@@ -2,7 +2,7 @@
 
 Status: **PLANNED, NOT STARTED**. Companion to `PLAN.md` (web platform course) — shared
 infrastructure, lesson anatomy, pipeline and completeness method are defined THERE (sections
-2, 2b, 4, 5, 6) and reused here; this file defines the 20 enterprise tracks. If starting mid-way:
+2, 2b, 4, 5, 6) and reused here; this file defines the 21 enterprise tracks. If starting mid-way:
 read PLAN.md sections 2/2b/4/5/6 first, then this file, then the Status Tracker at the bottom.
 
 User-provided topic lists were the MINIMUM. Modules below expand them toward 100% coverage
@@ -23,8 +23,10 @@ under the same deep/survey tier system as PLAN.md §2b.
 - Data/tooling: redis.io docs, git-scm.com book chapters, maven.apache.org + docs.gradle.org guides,
   docs.docker.com, kubernetes.io concepts, GitHub Actions docs, micrometer.io + prometheus.io +
   opentelemetry.io docs, developer.hashicorp.com/terraform
+- Jakarta EE: jakarta.ee platform specification index (EE 11) + MicroProfile spec list
 - Tiering: `deep` = feature-complete; `survey` = one awareness lesson. Non-goals: Scala/Kotlin,
-  JavaEE/Jakarta EE beyond JPA/Servlet basics, Azure/GCP (AWS chosen), React/Vue (Angular chosen).
+  Azure/GCP (AWS chosen), React/Vue (Angular chosen). (Jakarta EE exclusion REMOVED 2026-07-19 —
+  full track J3 added by user decision.)
 
 ## 2. Module Page Format
 
@@ -35,7 +37,7 @@ course: Javadoc/dev.java, docs.spring.io, angular.dev, kafka/rabbitmq/postgres o
 then Baeldung/established sites, then videos (established channels; Indian-audience channels
 welcome where quality holds). Interview Q&A: ≥10 per module, India-interview weighted, per PLAN.md §4.
 
-Scale estimate (directory format): ~240 module pages for this course.
+Scale estimate (directory format): ~255 module pages for this course (21 tracks incl. Jakarta EE).
 
 ## 3. Tracks and Modules
 
@@ -78,6 +80,22 @@ Scale estimate (directory format): ~240 module pages for this course.
 12. Process API/ProcessHandle, scripting, internationalization (Locale/ResourceBundle/MessageFormat), java.util.random RandomGenerator family, Foreign Function & Memory API overview
 13. Common pitfalls: equals/hashCode traps, autoboxing costs, BigDecimal vs double for money, string concat in loops, date bugs, == vs equals, integer cache, finalizers
 14. Clean code: Effective-Java-style item tour (naming, immutability-first, composition over inheritance, minimize accessibility, defensive copies, builder pattern, static factories), Javadoc incl. markdown doc comments (///), code review checklist
+
+### Track J3 — Jakarta EE (~14 modules) [theme-java]
+1. Platform overview: J2EE → Java EE → Jakarta EE history, spec/profile structure (Platform / Web Profile / Core Profile), application servers (WildFly, Payara, Open Liberty, TomEE, GlassFish), javax→jakarta namespace migration
+2. Servlets deep (interview staple): servlet lifecycle, ServletContext/ServletConfig, request/response API, filters + filter chains, listeners, session management (tracking modes, HttpSession), async servlets, multipart, error pages, web.xml vs annotations
+3. JSP and Expression Language: JSP lifecycle (translation/compilation), directives/scriptlets/declarations, implicit objects, JSTL core/formatting tags, EL syntax — legacy but still screened in Indian service-company interviews
+4. CDI (Contexts and Dependency Injection): managed beans, scopes, qualifiers, producers/disposers, interceptors, decorators, events (sync/async), stereotypes; CDI vs Spring DI mapping
+5. JAX-RS (Jakarta REST): resource classes, param annotations, entity providers/MessageBodyReader-Writer, exception mappers, filters/interceptors, client API, async + SSE
+6. Jakarta Faces (JSF): component model, request lifecycle, Facelets templating, validators/converters, AJAX support — working knowledge tier (declining but present in legacy)
+7. EJB: stateless/stateful/singleton session beans, @Asynchronous, timer service, message-driven beans, EJB transactions, when EJB vs CDI — legacy reality tier
+8. Transactions: JTA deep (UserTransaction, @Transactional CDI variant, XA/two-phase commit awareness), Jakarta Persistence in the EE container (ties to Track H1 — container-managed EntityManager, persistence contexts in EE)
+9. Jakarta Messaging (JMS) deep: ConnectionFactory/JMSContext, queues vs topics, producers/consumers, message types, acknowledgement modes, durable subscriptions, MDB consumption; relation to Track M2 brokers
+10. Jakarta Security: authentication mechanisms (form/basic/custom), identity stores, permissions, @RolesAllowed; relation to Spring Security concepts
+11. Web services and formats: JSON-P/JSON-B, Jakarta XML Binding + XML Web Services (SOAP — legacy awareness, still asked in banking/insurance interviews), Jakarta WebSocket
+12. Platform utilities: Jakarta Concurrency (managed executors), Jakarta Batch, Mail, Bean Validation in EE context, Jakarta Activation
+13. MicroProfile: Config, Health, Metrics, Fault Tolerance, OpenAPI, Rest Client, JWT propagation, Telemetry — the cloud-native EE stack (Quarkus/Helidon/Open Liberty as carriers, Quarkus working intro)
+14. Jakarta EE vs Spring: concept-by-concept mapping table, choosing between them, migrating EE→Spring and Spring→EE, Jakarta EE 11 current-state features, career/legacy-codebase positioning
 
 ### Track S1 — Spring Framework (~15 modules) [theme-spring]
 1. IoC/DI concepts, ApplicationContext vs BeanFactory, container bootstrap
@@ -325,7 +343,7 @@ build phases, and "which track modules it exercises" map.
 ## 4. Site Integration
 
 - Files: `site/courses/<track-slug>/...` — same convention as PLAN.md §5
-- Track slugs: `core-java`, `advanced-java`, `spring`, `spring-boot`, `spring-security`,
+- Track slugs: `core-java`, `advanced-java`, `jakarta-ee`, `spring`, `spring-boot`, `spring-security`,
   `hibernate-jpa`, `microservices`, `messaging`, `databases`, `angular-basics`, `angular-advanced`,
   `angular-state`, `frontend-testing`, `backend-testing`, `devops`, `aws`, `system-design`,
   `observability`, `secure-coding`, `projects`
@@ -341,6 +359,7 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E1:** J1 Core Java → J2 Advanced Java
 - **Phase E2:** D1 Databases (early — everything depends on it)
 - **Phase E3:** S1 Spring → S2 Boot → H1 JPA → S3 Security
+- **Phase E3b:** J3 Jakarta EE (after the Spring stack — taught with constant Spring contrast)
 - **Phase E4:** T2 Backend Testing
 - **Phase E5:** A1 → A2 → A3 Angular + T1 Frontend Testing
 - **Phase E6:** M1 Microservices → M2 Messaging
@@ -356,6 +375,7 @@ Scale estimate: ~240 modules ≈ 600+ lessons. Ship per-batch as always.
 - [ ] E1: J1 (0/22), J2 (0/14)
 - [ ] E2: D1 (0/14)
 - [ ] E3: S1 (0/15), S2 (0/12), H1 (0/14), S3 (0/10)
+- [ ] E3b: J3 Jakarta EE (0/14)
 - [ ] E4: T2 (0/10)
 - [ ] E5: A1 (0/10), A2 (0/14), A3 (0/8), T1 (0/8)
 - [ ] E6: M1 (0/12), M2 (0/10)
@@ -387,6 +407,10 @@ Scale estimate: ~240 modules ≈ 600+ lessons. Ship per-batch as always.
   reframe, ElastiCache Valkey, EKS Auto Mode; capstones now name A3/T1/T2/J2; duplicate-ownership
   cross-references added (MockMvc→T2.6, @ServiceConnection→T2.8, virtual threads→J1.19, API
   versioning three-way split, security split vs web plan); checklist sources extended to full toolchain.
+
+- 2026-07-19: Jakarta EE exclusion reversed by user decision — full Track J3 added (14 modules,
+  Jakarta EE 11 + MicroProfile, Servlets/JSP interview depth, Spring-contrast framing). Track
+  count 20→21, slugs + build order (E3b) + status tracker updated.
 
 ## 8. Decisions Already Made (do not relitigate)
 
