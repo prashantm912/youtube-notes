@@ -24,7 +24,7 @@ under the same deep/survey tier system as PLAN.md §2b.
   docs.docker.com, kubernetes.io concepts, GitHub Actions docs, micrometer.io + prometheus.io +
   opentelemetry.io docs, developer.hashicorp.com/terraform
 - Jakarta EE: jakarta.ee platform specification index (EE 11) + MicroProfile spec list
-- Tiering: `deep` = feature-complete; `survey` = one awareness lesson. Non-goals: Scala/Kotlin,
+- Tiering: `deep` = feature-complete; `survey` = one awareness entry within a module page. Non-goals: Scala/Kotlin,
   Azure/GCP (AWS chosen), React/Vue (Angular chosen). (Jakarta EE exclusion REMOVED 2026-07-19 —
   full track J3 added by user decision.)
 
@@ -85,17 +85,17 @@ Scale estimate (directory format): ~255 module pages for this course (21 tracks 
 1. Platform overview: J2EE → Java EE → Jakarta EE history, spec/profile structure (Platform / Web Profile / Core Profile), application servers (WildFly, Payara, Open Liberty, TomEE, GlassFish), javax→jakarta namespace migration
 2. Servlets deep (interview staple): servlet lifecycle, ServletContext/ServletConfig, request/response API, filters + filter chains, listeners, session management (tracking modes, HttpSession), async servlets, multipart, error pages, web.xml vs annotations
 3. JSP and Expression Language: JSP lifecycle (translation/compilation), directives/scriptlets/declarations, implicit objects, JSTL core/formatting tags, EL syntax — legacy but still screened in Indian service-company interviews
-4. CDI (Contexts and Dependency Injection): managed beans, scopes, qualifiers, producers/disposers, interceptors, decorators, events (sync/async), stereotypes; CDI vs Spring DI mapping
+4. CDI (Contexts and Dependency Injection): managed beans, scopes, qualifiers, producers/disposers, interceptors, decorators, events (sync/async), stereotypes; Jakarta Annotations (@Resource/@PostConstruct/@Priority); CDI vs Spring DI mapping
 5. JAX-RS (Jakarta REST): resource classes, param annotations, entity providers/MessageBodyReader-Writer, exception mappers, filters/interceptors, client API, async + SSE
-6. Jakarta Faces (JSF): component model, request lifecycle, Facelets templating, validators/converters, AJAX support — working knowledge tier (declining but present in legacy)
-7. EJB: stateless/stateful/singleton session beans, @Asynchronous, timer service, message-driven beans, EJB transactions, when EJB vs CDI — legacy reality tier
+6. Jakarta Faces (JSF): component model, request lifecycle, Facelets templating, validators/converters, AJAX support — survey-plus depth (declining but present in legacy)
+7. EJB + Connectors: stateless/stateful/singleton session beans, @Asynchronous, timer service, message-driven beans, EJB transactions, when EJB vs CDI; Jakarta Connectors (JCA) — EIS/MQ adapters, still required in EE 11 and alive in banking legacy
 8. Transactions: JTA deep (UserTransaction, @Transactional CDI variant, XA/two-phase commit awareness), Jakarta Persistence in the EE container (ties to Track H1 — container-managed EntityManager, persistence contexts in EE)
 9. Jakarta Messaging (JMS) deep: ConnectionFactory/JMSContext, queues vs topics, producers/consumers, message types, acknowledgement modes, durable subscriptions, MDB consumption; relation to Track M2 brokers
 10. Jakarta Security: authentication mechanisms (form/basic/custom), identity stores, permissions, @RolesAllowed; relation to Spring Security concepts
-11. Web services and formats: JSON-P/JSON-B, Jakarta XML Binding + XML Web Services (SOAP — legacy awareness, still asked in banking/insurance interviews), Jakarta WebSocket
+11. Web services and formats: JSON-P/JSON-B, Jakarta WebSocket; XML Binding + XML Web Services/SOAP — REMOVED from the Platform in EE 11 (standalone specs now), taught as legacy awareness because banking/insurance interviews still ask
 12. Platform utilities: Jakarta Concurrency (managed executors), Jakarta Batch, Mail, Bean Validation in EE context, Jakarta Activation
-13. MicroProfile: Config, Health, Metrics, Fault Tolerance, OpenAPI, Rest Client, JWT propagation, Telemetry — the cloud-native EE stack (Quarkus/Helidon/Open Liberty as carriers, Quarkus working intro)
-14. Jakarta EE vs Spring: concept-by-concept mapping table, choosing between them, migrating EE→Spring and Spring→EE, Jakarta EE 11 current-state features, career/legacy-codebase positioning
+13. MicroProfile (7.1 umbrella): Config, Health, Fault Tolerance, OpenAPI, Rest Client, JWT, Telemetry 2.x (which REPLACED Metrics in MP 7.0 — Metrics is standalone/legacy now); standalone specs awareness (GraphQL, Reactive Messaging, LRA, Context Propagation); carriers: Quarkus (working intro, via SmallRye), Open Liberty, Helidon, Payara
+14. Jakarta EE vs Spring: concept-by-concept mapping table, choosing between them, migrating EE→Spring and Spring→EE, EE 11 deltas (Jakarta Data — the new Platform spec, records support, pruned specs) + EE 12 roadmap awareness, career/legacy-codebase positioning
 
 ### Track S1 — Spring Framework (~15 modules) [theme-spring]
 1. IoC/DI concepts, ApplicationContext vs BeanFactory, container bootstrap
@@ -234,7 +234,7 @@ Scale estimate (directory format): ~255 module pages for this course (21 tracks 
 5. Effects: side-effect discipline, common patterns (load/optimistic update), error handling in effects, action lifecycle
 6. NgRx ergonomics: facades, functional creators, devtools, router-store; testing store/effects/selectors
 7. Modern alternatives: @ngrx/signal-store (deep — the current direction), @ngrx/component-store as legacy/migrate-away comparison
-8. Best practices: what belongs in global vs local state, when NgRx is overkill, migration paths; capstone state design exercise
+8. Best practices: what belongs in global vs local state, when NgRx is overkill, migration paths; state-design case study
 
 ### Track T1 — Frontend Testing (~8 modules) [theme-angular]
 1. Testing philosophy + pyramid for SPAs, what to test at which layer
@@ -327,8 +327,9 @@ Scale estimate (directory format): ~255 module pages for this course (21 tracks 
 10. Secure API design review: checklist-driven audit of a real service, security headers complete, rate limiting, audit logging, pen-test awareness (SAST/DAST)
 
 ### Track P1 — Real-World Projects (~10 capstones) [theme-arch]
-Ordered starter → flagship. Each capstone: feature spec, architecture doc, data model, API contract,
-build phases, and "which track modules it exercises" map.
+Ordered starter → flagship. Directory format: each capstone page = project brief (feature outline,
+architecture sketch, data-model and API-contract pointers, suggested build phases), curated links to
+reference implementations/tutorials for similar projects, and a "which track modules it exercises" map.
 1. Expense tracker (starter: Boot + JPA + Angular basics + auth)
 2. Admin dashboard (Angular focus: signals, NgRx signal-store [A3], charts, RBAC UI, frontend testing [T1])
 3. Inventory system (transactions, concurrency, reporting SQL; backend-testing flagship [T2]: full pyramid, Testcontainers, contracts)
@@ -367,7 +368,7 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E8:** Y1 System Design → Y2 Secure Coding
 - **Phase E9:** P1 Projects (interleaved once prereq tracks done; expense tracker can start after E3)
 
-Scale estimate: ~240 modules ≈ 600+ lessons. Ship per-batch as always.
+Scale: ~255 module pages across 21 tracks (directory format, per §2). Ship per-batch as always.
 
 ## 6. Status Tracker
 
@@ -414,8 +415,8 @@ Scale estimate: ~240 modules ≈ 600+ lessons. Ship per-batch as always.
 
 ## 8. Decisions Already Made (do not relitigate)
 
-- Same lesson anatomy/pipeline/tier system as PLAN.md; only the playground is replaced by
-  code+output panels for non-browser-runnable lessons (§2)
+- Same module-page anatomy/pipeline/tier system as PLAN.md §4/§4b (directory format); tiny
+  snippets use plain code blocks, optional code+output panels where output clarifies (§2)
 - PostgreSQL over MySQL as primary; AWS over Azure/GCP; Angular (no React/Vue); Playwright primary e2e
 - Kafka AND RabbitMQ both deep (different models, both interview-standard)
 - Java LTS-current baseline; JEP timeline lesson keeps feature coverage forward-compatible

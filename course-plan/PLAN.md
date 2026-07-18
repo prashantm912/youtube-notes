@@ -22,11 +22,12 @@ design system (`site/assets/site.css` + `site.js`) and deployment pipeline
   - CSS: MDN CSS property/selector/at-rule/function indexes
   - JavaScript: ECMAScript spec chapter list + MDN JS reference + curated Web API index
   - TypeScript: TS Handbook table of contents + release notes 1.x→7.x feature list (6.0 default changes, 7.0 native compiler)
-- Checklist item shape: `{ "id": "html.forms.input.range", "label": "<input type=range>", "lesson": null }`
-  — `lesson` filled with the lesson file path when covered.
+- Checklist item shape: `{ "id": "html.forms.input.range", "label": "<input type=range>", "page": null }`
+  — `page` filled with the module page path when covered.
 - Script `course-plan/scripts/coverage.mjs` (to be written in Phase 0) reports uncovered items
-  per track. A track is DONE only when its checklist shows zero uncovered items.
-- Every lesson page ends with a "Features covered" list naming its checklist ids.
+  per track, and re-verifies resource URLs (link-rot check) per §4b. A track is DONE only when
+  its checklist shows zero uncovered items.
+- Every module page ends with a "Features covered" list naming its checklist ids (collapsed details).
 
 ## 2b. Scope, Non-Goals, Coverage Tiers (added by gap review)
 
@@ -36,7 +37,7 @@ features are named in modules below), TypeScript language + compiler options, an
 APIs (DOM, events, fetch, storage, workers incl. service workers, observers, streams, URL,
 history/navigation, forms, canvas 2D basics, web components).
 
-**In scope, SURVEY tier (one awareness lesson each, not feature-complete):** WebRTC, Web Audio,
+**In scope, SURVEY tier (one awareness entry within a module page, not feature-complete):** WebRTC, Web Audio,
 WebGL/WebGPU, WebAuthn, Payment, Speech, sensors/device APIs, Houdini paint worklets,
 inline SVG (as used from HTML/CSS), MathML existence.
 
@@ -44,7 +45,7 @@ inline SVG (as used from HTML/CSS), MathML existence.
 beyond a bundler-awareness lesson, the full SVG spec as its own language.
 
 Every checklist item carries `"tier": "deep" | "survey"`. The 100% claim = 100% of deep-tier
-items covered + every survey item having its awareness lesson. Checklists record source +
+items covered + every survey item having its awareness entry. Checklists record source +
 retrieval date; refresh pass scheduled at each phase boundary.
 
 ## 3. Tracks and Modules
@@ -111,7 +112,7 @@ retrieval date; refresh pass scheduled at each phase boundary.
 21. Web Components: customElements.define, lifecycle callbacks, Shadow DOM API (attachShadow, slots, events across shadow boundaries), form-associated custom elements + ElementInternals, template/slot patterns, ::part/::slotted styling contract
 22. Streams and workers deep: ReadableStream/WritableStream/TransformStream (backpressure, piping, byte streams), CompressionStream/DecompressionStream, Web Workers (module workers, transfer), Service Workers + PWA (registration, lifecycle, fetch interception, Cache API, offline strategies, web app manifest, push overview)
 23. Security for JS developers: XSS classes and defenses, CSP in practice, CORS mechanics (preflight, credentials), cookies (SameSite/HttpOnly/Secure), clickjacking/frame-ancestors, SRI, Trusted Types + Sanitizer API, Web Crypto basics (randomUUID/getRandomValues/subtle.digest), prototype pollution, supply-chain hygiene. (This module owns browser-side security depth; server/enterprise security lives in PLAN-JAVA-STACK Tracks S3/Y2, which cross-reference here)
-24. Debugging and legacy: complete console API (every method), debugger statement, breakpoints/DevTools workflow, error monitoring patterns; strict vs sloppy mode differences, eval/with, deprecated-but-real features awareness (document.write, __proto__ accessor…); SURVEY-tier lesson: WebRTC, Web Audio, WebGL/WebGPU, WebAuthn, Speech, sensors, Houdini worklets
+24. Debugging and legacy: complete console API (every method), debugger statement, breakpoints/DevTools workflow, error monitoring patterns; strict vs sloppy mode differences, eval/with, deprecated-but-real features awareness (document.write, __proto__ accessor…); SURVEY-tier entries: WebRTC, Web Audio, WebGL/WebGPU, WebAuthn, Speech, sensors, Houdini worklets
 
 ### Track 4 — TypeScript (~13 modules)
 1. Why TS + setup: tsc (TS 7 native compiler era), tsconfig anatomy, TS 6.0 defaults (strict:true, module esnext, target es2025) + removed legacy flags (baseUrl/outFile/downlevelIteration/moduleResolution classic-node), strictness philosophy
@@ -149,6 +150,19 @@ One page per MODULE (not per topic) at `site/courses/<track-slug>/<nn>-<module-s
 
 Per track additionally: a **track TOC page** and one aggregated **interview question-bank page**.
 
+**Template rules (from pilot review — every generated page follows these):**
+- Static breadcrumb (to track TOC) and prev/next links emitted at generation time — no runtime manifest fetch.
+- Footer carries a dated verification stamp: `Links verified: <time datetime="YYYY-MM-DD">` — the §4b
+  link-rot pass keys off this date.
+- A given URL appears at most ONCE per page, at its best-fit topic; a topic may carry 3 links instead
+  of padding to 5 with repeats.
+- Q&A level tags are real text inside `<summary>` (`<span class="level">`), not attribute-only —
+  screen-reader visible; the Q&A section heading shows the question count; expand/collapse-all
+  control injected by site.js.
+- "Features covered" checklist ids live in a closed `<details>` — traceability without visual noise.
+- Vary the standfirst per module — no boilerplate sentence repeated across pages.
+- NO per-resource durations, difficulty scores, or estimated study times — subjective, rot fast.
+
 ## 4b. Resource Curation Policy
 
 - Source hierarchy: official docs → official guide/tutorial → established references
@@ -168,14 +182,13 @@ Per track additionally: a **track TOC page** and one aggregated **interview ques
   `theme-web` (neutral teal), `theme-html` (orange #e34f26-ish), `theme-css` (blue #2965f1-ish),
   `theme-js` (amber #b8860b-ish, dark bg card feel), `theme-ts` (steel blue #3178c6-ish)
   and add rows to `.claude/skills/transcript-to-html/references/theming.md`
-- New shared components in site.css: `.lesson-nav` (prev/next), `.playground`, `.code-block` (pre/code styling),
-  `.qa` (interview Q&A details styling), `.exercise`, `.covered-list`, `.track-progress` (localStorage bar)
+- Shared components in site.css (shipped with pilots): `.code-block`, `.code-demo`, `.resources`
+  (link lists), `.qa` (interview Q&A), `.covered-list`, `figure.diagram`
 - Index page: new top-level menu `Courses` with a submenu per track (chips + cards, same card-grid format)
-- Lesson pages carry `class="theme-<track> lesson-page"`; lesson-page gets prev/next injected nav via site.js
-  reading a per-track manifest `site/courses/<track-slug>/manifest.json` (ordered lesson list)
-- check-html.mjs: will need a lesson-page allowance — lessons may contain `<pre><code>` blocks whose content
-  can legitimately contain markdown-like text and "filler" words; adjust script to skip `<pre>` content
-  during noise/markdown checks (Phase 0 task)
+- Module pages carry `class="theme-<track> lesson-page"` and file pattern `<nn>-<module-slug>.html`
+- Navigation is STATIC, emitted at generation time (breadcrumb to track TOC + prev/next links) —
+  a manifest.json fetch would be CORS-blocked under file://, which must keep working
+- check-html.mjs skips `<pre>`/`<textarea>` content during noise/markdown checks (DONE)
 
 ## 6. Build Pipeline
 
@@ -188,29 +201,30 @@ Mirrors the transcript pipeline that already works in this repo:
   resource policy, Q&A format.
 - Batches of ~5 parallel agents (one module page each), then main thread: lint each page,
   spot-check links, run coverage.mjs, update track TOC + index, commit, push (auto-deploys).
-- `course-plan/checklists/*.json` = the changelog analog: item `lesson: null` → pending; filled → done.
-- Review: html-review-gate stays usable; for lessons the "source transcript" is replaced by the
-  lesson spec + MDN — fidelity check = technical accuracy pass via Codex.
+- `course-plan/checklists/*.json` = the changelog analog: item `page: null` → pending; filled → done.
+- Review: html-review-gate stays usable; for module pages the "source transcript" is replaced by
+  the module spec + official docs — accuracy pass via Codex + link spot-checks.
 
 ## 7. Build Order (phases)
 
-- **Phase 0 (infra, one session):** checklists JSON scaffolds, coverage.mjs, playground.js,
-  lesson CSS components + new themes, lesson template reference, course-lesson skill,
-  check-html.mjs pre-block exemption, Courses menu stub on index. Commit.
-- **Phase 1:** Track 0 (4 modules) — validates template end-to-end. Commit per batch.
-- **Phase 2:** Track 1 HTML (~10 modules, ~50-60 lessons; multiple lessons per module where needed)
+- **Phase 0 (infra, one session):** checklists JSON scaffolds, coverage.mjs (coverage + link-rot
+  check), course-lesson skill + module-page template reference (derived from the two converted
+  pilots), remaining themes. (Already done with pilots: page CSS components, check-html.mjs
+  code-block exemption, Courses index menu.)
+- **Phase 1:** Track 0 (4 module pages) — validates template end-to-end. Commit per batch.
+- **Phase 2:** Track 1 HTML (10 module pages)
 - **Phase 3:** Track 2 CSS (~18 modules)
 - **Phase 4:** Track 3 JavaScript (~24 modules)
 - **Phase 5:** Track 4 TypeScript (~13 modules)
-- **Phase 6:** cross-track capstone: build-a-project lessons + full interview bank page
+- **Phase 6:** cross-track capstone project briefs (directory format) + full interview bank page
 
 Scale estimate (directory format): ~63 module pages for this course. Each phase ships
 incrementally; site stays consistent throughout.
 
 ## 8. Status Tracker (update this section as work lands)
 
-- [~] Phase 0: infra (PILOT SLICE DONE 2026-07-19 — two pilot lessons shipped to validate format:
-      site/courses/css/05-box-model.html and site/courses/advanced-java/04-optional.html)
+- [~] Phase 0: infra (PILOT SLICE DONE 2026-07-19 — two pilot module pages shipped and converted
+      to directory format: site/courses/css/05-box-model.html, site/courses/advanced-java/04-optional.html)
   - [ ] course-plan/checklists/{web-basics,html,css,javascript,typescript}.json scaffolds
   - [ ] course-plan/scripts/coverage.mjs
   - [x] site/assets/playground.js (editor + live iframe, tab handling, debounce)

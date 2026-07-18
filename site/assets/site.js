@@ -98,6 +98,28 @@
     });
   }
 
+  // Interview Q&A: question count in heading + expand/collapse-all control
+  var qaItems = document.querySelectorAll(".qa");
+  if (qaItems.length) {
+    var qaSection = qaItems[0].closest("section");
+    var qaHead = qaSection && qaSection.querySelector("h2");
+    if (qaHead && qaHead.textContent.indexOf("(") === -1) {
+      qaHead.textContent += " (" + qaItems.length + ")";
+    }
+    var toggle = document.createElement("button");
+    toggle.className = "qa-toggle-all";
+    toggle.type = "button";
+    var allOpen = false;
+    function labelToggle() { toggle.textContent = allOpen ? "Collapse all answers" : "Expand all answers"; }
+    labelToggle();
+    toggle.addEventListener("click", function () {
+      allOpen = !allOpen;
+      qaItems.forEach(function (d) { d.open = allOpen; });
+      labelToggle();
+    });
+    qaItems[0].parentNode.insertBefore(toggle, qaItems[0]);
+  }
+
   // Scroll-reveal for sections, callouts, tables
   if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches && "IntersectionObserver" in window) {
     var targets = document.querySelectorAll("main section, main aside, main table");
