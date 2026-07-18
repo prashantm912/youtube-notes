@@ -26,7 +26,10 @@ const coveredIds = new Set();
 const urls = new Set();
 for (const { html } of pages) {
   for (const m of html.matchAll(/<li>([a-z0-9.\-]+)<\/li>/gi)) coveredIds.add(m[1]);
-  for (const m of html.matchAll(/href="(https?:\/\/[^"]+)"/gi)) urls.add(m[1]);
+  // Only vet URLs inside resource lists — illustrative href demos in prose/snippets are not
+  // resources we vouch for (and often use RFC 2606 reserved example domains).
+  for (const block of html.matchAll(/<ul class="resources">([\s\S]*?)<\/ul>/gi))
+    for (const m of block[1].matchAll(/href="(https?:\/\/[^"]+)"/gi)) urls.add(m[1]);
 }
 const uncovered = allIds.filter((id) => !coveredIds.has(id));
 

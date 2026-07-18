@@ -212,7 +212,7 @@ Mirrors the transcript pipeline that already works in this repo:
   pilots), remaining themes. (Already done with pilots: page CSS components, check-html.mjs
   code-block exemption, Courses index menu.)
 - **Phase 1:** Track 0 (4 module pages) — validates template end-to-end. Commit per batch.
-- **Phase 2:** Track 1 HTML (10 module pages)
+- **Phase 2:** Track 1 HTML (10 module pages) — DONE 2026-07-19. Coverage 48/48, 204 links verified.
 - **Phase 3:** Track 2 CSS (~18 modules)
 - **Phase 4:** Track 3 JavaScript (~24 modules)
 - **Phase 5:** Track 4 TypeScript (~13 modules)
