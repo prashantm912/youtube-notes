@@ -13,7 +13,7 @@
       "wellness": "Wellness & Lifestyle", "system-design": "Communication & Social Skills",
       "html": "HTML — Web Platform Course", "css": "CSS — Web Platform Course",
       "js": "JavaScript — Web Platform Course", "ts": "TypeScript — Web Platform Course",
-      "java": "Java — Enterprise Course",
+      "java": "Java — Enterprise Course", "web": "How the Web Works — Web Platform Course",
     };
     var label = null;
     document.body.className.split(/\s+/).forEach(function (c) {

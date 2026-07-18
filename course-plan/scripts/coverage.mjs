@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+// Course coverage + link-rot checker.
+//   node coverage.mjs <checklist.json>            → coverage report (which items have a page)
+//   node coverage.mjs <checklist.json> --links    → also HTTP-check every resource URL in the pages
+// A track is DONE when coverage shows 0 uncovered items. Reads generated pages under
+// site/courses/<track>/ to confirm each checklist id appears in a page's covered-list.
+
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const file = process.argv[2];
+const checkLinks = process.argv.includes("--links");
+if (!file) { console.error("Usage: node coverage.mjs <checklist.json> [--links]"); process.exit(2); }
+
+const checklist = JSON.parse(readFileSync(file, "utf8"));
+const trackDir = join(root, "site", "courses", checklist.track);
+const pages = existsSync(trackDir)
+  ? readdirSync(trackDir).filter((f) => f.endsWith(".html")).map((f) => ({ f, html: readFileSync(join(trackDir, f), "utf8") }))
+  : [];
+
+// --- Coverage: is each checklist id named in some page's covered-list? ---
+const allIds = checklist.modules.flatMap((m) => m.items.map((i) => i.id));
+const coveredIds = new Set();
+const urls = new Set();
+for (const { html } of pages) {
+  for (const m of html.matchAll(/<li>([a-z0-9.\-]+)<\/li>/gi)) coveredIds.add(m[1]);
+  for (const m of html.matchAll(/href="(https?:\/\/[^"]+)"/gi)) urls.add(m[1]);
+}
+const uncovered = allIds.filter((id) => !coveredIds.has(id));
+
+console.log(`Track: ${checklist.track}  |  items: ${allIds.length}  |  covered: ${allIds.length - uncovered.length}  |  pages: ${pages.length}`);
+if (uncovered.length) {
+  console.log("\nUNCOVERED:");
+  for (const id of uncovered) console.log("  " + id);
+} else if (allIds.length) {
+  console.log("All checklist items covered.");
+}
+
+// --- Optional link-rot check ---
+if (checkLinks) {
+  console.log(`\nChecking ${urls.size} unique URL(s)...`);
+  let dead = 0;
+  for (const u of urls) {
+    let ok = false, note = "";
+    try {
+      let res = await fetch(u, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(12000) });
+      if (res.status === 405 || res.status === 403) // some hosts reject HEAD; retry GET
+        res = await fetch(u, { method: "GET", redirect: "follow", signal: AbortSignal.timeout(15000) });
+      ok = res.ok;
+      note = String(res.status);
+    } catch (e) { note = e.name === "TimeoutError" ? "timeout" : e.message.slice(0, 40); }
+    if (!ok) { dead++; console.log(`  DEAD [${note}] ${u}`); }
+  }
+  console.log(dead ? `\n${dead} dead link(s) — fix before shipping.` : "\nAll links reachable.");
+  if (dead) process.exit(1);
+}
+
+process.exit(uncovered.length ? 1 : 0);
