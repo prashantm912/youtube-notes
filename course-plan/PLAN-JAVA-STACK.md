@@ -2,7 +2,7 @@
 
 Status: **PLANNED, NOT STARTED**. Companion to `PLAN.md` (web platform course) — shared
 infrastructure, lesson anatomy, pipeline and completeness method are defined THERE (sections
-2, 4, 5, 6) and reused here; this file defines the 20 enterprise tracks. If starting mid-way:
+2, 2b, 4, 5, 6) and reused here; this file defines the 20 enterprise tracks. If starting mid-way:
 read PLAN.md sections 2/2b/4/5/6 first, then this file, then the Status Tracker at the bottom.
 
 User-provided topic lists were the MINIMUM. Modules below expand them toward 100% coverage
@@ -17,8 +17,12 @@ under the same deep/survey tier system as PLAN.md §2b.
 - Kafka/RabbitMQ: official docs TOCs
 - SQL/PostgreSQL: PostgreSQL docs TOC (SQL commands + concepts chapters)
 - AWS: per-service developer guide key-concept lists (scoped to services named below)
-- Testing: JUnit 5 / Mockito / Jasmine / Testcontainers docs TOCs
+- Testing: JUnit 6 / Mockito / Vitest (+ legacy Jasmine) / Testcontainers docs TOCs
 - Security: OWASP Top 10 (current edition) + OWASP cheat-sheet index (scoped)
+- Frontend ecosystem: Playwright / RxJS / NgRx docs TOCs; backend ecosystem: AssertJ / Resilience4j docs
+- Data/tooling: redis.io docs, git-scm.com book chapters, maven.apache.org + docs.gradle.org guides,
+  docs.docker.com, kubernetes.io concepts, GitHub Actions docs, micrometer.io + prometheus.io +
+  opentelemetry.io docs, developer.hashicorp.com/terraform
 - Tiering: `deep` = feature-complete; `survey` = one awareness lesson. Non-goals: Scala/Kotlin,
   JavaEE/Jakarta EE beyond JPA/Servlet basics, Azure/GCP (AWS chosen), React/Vue (Angular chosen).
 
@@ -82,10 +86,10 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 8. Spring MVC B: interceptors, filters vs interceptors, static resources, view resolution awareness, multipart handling
 9. REST API development: @RestController patterns, ResponseEntity, content negotiation, status code discipline, HATEOAS awareness, API documentation (springdoc/OpenAPI)
 10. Validation: Bean Validation complete (every constraint annotation, groups, custom validators, cascading), @Validated vs @Valid, error binding
-11. Exception handling: @ExceptionHandler/@ControllerAdvice, ProblemDetail (RFC 7807), error response design
+11. Exception handling: @ExceptionHandler/@ControllerAdvice, ProblemDetail (RFC 9457, obsoletes 7807), error response design
 12. Transactions: @Transactional complete (propagation — all 7, isolation, rollback rules, readOnly), programmatic transactions, pitfalls
 13. Logging (SLF4J/Logback config, MDC), caching abstraction (@Cacheable et al), scheduling (@Scheduled/cron) + async (@Async, executors)
-14. Testing in Spring: TestContext framework, context caching, @MockitoBean (@MockBean deprecated since Boot 3.4 — teach the replacement), MockMvc deep, transactional tests; WebFlux/reactive stack survey lesson
+14. Testing in Spring: TestContext framework, context caching, @MockitoBean (@MockBean deprecated since Boot 3.4 — teach the replacement), MockMvc intro (deep coverage owned by T2.6), transactional tests; WebFlux/reactive stack survey lesson
 15. HTTP clients + server push: RestClient (the modern default), RestTemplate legacy, WebClient, declarative HTTP interface clients (@HttpExchange), client-side error handling/timeouts; server WebSocket/STOMP support, SSE (SseEmitter); null-safety (JSpecify) + Framework AOT awareness
 
 ### Track S2 — Spring Boot (~12 modules) [theme-spring]
@@ -100,7 +104,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 9. File upload/download: multipart config, streaming large files, Resource abstraction, content disposition, storage strategies
 10. Scheduling + async processing in Boot, application events, ApplicationRunner/CommandLineRunner, graceful shutdown
 11. Actuator: every built-in endpoint, exposure config, custom endpoints/health indicators/info contributors, Micrometer metrics intro
-12. Boot current-gen (4.x baseline): modularized starters, JSpecify null-safety, Jackson 3, SSL bundles, Docker Compose support + dev-time Testcontainers (@ServiceConnection as Dev Service), virtual threads (spring.threads.virtual.enabled), structured logging support, native image/GraalVM awareness, DevTools, packaging + running in prod
+12. Boot current-gen (4.x baseline): modularized starters, JSpecify null-safety, Jackson 3, SSL bundles, Docker Compose support + dev-time Testcontainers (@ServiceConnection as Dev Service; test-time usage owned by T2.8), virtual threads wiring via spring.threads.virtual.enabled (Loom itself deep in J1.19), structured logging support, native image/GraalVM awareness, DevTools, packaging + running in prod
 
 ### Track S3 — Spring Security (~10 modules) [theme-spring]
 1. Architecture: filter chain (every default filter's job), SecurityContext/SecurityContextHolder, AuthenticationManager/Provider, UserDetailsService
@@ -132,8 +136,8 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 
 ### Track M1 — Microservices (~12 modules) [theme-arch]
 1. Monolith vs microservices: real tradeoffs, modular monolith option, when NOT to do microservices
-2. Decomposition: DDD-lite (bounded contexts, aggregates), decomposition by capability/subdomain, strangler fig migration
-3. Data per service: shared-nothing, reporting across services, eventual consistency intro
+2. Decomposition: DDD-lite (bounded contexts, aggregates), decomposition by capability/subdomain, strangler fig migration + anti-corruption layer
+3. Data per service: shared-nothing, reporting across services (API composition pattern), eventual consistency intro
 4. Inter-service communication: REST vs gRPC vs messaging, sync vs async tradeoffs, API contracts, client generation
 5. API gateway: routing/auth/rate-limiting at edge, Spring Cloud Gateway, BFF pattern
 6. Service discovery: client vs server side, Eureka/Consul, Kubernetes-native discovery
@@ -142,7 +146,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 9. Distributed data patterns: saga (choreography vs orchestration), outbox + CDC, idempotency keys, exactly-once myth
 10. CQRS + event sourcing (awareness→working example), read models
 11. Distributed tracing + correlation (deep dive lives in Track O1), debugging across services
-12. Versioning/backward compatibility, consumer-driven contracts, deployment topologies, service mesh survey (Istio/Linkerd), testing strategy for microservices
+12. Versioning/backward compatibility, consumer-driven contracts, microservice chassis/service template, deployment topologies, service mesh survey (Istio/Linkerd — sidecar/ambassador as the underlying mechanism), testing strategy for microservices
 
 ### Track M2 — Messaging and Event-Driven Systems (~10 modules) [theme-arch]
 1. Messaging fundamentals: queues vs pub-sub, delivery guarantees (at-most/at-least/exactly-once), idempotent consumers, poison messages
@@ -169,7 +173,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 10. Transactions: ACID, isolation levels + anomalies matrix (dirty/non-repeatable/phantom/serialization), MVCC, locking (row/table, deadlocks), SELECT FOR UPDATE
 11. Design: normalization 1NF→BCNF with worked examples, denormalization tradeoffs, schema design patterns (soft delete, audit columns, multi-tenancy options)
 12. Views/materialized views, stored procedures/triggers basics, partitioning awareness, connection pooling (HikariCP sizing); Postgres operations: roles/GRANT/REVOKE/row-level security, VACUUM/autovacuum + bloat (MVCC consequence), backup/restore (pg_dump/PITR) awareness, full-text search + JSONB operators
-13. Redis: data structures (string/hash/list/set/zset/stream), caching patterns (cache-aside/write-through), TTL/eviction policies, pipelines/transactions, pub/sub, persistence (RDB/AOF), distributed lock caveats, Spring Data Redis
+13. Redis: data structures (string/hash/list/set/zset/stream), Redis 8 core additions (JSON, query engine/search, time series, probabilistic types, vector sets), caching patterns (cache-aside/write-through), TTL/eviction policies, pipelines/transactions, pub/sub, persistence (RDB/AOF), distributed lock caveats, Spring Data Redis; licensing/Valkey awareness (AGPLv3 return, Valkey fork = ElastiCache default engine)
 14. NoSQL taxonomy: document/key-value/wide-column/graph — when each; MongoDB working intro; CAP/PACELC; polyglot persistence decision framework
 
 ### Track A1 — Angular Basics (~10 modules) [theme-angular]
@@ -234,14 +238,14 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 
 ### Track O1 — DevOps and Deployment (~14 modules) [theme-devops]
 1. Git A: object model (blobs/trees/commits), staging, every daily command, .gitignore, diff mastery
-2. Git B: merge vs rebase (+ interactive), conflict resolution, cherry-pick, stash, tags, reflog recovery, bisect, hooks, submodules/worktrees awareness
+2. Git B: merge vs rebase (+ interactive), conflict resolution, cherry-pick, stash, tags, reflog recovery, bisect, hooks, submodules/worktrees awareness; large-repo Git (sparse-checkout, partial clone, scalar, git maintenance, bundle-URI awareness; reftable backend coming in Git 3.0)
 3. GitHub: PR workflow, code review practice, protected branches, CODEOWNERS, issues/projects, releases
 4. Branching strategies: trunk-based vs GitFlow vs GitHub Flow — tradeoffs, versioning (SemVer), conventional commits + changelog automation
-5. Maven: POM anatomy, lifecycle/phases/goals, dependency mediation + BOM/dependencyManagement, multi-module builds, profiles, essential plugins, wrapper
-6. Gradle: build.gradle(.kts), tasks, dependency configurations, multi-project, version catalogs, Maven comparison
-7. Docker A: images/layers/registries, Dockerfile instruction set complete, build context, .dockerignore
-8. Docker B: multi-stage builds for Java (jlink/layered Boot jars) and Angular (nginx serve), networking, volumes, resource limits, healthchecks, image scanning, distroless/JRE base image choice
-9. Docker Compose: full-stack local environment (Postgres+Redis+Kafka+services), profiles, healthcheck-based startup ordering, override files
+5. Maven: POM anatomy, lifecycle/phases/goals, dependency mediation + BOM/dependencyManagement, multi-module builds, profiles, essential plugins, wrapper; Maven 4 awareness (build/consumer POM split, modelVersion 4.1.0, bom packaging — RC as of mid-2026, 3.9.x still GA)
+6. Gradle: build.gradle(.kts), tasks, dependency configurations, configuration cache (preferred execution mode, Gradle 9+), multi-project, version catalogs, Maven comparison
+7. Docker A: images/layers/registries, BuildKit (the default builder), Dockerfile instruction set complete, build context, .dockerignore
+8. Docker B: multi-stage builds for Java (jlink/layered Boot jars) and Angular (nginx serve), cache mounts (--mount=type=cache for Maven/npm), buildx multi-arch + Bake, networking, volumes, resource limits, healthchecks, image scanning, distroless/JRE base image choice
+9. Docker Compose: compose spec (compose.yaml, no version key), full-stack local environment (Postgres+Redis+Kafka+services), profiles, healthcheck-based startup ordering, override files; Docker Hub rate limits + registry mirror/pull-through cache for CI
 10. Kubernetes A: architecture, Pods/ReplicaSets/Deployments, Services (ClusterIP/NodePort/LoadBalancer), namespaces, kubectl fluency
 11. Kubernetes B: ConfigMaps/Secrets, probes (liveness/readiness/startup), resource requests/limits, HPA, Ingress (frozen API) + Gateway API (the recommended successor), storage (PV/PVC/StorageClass), security (RBAC/ServiceAccounts/securityContext), rolling updates/rollbacks, StatefulSets/Jobs/CronJobs awareness, Helm basics; NetworkPolicy/Kustomize/GitOps (Argo CD) awareness
 12. CI/CD concepts: pipeline stages, quality gates, artifact management, environment promotion
@@ -256,9 +260,9 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 5. VPC fundamentals: subnets (public/private), route tables, IGW/NAT, security groups vs NACLs, endpoints awareness
 6. RDS: engines, Multi-AZ vs read replicas, backups/snapshots, parameter groups, Aurora overview, connecting Spring Boot securely
 7. Load balancing + scaling: ALB/NLB (target groups, health checks, path routing), Auto Scaling groups + policies
-8. Containers/serverless on AWS: ECS/Fargate deploy of our stack, ECR, EKS awareness; Lambda (triggers, cold starts, Java on Lambda), API Gateway, SQS/SNS/EventBridge
-9. Caching + DNS + CDN: ElastiCache (Redis), Route 53, CloudFront (serving the Angular app)
-10. Monitoring in cloud: CloudWatch (metrics/logs/alarms/dashboards), X-Ray awareness, cost monitoring/budgets
+8. Containers/serverless on AWS: ECS/Fargate deploy of our stack (Managed Instances/Express Mode awareness), ECR, EKS awareness (incl. Auto Mode); Lambda (triggers, cold starts, Java on Lambda), API Gateway, SQS/SNS/EventBridge
+9. Caching + DNS + CDN: ElastiCache (Valkey/Redis — Valkey default for new clusters), Route 53, CloudFront (serving the Angular app)
+10. Monitoring in cloud: CloudWatch (metrics/logs/alarms/dashboards), tracing via OpenTelemetry/ADOT + Application Signals (X-Ray SDK is end-of-support 2027 — teach OTel path), cost monitoring/budgets
 11. IaC: CloudFormation concepts, Terraform working intro (state, plan/apply, modules) — deploy the stack via IaC
 12. Well-Architected pillars tour + reference deployment: full app (ALB + ECS + RDS + ElastiCache + S3/CloudFront) end-to-end — incl. Secrets Manager/SSM Parameter Store for credentials and ACM for TLS certificates
 
@@ -266,16 +270,16 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 1. Foundations: latency numbers, throughput vs latency, back-of-envelope estimation method, requirements gathering (functional/NFR)
 2. Scaling basics: vertical vs horizontal, stateless services, session externalization, 12-factor app
 3. Load balancing: L4 vs L7, algorithms (RR/least-conn/consistent hashing), health checks, global LB/geo-DNS
-4. Caching: every layer (browser/CDN/gateway/app/db), invalidation strategies, cache stampede protections, cache coherence problems
+4. Caching: every layer (browser/CDN/gateway/app/db), invalidation strategies, cache stampede protections, cache coherence problems; probabilistic structures (bloom filters, hyperloglog)
 5. Rate limiting: token bucket/leaky bucket/fixed/sliding window — implementations, distributed rate limiting, client fairness
-6. Database scaling: replication (sync/async, failover), sharding (range/hash/directory, resharding pain, consistent hashing), federation, hot partition handling
-7. Consistency + availability: CAP/PACELC properly, consistency models (strong/eventual/causal/RYW), quorums, leader election awareness
-8. High availability + fault tolerance: redundancy math (nines), failure domains, graceful degradation, backpressure, timeout budgets, retry storms, chaos engineering awareness
-9. API design: REST maturity/idempotency/pagination/filtering/versioning, gRPC, GraphQL survey, webhooks, real-time (WebSocket/SSE/long-polling — choosing)
+6. Database scaling: replication (sync/async, failover), sharding (range/hash/directory, resharding pain, consistent hashing), federation, hot partition handling, distributed ID generation (snowflake/UUIDv7)
+7. Distributed coordination: consensus (Raft/Paxos intuition), leader election, distributed locks + fencing tokens (Redlock caveats), clocks and ordering (Lamport/vector clocks, causality), gossip/heartbeats/failure detection
+8. Consistency + availability: CAP/PACELC properly, consistency models (strong/eventual/causal/RYW), quorums; high availability + fault tolerance: redundancy math (nines), failure domains, multi-region/active-active + disaster recovery (RTO/RPO), graceful degradation, backpressure, timeout budgets, retry storms, chaos engineering awareness
+9. API design: REST maturity/idempotency/pagination/filtering/versioning (strategy level — Boot implementation owned by S2.7), gRPC, GraphQL survey, webhooks, real-time (WebSocket/SSE/long-polling — choosing)
 10. Async architectures: queue-based load leveling, fan-out, scheduled/batch vs stream processing, exactly-once revisited
-11. Storage systems: blob storage design, time-series/search (Elasticsearch survey), metadata + content separation, CDC pipelines
-12. Classic designs A: URL shortener, distributed rate limiter, notification system, chat system
-13. Classic designs B: news feed, e-commerce checkout + inventory, payment flow (idempotency deep), video platform basics
+11. Storage systems: blob storage design, time-series/search (Elasticsearch survey), geo-indexing (geohash/quadtree), metadata + content separation, CDC pipelines; OLTP vs OLAP + data lake/warehouse awareness, ML-serving awareness
+12. Classic designs A: URL shortener, distributed rate limiter, distributed key-value store, notification system, chat system, search autocomplete
+13. Classic designs B: news feed, web crawler, proximity/location service, cloud file storage (Drive-like), e-commerce checkout + inventory, payment flow (idempotency deep), video platform basics
 14. Enterprise application design: layered vs hexagonal/clean architecture, modular monolith design, ADRs, diagramming (C4), interview method (framework + mock walkthroughs)
 
 ### Track O2 — Observability (~8 modules) [theme-devops]
@@ -304,10 +308,10 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 Ordered starter → flagship. Each capstone: feature spec, architecture doc, data model, API contract,
 build phases, and "which track modules it exercises" map.
 1. Expense tracker (starter: Boot + JPA + Angular basics + auth)
-2. Admin dashboard (Angular focus: signals, charts, RBAC UI, testing)
-3. Inventory system (transactions, concurrency, reporting SQL)
-4. Job portal (search/filtering/pagination at scale, file uploads, emails)
-5. HR management system (workflows, roles deep, audit logging)
+2. Admin dashboard (Angular focus: signals, NgRx signal-store [A3], charts, RBAC UI, frontend testing [T1])
+3. Inventory system (transactions, concurrency, reporting SQL; backend-testing flagship [T2]: full pyramid, Testcontainers, contracts)
+4. Job portal (search/filtering/pagination at scale, file uploads [J2 NIO/IO], emails)
+5. HR management system (workflows, roles deep, audit logging; exercises J2: annotations/reflection-driven workflow rules, serialization for exports)
 6. Stock market dashboard (WebSockets/SSE, Redis, real-time Angular)
 7. Banking application (security flagship: JWT+OAuth2, idempotent transfers, ledger modeling, audit)
 8. E-commerce application (full-stack flagship: catalog/cart/checkout/payments/inventory)
@@ -340,14 +344,14 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E8:** Y1 System Design → Y2 Secure Coding
 - **Phase E9:** P1 Projects (interleaved once prereq tracks done; expense tracker can start after E3)
 
-Scale estimate: ~250 modules ≈ 600+ lessons. Ship per-batch as always.
+Scale estimate: ~240 modules ≈ 600+ lessons. Ship per-batch as always.
 
 ## 6. Status Tracker
 
 - [ ] Shared Phase 0 infra (see PLAN.md) + this plan's themes/checklists scaffolds
 - [ ] E1: J1 (0/22), J2 (0/14)
 - [ ] E2: D1 (0/14)
-- [ ] E3: S1 (0/14), S2 (0/12), H1 (0/14), S3 (0/10)
+- [ ] E3: S1 (0/15), S2 (0/12), H1 (0/14), S3 (0/10)
 - [ ] E4: T2 (0/10)
 - [ ] E5: A1 (0/10), A2 (0/14), A3 (0/8), T1 (0/8)
 - [ ] E6: M1 (0/12), M2 (0/10)
@@ -370,6 +374,15 @@ Scale estimate: ~250 modules ≈ 600+ lessons. Ship per-batch as always.
   StackWalker, markdown doc comments, HTTP/3, structured-concurrency-still-preview caveat; Postgres ops
   (roles/RLS/VACUUM/backup); K8s storage+security; GHA OIDC; Secrets Manager/ACM; Micrometer Tracing.
   No fabricated features found; string templates correctly absent.
+- 2026-07-19 round 2 (system-design canon + tooling currency + consistency agents). Y1 gained the
+  distributed-systems canon (consensus/Raft, Lamport/vector clocks, distributed locks + fencing,
+  gossip/failure detection, snowflake IDs, geo-indexing, bloom filters, multi-region DR, OLTP/OLAP,
+  4 more classic designs); M1 gained anti-corruption layer, API composition, chassis, sidecar naming;
+  RFC 7807→9457 fixed; O1 gained BuildKit/cache mounts/Bake, configuration cache, Maven 4 awareness,
+  large-repo Git, compose spec + Hub limits; D1.13 Redis 8 additions + Valkey/licensing; C1 X-Ray→OTel
+  reframe, ElastiCache Valkey, EKS Auto Mode; capstones now name A3/T1/T2/J2; duplicate-ownership
+  cross-references added (MockMvc→T2.6, @ServiceConnection→T2.8, virtual threads→J1.19, API
+  versioning three-way split, security split vs web plan); checklist sources extended to full toolchain.
 
 ## 8. Decisions Already Made (do not relitigate)
 

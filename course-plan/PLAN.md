@@ -21,7 +21,7 @@ design system (`site/assets/site.css` + `site.js`) and deployment pipeline
   - HTML: MDN HTML element reference (~110 elements) + global attributes + input types
   - CSS: MDN CSS property/selector/at-rule/function indexes
   - JavaScript: ECMAScript spec chapter list + MDN JS reference + curated Web API index
-  - TypeScript: TS Handbook table of contents + release notes 1.x→5.x feature list
+  - TypeScript: TS Handbook table of contents + release notes 1.x→7.x feature list (6.0 default changes, 7.0 native compiler)
 - Checklist item shape: `{ "id": "html.forms.input.range", "label": "<input type=range>", "lesson": null }`
   — `lesson` filled with the lesson file path when covered.
 - Script `course-plan/scripts/coverage.mjs` (to be written in Phase 0) reports uncovered items
@@ -49,10 +49,11 @@ retrieval date; refresh pass scheduled at each phase boundary.
 
 ## 3. Tracks and Modules
 
-### Track 0 — How the Web Works (3 modules, foundation)
-1. Browsers and the request cycle (URL → DNS → HTTP → response)
-2. HTTP essentials (methods, status codes, headers, caching, HTTPS)
-3. The rendering pipeline (HTML parsing → DOM → CSSOM → layout → paint → composite)
+### Track 0 — How the Web Works (4 modules, foundation)
+1. Browsers and the request cycle (URL anatomy → DNS resolution → HTTP → response)
+2. HTTP essentials: methods, status codes, headers, redirects; HTTPS/TLS 1.3 (handshake, certificates)
+3. HTTP in depth: HTTP/1.1 vs 2 vs 3+QUIC evolution, connection management (keep-alive/multiplexing/head-of-line blocking), caching (Cache-Control/ETag/Vary/conditional requests), cookie mechanics (Set-Cookie attributes/SameSite/sessions), content negotiation, compression (gzip/brotli/zstd)
+4. The rendering pipeline (HTML parsing → DOM → CSSOM → layout → paint → composite)
 
 ### Track 1 — HTML (~10 modules)
 1. Document anatomy: doctype, html/head/body, metadata elements (meta, title, link, base, style, script attributes incl. defer/async/module)
@@ -109,7 +110,7 @@ retrieval date; refresh pass scheduled at each phase boundary.
 20. Browser APIs B: fetch complete (Request/Response/Headers), URL/URLSearchParams, History/Location + Navigation API, observers (Intersection/Mutation/Resize/Performance), Web Animations API (element.animate), View Transitions JS (document.startViewTransition), WebSockets, File/Blob/FileReader/object URLs, TextEncoder/TextDecoder, drag-and-drop API, MessageChannel/BroadcastChannel, Canvas 2D basics, media/geolocation/notifications/clipboard/share/fullscreen, performance API, memory/GC notes
 21. Web Components: customElements.define, lifecycle callbacks, Shadow DOM API (attachShadow, slots, events across shadow boundaries), form-associated custom elements + ElementInternals, template/slot patterns, ::part/::slotted styling contract
 22. Streams and workers deep: ReadableStream/WritableStream/TransformStream (backpressure, piping, byte streams), CompressionStream/DecompressionStream, Web Workers (module workers, transfer), Service Workers + PWA (registration, lifecycle, fetch interception, Cache API, offline strategies, web app manifest, push overview)
-23. Security for JS developers: XSS classes and defenses, CSP in practice, CORS mechanics (preflight, credentials), cookies (SameSite/HttpOnly/Secure), clickjacking/frame-ancestors, SRI, Trusted Types + Sanitizer API, Web Crypto basics (randomUUID/getRandomValues/subtle.digest), prototype pollution, supply-chain hygiene
+23. Security for JS developers: XSS classes and defenses, CSP in practice, CORS mechanics (preflight, credentials), cookies (SameSite/HttpOnly/Secure), clickjacking/frame-ancestors, SRI, Trusted Types + Sanitizer API, Web Crypto basics (randomUUID/getRandomValues/subtle.digest), prototype pollution, supply-chain hygiene. (This module owns browser-side security depth; server/enterprise security lives in PLAN-JAVA-STACK Tracks S3/Y2, which cross-reference here)
 24. Debugging and legacy: complete console API (every method), debugger statement, breakpoints/DevTools workflow, error monitoring patterns; strict vs sloppy mode differences, eval/with, deprecated-but-real features awareness (document.write, __proto__ accessor…); SURVEY-tier lesson: WebRTC, Web Audio, WebGL/WebGPU, WebAuthn, Speech, sensors, Houdini worklets
 
 ### Track 4 — TypeScript (~13 modules)
@@ -177,7 +178,7 @@ Mirrors the transcript pipeline that already works in this repo:
 - **Phase 0 (infra, one session):** checklists JSON scaffolds, coverage.mjs, playground.js,
   lesson CSS components + new themes, lesson template reference, course-lesson skill,
   check-html.mjs pre-block exemption, Courses menu stub on index. Commit.
-- **Phase 1:** Track 0 (3 lessons) — validates template end-to-end. Commit per batch.
+- **Phase 1:** Track 0 (4 modules) — validates template end-to-end. Commit per batch.
 - **Phase 2:** Track 1 HTML (~10 modules, ~50-60 lessons; multiple lessons per module where needed)
 - **Phase 3:** Track 2 CSS (~18 modules)
 - **Phase 4:** Track 3 JavaScript (~24 modules)
@@ -196,7 +197,7 @@ Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays 
   - [ ] .claude/skills/course-lesson/ (SKILL.md + references/lesson-template.md)
   - [ ] check-html.mjs: skip <pre> content in noise/markdown checks
   - [ ] index.html: Courses menu
-- [ ] Phase 1: Track 0 web-basics (0/3 lessons)
+- [ ] Phase 1: Track 0 web-basics (0/4 modules)
 - [ ] Phase 2: Track 1 html (0 modules started)
 - [ ] Phase 3: Track 2 css (0 modules started)
 - [ ] Phase 4: Track 3 javascript (0 modules started)
@@ -214,6 +215,9 @@ Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays 
   shadow-DOM pseudo-classes, ::picker(); HTML customizable select, invoker commands, search element,
   missing text elements; TS keyof/typeof/indexed-access, Type Compatibility, moduleResolution/interop,
   isolatedDeclarations/erasableSyntaxOnly, decorator metadata, ThisType. No fabricated features found.
+- 2026-07-19 round 2 (Track 0 depth + consistency agents): Track 0 expanded 3→4 modules (HTTP versions/
+  QUIC, caching, cookies, negotiation, compression, connection management were homeless); security
+  ownership split vs enterprise plan stated on JS M23. Counts/references/currency verified consistent.
 
 - 2026-07-19 gap review vs "100% coverage" goal. Added: scope/non-goals/coverage-tier section (2b);
   JS modules 21-24 (Web Components, Streams+Service Workers/PWA, Security, Debugging/legacy/survey);
