@@ -24,34 +24,45 @@ Same rules as generated pages: complete semantic HTML5 document, kebab-case clas
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Library of knowledge pages: <menu names>.">
+  <meta name="description" content="Library of knowledge pages: <topic list>.">
   <title>Knowledge Library</title>
   <link rel="stylesheet" href="assets/site.css">
 </head>
-<body class="theme-library">
+<body class="theme-library index-page">
 <header class="site-header">
   <h1>Knowledge Library</h1>
   <p class="standfirst">One line describing the library's current scope.</p>
+  <p class="hero-stats"><span class="stat"><strong>N</strong> pages</span><span class="stat"><strong>M</strong> topics</span><span class="stat"><strong>100%</strong> expert-sourced</span></p>
+  <p class="filter-wrap"><input id="library-filter" type="search" placeholder="Search all pages — try &quot;keyword&quot;…" aria-label="Search pages"></p>
 </header>
 <main>
+  <nav class="topic-chips" aria-label="Jump to topic">
+    <a class="chip theme-skin-care" href="#skin-care">Skin Care <span class="count">16</span></a>
+    <!-- one chip per submenu, theme class matches the submenu's, count = its pages -->
+  </nav>
+  <p class="no-results" hidden>No pages match your search.</p>
   <nav class="library-nav" aria-label="All pages">
     <section class="menu health-wellness">
       <h2>Health &amp; Wellness</h2>
-      <section class="submenu skin-care">
+      <section class="submenu theme-skin-care" id="skin-care">
         <h3>Skin Care</h3>
-        <ul>
-          <li><a href="pages/skin-care-myths.html">Page Title</a> — one-line description from the page's meta description.</li>
+        <ul class="card-grid">
+          <li class="card"><a href="pages/<slug>.html">Page Title (trim to ~60 chars if long)</a><p class="card-desc">One-to-two line description from the page's meta description.</p></li>
         </ul>
       </section>
     </section>
   </nav>
 </main>
 <footer>
-  <p class="page-count">N pages.</p>
+  <p class="page-count">N pages and growing.</p>
 </footer>
 <script src="assets/site.js" defer></script>
 </body>
 </html>
 ```
 
-Relative links only (`pages/<slug>.html`). Update the footer count and the standfirst to match the actual contents. Lint the rebuilt index with the same `check-html.mjs` script.
+Rules for the rebuild:
+- Each submenu `<section>` carries its theme class (from theming.md) and an `id` used by its chip's `href="#id"`.
+- One chip per submenu in `.topic-chips`, same theme class, count in `<span class="count">`.
+- The search filter, chip hiding, and empty-state are handled by shared `assets/site.js` — the markup only needs `#library-filter`, `.no-results`, `.card` items.
+- Relative links only (`pages/<slug>.html`). Update hero stats, chip counts, and footer count to match the actual contents. Lint the rebuilt index with `check-html.mjs`.
