@@ -26,12 +26,16 @@ under the same deep/survey tier system as PLAN.md §2b.
 - Tiering: `deep` = feature-complete; `survey` = one awareness lesson. Non-goals: Scala/Kotlin,
   JavaEE/Jakarta EE beyond JPA/Servlet basics, Azure/GCP (AWS chosen), React/Vue (Angular chosen).
 
-## 2. Lesson Anatomy Deviation (vs PLAN.md §4)
+## 2. Module Page Format
 
-Browser playground impossible for Java/Angular-CLI code. Replacement for non-web-runnable lessons:
-**annotated code panel + expected-output panel** (two-column, styled like the playground), plus
-"run it yourself" setup note. Everything else in the lesson template stays identical
-(concept → visual → code+output → gotchas → exercise → interview Q&A → features-covered footer).
+Directory format per PLAN.md §4/§4b applies unchanged (the pivot removed the playground, so the
+old web-vs-Java deviation is moot). Tiny snippets use plain code blocks; the code+output panel
+component exists in site.css for cases where showing output clarifies. Resource hierarchy for this
+course: Javadoc/dev.java, docs.spring.io, angular.dev, kafka/rabbitmq/postgres official docs FIRST,
+then Baeldung/established sites, then videos (established channels; Indian-audience channels
+welcome where quality holds). Interview Q&A: ≥10 per module, India-interview weighted, per PLAN.md §4.
+
+Scale estimate (directory format): ~240 module pages for this course.
 
 ## 3. Tracks and Modules
 

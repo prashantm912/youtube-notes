@@ -128,20 +128,37 @@ retrieval date; refresh pass scheduled at each phase boundary.
 12. JSX/TSX as a TS language feature: jsx compiler options, JSX namespace, typing components/props/children (framework-agnostic)
 13. Feature timeline 1.x→7.x: 6.0 (default flips, last JS-based compiler) → 7.0 (native Go port, ~10x faster) + import defer; TS in practice (with DOM, with our site.js as case study), migration strategy
 
-## 4. Lesson Anatomy (fixed template — every lesson identical shape)
+## 4. Module Page Anatomy (fixed template — DIRECTORY FORMAT, decided 2026-07-19)
 
-1. **Concept** — why it exists, then what it is
-2. **Visual** — inline SVG diagram styled by the design system (accent-colored, theme-aware).
-   Diagram types: box/flow diagrams, axis diagrams (flexbox/grid), timeline (event loop), tree (DOM/prototype chain)
-3. **Runnable example** — live playground: `<textarea>` editor + `<iframe srcdoc>` output, powered by
-   a shared `site/assets/playground.js` (to be written Phase 0). No external CDNs (site rule).
-   TS lessons: show compiled JS output side-by-side (precompiled at authoring time, not in-browser).
-4. **Gotchas** — edge cases, browser quirks, common bugs (aside.callout)
-5. **Exercise** — one task with a hidden solution (details/summary)
-6. **Interview Q&A** — 3–5 per lesson in `<details>`, tagged [Beginner]/[Intermediate]/[Pro]
-7. **Features covered** — checklist ids this lesson covers (traceability footer)
+**Format pivot:** we do NOT author full tutorials. We are a curated learning directory:
+every topic gets a short orientation plus vetted links to the best existing resources.
+One page per MODULE (not per topic) at `site/courses/<track-slug>/<nn>-<module-slug>.html`.
 
-Per track additionally: one **question-bank page** aggregating all its interview Q&A, and a **track TOC page**.
+1. **Module intro** — 2–3 sentences: what this module covers, where it sits in the track.
+2. **Topic entries** — one per checklist topic (h3 heading), each containing:
+   - 1–2 paragraphs: WHAT it is and WHY it exists/when it matters. Orientation, not instruction.
+   - Optional tiny snippet (3–8 lines) when code says it faster than prose. No playgrounds, no exercises.
+   - **Resource list, 4–5 links, fixed order:** (1) official documentation FIRST (MDN for web platform,
+     Javadoc/reference docs, spec), (2) official tutorial/example if one exists, (3) 2–3 acclaimed
+     third-party resources (established sites and at least one video). Each link rendered as:
+     title — source, tagged [Official] / [Article] / [Video].
+3. **Interview questions** — MINIMUM 10 per module, more when the module is interview-heavy.
+   Weighted toward what is most asked in Indian interviews (service-company screening through
+   product-company rounds). Tagged [Beginner]/[Intermediate]/[Pro], expandable answers.
+4. **Features covered** — checklist ids (traceability footer, unchanged).
+
+Per track additionally: a **track TOC page** and one aggregated **interview question-bank page**.
+
+## 4b. Resource Curation Policy
+
+- Source hierarchy: official docs → official guide/tutorial → established references
+  (web: MDN, web.dev, javascript.info, CSS-Tricks, TypeScript handbook; Java stack: dev.java,
+  Baeldung, official Spring/Angular guides) → high-quality videos (established channels).
+- **Every URL verified reachable at authoring time** — the generating agent fetches it;
+  404, paywall, login-wall, or redirect-to-homepage = rejected, find a substitute.
+- Prefer evergreen/undated URLs; avoid version-pinned doc links unless the topic is version-specific.
+- No SEO content farms; popularity alone insufficient — the resource must actually teach the topic.
+- Link-rot re-verification pass at every phase boundary (coverage script extended to check URLs).
 
 ## 5. Site Integration
 
@@ -164,11 +181,13 @@ Per track additionally: one **question-bank page** aggregating all its interview
 
 Mirrors the transcript pipeline that already works in this repo:
 
-- New skill: `.claude/skills/course-lesson/SKILL.md` — generates ONE lesson from
-  (track, module, lesson spec, checklist ids). References: lesson template markup file,
-  visual/diagram guidelines, playground usage, Q&A format.
-- Batches of ~5 parallel agents (one lesson each), then main thread: lint each page,
-  run coverage.mjs, update manifest.json + track TOC + index, commit, push (auto-deploys).
+- New skill: `.claude/skills/course-lesson/SKILL.md` — generates ONE module page from
+  (track, module spec, checklist ids). The agent RESEARCHES resources (WebSearch/WebFetch),
+  VERIFIES every URL per §4b, writes orientation paras + India-weighted interview Q&A.
+  References: module template markup (derived from the two converted pilot pages),
+  resource policy, Q&A format.
+- Batches of ~5 parallel agents (one module page each), then main thread: lint each page,
+  spot-check links, run coverage.mjs, update track TOC + index, commit, push (auto-deploys).
 - `course-plan/checklists/*.json` = the changelog analog: item `lesson: null` → pending; filled → done.
 - Review: html-review-gate stays usable; for lessons the "source transcript" is replaced by the
   lesson spec + MDN — fidelity check = technical accuracy pass via Codex.
@@ -185,7 +204,8 @@ Mirrors the transcript pipeline that already works in this repo:
 - **Phase 5:** Track 4 TypeScript (~13 modules)
 - **Phase 6:** cross-track capstone: build-a-project lessons + full interview bank page
 
-Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays consistent throughout.
+Scale estimate (directory format): ~63 module pages for this course. Each phase ships
+incrementally; site stays consistent throughout.
 
 ## 8. Status Tracker (update this section as work lands)
 
@@ -233,9 +253,13 @@ Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays 
 
 ## 10. Decisions Already Made (do not relitigate)
 
-- Design system: reuse site.css/site.js; no external CDNs ever; file:// must keep working
+- **Directory format (2026-07-19, user decision):** we curate, we don't author tutorials.
+  Module pages = orientation paras + verified resource links + interview Q&A (§4/§4b).
+  One page per module. ≥10 interview questions per module, India-interview weighted.
+  Tiny illustrative snippets allowed; no playgrounds/exercises. The two deep pilot lessons
+  were converted to this format.
+- Design system: reuse site.css/site.js; no external CDNs in OUR code; resource links are
+  external by design; file:// must keep working
 - Completeness = checklist-verified, not narrative claims
-- Lesson shape fixed (section 4); interview Q&A embedded per lesson AND aggregated per track
 - Batch generation with parallel agents + lint gate + push-per-batch, same as transcript pipeline
-- Playground = textarea + iframe srcdoc, no external editor libraries
-- TS compilation shown precompiled, not in-browser
+- playground.js retained in assets but unused by the directory format
