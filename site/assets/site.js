@@ -2,6 +2,35 @@
 (function () {
   "use strict";
 
+  var isArticle = !document.body.classList.contains("index-page") && document.querySelector(".page-header");
+
+  // Article chrome: topic eyebrow + floating back-to-library link
+  if (isArticle) {
+    var TOPICS = {
+      "skin-care": "Skin Care", "hair-care": "Hair Care", "nutrition": "Nutrition & Diet",
+      "fitness": "Fitness & Exercise", "medicine": "Medicine & Organ Health",
+      "longevity": "Longevity & Biohacking", "supplements": "Supplements",
+      "wellness": "Wellness & Lifestyle", "system-design": "Communication & Social Skills",
+    };
+    var label = null;
+    document.body.className.split(/\s+/).forEach(function (c) {
+      if (c.indexOf("theme-") === 0 && TOPICS[c.slice(6)]) label = TOPICS[c.slice(6)];
+    });
+    var header = document.querySelector(".page-header");
+    var h1 = header && header.querySelector("h1");
+    if (label && h1) {
+      var eyebrow = document.createElement("span");
+      eyebrow.className = "eyebrow";
+      eyebrow.textContent = label;
+      header.insertBefore(eyebrow, h1);
+    }
+    var back = document.createElement("a");
+    back.className = "back-link";
+    back.href = "../index.html";
+    back.innerHTML = "← Knowledge Library";
+    document.body.appendChild(back);
+  }
+
   // Reading progress bar (article pages get meaningful scroll; index too — harmless)
   var bar = document.createElement("div");
   bar.className = "progress-bar";
