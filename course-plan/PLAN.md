@@ -213,7 +213,7 @@ Mirrors the transcript pipeline that already works in this repo:
   code-block exemption, Courses index menu.)
 - **Phase 1:** Track 0 (4 module pages) — validates template end-to-end. Commit per batch.
 - **Phase 2:** Track 1 HTML (10 module pages) — DONE 2026-07-19. Coverage 48/48, 204 links verified.
-- **Phase 3:** Track 2 CSS (~18 modules)
+- **Phase 3:** Track 2 CSS (18 modules) — DONE 2026-07-19. Coverage 82/82, 321 links verified.
 - **Phase 4:** Track 3 JavaScript (~24 modules)
 - **Phase 5:** Track 4 TypeScript (~13 modules)
 - **Phase 6:** cross-track capstone project briefs (directory format) + full interview bank page

@@ -81,7 +81,10 @@ if (!/<link[^>]*rel=["']stylesheet["'][^>]*assets\/site\.css/i.test(html))
   warnings.push("No link to shared stylesheet (assets/site.css)");
 if (!/<body[^>]*class=["'][^"']*theme-/i.test(html))
   warnings.push("<body> has no theme-* class — page won't pick up a topic palette");
-if (/\b(TODO|FIXME|PLACEHOLDER|Lorem ipsum)\b/i.test(body)) errors.push("Placeholder/TODO text in output");
+// Uppercase-only for marker words: real template markers are ALL CAPS, while "placeholder"
+// (the HTML attribute / CSS pseudo-element) and "todo lists" are legitimate lowercase prose.
+if (/\b(TODO|FIXME|PLACEHOLDER)\b/.test(body) || /\bLorem ipsum\b/i.test(body))
+  errors.push("Placeholder/TODO marker text in output");
 
 // --- Empty sections ---
 for (const m of html.matchAll(/<section[^>]*>([\s\S]*?)<\/section>/gi)) {
