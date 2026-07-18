@@ -32,28 +32,28 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 ## 3. Tracks and Modules
 
 ### Track J1 — Core Java (~22 modules) [theme-java]
-1. Setup + language basics: JDK/JRE/JVM, javac/java, syntax, primitives vs references, literals, var, casting/promotion
-2. Operators (every one incl. bitwise/shift/instanceof pattern), control flow (all forms, labeled breaks, switch statement AND switch expressions with pattern matching)
-3. Strings deep: immutability, pool, String API complete, StringBuilder/StringBuffer, text blocks, formatting
+1. Setup + language basics: JDK/JRE/JVM, javac/java, compact source files + instance main methods (JEP 512 — the modern entry point), syntax, primitives vs references, literals, var, casting/promotion
+2. Operators (every one incl. bitwise/shift/instanceof pattern), control flow (all forms, labeled breaks, switch statement AND switch expressions with pattern matching), unnamed variables & patterns (_)
+3. Strings deep: immutability, pool + compact strings, String API complete, CharSequence/Character APIs, StringBuilder/StringBuffer, text blocks, formatting
 4. Arrays + varargs; java.util.Arrays complete
 5. OOP A: classes/objects, constructors, this/static, initializer blocks, access modifiers, packages/imports (incl. static imports)
-6. OOP B: inheritance, polymorphism, overloading vs overriding rules, super, final, abstract, Object methods (equals/hashCode contract, toString, clone, finalize deprecation)
+6. OOP B: inheritance, polymorphism, overloading vs overriding rules, super, flexible constructor bodies (statements before super()), final, abstract, Object methods (equals/hashCode contract, toString, clone, finalize deprecation)
 7. OOP C: interfaces (default/static/private methods, constants), records (compact constructors, invariants), sealed classes/interfaces, enums complete (fields/methods/abstract methods, EnumSet/EnumMap)
 8. Nested types: inner, static nested, local, anonymous; lambdas vs anonymous classes
 9. Exceptions: hierarchy, checked vs unchecked, try/catch/finally semantics, try-with-resources + AutoCloseable, multi-catch, custom exceptions, suppressed exceptions, best practices
 10. Generics: type parameters, bounded types, wildcards (PECS), erasure + consequences, generic methods, raw types, bridge methods awareness
-11. Collections A: Collection hierarchy, List (ArrayList/LinkedList internals), Set (HashSet/LinkedHashSet/TreeSet), equals/hashCode in collections, Iterator/ListIterator, fail-fast vs fail-safe
-12. Collections B: Map complete (HashMap internals — buckets/treeification, LinkedHashMap incl. LRU, TreeMap/NavigableMap), Queue/Deque (ArrayDeque, PriorityQueue), Comparator/Comparable (chaining, nullsFirst), Collections/List/Map factory + utility methods, immutable collections
+11. Collections A: Collection hierarchy incl. SequencedCollection/SequencedSet (getFirst/getLast/reversed), List (ArrayList/LinkedList internals), Set (HashSet/LinkedHashSet/TreeSet), equals/hashCode in collections, Iterator/ListIterator, fail-fast vs fail-safe
+12. Collections B: Map complete (HashMap internals — buckets/treeification, LinkedHashMap incl. LRU, TreeMap/NavigableMap, SequencedMap), Queue/Deque (ArrayDeque, PriorityQueue), Comparator/Comparable (chaining, nullsFirst), Collections/List/Map factory + utility methods, immutable collections
 13. Lambdas + functional programming: lambda syntax/scoping, method/constructor references, java.util.function complete (all 40+ interfaces), composition (andThen/compose), closures/effectively-final
 14. Streams A: pipeline model, every intermediate op (map/filter/flatMap/mapMulti/peek/sorted/distinct/limit/skip/takeWhile/dropWhile), lazy evaluation
-15. Streams B: terminal ops complete, Collectors complete (groupingBy/partitioningBy/teeing/mapping/flatMapping/joining/to*), primitive streams, Optional-returning ops, parallel streams + Spliterator awareness, when NOT to parallelize
+15. Streams B: terminal ops complete, Collectors complete (groupingBy/partitioningBy/teeing/mapping/flatMapping/joining/to*), stream gatherers (Stream::gather, built-in Gatherers, custom gatherers), primitive streams, Optional-returning ops, parallel streams + Spliterator awareness, when NOT to parallelize
 16. Concurrency A: Thread lifecycle/API, Runnable/Callable, synchronized (methods/blocks, intrinsic locks), volatile, Java Memory Model (happens-before), wait/notify, ThreadLocal
 17. Concurrency B: java.util.concurrent — ExecutorService/thread pools (all factory types, ThreadPoolExecutor params), Future/CompletableFuture complete (composition, error handling), locks (ReentrantLock/ReadWrite/StampedLock), Condition
 18. Concurrency C: atomics (all classes, CAS), concurrent collections (ConcurrentHashMap internals, CopyOnWrite*, Blocking queues), synchronizers (CountDownLatch/CyclicBarrier/Semaphore/Phaser/Exchanger), ForkJoinPool
-19. Concurrency D (modern): virtual threads (Loom), structured concurrency, scoped values; deadlock/livelock/starvation + detection; common concurrency bugs
-20. JVM: architecture, classloading (delegation, custom loaders), bytecode basics, JIT/tiered compilation, memory areas (heap/stack/metaspace/code cache), JEP timeline tour — every language/JVM feature Java 8→current LTS (modules, var, switch expr, records, sealed, pattern matching for switch, virtual threads, FFM…)
-21. Memory + GC: object lifecycle, reference types (strong/soft/weak/phantom), GC algorithms (Serial/Parallel/G1/ZGC/Shenandoah — how each works, when each), tuning flags, OOM types, leak patterns + diagnosis
-22. Performance + design patterns: profiling (JFR/async-profiler awareness), JMH microbenchmarks, common perf pitfalls; GoF 23 patterns in modern Java (records/lambdas change idioms) + SOLID; anti-patterns
+19. Concurrency D (modern): virtual threads (Loom), structured concurrency (still PREVIEW as of Java 26 — teach with caveat), scoped values (final, Java 25); deadlock/livelock/starvation + detection; common concurrency bugs
+20. JVM: architecture, classloading (delegation, custom loaders), bytecode basics + Class-File API (java.lang.classfile), StackWalker, JIT/tiered compilation, memory areas (heap/stack/metaspace/code cache), JEP timeline tour — every language/JVM feature Java 8→current (modules, var, switch expr, records, sealed, pattern matching, virtual threads, FFM, sequenced collections, gatherers…; non-final awareness: Vector API incubator, primitive patterns preview; string templates withdrawn — do not teach)
+21. Memory + GC: object lifecycle, reference types (strong/soft/weak/phantom), Cleaner (finalize replacement), GC algorithms (Serial/Parallel/G1/ZGC/Shenandoah — how each works, when each), tuning flags, OOM types, leak patterns + diagnosis
+22. Performance + design patterns: profiling (JFR/async-profiler awareness), JMH microbenchmarks, AOT class loading/caching (Project Leyden, JEPs 483/514/515), common perf pitfalls; GoF 23 patterns in modern Java (records/lambdas change idioms) + SOLID; anti-patterns
 
 ### Track J2 — Advanced Java (~14 modules) [theme-java]
 1. Annotations: built-in, meta-annotations, custom annotations, retention/targets, annotation processing (APT) awareness
@@ -63,15 +63,15 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 5. java.time complete: Instant/LocalDate(Time)/ZonedDateTime/OffsetDateTime, Duration/Period, ZoneId/DST handling, formatting/parsing, TemporalAdjusters, conversion with legacy Date/Calendar, Clock for testability
 6. IO classic: streams/readers/writers, buffering, File; NIO.2: Path/Files complete, directory walking, watch service
 7. NIO channels: ByteBuffer mechanics, channels, selectors + non-blocking IO model, memory-mapped files
-8. Networking: sockets, java.net.http.HttpClient complete (sync/async, HTTP/2, WebSocket)
+8. Networking: sockets, java.net.http.HttpClient complete (sync/async, HTTP/2 + HTTP/3 [Java 26], WebSocket)
 9. Regex (java.util.regex flavor complete) + text processing (Scanner, BreakIterator awareness)
 10. JDBC core: DriverManager/DataSource, PreparedStatement (injection safety), ResultSet, batching, transactions, connection pooling concepts
-11. JPMS (modules): module-info, requires/exports/opens, services (ServiceLoader), migration reality
-12. Process API, scripting, internationalization (Locale/ResourceBundle/MessageFormat), Foreign Function & Memory API overview
+11. JPMS (modules): module-info, requires/exports/opens, module import declarations (import module), services (ServiceLoader), migration reality
+12. Process API/ProcessHandle, scripting, internationalization (Locale/ResourceBundle/MessageFormat), java.util.random RandomGenerator family, Foreign Function & Memory API overview
 13. Common pitfalls: equals/hashCode traps, autoboxing costs, BigDecimal vs double for money, string concat in loops, date bugs, == vs equals, integer cache, finalizers
-14. Clean code: Effective-Java-style item tour (naming, immutability-first, composition over inheritance, minimize accessibility, defensive copies, builder pattern, static factories), Javadoc, code review checklist
+14. Clean code: Effective-Java-style item tour (naming, immutability-first, composition over inheritance, minimize accessibility, defensive copies, builder pattern, static factories), Javadoc incl. markdown doc comments (///), code review checklist
 
-### Track S1 — Spring Framework (~14 modules) [theme-spring]
+### Track S1 — Spring Framework (~15 modules) [theme-spring]
 1. IoC/DI concepts, ApplicationContext vs BeanFactory, container bootstrap
 2. Bean definition: @Component/@Service/@Repository/@Controller, @Bean/@Configuration, component scanning, stereotype semantics
 3. DI mechanics: constructor/setter/field injection, @Autowired resolution, @Qualifier/@Primary, circular dependencies, @Lazy, @Value + property injection
@@ -85,7 +85,8 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 11. Exception handling: @ExceptionHandler/@ControllerAdvice, ProblemDetail (RFC 7807), error response design
 12. Transactions: @Transactional complete (propagation — all 7, isolation, rollback rules, readOnly), programmatic transactions, pitfalls
 13. Logging (SLF4J/Logback config, MDC), caching abstraction (@Cacheable et al), scheduling (@Scheduled/cron) + async (@Async, executors)
-14. Testing in Spring: TestContext framework, context caching, @MockBean, MockMvc deep, transactional tests; WebFlux/reactive stack survey lesson
+14. Testing in Spring: TestContext framework, context caching, @MockitoBean (@MockBean deprecated since Boot 3.4 — teach the replacement), MockMvc deep, transactional tests; WebFlux/reactive stack survey lesson
+15. HTTP clients + server push: RestClient (the modern default), RestTemplate legacy, WebClient, declarative HTTP interface clients (@HttpExchange), client-side error handling/timeouts; server WebSocket/STOMP support, SSE (SseEmitter); null-safety (JSpecify) + Framework AOT awareness
 
 ### Track S2 — Spring Boot (~12 modules) [theme-spring]
 1. Boot architecture: starters, @SpringBootApplication, SpringApplication lifecycle, embedded servers (Tomcat/Jetty/Undertow), fat/layered jars
@@ -94,16 +95,16 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 4. RESTful service design: resource modeling, DTO layer + MapStruct/manual mappers, request/response design, null-handling policy
 5. Persistence wiring: DataSource auto-config, HikariCP tuning basics, Spring Data JPA repositories intro (deep coverage in Track H1)
 6. Pagination and sorting: Pageable/Sort/Page vs Slice, web support, stable sort keys, keyset pagination awareness
-7. API versioning strategies (URI/header/media-type, deprecation policy) + API evolution/backward compatibility
+7. API versioning: Framework 7 built-in API versioning (MVC/WebFlux) + strategies (URI/header/media-type, deprecation policy) + API evolution/backward compatibility
 8. Global exception handling: end-to-end error architecture, validation errors, ProblemDetail responses, error catalogs
 9. File upload/download: multipart config, streaming large files, Resource abstraction, content disposition, storage strategies
 10. Scheduling + async processing in Boot, application events, ApplicationRunner/CommandLineRunner, graceful shutdown
 11. Actuator: every built-in endpoint, exposure config, custom endpoints/health indicators/info contributors, Micrometer metrics intro
-12. Boot 3.x specifics: Jakarta namespace, native image/GraalVM awareness, DevTools, banner/logging config, packaging + running in prod
+12. Boot current-gen (4.x baseline): modularized starters, JSpecify null-safety, Jackson 3, SSL bundles, Docker Compose support + dev-time Testcontainers (@ServiceConnection as Dev Service), virtual threads (spring.threads.virtual.enabled), structured logging support, native image/GraalVM awareness, DevTools, packaging + running in prod
 
 ### Track S3 — Spring Security (~10 modules) [theme-spring]
 1. Architecture: filter chain (every default filter's job), SecurityContext/SecurityContextHolder, AuthenticationManager/Provider, UserDetailsService
-2. Authentication: form login, HTTP basic, remember-me, session management (fixation, concurrency), logout handling
+2. Authentication: form login, HTTP basic, remember-me, passkeys/WebAuthn login, one-time token login, MFA (first-class in Security 7), session management (fixation, concurrency), logout handling
 3. Password storage: PasswordEncoder implementations (BCrypt/Argon2/scrypt/PBKDF2), DelegatingPasswordEncoder, upgrade strategies
 4. Authorization: URL-based rules, method security (@PreAuthorize/@PostAuthorize/@Secured), roles vs authorities, hierarchical roles, SpEL in security
 5. JWT deep: structure, signing (HMAC vs RSA/EC), validation, refresh token patterns, storage tradeoffs (cookie vs header), stateless architecture, revocation strategies
@@ -126,8 +127,8 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 10. Transactions + locking: optimistic (@Version) vs pessimistic, lock modes, isolation interplay, dirty checking/flush modes
 11. Caching: first-level, second-level (providers, concurrency strategies), query cache, when caching hurts
 12. Cascade types (all) + orphanRemoval vs CascadeType.REMOVE; batch inserts/updates, StatelessSession awareness
-13. Spring Data JPA deep: repository hierarchy, derived query methods (full grammar), @Query/@Modifying, projections (interface/class/dynamic), auditing, pagination integration
-14. Performance tuning + migrations: statement logging/statistics, common slow patterns, connection pool sizing, Flyway/Liquibase (versioned migrations, repeatable, rollback strategy)
+13. Spring Data JPA deep: repository hierarchy, derived query methods (full grammar), @Query/@Modifying, projections (interface/class/dynamic), auditing (Spring Data) + Hibernate Envers entity auditing, pagination integration; Jakarta Data awareness
+14. Performance tuning + migrations: statement logging/statistics, common slow patterns, connection pool sizing, Flyway/Liquibase (versioned migrations, repeatable, rollback strategy); Hibernate 7 changes awareness
 
 ### Track M1 — Microservices (~12 modules) [theme-arch]
 1. Monolith vs microservices: real tradeoffs, modular monolith option, when NOT to do microservices
@@ -145,12 +146,12 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 
 ### Track M2 — Messaging and Event-Driven Systems (~10 modules) [theme-arch]
 1. Messaging fundamentals: queues vs pub-sub, delivery guarantees (at-most/at-least/exactly-once), idempotent consumers, poison messages
-2. Kafka A: architecture (brokers/topics/partitions/offsets/replication, KRaft), when Kafka vs queue broker
-3. Kafka B: producers (acks/idempotence/batching/compression/partitioners), consumers (groups/rebalancing/offset commit strategies)
-4. Kafka C: transactions + EOS semantics, compacted topics, retention, schema registry + Avro/Protobuf, Kafka Streams + Connect survey
+2. Kafka A: architecture (brokers/topics/partitions/offsets/replication, KRaft-only since 4.0 — ZooKeeper removed), when Kafka vs queue broker (incl. share groups/"Queues for Kafka" KIP-932 changing this answer)
+3. Kafka B: producers (acks/idempotence/batching/compression/partitioners), consumers (groups/rebalancing incl. new group protocol KIP-848/offset commit strategies)
+4. Kafka C: transactions + EOS semantics, compacted topics, retention + tiered storage, schema registry + Avro/Protobuf, Kafka Streams + Connect survey
 5. Spring Kafka: listeners, error handlers, retry topics, DLT, testing with EmbeddedKafka/Testcontainers
 6. RabbitMQ A: AMQP model — exchanges (direct/topic/fanout/headers), queues, bindings, routing keys
-7. RabbitMQ B: acknowledgements/prefetch, TTL, DLX, priority/lazy queues, quorum queues, clustering awareness; Spring AMQP
+7. RabbitMQ B: acknowledgements/prefetch, TTL, DLX, priority queues, quorum queues (the default choice), RabbitMQ Streams + super streams, clustering awareness; Spring AMQP. (Historical note only: "lazy queues" x-queue-mode is a no-op since 3.12 — do not teach as a current queue type)
 8. Dead-letter handling + retries: backoff strategies, parking-lot pattern, alerting on DLQ
 9. Ordering: per-key ordering, partition strategies, reordering hazards, concurrency vs ordering tradeoff
 10. Event-driven architecture: event notification vs event-carried state vs event sourcing, event schema design/versioning, choreography case study
@@ -167,7 +168,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 9. Query optimization: EXPLAIN (ANALYZE) reading, planner behavior, statistics, common rewrite patterns, pagination at scale (keyset)
 10. Transactions: ACID, isolation levels + anomalies matrix (dirty/non-repeatable/phantom/serialization), MVCC, locking (row/table, deadlocks), SELECT FOR UPDATE
 11. Design: normalization 1NF→BCNF with worked examples, denormalization tradeoffs, schema design patterns (soft delete, audit columns, multi-tenancy options)
-12. Views/materialized views, stored procedures/triggers basics, partitioning awareness, connection pooling (HikariCP sizing)
+12. Views/materialized views, stored procedures/triggers basics, partitioning awareness, connection pooling (HikariCP sizing); Postgres operations: roles/GRANT/REVOKE/row-level security, VACUUM/autovacuum + bloat (MVCC consequence), backup/restore (pg_dump/PITR) awareness, full-text search + JSONB operators
 13. Redis: data structures (string/hash/list/set/zset/stream), caching patterns (cache-aside/write-through), TTL/eviction policies, pipelines/transactions, pub/sub, persistence (RDB/AOF), distributed lock caveats, Spring Data Redis
 14. NoSQL taxonomy: document/key-value/wide-column/graph — when each; MongoDB working intro; CAP/PACELC; polyglot persistence decision framework
 
@@ -186,7 +187,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 ### Track A2 — Angular Advanced (~14 modules) [theme-angular]
 1. Reactive forms A: FormControl/FormGroup/FormArray/FormBuilder, typed forms, value/status streams
 2. Reactive forms B: every built-in validator, custom sync/async validators, cross-field validation, dynamic forms, ControlValueAccessor (custom form controls)
-3. Template-driven forms: ngModel/ngForm mechanics, when acceptable, comparison
+3. Template-driven forms (ngModel/ngForm, when acceptable) + Signal Forms (stable v22 — the new direction), three-way comparison
 4. HttpClient: typed requests, params/headers/context, progress events, error handling patterns, retry strategies
 5. RxJS A: Observable contract, creation operators, subjects (Subject/Behavior/Replay/Async), hot vs cold, multicasting (share/shareReplay)
 6. RxJS B: transformation/filtering/combination operators (full practical set), higher-order mapping (switchMap/mergeMap/concatMap/exhaustMap — decision matrix), error operators, schedulers awareness
@@ -194,10 +195,10 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 8. Interceptors (functional + class), auth token flow, caching/logging/error interceptors, ordering
 9. Guards + resolvers (functional style), CanActivate/CanMatch/CanDeactivate, route-level auth UX
 10. Lazy loading: route-level code splitting, loadComponent/loadChildren, preloading strategies (+custom), @defer triggers deep
-11. Change detection deep: Zone.js mechanics, OnPush rules, markForCheck/detectChanges, signals-driven CD, zoneless Angular
-12. Signals deep: linkedSignal, resource()/rxResource, toSignal/toObservable interop, signal-based components, effects discipline
-13. Performance: profiling, trackBy/track, virtual scrolling (CDK), image optimization (NgOptimizedImage), bundle analysis, hydration + SSR (Angular Universal, incremental hydration)
-14. Ecosystem essentials: i18n, animations API, CDK survey (overlay/portal/a11y/drag-drop), Angular Elements, accessibility patterns, upgrade/migration strategy
+11. Change detection deep: zoneless as the default (v21+, OnPush default in v22), signals-driven CD, Zone.js as the legacy/opt-in path (mechanics, markForCheck/detectChanges for legacy apps)
+12. Signals deep: linkedSignal, resource()/rxResource/httpResource, toSignal/toObservable interop, signal-based components, effects discipline
+13. Performance: profiling, trackBy/track, virtual scrolling (CDK), image optimization (NgOptimizedImage), bundle analysis, hydration + SSR (@angular/ssr, incremental hydration)
+14. Ecosystem essentials: i18n, animations — native CSS + animate.enter/animate.leave (the @angular/animations package is deprecated since v20.2, removal planned; teach migration), CDK survey (overlay/portal/a11y/drag-drop), Angular Aria (stable v22), Angular Elements, accessibility patterns, upgrade/migration strategy
 
 ### Track A3 — Angular State Management (~8 modules) [theme-angular]
 1. Component communication matrix: input/output, viewChild/contentChild (signal queries), service-mediated, router state — choosing correctly
@@ -206,13 +207,13 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 4. Selectors: createSelector memoization, composing, view models, entity adapter (@ngrx/entity)
 5. Effects: side-effect discipline, common patterns (load/optimistic update), error handling in effects, action lifecycle
 6. NgRx ergonomics: facades, functional creators, devtools, router-store; testing store/effects/selectors
-7. Modern alternatives: @ngrx/component-store, @ngrx/signal-store (deep — the current direction), comparison
+7. Modern alternatives: @ngrx/signal-store (deep — the current direction), @ngrx/component-store as legacy/migrate-away comparison
 8. Best practices: what belongs in global vs local state, when NgRx is overkill, migration paths; capstone state design exercise
 
 ### Track T1 — Frontend Testing (~8 modules) [theme-angular]
 1. Testing philosophy + pyramid for SPAs, what to test at which layer
-2. Jasmine complete: describe/it/expect, every matcher, spies (all forms), async patterns (fakeAsync/tick/waitForAsync), beforeEach discipline
-3. Karma config + TestBed: configureTestingModule, standalone component testing, fixtures, DebugElement/By, detectChanges mechanics
+2. Vitest complete (the stable default runner since Angular v21): expect matchers, vi.fn/spies, fake timers, async patterns; Jasmine/Karma as legacy stack (deprecated — migration lesson, fakeAsync/tick still TestBed-relevant)
+3. Vitest config + TestBed: configureTestingModule, standalone component testing, fixtures, DebugElement/By, detectChanges mechanics
 4. Component testing deep: DOM interaction, inputs/outputs, projected content, host components, component harnesses (CDK)
 5. Service + HTTP testing: HttpClientTestingModule/HttpTestingController, DI overrides, mocking strategies
 6. Directive/pipe/router/guard testing; NgRx testing (MockStore, effects marble tests)
@@ -220,14 +221,14 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 8. Strategy: mocking APIs (MSW awareness), test data builders, flake control, coverage targets, CI wiring
 
 ### Track T2 — Backend Testing (~10 modules) [theme-java]
-1. JUnit 5 A: architecture (platform/jupiter/vintage), lifecycle, assertions complete, assumptions, display names/tags/ordering
-2. JUnit 5 B: parameterized tests (every source type), nested tests, dynamic tests, extensions model, temp dirs, parallel execution
+1. JUnit (Jupiter, v6 — current since 2025) A: architecture (platform/jupiter/vintage, unified v6 versioning), lifecycle, assertions complete, assumptions, display names/tags/ordering, conditional execution (@EnabledOnOs/@EnabledIf…), @RepeatedTest/@Timeout
+2. JUnit B: parameterized tests (every source type), nested tests, dynamic tests, test interfaces/inheritance, extensions model, temp dirs, parallel execution
 3. AssertJ fluent assertions complete; Hamcrest awareness
-4. Mockito A: mocks vs stubs vs spies, when/thenReturn vs doReturn, argument matchers discipline
+4. Mockito A: MockitoExtension/@Mock/@InjectMocks, mocks vs stubs vs spies, when/thenReturn vs doReturn, argument matchers discipline
 5. Mockito B: ArgumentCaptor, verify modes, BDDMockito, static/constructor mocking, strictness, inline mock maker, anti-patterns (don't mock value objects)
 6. Spring test slices: @WebMvcTest + MockMvc deep, @DataJpaTest (+ TestEntityManager), @JsonTest, @RestClientTest, slice vs @SpringBootTest tradeoffs
 7. Integration testing: @SpringBootTest (webEnvironment modes), TestRestTemplate/WebTestClient, test profiles/config, transactional rollback pitfalls
-8. Testcontainers deep: PostgreSQL/Kafka/Redis containers, singleton container pattern, @ServiceConnection, CI performance
+8. Testcontainers deep: PostgreSQL/Kafka/Redis containers, GenericContainer/custom images, wait strategies, reusable containers, singleton container pattern, @ServiceConnection, CI performance
 9. Contract testing: consumer-driven contracts, Spring Cloud Contract AND Pact — full workflow both sides
 10. Strategy for microservices: test pyramid per service, test data management, coverage (JaCoCo), mutation testing (PIT), performance test awareness (Gatling), flaky test policy
 
@@ -242,9 +243,9 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 8. Docker B: multi-stage builds for Java (jlink/layered Boot jars) and Angular (nginx serve), networking, volumes, resource limits, healthchecks, image scanning, distroless/JRE base image choice
 9. Docker Compose: full-stack local environment (Postgres+Redis+Kafka+services), profiles, healthcheck-based startup ordering, override files
 10. Kubernetes A: architecture, Pods/ReplicaSets/Deployments, Services (ClusterIP/NodePort/LoadBalancer), namespaces, kubectl fluency
-11. Kubernetes B: ConfigMaps/Secrets, probes (liveness/readiness/startup), resource requests/limits, HPA, Ingress, rolling updates/rollbacks, StatefulSets/Jobs/CronJobs awareness, Helm basics
+11. Kubernetes B: ConfigMaps/Secrets, probes (liveness/readiness/startup), resource requests/limits, HPA, Ingress (frozen API) + Gateway API (the recommended successor), storage (PV/PVC/StorageClass), security (RBAC/ServiceAccounts/securityContext), rolling updates/rollbacks, StatefulSets/Jobs/CronJobs awareness, Helm basics; NetworkPolicy/Kustomize/GitOps (Argo CD) awareness
 12. CI/CD concepts: pipeline stages, quality gates, artifact management, environment promotion
-13. GitHub Actions deep: workflow syntax complete, matrix builds, caching, secrets/environments, reusable workflows, building+testing+publishing the full stack; Jenkins survey (Jenkinsfile basics)
+13. GitHub Actions deep: workflow syntax complete, matrix builds, caching, secrets/environments, OIDC federation for keyless cloud deploys, reusable workflows, building+testing+publishing the full stack; Jenkins survey (Jenkinsfile basics)
 14. Deployment strategies: rolling/blue-green/canary/feature flags, database migrations in CD, rollback discipline, environment management (dev/stage/prod parity)
 
 ### Track C1 — Cloud AWS (~12 modules) [theme-cloud]
@@ -259,7 +260,7 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 9. Caching + DNS + CDN: ElastiCache (Redis), Route 53, CloudFront (serving the Angular app)
 10. Monitoring in cloud: CloudWatch (metrics/logs/alarms/dashboards), X-Ray awareness, cost monitoring/budgets
 11. IaC: CloudFormation concepts, Terraform working intro (state, plan/apply, modules) — deploy the stack via IaC
-12. Well-Architected pillars tour + reference deployment: full app (ALB + ECS + RDS + ElastiCache + S3/CloudFront) end-to-end
+12. Well-Architected pillars tour + reference deployment: full app (ALB + ECS + RDS + ElastiCache + S3/CloudFront) end-to-end — incl. Secrets Manager/SSM Parameter Store for credentials and ACM for TLS certificates
 
 ### Track Y1 — System Design (~14 modules) [theme-arch]
 1. Foundations: latency numbers, throughput vs latency, back-of-envelope estimation method, requirements gathering (functional/NFR)
@@ -284,16 +285,16 @@ Browser playground impossible for Java/Angular-CLI code. Replacement for non-web
 4. Metrics: Micrometer deep (counters/gauges/timers/distribution summaries, tags cardinality dangers), Prometheus (scraping, PromQL basics), RED/USE methods
 5. Dashboards + Grafana: dashboard design, template variables, alert visualization
 6. Health checks: liveness vs readiness semantics (K8s interplay), Actuator health groups, dependency health, synthetic checks
-7. Distributed tracing: OpenTelemetry (SDK/collector, W3C trace context), spans/baggage, sampling strategies, Zipkin/Jaeger/Tempo, tracing async + messaging flows
+7. Distributed tracing: OpenTelemetry (SDK/collector, W3C trace context, logs as stable signal), Micrometer Tracing bridge (the Spring Boot wiring), spans/baggage, sampling strategies, Zipkin/Jaeger/Tempo, tracing async + messaging flows
 8. Error tracking + alerting: Sentry-style grouping awareness, SLI/SLO/error budgets, alert design (symptom-based, fatigue avoidance), on-call runbooks; JFR/continuous profiling in prod
 
 ### Track Y2 — Secure Coding (~10 modules) [theme-arch]
 1. Threat modeling basics (STRIDE-lite), security mindset, defense in depth
-2. OWASP Top 10 tour (current edition) — each category with Java/Angular examples
+2. OWASP Top 10:2025 tour — each category with Java/Angular examples (note 2025 deltas: SSRF folded into Broken Access Control, new "Mishandling of Exceptional Conditions" and "Software Supply Chain Failures" categories)
 3. Injection: SQLi (prepared statements/JPA safety), command/LDAP/log injection, ORM-specific pitfalls
 4. XSS in SPA context: Angular's sanitization model, bypassSecurityTrust* discipline, CSP for SPAs, DOM XSS
 5. AuthN/AuthZ failures: session vs token pitfalls, IDOR/broken object-level auth, function-level auth, multi-tenancy isolation
-6. CSRF/SSRF/deserialization: mechanics + Java-specific gadget awareness + defenses
+6. CSRF/SSRF/deserialization: mechanics + Java-specific gadget awareness + defenses; exceptional-condition handling failures (fail-open bugs, error-path security)
 7. Secrets management: never-in-git, env vars vs vaults (Vault/AWS Secrets Manager), rotation, .env hygiene, key management basics (TLS, hashing vs encryption, salts/peppers)
 8. Input validation + file handling: allow-list validation, canonicalization, path traversal, upload hardening (type/size/content sniffing), safe zip extraction
 9. Supply chain: dependency scanning (OWASP Dependency-Check/Snyk awareness), lockfiles, container scanning, SBOM awareness, CI security gates
@@ -354,7 +355,23 @@ Scale estimate: ~250 modules ≈ 600+ lessons. Ship per-batch as always.
 - [ ] E8: Y1 (0/14), Y2 (0/10)
 - [ ] E9: P1 (0/10)
 
-## 7. Decisions Already Made (do not relitigate)
+## 7. Review Log
+
+- 2026-07-19 source-verified review (research agents vs JEP index/Spring docs/angular.dev/K8s/OWASP/PostgreSQL).
+  Version-currency fixes: JUnit 6 (was "JUnit 5"), Boot 4.x/Framework 7/Security 7.1 baseline (was "3.x"),
+  Angular v21/22 reality (Vitest default — Karma/Jasmine legacy, zoneless default, Signal Forms, deprecated
+  @angular/animations, Angular Aria, @angular/ssr naming), @MockitoBean replaces deprecated @MockBean,
+  Kafka 4 KRaft-only + KIP-932 share groups + KIP-848 + tiered storage, RabbitMQ lazy-queues no-op (accuracy),
+  OWASP Top 10:2025 deltas, K8s Gateway API. Structural adds: S1.15 HTTP clients (RestClient/@HttpExchange)
+  + WebSocket/SSE; SSL bundles/Docker Compose/dev Testcontainers/virtual-threads/structured logging (S2.12);
+  passkeys/OTT/MFA (S3.2); Framework 7 built-in API versioning (S2.7); Envers + Jakarta Data (H1.13);
+  RabbitMQ Streams (M2.7); Java: sequenced collections, stream gatherers, compact source files, flexible
+  constructor bodies, unnamed variables, module imports, Class-File API, Leyden AOT, Cleaner, RandomGenerator,
+  StackWalker, markdown doc comments, HTTP/3, structured-concurrency-still-preview caveat; Postgres ops
+  (roles/RLS/VACUUM/backup); K8s storage+security; GHA OIDC; Secrets Manager/ACM; Micrometer Tracing.
+  No fabricated features found; string templates correctly absent.
+
+## 8. Decisions Already Made (do not relitigate)
 
 - Same lesson anatomy/pipeline/tier system as PLAN.md; only the playground is replaced by
   code+output panels for non-browser-runnable lessons (§2)
