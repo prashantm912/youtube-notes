@@ -28,6 +28,25 @@ design system (`site/assets/site.css` + `site.js`) and deployment pipeline
   per track. A track is DONE only when its checklist shows zero uncovered items.
 - Every lesson page ends with a "Features covered" list naming its checklist ids.
 
+## 2b. Scope, Non-Goals, Coverage Tiers (added by gap review)
+
+**In scope, DEEP tier (checklist-verified 100%):** the HTML language, the CSS language,
+ECMAScript (through the latest published edition at authoring time — ES2024/ES2025 features
+are named in modules below), TypeScript language + compiler options, and the CORE browser
+APIs (DOM, events, fetch, storage, workers incl. service workers, observers, streams, URL,
+history/navigation, forms, canvas 2D basics, web components).
+
+**In scope, SURVEY tier (one awareness lesson each, not feature-complete):** WebRTC, Web Audio,
+WebGL/WebGPU, WebAuthn, Payment, Speech, sensors/device APIs, Houdini paint worklets,
+inline SVG (as used from HTML/CSS), MathML existence.
+
+**Out of scope (named non-goals):** Node.js runtime, frameworks (React/Vue/...), build tools
+beyond a bundler-awareness lesson, the full SVG spec as its own language.
+
+Every checklist item carries `"tier": "deep" | "survey"`. The 100% claim = 100% of deep-tier
+items covered + every survey item having its awareness lesson. Checklists record source +
+retrieval date; refresh pass scheduled at each phase boundary.
+
 ## 3. Tracks and Modules
 
 ### Track 0 — How the Web Works (3 modules, foundation)
@@ -44,30 +63,30 @@ design system (`site/assets/site.css` + `site.js`) and deployment pipeline
 6. Tables: table/caption/thead/tbody/tfoot/tr/th/td/colgroup/col, scope/headers, accessibility
 7. Forms A: form element, every input type (text, password, email, url, tel, search, number, range, date, time, datetime-local, month, week, color, checkbox, radio, file, hidden, submit, reset, button, image), labels
 8. Forms B: select/option/optgroup, datalist, textarea, button, fieldset/legend, output, progress, meter; every form attribute; constraint validation API; form submission mechanics
-9. Interactive and embedded: details/summary, dialog, popover attribute, iframe (sandbox/allow), embed/object, template, slot, custom elements intro
-10. Global attributes (id/class/style/title/lang/dir/hidden/inert/contenteditable/draggable/spellcheck/translate/autocapitalize/data-*/is/part/exportparts), ARIA + accessibility fundamentals, deprecated elements awareness
+9. Interactive and embedded: details/summary, dialog, popover attribute, iframe (sandbox/allow/srcdoc/loading/referrerpolicy), embed/object, template, slot, declarative shadow DOM (template shadowrootmode), custom-element usage from HTML; script type=importmap/speculationrules; SVG-in-HTML and MathML awareness
+10. Global attributes (id/class/style/title/lang/dir/hidden/inert/contenteditable/draggable/spellcheck/translate/autocapitalize/data-*/is/part/exportparts/nonce/itemprop microdata), ARIA + accessibility fundamentals, deprecated elements awareness
 
 ### Track 2 — CSS (~18 modules)
 1. Applying CSS, cascade, specificity, inheritance, @layer, !important
 2. Selectors A: type/class/id/attribute selectors, combinators (descendant, >, +, ~), selector lists
-3. Selectors B: every pseudo-class (:hover…:focus-visible, structural :nth-*, :is/:where/:not/:has, form states, :target, :lang, :dir…) and pseudo-elements (::before/::after/::first-line/::first-letter/::marker/::selection/::placeholder/::backdrop/::file-selector-button)
-4. Values and units: absolute/relative lengths, percentages, viewport units (incl. sv/lv/dv), angle/time/resolution, custom properties (--*, var()), calc/min/max/clamp
+3. Selectors B: every pseudo-class (:hover…:focus-visible, structural :nth-*, :is/:where/:not/:has, form states, :target, :lang, :dir, :popover-open, :modal, :fullscreen…) and every pseudo-element (::before/::after/::first-line/::first-letter/::marker/::selection/::placeholder/::backdrop/::file-selector-button/::part/::slotted/::highlight/::target-text/::spelling-error/::grammar-error/::details-content/::cue)
+4. Values and units: absolute/relative lengths, percentages, viewport units (incl. sv/lv/dv), angle/time/resolution, custom properties (--*, var()), env(), attr(), full math function set: calc/min/max/clamp/round/mod/rem/pow/sqrt/log/exp/hypot/abs/sign + trig (sin/cos/tan/asin/acos/atan/atan2)
 5. Box model: content/padding/border/margin, box-sizing, margin collapse, outline, overflow (all values), aspect-ratio
 6. Colors and backgrounds: every color syntax (named/hex/rgb/hsl/hwb/lab/lch/oklab/oklch/color-mix/color()), gradients (linear/radial/conic/repeating), background-* longhands, multiple backgrounds
 7. Typography: font-* properties, @font-face, variable fonts, line-height, text-* properties, white-space, word-break/overflow-wrap, hyphens, writing-mode, web font loading
 8. Normal flow, display (every value incl. flow-root/contents), float/clear, position (static/relative/absolute/fixed/sticky), z-index and stacking contexts
 9. Flexbox: complete — container and item properties, axes, wrapping, gap, order, alignment (justify-/align-*)
 10. Grid: complete — template rows/columns/areas, repeat/minmax/auto-fit/auto-fill, fr, implicit grid, placement, subgrid, alignment
-11. Responsive design: media queries (all features incl. prefers-*), container queries (@container, cq units), fluid patterns, mobile-first
+11. Responsive design: media queries (all features incl. prefers-*/forced-colors/scripting/display-mode), container queries (@container size AND style() queries, cq units), fluid patterns, mobile-first
 12. Transforms: 2D and 3D, transform-origin, perspective, backface-visibility; will-change
 13. Transitions and animations: transition-*, @keyframes, animation-* (all), animation-composition, scroll-driven animations (animation-timeline/scroll()/view())
 14. Visual effects: opacity, filter (every function), backdrop-filter, mix-blend-mode/background-blend-mode, clip-path, mask-*, shape-outside
-15. Modern layout extras: multi-column (column-*), logical properties (inline/block variants), gap everywhere, contain/content-visibility, isolation
-16. Modern selectors/features in practice: nesting syntax, :has() patterns, @scope, @supports, view transitions API (CSS side), @property (Houdini custom properties)
-17. UI details: cursors, scroll-behavior/scroll-snap (all), overscroll-behavior, accent-color, color-scheme, appearance, user-select, pointer-events, resize
+15. Modern layout extras: multi-column (column-*), logical properties (inline/block variants), gap everywhere, contain/content-visibility, isolation, CSS motion path (offset-path/offset-distance/offset-rotate, ray()/path()), anchor positioning (anchor(), position-anchor, position-try, @position-try)
+16. Modern selectors/features in practice: nesting syntax, :has() patterns, @scope, @supports, view transitions (CSS side + @view-transition), @property (Houdini custom properties), @starting-style, transition-behavior allow-discrete; at-rule census: @import (incl. layer()/supports()), @charset, @namespace, @font-feature-values, @font-palette-values
+17. UI details: cursors, scroll-behavior/scroll-snap (all), overscroll-behavior, accent-color, color-scheme + light-dark(), appearance, user-select, pointer-events, resize, field-sizing, image-set()/cross-fade()
 18. Print styles, counters (counter()/counters()/@counter-style), generated content, lists (list-style-*), tables CSS, and a wrap-up architecture module (BEM-ish conventions, layers strategy, our own site.css as case study)
 
-### Track 3 — JavaScript (~20 modules)
+### Track 3 — JavaScript (~24 modules)
 1. Language basics: values/types (all primitives + object), typeof, coercion rules (== vs ===), template literals, var/let/const, hoisting, TDZ, scope
 2. Operators: every one — arithmetic, comparison, logical (&&/||/??), assignment variants, ternary, comma, in, instanceof, delete, void, spread/rest, optional chaining ?., exponentiation, bitwise set
 3. Control flow: if/switch, all loop forms (for, for-in, for-of, while, do-while), break/continue/labels, error handling (throw/try/catch/finally, Error hierarchy, cause, custom errors)
@@ -75,33 +94,38 @@ design system (`site/assets/site.css` + `site.js`) and deployment pipeline
 5. this and binding: call/apply/bind, method context, arrow this, globalThis, strict mode effects
 6. Objects: literals, property descriptors (defineProperty, getters/setters, enumerable/configurable/writable), Object.* statics (keys/values/entries/assign/freeze/seal/create/fromEntries/groupBy…), shorthand/computed properties
 7. Prototypes and classes: prototype chain, __proto__ vs prototype, class syntax complete (constructor, fields, private #fields/#methods, static, static blocks, accessors, inheritance/super, mixins pattern)
-8. Arrays: every method (iteration, mutation, non-mutating variants toSorted/toReversed/toSpliced/with, at, flat/flatMap, reduce deep, findLast, includes, copyWithin, fill…), array-likes, typed arrays overview
+8. Arrays: every method (iteration, mutation, non-mutating variants toSorted/toReversed/toSpliced/with, at, flat/flatMap, reduce deep, findLast, includes, copyWithin, fill, Array.fromAsync…), array-likes; binary data: ArrayBuffer (incl. resizable/transfer), every TypedArray, DataView, SharedArrayBuffer + Atomics
 9. Strings: every method, unicode/code points, normalization, raw strings, tagged templates
 10. Numbers and math: Number statics/methods, floating point reality, BigInt, Math complete, parse functions
-11. Symbols, iterators, generators: Symbol registry + well-known symbols, iteration protocols, generator functions/yield/delegation, async generators
-12. Collections: Map/Set/WeakMap/WeakSet/WeakRef/FinalizationRegistry, when each
+11. Symbols, iterators, generators: Symbol registry + well-known symbols, iteration protocols, generator functions/yield/delegation, async generators, iterator helpers (Iterator.prototype.map/filter/take/drop/flatMap/reduce/toArray/forEach/some/every/find)
+12. Collections: Map/Set/WeakMap/WeakSet/WeakRef/FinalizationRegistry, when each; Set methods (union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom); Map.groupBy/Object.groupBy
 13. Destructuring and modern syntax: object/array destructuring (nested, defaults, rest), spread patterns, logical assignment, numeric separators
 14. Async A: event loop deep (call stack, task/microtask queues), callbacks, Promise complete (states, chaining, error flow, all/allSettled/any/race, withResolvers)
 15. Async B: async/await patterns, top-level await, cancellation with AbortController, timers, queueMicrotask, requestAnimationFrame
-16. Modules: ESM complete (import/export forms, dynamic import(), import.meta, module resolution), CJS awareness, bundler reality
+16. Modules: ESM complete (import/export forms, dynamic import(), import.meta, import attributes with {type:"json"}, module resolution, import maps), CJS awareness, bundler reality; explicit resource management (using/await using, Symbol.dispose)
 17. Regex: complete — syntax, flags (d/g/i/m/s/u/v/y), groups (named/capturing), lookaround, unicode properties, String/RegExp methods, replacement patterns
 18. Meta-programming and built-ins: Proxy (all traps), Reflect, structuredClone, JSON (replacer/reviver), Date + Temporal overview, Intl (NumberFormat/DateTimeFormat/Collator/RelativeTimeFormat/ListFormat/PluralRules/Segmenter), globalThis utilities (encode/decodeURI*)
-19. Browser APIs A: DOM complete (selection, traversal, manipulation, classList/dataset, events — bubbling/capture/delegation/custom events, every common event type), forms via JS, storage (localStorage/sessionStorage/cookies/IndexedDB overview)
-20. Browser APIs B: fetch complete (Request/Response/Headers/streams basics), URL/URLSearchParams, History/Location, observers (Intersection/Mutation/Resize/Performance), Web Workers, WebSockets, Canvas 2D basics, media/geolocation/notifications/clipboard/share/fullscreen/battery, performance API, memory/GC notes
+19. Browser APIs A: DOM complete (selection, traversal, manipulation, classList/dataset, events — bubbling/capture/delegation/custom events, every common event type incl. pointer/touch/keyboard/input/composition), forms via JS + constraint validation, focus management and JS accessibility patterns, storage (localStorage/sessionStorage/cookies, IndexedDB full lesson: object stores, indexes, transactions, cursors)
+20. Browser APIs B: fetch complete (Request/Response/Headers), URL/URLSearchParams, History/Location + Navigation API, observers (Intersection/Mutation/Resize/Performance), WebSockets, File/Blob/FileReader/object URLs, drag-and-drop API, MessageChannel/BroadcastChannel, Canvas 2D basics, media/geolocation/notifications/clipboard/share/fullscreen, performance API, memory/GC notes
+21. Web Components: customElements.define, lifecycle callbacks, Shadow DOM API (attachShadow, slots, events across shadow boundaries), form-associated custom elements + ElementInternals, template/slot patterns, ::part/::slotted styling contract
+22. Streams and workers deep: ReadableStream/WritableStream/TransformStream (backpressure, piping, byte streams), Web Workers (module workers, transfer), Service Workers + PWA (registration, lifecycle, fetch interception, Cache API, offline strategies, web app manifest, push overview)
+23. Security for JS developers: XSS classes and defenses, CSP in practice, CORS mechanics (preflight, credentials), cookies (SameSite/HttpOnly/Secure), clickjacking/frame-ancestors, SRI, Trusted Types + Sanitizer API, prototype pollution, supply-chain hygiene
+24. Debugging and legacy: complete console API (every method), debugger statement, breakpoints/DevTools workflow, error monitoring patterns; strict vs sloppy mode differences, eval/with, deprecated-but-real features awareness (document.write, __proto__ accessor…); SURVEY-tier lesson: WebRTC, Web Audio, WebGL/WebGPU, WebAuthn, Speech, sensors, Houdini worklets
 
-### Track 4 — TypeScript (~12 modules)
+### Track 4 — TypeScript (~13 modules)
 1. Why TS + setup: tsc, tsconfig anatomy, strictness flags philosophy
 2. Basic types: primitives, arrays, tuples (named/optional/rest elements), any/unknown/never/void, literal types, as const
 3. Object types: interfaces vs type aliases, optional/readonly, index signatures, extending, declaration merging
 4. Unions/intersections and narrowing: every narrowing technique (typeof/instanceof/in/truthiness/equality/discriminated unions/type predicates/assertion functions)
 5. Functions: signatures, overloads, this typing, generic functions, contextual typing
-6. Generics deep: constraints, defaults, inference, variance intuition, generic classes
+6. Generics deep: constraints, defaults, inference, variance intuition + explicit variance annotations (in/out), generic classes
 7. Utility types: ALL built-ins (Partial/Required/Readonly/Record/Pick/Omit/Exclude/Extract/NonNullable/Parameters/ReturnType/ConstructorParameters/InstanceType/ThisParameterType/OmitThisParameter/Awaited/NoInfer/Uppercase/Lowercase/Capitalize/Uncapitalize) — each rebuilt from scratch
 8. Type-level programming: conditional types, infer, distributivity, mapped types (key remapping, modifiers), template literal types, recursive types
 9. Classes and decorators: TS class features (parameter properties, abstract, implements, access modifiers), 5.0 decorators
-10. Modules and declarations: .d.ts files, declare, ambient modules, module augmentation, DefinitelyTyped, JSDoc typing
-11. Enums, namespaces, satisfies, const type parameters, special directives (@ts-expect-error etc.), tsconfig every flag reference
-12. Feature timeline 1.x→5.x + TS in practice (with DOM, with our site.js as case study), migration strategy
+10. Modules and declarations: .d.ts files, declare (incl. declare global), ambient modules, module augmentation, triple-slash directives, DefinitelyTyped, JSDoc typing, import type/export type, unique symbol
+11. Enums (numeric/string/const enum/ambient), namespaces, satisfies, const type parameters, special directives (@ts-expect-error/@ts-ignore/@ts-nocheck/@ts-check), tsconfig every flag reference
+12. JSX/TSX as a TS language feature: jsx compiler options, JSX namespace, typing components/props/children (framework-agnostic)
+13. Feature timeline 1.x→5.x + TS in practice (with DOM, with our site.js as case study), migration strategy
 
 ## 4. Lesson Anatomy (fixed template — every lesson identical shape)
 
@@ -156,8 +180,8 @@ Mirrors the transcript pipeline that already works in this repo:
 - **Phase 1:** Track 0 (3 lessons) — validates template end-to-end. Commit per batch.
 - **Phase 2:** Track 1 HTML (~10 modules, ~50-60 lessons; multiple lessons per module where needed)
 - **Phase 3:** Track 2 CSS (~18 modules)
-- **Phase 4:** Track 3 JavaScript (~20 modules)
-- **Phase 5:** Track 4 TypeScript (~12 modules)
+- **Phase 4:** Track 3 JavaScript (~24 modules)
+- **Phase 5:** Track 4 TypeScript (~13 modules)
 - **Phase 6:** cross-track capstone: build-a-project lessons + full interview bank page
 
 Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays consistent throughout.
@@ -179,7 +203,18 @@ Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays 
 - [ ] Phase 5: Track 4 typescript (0 modules started)
 - [ ] Phase 6: capstone + interview bank
 
-## 9. Decisions Already Made (do not relitigate)
+## 9. Review Log
+
+- 2026-07-19 gap review vs "100% coverage" goal. Added: scope/non-goals/coverage-tier section (2b);
+  JS modules 21-24 (Web Components, Streams+Service Workers/PWA, Security, Debugging/legacy/survey);
+  TS module 12 (JSX); CSS additions (::part/::slotted/::highlight et al, full math+trig functions,
+  anchor positioning, motion path, @starting-style, style() container queries, at-rule census,
+  light-dark(), field-sizing); HTML additions (declarative shadow DOM, importmap/speculationrules,
+  MathML/SVG awareness); JS in-module additions (ArrayBuffer/Atomics, iterator helpers, Set methods,
+  import attributes, using, Navigation API, File/Blob, drag-and-drop, IndexedDB full, focus management);
+  TS in-module additions (variance annotations, triple-slash, const enum, declare global, import type).
+
+## 10. Decisions Already Made (do not relitigate)
 
 - Design system: reuse site.css/site.js; no external CDNs ever; file:// must keep working
 - Completeness = checklist-verified, not narrative claims
