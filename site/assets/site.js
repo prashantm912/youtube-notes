@@ -38,6 +38,33 @@
     main.insertBefore(toc, main.firstElementChild);
   }
 
+  // Library search filter (index page only)
+  var filter = document.getElementById("library-filter");
+  if (filter) {
+    var cards = Array.prototype.slice.call(document.querySelectorAll(".card"));
+    var submenus = Array.prototype.slice.call(document.querySelectorAll(".library-nav .submenu"));
+    var menus = Array.prototype.slice.call(document.querySelectorAll(".library-nav > .menu"));
+    var chips = document.querySelector(".topic-chips");
+    var noResults = document.querySelector(".no-results");
+    filter.addEventListener("input", function () {
+      var q = filter.value.trim().toLowerCase();
+      var anyShown = false;
+      cards.forEach(function (c) {
+        var hit = !q || c.textContent.toLowerCase().indexOf(q) !== -1;
+        c.hidden = !hit;
+        if (hit) anyShown = true;
+      });
+      submenus.forEach(function (s) {
+        s.hidden = !s.querySelector(".card:not([hidden])");
+      });
+      menus.forEach(function (m) {
+        m.hidden = !m.querySelector(".submenu:not([hidden])");
+      });
+      if (chips) chips.hidden = !!q;
+      if (noResults) noResults.hidden = anyShown;
+    });
+  }
+
   // Scroll-reveal for sections, callouts, tables
   if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches && "IntersectionObserver" in window) {
     var targets = document.querySelectorAll("main section, main aside, main table");

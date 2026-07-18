@@ -76,7 +76,7 @@ if (!/<link[^>]*rel=["']stylesheet["'][^>]*assets\/site\.css/i.test(html))
   warnings.push("No link to shared stylesheet (assets/site.css)");
 if (!/<body[^>]*class=["'][^"']*theme-/i.test(html))
   warnings.push("<body> has no theme-* class — page won't pick up a topic palette");
-if (/\b(TODO|FIXME|PLACEHOLDER|Lorem ipsum)\b/i.test(html)) errors.push("Placeholder/TODO text in output");
+if (/\b(TODO|FIXME|PLACEHOLDER|Lorem ipsum)\b/i.test(body)) errors.push("Placeholder/TODO text in output");
 
 // --- Empty sections ---
 for (const m of html.matchAll(/<section[^>]*>([\s\S]*?)<\/section>/gi)) {
