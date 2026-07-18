@@ -43,14 +43,19 @@ for (const tag of ["main", "section", "article", "aside", "header", "footer", "u
 }
 
 // --- Markdown remnants ---
-if (/```/.test(html)) errors.push("Markdown code fence (```) in output");
-if (/^#{1,6}\s/m.test(html)) errors.push("Markdown heading (# ...) in output");
-if (/\*\*[^*\n]+\*\*/.test(html)) errors.push("Markdown bold (**...**) in output");
-if (/^\s*[-*]\s+\S/m.test(html.replace(/<!--[\s\S]*?-->/g, "")))
+// Code blocks (<pre>, playground textareas) legitimately contain code that can look like
+// markdown or transcript noise — exclude their content from these checks.
+const htmlNoCode = html
+  .replace(/<pre[\s\S]*?<\/pre>/gi, " ")
+  .replace(/<textarea[\s\S]*?<\/textarea>/gi, " ");
+if (/```/.test(htmlNoCode)) errors.push("Markdown code fence (```) in output");
+if (/^#{1,6}\s/m.test(htmlNoCode)) errors.push("Markdown heading (# ...) in output");
+if (/\*\*[^*\n]+\*\*/.test(htmlNoCode)) errors.push("Markdown bold (**...**) in output");
+if (/^\s*[-*]\s+\S/m.test(htmlNoCode.replace(/<!--[\s\S]*?-->/g, "")))
   warnings.push("Possible markdown list bullets (- item) — verify these are intentional text");
 
 // --- Transcript noise ---
-const body = html.replace(/<[^>]+>/g, " "); // text content, rough
+const body = htmlNoCode.replace(/<[^>]+>/g, " "); // text content, rough; code excluded
 if (/\b\d{1,2}:\d{2}\b/.test(body)) errors.push("Timestamp-like token (MM:SS) in page text");
 const voicePhrases = [
   "in this video", "in this episode", "in today's video", "welcome to the",

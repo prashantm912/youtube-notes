@@ -21,6 +21,8 @@ Every generated page links the shared design system (`site/assets/site.css` + `s
 
 The index page uses `theme-library` (base palette).
 
+Course lesson themes (lesson pages add `lesson-page` beside the theme class): `theme-html`, `theme-css`, `theme-js`, `theme-ts` (web platform tracks), `theme-java` (Java tracks). More enterprise course themes (`theme-spring`, `theme-angular`, `theme-db`, `theme-devops`, `theme-cloud`, `theme-arch`) get added to site.css when their tracks start — pattern in course-plan/PLAN-JAVA-STACK.md §4.
+
 ## Rules
 
 - Exactly one theme class per page, matching the page's index submenu (a skin-care page sits in the Skin Care submenu AND carries `theme-skin-care`).

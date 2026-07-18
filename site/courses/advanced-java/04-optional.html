@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java's Optional class done right: creation, map/flatMap/filter chaining, orElse vs orElseGet, the anti-patterns that defeat its purpose, and the interview questions it powers.">
+  <title>Java Optional: Modeling Absence Without null</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Optional: Modeling Absence Without <code>null</code></h1>
+  <p class="standfirst">Optional makes "there might be no value here" part of a method's type instead of a footnote in its Javadoc. Used well, it eliminates a whole class of NullPointerExceptions; used badly, it just moves them.</p>
+</header>
+<main>
+
+  <section id="concept">
+    <h2>The problem Optional solves</h2>
+    <p>Before Java 8, a method like <code>findUserById</code> had two dishonest options: return <code>null</code> (and hope every caller remembers to check) or throw an exception (for a situation that is not exceptional). The type signature <code>User findUserById(long id)</code> tells the caller nothing about the empty case — the compiler cannot help.</p>
+    <p><code>Optional&lt;User&gt;</code> changes the contract: absence is now in the signature. The caller <em>must</em> unwrap, and the API of Optional pushes that unwrapping toward explicit, safe patterns. That is its entire job: <strong>a return type for "maybe one result"</strong> — not a general-purpose null replacement.</p>
+    <figure class="diagram">
+      <svg viewBox="0 0 680 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Optional pipeline: a value flows through map and filter; an empty Optional skips every step and falls to the default">
+        <rect x="10" y="30" width="120" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="70" y="58" text-anchor="middle" fill="var(--accent-ink)" font-family="monospace" font-size="14">Optional[v]</text>
+        <rect x="180" y="30" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+        <text x="230" y="58" text-anchor="middle" fill="var(--ink)" font-family="monospace" font-size="14">map</text>
+        <rect x="330" y="30" width="100" height="46" rx="8" fill="var(--card)" stroke="var(--accent)"/>
+        <text x="380" y="58" text-anchor="middle" fill="var(--ink)" font-family="monospace" font-size="14">filter</text>
+        <rect x="480" y="30" width="180" height="46" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="570" y="58" text-anchor="middle" fill="var(--accent-ink)" font-family="monospace" font-size="14">orElse(default)</text>
+        <path d="M130 53 h44 M280 53 h44 M430 53 h44" stroke="var(--accent)" stroke-width="2" fill="none"/>
+        <path d="M70 76 v70 h500 v-40" stroke="var(--ink-soft)" stroke-width="2" stroke-dasharray="5 4" fill="none"/>
+        <text x="320" y="170" text-anchor="middle" fill="var(--ink-soft)" font-family="monospace" font-size="13">Optional.empty() skips every step and lands on the default</text>
+      </svg>
+      <figcaption>The pipeline mental model: present values flow through the operations; an empty Optional bypasses them all and resolves at the terminal step.</figcaption>
+    </figure>
+  </section>
+
+  <section id="creating">
+    <h2>Creating Optionals</h2>
+    <p>Three factories, one decision: can the value be null?</p>
+    <figure class="code-demo">
+      <pre class="code-block" data-label="Java"><code>Optional&lt;String&gt; some  = Optional.of("hello");        // value is guaranteed non-null
+Optional&lt;String&gt; none  = Optional.empty();            // explicitly no value
+Optional&lt;String&gt; maybe = Optional.ofNullable(lookup); // null becomes empty
+
+Optional&lt;String&gt; boom  = Optional.of(null);           // wrong factory for null</code></pre>
+      <pre class="code-output" data-label="Output"><samp>some  -&gt; Optional[hello]
+none  -&gt; Optional.empty
+maybe -&gt; Optional.empty   (lookup was null)
+
+boom  -&gt; NullPointerException at Optional.of</samp></pre>
+    </figure>
+    <p><code>Optional.of</code> documents "this cannot be null" and fails fast if you are wrong. <code>ofNullable</code> is the bridge from null-returning APIs. Reaching for <code>ofNullable</code> everywhere is a smell — it means you don't know your own nullability.</p>
+  </section>
+
+  <section id="chaining">
+    <h2>Chaining: map, flatMap, filter, or</h2>
+    <p>The power is in transforming <em>inside</em> the box, so the empty case needs no if-statements:</p>
+    <figure class="code-demo">
+      <pre class="code-block" data-label="Java"><code>record User(String name, Optional&lt;Address&gt; address) {}
+record Address(String city) {}
+
+String city = findUser(id)                 // Optional&lt;User&gt;
+    .filter(u -&gt; u.name().length() &gt; 2)    // drop if predicate fails
+    .flatMap(User::address)                // Optional-returning mapper
+    .map(Address::city)                    // plain mapper
+    .map(String::toUpperCase)
+    .orElse("UNKNOWN");</code></pre>
+      <pre class="code-output" data-label="Output"><samp>user present, has address:
+  city -&gt; "PUNE"
+
+user present, no address:
+  city -&gt; "UNKNOWN"
+
+user absent:
+  city -&gt; "UNKNOWN"</samp></pre>
+    </figure>
+    <ul>
+      <li><code>map</code> — transform the value if present; a null result from the mapper becomes empty.</li>
+      <li><code>flatMap</code> — same, but for mappers that already return Optional (avoids <code>Optional&lt;Optional&lt;T&gt;&gt;</code>).</li>
+      <li><code>filter</code> — keep the value only if the predicate passes.</li>
+      <li><code>or</code> — lazy fallback to <em>another Optional</em>: <code>primary().or(() -&gt; secondary())</code>.</li>
+      <li><code>stream()</code> — turns Optional into a 0-or-1 element stream; <code>list.stream().flatMap(Optional::stream)</code> keeps only the present values.</li>
+    </ul>
+  </section>
+
+  <section id="terminal">
+    <h2>Unwrapping: the terminal operations</h2>
+    <figure class="code-demo">
+      <pre class="code-block" data-label="Java"><code>opt.orElse(computeDefault());        // default ALWAYS computed
+opt.orElseGet(() -&gt; computeDefault()); // computed only when empty
+opt.orElseThrow();                   // NoSuchElementException if empty
+opt.orElseThrow(NotFound::new);      // your exception
+opt.ifPresent(v -&gt; log(v));
+opt.ifPresentOrElse(v -&gt; log(v), () -&gt; logMissing());
+opt.isPresent(); opt.isEmpty();      // last resort for control flow</code></pre>
+      <pre class="code-output" data-label="Key behavior"><samp>orElse:    computeDefault() runs
+           even when value is present
+orElseGet: supplier runs only
+           on the empty path
+
+Rule: cheap constant -&gt; orElse
+      anything costly -&gt; orElseGet</samp></pre>
+    </figure>
+    <aside class="callout">
+      <p><code>orElse(expensiveCall())</code> in a hot path is a real production bug pattern: the expensive call executes on every invocation, present or not, because arguments are evaluated eagerly. <code>orElseGet</code> defers via the supplier. This exact trap is a favorite interview probe.</p>
+    </aside>
+  </section>
+
+  <section id="antipatterns">
+    <h2>Anti-patterns: where Optional goes wrong</h2>
+    <ul>
+      <li><strong><code>if (opt.isPresent()) opt.get()</code></strong> — null-checking with extra steps. Chain instead. Bare <code>get()</code> is so discouraged that <code>orElseThrow()</code> was added as its honest synonym.</li>
+      <li><strong>Optional fields and method parameters</strong> — Optional is not Serializable, adds an allocation per read, and an Optional parameter forces every caller to wrap. The designers' stated intent: <em>return types only</em>. For fields, a nullable field with an Optional-returning getter is the idiom.</li>
+      <li><strong>Returning null from an Optional-returning method</strong> — the betrayal maximum. Never.</li>
+      <li><strong><code>Optional.ofNullable(x).orElse(y)</code></strong> — that is a ternary (<code>x != null ? x : y</code>, or <code>Objects.requireNonNullElse</code>) wearing a costume, plus an allocation.</li>
+      <li><strong>Collections in Optionals</strong> — <code>Optional&lt;List&lt;T&gt;&gt;</code> has two empty states. Return an empty list.</li>
+    </ul>
+  </section>
+
+  <section id="exercise" class="exercise">
+    <h2>Exercise</h2>
+    <p>Refactor this pre-Java-8 lookup to a single Optional chain with no if-statements: given <code>Map&lt;String, Config&gt; configs</code>, find config by key, take its <code>timeout</code> (an <code>Optional&lt;Integer&gt;</code> accessor), reject non-positive values, and fall back to <code>30</code>.</p>
+    <details class="exercise-solution">
+      <summary>Show solution</summary>
+      <div class="solution">
+        <pre class="code-block" data-label="Java"><code>int timeout = Optional.ofNullable(configs.get(key))
+    .flatMap(Config::timeout)
+    .filter(t -&gt; t &gt; 0)
+    .orElse(30);</code></pre>
+        <p><code>ofNullable</code> bridges the null-returning Map, <code>flatMap</code> unwraps the nested Optional, <code>filter</code> encodes the validity rule, and the constant default is fine with plain <code>orElse</code>.</p>
+      </div>
+    </details>
+  </section>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <details class="qa"><summary data-level="Beginner">What problem does Optional solve, and what is it NOT meant for?</summary>
+      <div class="answer"><p>It makes possible absence explicit in a method's return type, forcing callers to handle the empty case, replacing the null-return convention. It is not a general null replacement: not for fields, not for parameters, not for collections — return types only, per its designers.</p></div>
+    </details>
+    <details class="qa"><summary data-level="Beginner">Difference between Optional.of and Optional.ofNullable?</summary>
+      <div class="answer"><p><code>of</code> throws NullPointerException immediately if given null — an assertion that the value exists. <code>ofNullable</code> converts null to empty — the bridge for legacy null-returning APIs.</p></div>
+    </details>
+    <details class="qa"><summary data-level="Intermediate">orElse vs orElseGet — when does it actually matter?</summary>
+      <div class="answer"><p><code>orElse(x)</code> evaluates x eagerly, always — even when the Optional is present. <code>orElseGet(supplier)</code> invokes the supplier only when empty. Matters when the default is expensive (DB call, object construction) or has side effects. Rule: constant → orElse, computed → orElseGet.</p></div>
+    </details>
+    <details class="qa"><summary data-level="Intermediate">map vs flatMap on Optional?</summary>
+      <div class="answer"><p>Both transform a present value. <code>map</code> wraps the mapper's result in an Optional; if the mapper itself returns Optional you would get <code>Optional&lt;Optional&lt;T&gt;&gt;</code> — <code>flatMap</code> flattens exactly that. Structurally identical to Stream's map/flatMap distinction.</p></div>
+    </details>
+    <details class="qa"><summary data-level="Pro">Why is Optional discouraged for fields and parameters, and what do you do instead?</summary>
+      <div class="answer"><p>It is not Serializable (breaks serializable classes), adds per-access allocation and indirection, and as a parameter it forces ceremony on every caller while still allowing a null Optional reference — the worst of both worlds. Idiom: nullable field internally, Optional-returning accessor at the boundary; for parameters, overloads or a builder. Cite the API note: Optional was designed for return types where "no result" is a legitimate answer.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Checklist items this lesson covers:</p>
+    <ul class="covered-list">
+      <li>java.optional.of</li>
+      <li>java.optional.ofNullable</li>
+      <li>java.optional.empty</li>
+      <li>java.optional.map</li>
+      <li>java.optional.flatMap</li>
+      <li>java.optional.filter</li>
+      <li>java.optional.or</li>
+      <li>java.optional.stream</li>
+      <li>java.optional.orElse-vs-orElseGet</li>
+      <li>java.optional.orElseThrow</li>
+      <li>java.optional.ifPresentOrElse</li>
+      <li>java.optional.anti-patterns</li>
+    </ul>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Next up: the java.time API.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

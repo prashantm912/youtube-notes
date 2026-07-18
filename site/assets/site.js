@@ -11,6 +11,9 @@
       "fitness": "Fitness & Exercise", "medicine": "Medicine & Organ Health",
       "longevity": "Longevity & Biohacking", "supplements": "Supplements",
       "wellness": "Wellness & Lifestyle", "system-design": "Communication & Social Skills",
+      "html": "HTML — Web Platform Course", "css": "CSS — Web Platform Course",
+      "js": "JavaScript — Web Platform Course", "ts": "TypeScript — Web Platform Course",
+      "java": "Java — Enterprise Course",
     };
     var label = null;
     document.body.className.split(/\s+/).forEach(function (c) {
@@ -26,7 +29,8 @@
     }
     var back = document.createElement("a");
     back.className = "back-link";
-    back.href = "../index.html";
+    // Course lessons live two levels deep (courses/<track>/), articles one (pages/)
+    back.href = location.pathname.indexOf("/courses/") !== -1 ? "../../index.html" : "../index.html";
     back.innerHTML = "← Knowledge Library";
     document.body.appendChild(back);
   }

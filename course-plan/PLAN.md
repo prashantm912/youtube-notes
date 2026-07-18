@@ -189,14 +189,17 @@ Scale estimate: ~300+ lessons total. Each phase ships incrementally; site stays 
 
 ## 8. Status Tracker (update this section as work lands)
 
-- [ ] Phase 0: infra
+- [~] Phase 0: infra (PILOT SLICE DONE 2026-07-19 — two pilot lessons shipped to validate format:
+      site/courses/css/05-box-model.html and site/courses/advanced-java/04-optional.html)
   - [ ] course-plan/checklists/{web-basics,html,css,javascript,typescript}.json scaffolds
   - [ ] course-plan/scripts/coverage.mjs
-  - [ ] site/assets/playground.js
-  - [ ] site.css: lesson components + theme-web/html/css/js/ts (+ theming.md rows)
-  - [ ] .claude/skills/course-lesson/ (SKILL.md + references/lesson-template.md)
-  - [ ] check-html.mjs: skip <pre> content in noise/markdown checks
-  - [ ] index.html: Courses menu
+  - [x] site/assets/playground.js (editor + live iframe, tab handling, debounce)
+  - [x] site.css: lesson components (code-demo/playground/diagram/qa/exercise/covered-list) + themes
+        theme-html/css/js/ts/java + topic icons for css/java (+ theming.md rows). theme-web pending.
+  - [ ] .claude/skills/course-lesson/ (SKILL.md + references/lesson-template.md — derive template
+        from the two pilot lessons, they are the canonical examples)
+  - [x] check-html.mjs: skip <pre>/<textarea> content in noise/markdown checks
+  - [x] index.html: Courses menu (pilot submenus for CSS + Advanced Java)
 - [ ] Phase 1: Track 0 web-basics (0/4 modules)
 - [ ] Phase 2: Track 1 html (0 modules started)
 - [ ] Phase 3: Track 2 css (0 modules started)
