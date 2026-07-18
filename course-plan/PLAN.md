@@ -234,7 +234,7 @@ incrementally; site stays consistent throughout.
         from the two pilot lessons, they are the canonical examples)
   - [x] check-html.mjs: skip <pre>/<textarea> content in noise/markdown checks
   - [x] index.html: Courses menu (pilot submenus for CSS + Advanced Java)
-- [ ] Phase 1: Track 0 web-basics (0/4 modules)
+- [x] Phase 1: Track 0 web-basics (4/4 modules) — DONE 2026-07-19. Coverage 21/21, all links verified.
 - [ ] Phase 2: Track 1 html (0 modules started)
 - [ ] Phase 3: Track 2 css (0 modules started)
 - [ ] Phase 4: Track 3 javascript (0 modules started)

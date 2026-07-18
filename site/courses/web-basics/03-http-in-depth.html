@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="HTTP in Depth module: how HTTP evolved from 1.1 to HTTP/2 to HTTP/3 over QUIC, connection management and head-of-line blocking, caching and conditional requests, cookie mechanics, content negotiation, and compression — with the best official resources and the interview questions each powers.">
+  <title>HTTP in Depth — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-web lesson-page">
+<header class="page-header">
+  <h1>Module: HTTP in Depth</h1>
+  <p class="standfirst">You already send requests and read status codes — this module goes under the hood: how the wire protocol got faster three times over, why a cache returns 304, and what a single cookie attribute has to do with CSRF.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → How the Web Works → HTTP in Depth</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>HTTP is the request/response protocol every web page rides on, and its details decide real performance and security. This module orients you on six areas interviewers actually probe: the HTTP/1.1 → HTTP/2 → HTTP/3 evolution, how connections are managed and stalled, the caching machinery (<code>Cache-Control</code>, <code>ETag</code>, conditional requests), cookie attributes and sessions, content negotiation, and compression. Depth lives in the linked official docs — this page gets you the map.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>HTTP/1.1 vs HTTP/2 vs HTTP/3 + QUIC</h3>
+    <p>Each HTTP version removed the previous one's bottleneck. HTTP/1.1 (1997) added persistent connections, the <code>Host</code> header for virtual hosting, and chunked transfer — but it still processes one request/response per connection at a time, so browsers open roughly six parallel TCP connections per origin to fake concurrency. HTTP/2 (2015) replaced the text protocol with a binary framing layer: many independent <em>streams</em> are multiplexed over one connection, headers are compressed with HPACK, and the six-connection hack becomes unnecessary. HTTP/3 (2022) keeps HTTP/2's semantics but swaps the transport from TCP to <strong>QUIC</strong> (UDP plus built-in TLS 1.3), eliminating transport-level head-of-line blocking and cutting connection-setup latency.</p>
+    <p>Why it matters: interviewers routinely ask you to place the three versions on a timeline and state precisely what each fixed. The honest one-liner — "HTTP/2 fixed application-layer HOL blocking, HTTP/3 fixed the transport-layer HOL blocking that HTTP/2 left behind" — is what separates a memorized answer from an understood one. Browsers discover HTTP/3 support via the <code>Alt-Svc</code> header.</p>
+    <pre class="code-block" data-label="HTTP"><code>HTTP/1.1 200 OK
+Alt-Svc: h3=":443"; ma=86400     ; server advertises HTTP/3 (QUIC) on 443
+                                 ; the client may switch on its next visit</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Evolution_of_HTTP" rel="noopener">Evolution of HTTP — MDN (0.9 through HTTP/3, what each version fixed)</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc9114" rel="noopener">RFC 9114: HTTP/3 — IETF (maps HTTP semantics onto QUIC)</a></li>
+      <li>[Article] <a href="https://http3-explained.haxx.se/en" rel="noopener">HTTP/3 explained — Daniel Stenberg (free book on QUIC, by curl's author)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=a-sBfyiXysI" rel="noopener">HTTP/1 to HTTP/2 to HTTP/3 — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Connection management: keep-alive, pipelining, multiplexing, HOL blocking</h3>
+    <p>HTTP/1.0 opened a fresh TCP connection per request; HTTP/1.1 made <em>persistent</em> connections (keep-alive) the default so the handshake and TCP slow-start cost is paid once and reused. Pipelining — sending several requests without waiting for each response — was specified but is disabled in practice because responses must return in order (so one slow response blocks the rest) and buggy proxies mishandled it. That ordering constraint is <strong>head-of-line (HOL) blocking</strong>. HTTP/2's multiplexing solves the application-layer version by numbering streams so responses interleave in any order, which is also why the old workaround of domain sharding became an anti-pattern.</p>
+    <p>Why it matters: the subtle, most-tested point is that HTTP/2 still runs on TCP, so a single lost packet stalls <em>every</em> stream until it is retransmitted — TCP-level HOL blocking. QUIC gives each stream independent loss recovery, which is the whole reason HTTP/3 exists. Note that <code>Connection</code> and <code>Keep-Alive</code> are hop-by-hop headers and are forbidden in HTTP/2 and HTTP/3.</p>
+    <pre class="code-block" data-label="HTTP"><code>Connection: keep-alive
+Keep-Alive: timeout=5, max=1000   ; reuse this socket for up to 1000 requests
+                                  ; or until it sits idle for 5 seconds</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Connection_management_in_HTTP_1.x" rel="noopener">Connection management in HTTP/1.x — MDN (short-lived, persistent, pipelining, sharding)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Connection" rel="noopener">Connection header — MDN reference</a></li>
+      <li>[Reference] <a href="https://developer.mozilla.org/en-US/docs/Glossary/Head_of_line_blocking" rel="noopener">Head-of-line blocking — MDN glossary (1.1 vs 2 vs 3)</a></li>
+      <li>[Article] <a href="https://hpbn.co/http2/" rel="noopener">HTTP/2 — High Performance Browser Networking, Ilya Grigorik (multiplexing, HPACK)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GriONb4EfPY" rel="noopener">HTTP/2 Critical Limitation that led to HTTP/3 &amp; QUIC — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Caching: Cache-Control, ETag, Vary, conditional requests</h3>
+    <p>HTTP caching has two mechanisms. <em>Freshness</em> lets a stored response be reused with no network trip until it ages out: <code>Cache-Control: max-age=N</code> (seconds), plus directives like <code>no-store</code> (never cache), <code>no-cache</code> (store but revalidate before every reuse), <code>private</code> vs <code>public</code> (browser-only vs shared/CDN caches), and <code>immutable</code>. <em>Validation</em> handles what happens after a response goes stale: the server stamps a response with an <code>ETag</code> (a version id) or <code>Last-Modified</code> date, and the client revalidates with a <strong>conditional request</strong> — <code>If-None-Match</code> or <code>If-Modified-Since</code>. If nothing changed the server returns a tiny <code>304 Not Modified</code> with no body.</p>
+    <p>Why it matters: the standard production pattern is fingerprinted, long-lived static assets (<code>max-age=31536000, immutable</code>) plus <code>no-cache</code> HTML that always revalidates — a favourite whiteboard question. The <code>Vary</code> header is the trap: a shared cache must key a negotiated response on the request headers used to build it (e.g. <code>Vary: Accept-Encoding</code>), or it will serve a gzip body to a client that cannot read it.</p>
+    <pre class="code-block" data-label="HTTP"><code>; response the first time
+Cache-Control: public, max-age=31536000, immutable
+ETag: "33a64df5"
+
+; the browser revalidates later
+If-None-Match: "33a64df5"   ->  HTTP/1.1 304 Not Modified   ; no body re-sent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching" rel="noopener">HTTP caching — MDN (freshness, validation, common patterns)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control" rel="noopener">Cache-Control — MDN reference (every directive)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/ETag" rel="noopener">ETag — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/If-None-Match" rel="noopener">If-None-Match — MDN reference (conditional requests, 304)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/http-cache" rel="noopener">Prevent unnecessary network requests with the HTTP Cache — web.dev (Google)</a></li>
+    </ul>
+
+    <h3>Cookie mechanics: Set-Cookie attributes, SameSite, Secure/HttpOnly, sessions</h3>
+    <p>A cookie is a small key/value the server sets with <code>Set-Cookie</code> and the browser returns on every matching request — the standard way stateless HTTP carries a session. The attributes are the whole exam. <code>Max-Age</code>/<code>Expires</code> separate persistent cookies from session cookies; <code>Domain</code> and <code>Path</code> scope where it is sent; <code>Secure</code> restricts it to HTTPS; <code>HttpOnly</code> hides it from JavaScript (an XSS defence); and <code>SameSite</code> controls cross-site sending — <code>Strict</code>, <code>Lax</code> (the modern default), or <code>None</code>, which <em>must</em> be paired with <code>Secure</code>. The <code>__Host-</code> prefix enforces a hardened combination.</p>
+    <p>Why it matters: for a login session cookie the expected answer is a short recipe — an opaque server-side session id, marked <code>HttpOnly</code> (XSS), <code>Secure</code> (HTTPS only), and <code>SameSite=Lax</code> or <code>Strict</code> (CSRF). Explaining <em>why</em> each attribute maps to a specific attack is the difference between a junior and senior answer, and SameSite is asked constantly since browsers changed its default.</p>
+    <pre class="code-block" data-label="HTTP"><code>Set-Cookie: __Host-sid=Ab3xZ9; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=2592000
+; __Host- forces Secure + Path=/ + no Domain — cannot be overwritten by a subdomain</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies" rel="noopener">Using HTTP cookies — MDN (lifetime, security attributes, sessions)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie" rel="noopener">Set-Cookie — MDN reference (all attributes and prefixes)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies" rel="noopener">Secure cookie configuration — MDN security guide</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Third-party_cookies" rel="noopener">Third-party cookies — MDN (privacy, CHIPS, browser blocking)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/samesite-cookies-explained" rel="noopener">SameSite cookies explained — web.dev (Google)</a></li>
+    </ul>
+
+    <h3>Content negotiation: Accept, Accept-Language, Accept-Encoding, quality values</h3>
+    <p>Content negotiation lets one URL serve different representations to different clients. In the common <em>proactive</em> (server-driven) form, the client advertises preferences with <code>Accept</code> (media types), <code>Accept-Language</code> (natural language), and <code>Accept-Encoding</code> (compression), and the server picks the best match. Preferences are ranked with <strong>quality values</strong> — a <code>;q=</code> weight from 0 to 1, defaulting to 1 — so <code>en-IN,en;q=0.9,hi;q=0.8</code> means "Indian English first, then English, then Hindi." When no representation is acceptable the server may return <code>406 Not Acceptable</code>.</p>
+    <p>Why it matters: negotiation and caching are joined at the hip. Whatever request header drove the server's choice must be echoed in <code>Vary</code>, or a shared cache will hand the wrong language or encoding to the next user. Being able to read a real <code>Accept</code> string with q-values, and explain the <code>Vary</code> consequence, is the crux of the question.</p>
+    <pre class="code-block" data-label="HTTP"><code>; request
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language: en-IN,en;q=0.9,hi;q=0.8
+
+; response — tell caches this body depends on the language asked for
+Content-Language: en-IN
+Vary: Accept-Language</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Content_negotiation" rel="noopener">Content negotiation — MDN (server-driven vs agent-driven)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Accept" rel="noopener">Accept — MDN reference (media-type negotiation)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Accept-Language" rel="noopener">Accept-Language — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Vary" rel="noopener">Vary — MDN reference (keying caches on negotiation)</a></li>
+      <li>[Reference] <a href="https://developer.mozilla.org/en-US/docs/Glossary/Quality_values" rel="noopener">Quality values (q-factor) — MDN glossary</a></li>
+    </ul>
+
+    <h3>Compression: gzip, brotli, zstd</h3>
+    <p>End-to-end compression shrinks text payloads — HTML, CSS, JS, JSON — by 70% or more before they cross the network. It is a negotiation: the client sends <code>Accept-Encoding: br, gzip, zstd</code> listing the algorithms it understands, and the server responds with <code>Content-Encoding</code> naming the one it used. <strong>gzip</strong> is the universal baseline; <strong>Brotli</strong> (<code>br</code>) generally beats gzip on text and is now widely deployed; <strong>zstd</strong> (Zstandard) is the newer entrant offering strong ratios with fast decode. Because the same URL now has multiple byte representations, the response must carry <code>Vary: Accept-Encoding</code>.</p>
+    <p>Why it matters: the expected talking points are "Brotli over gzip for text where the browser supports it," never compress already-compressed media (JPEG, PNG, MP4 — you waste CPU for near-zero gain), and remember the <code>Vary: Accept-Encoding</code> so a proxy does not send a Brotli body to a gzip-only client. It is a fast, high-impact performance win interviewers expect you to know cold.</p>
+    <pre class="code-block" data-label="HTTP"><code>; request
+Accept-Encoding: br, gzip, zstd
+
+; response
+Content-Encoding: br
+Vary: Accept-Encoding</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Compression" rel="noopener">Compression in HTTP — MDN (end-to-end vs hop-by-hop, negotiation)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Accept-Encoding" rel="noopener">Accept-Encoding — MDN reference (gzip, br, zstd, identity)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Encoding" rel="noopener">Content-Encoding — MDN reference</a></li>
+      <li>[Article] <a href="https://web.dev/articles/reduce-network-payloads-using-text-compression" rel="noopener">Minify and compress network payloads — web.dev (Google)</a></li>
+    </ul>
+  </section>
+
+  <section id="nav-prev-next" aria-label="Module navigation">
+    <h2>Continue the track</h2>
+    <p>Previous: <a href="02-http-essentials.html" rel="prev">HTTP Essentials</a> · <a href="index.html">All modules in this track</a> · Next: <a href="04-rendering-pipeline.html" rel="next">The Rendering Pipeline</a></p>
+  </section>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked HTTP internals questions in Indian interviews — HTTP/2 multiplexing, caching headers, SameSite cookies, and HTTP/3/QUIC are increasingly standard, from service-company screens to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the main differences between HTTP/1.1 and HTTP/2?</summary>
+      <div class="answer"><p>HTTP/1.1 is a text protocol handling one request/response per connection at a time, forcing browsers to open several parallel TCP connections. HTTP/2 is binary, multiplexes many independent streams over a single connection, and compresses headers with HPACK — so the same connection carries everything concurrently without the parallel-connection hack.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an HTTP keep-alive (persistent) connection and why does it help?</summary>
+      <div class="answer"><p>It keeps the TCP connection open across successive requests instead of reopening one each time. That avoids repeating the TCP handshake and TCP slow-start, cutting latency. It is the default in HTTP/1.1, controlled by the <code>Connection</code> and <code>Keep-Alive</code> headers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Cache-Control: no-cache vs no-store — what is the difference?</summary>
+      <div class="answer"><p><code>no-store</code> means never write this to any cache. <code>no-cache</code> means you may store it but must revalidate with the origin (via a conditional request) before every reuse — so it can still return a fast <code>304</code>. "no-cache" does not mean "do not cache"; that is the common trap.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an ETag and how is it used?</summary>
+      <div class="answer"><p>An ETag is a version identifier the server attaches to a response. On the next request the client sends it back in <code>If-None-Match</code>; if the resource is unchanged the server replies <code>304 Not Modified</code> with no body, saving bandwidth. Weak tags (<code>W/"..."</code>) assert semantic, not byte-for-byte, equivalence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do the Secure and HttpOnly cookie attributes do?</summary>
+      <div class="answer"><p><code>Secure</code> sends the cookie only over HTTPS. <code>HttpOnly</code> hides it from JavaScript (<code>document.cookie</code>), which blocks an XSS script from stealing a session cookie. They defend different things and are usually set together on session cookies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain HTTP/2 multiplexing. Which HTTP/1.1 problem does it solve?</summary>
+      <div class="answer"><p>HTTP/2 splits each message into frames tagged with a stream id, so many requests and responses interleave over one connection and can complete out of order. This removes HTTP/1.1's application-layer head-of-line blocking, where a slow response held up everything queued behind it, and makes domain sharding and six-connection tricks obsolete.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through a conditional request. What drives a 304 Not Modified?</summary>
+      <div class="answer"><p>When a cached response goes stale, the client revalidates: it sends <code>If-None-Match</code> with the stored <code>ETag</code> (or <code>If-Modified-Since</code> with the stored <code>Last-Modified</code>). If the resource is unchanged the server returns <code>304</code> with headers only and no body, and the client reuses its cached copy; otherwise it returns <code>200</code> with fresh content.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain SameSite=Strict/Lax/None and the current default.</summary>
+      <div class="answer"><p><code>Strict</code> sends the cookie only on same-site requests. <code>Lax</code> also sends it on top-level cross-site navigations (following a link) but not on cross-site subresource or POST requests — the modern browser default when SameSite is unset. <code>None</code> sends it on all cross-site requests and must be combined with <code>Secure</code>. SameSite is a primary CSRF mitigation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does content negotiation work, and why does Vary matter to caches?</summary>
+      <div class="answer"><p>The client advertises preferences via <code>Accept</code>, <code>Accept-Language</code>, and <code>Accept-Encoding</code>, ranked by <code>;q=</code> quality values, and the server picks a representation. Whatever request headers influenced that choice must be listed in the response's <code>Vary</code> header, so a shared cache stores a separate entry per variant and never serves the wrong language or encoding.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> gzip vs Brotli vs zstd — how do client and server agree, and when do you skip compression?</summary>
+      <div class="answer"><p>The client lists what it supports in <code>Accept-Encoding</code>; the server confirms its pick in <code>Content-Encoding</code> and adds <code>Vary: Accept-Encoding</code>. gzip is the universal baseline, Brotli usually wins on text, zstd is the newer fast option. Skip compression on already-compressed media (JPEG, PNG, MP4) — it burns CPU for almost no size reduction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> HTTP/2 multiplexes over one connection but can still stall — why, and how does HTTP/3/QUIC fix it?</summary>
+      <div class="answer"><p>HTTP/2 runs on TCP, which guarantees in-order delivery, so one lost packet blocks every multiplexed stream until it is retransmitted — transport-layer head-of-line blocking. HTTP/3 runs on QUIC (over UDP) with per-stream loss recovery, so a lost packet only stalls its own stream. QUIC also folds in TLS 1.3 for a faster handshake and supports connection migration across network changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design a secure session cookie. Why does each attribute map to a specific attack, and what does __Host- add?</summary>
+      <div class="answer"><p>Store an opaque server-side session id, not user data. Mark it <code>HttpOnly</code> (an XSS script cannot read it), <code>Secure</code> (never leaks over plain HTTP), and <code>SameSite=Lax</code> or <code>Strict</code> (blocks CSRF via cross-site requests). <code>SameSite=None</code> would require <code>Secure</code>. The <code>__Host-</code> prefix forces <code>Secure</code>, <code>Path=/</code>, and no <code>Domain</code>, so a compromised subdomain cannot overwrite it — defence in depth for the most sensitive cookie you own.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the How the Web Works track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>web.http.versions</li>
+      <li>web.http.connections</li>
+      <li>web.http.caching</li>
+      <li>web.http.cookies</li>
+      <li>web.http.negotiation</li>
+      <li>web.http.compression</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the How the Web Works track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
