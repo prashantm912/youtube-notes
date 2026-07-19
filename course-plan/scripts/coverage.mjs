@@ -45,15 +45,23 @@ if (uncovered.length) {
 if (checkLinks) {
   console.log(`\nChecking ${urls.size} unique URL(s)...`);
   let dead = 0;
+  // Status codes that mean "the resource exists, the host just blocks automated clients"
+  // (Baeldung/PortSwigger/Cloudflare/LinkedIn etc. 403/429 bots). These are NOT dead links.
+  const blockedButAlive = new Set([401, 403, 429, 503, 999]);
+  function verdict(status) {
+    if (status >= 200 && status < 400) return { ok: true, note: String(status) };
+    if (blockedButAlive.has(status)) return { ok: true, note: status + " (bot-blocked, treated live)" };
+    return { ok: false, note: String(status) };
+  }
   async function check(u) {
     // Try HEAD, then GET if HEAD is not ok (many hosts reject/404 HEAD but serve GET fine).
     try {
       const res = await fetch(u, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(12000) });
-      if (res.ok) return { ok: true, note: String(res.status) };
+      if (res.ok || blockedButAlive.has(res.status)) return verdict(res.status);
     } catch { /* fall through to GET */ }
     try {
       const res = await fetch(u, { method: "GET", redirect: "follow", signal: AbortSignal.timeout(20000) });
-      return { ok: res.ok, note: String(res.status) };
+      return verdict(res.status);
     } catch (e) { return { ok: false, note: e.name === "TimeoutError" ? "timeout" : e.message.slice(0, 40) }; }
   }
   for (const u of urls) {

@@ -35,6 +35,10 @@ list lives in PLAN.md (web) or PLAN-JAVA-STACK.md (enterprise). Read the relevan
    Indian-audience channels fine when quality holds).
 2. **Verify every URL** — fetch it. 404 / paywall / login-wall / redirect-to-homepage = reject,
    find a substitute. Never ship an unverified link. Prefer evergreen (unversioned) doc URLs.
+   - **Bot-blocked hosts (403/429) are NOT dead.** Baeldung, PortSwigger, some Cloudflare-fronted
+     sites, and a few others return 403 to automated fetches but are live, high-quality pages.
+     Confirm the exact page exists via a domain-scoped search and KEEP the link — do not drop a
+     good Baeldung URL just because WebFetch got a 403. (The link-checker treats these as live too.)
 3. **Write the page** to the template (see structure below). One page per module.
 4. **Lint:** `node .claude/skills/html-review-gate/scripts/check-html.mjs <path>` — fix to PASS.
 5. Return: module title, path, topic count, total verified links, interview-question count, lint result.
