@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Symbols, Iterators and Generators module: what Symbols and well-known symbols are, the iterable/iterator protocols behind for...of, generators and async generators, and the ES2025 iterator helpers — with verified official resources and India-weighted interview questions.">
+  <title>Symbols, Iterators and Generators — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-js lesson-page">
+<header class="page-header">
+  <h1>Module: Symbols, Iterators and Generators</h1>
+  <p class="standfirst">Three quiet protocols power the visible language: Symbols name behavior without name clashes, the iteration protocols make <code>for...of</code> and spread work on anything, and generators produce values on demand — now with native iterator helpers on top.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → JavaScript → Symbols, Iterators and Generators</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module is about the machinery underneath the syntax you already use. Symbols give unique, collision-proof keys and — through the <em>well-known symbols</em> — let objects plug into built-in operations like iteration and <code>instanceof</code>. The iterable and iterator protocols define exactly what makes a value work in <code>for...of</code>, spread and destructuring; generators are the ergonomic way to author those iterators; and the ES2025 iterator helpers add lazy <code>map</code>/<code>filter</code>/<code>take</code> pipelines that never materialize an intermediate array.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Symbol, well-known symbols, registry</h3>
+    <p>A <code>Symbol</code> is a primitive whose every instance is unique — even two symbols with the same description are unequal. Used as an object key it never collides with string keys and stays out of <code>for...in</code> and <code>Object.keys</code>, which makes it the tool for attaching metadata or library-private state to objects you do not own. The <em>well-known symbols</em> (<code>Symbol.iterator</code>, <code>Symbol.asyncIterator</code>, <code>Symbol.hasInstance</code>, <code>Symbol.toPrimitive</code>, <code>Symbol.toStringTag</code>) are the extension points the language reads to customize built-in behavior.</p>
+    <p>Why it matters: Symbols are how JavaScript exposes its own protocols to your objects, so understanding them unlocks the rest of this module. The global registry — <code>Symbol.for(key)</code> / <code>Symbol.keyFor(sym)</code> — is a separate, shared table for symbols that must be the same across realms (iframes, workers), and a favourite "is this the same symbol?" interview trap.</p>
+    <pre class="code-block" data-label="JS"><code>const id = Symbol("id");           // unique, even vs another Symbol("id")
+const user = { name: "Asha", [id]: 42 };
+Object.keys(user);                 // ["name"] — the symbol key is hidden
+
+const shared = Symbol.for("app.id");    // created in / read from the registry
+Symbol.for("app.id") === shared;        // true — same key, same symbol</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol" rel="noopener">Symbol — MDN reference (incl. the well-known symbols table)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/for" rel="noopener">Symbol.for() and the global symbol registry — MDN</a></li>
+      <li>[Article] <a href="https://javascript.info/symbol" rel="noopener">Symbol type — javascript.info</a></li>
+    </ul>
+
+    <h3>Iteration protocols (iterable/iterator)</h3>
+    <p>Two contracts sit under every loop. An object is <em>iterable</em> if it has a <code>[Symbol.iterator]()</code> method returning an <em>iterator</em>; an iterator is any object with a <code>next()</code> method that returns <code>{ value, done }</code> on each call. <code>for...of</code>, spread (<code>[...x]</code>), array/object destructuring, <code>Array.from</code>, <code>Promise.all</code> and <code>new Map(entries)</code> all speak this protocol — which is why implementing it once makes a custom object work everywhere.</p>
+    <p>Why it matters: this is the single most leveraged abstraction in the language. Knowing that an iterator is "stateful and one-shot" explains why a spread re-runs from the start (it calls <code>Symbol.iterator</code> afresh) while a half-consumed iterator resumes where it stopped — the mental model behind a lot of "why is my array empty?" bugs.</p>
+    <pre class="code-block" data-label="JS"><code>const range = {
+  from: 1, to: 3,
+  [Symbol.iterator]() {
+    let n = this.from;
+    return {
+      next: () =&gt; n &lt;= this.to
+        ? { value: n++, done: false }
+        : { value: undefined, done: true },
+    };
+  },
+};
+[...range];   // [1, 2, 3]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Iteration_protocols" rel="noopener">Iteration protocols — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/iterator" rel="noopener">Symbol.iterator — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Iterators_and_generators" rel="noopener">Iterators and generators — MDN Guide</a></li>
+      <li>[Article] <a href="https://javascript.info/iterable" rel="noopener">Iterables — javascript.info</a></li>
+    </ul>
+
+    <h3>Generators (yield/delegation), async generators</h3>
+    <p>A generator function (<code>function*</code>) returns a generator object that is <em>both</em> an iterator and iterable, so you rarely hand-write the <code>next()</code> boilerplate above again. Execution pauses at each <code>yield</code> and resumes on the next <code>next()</code> call, carrying local state across the gap — ideal for lazy sequences, state machines and tree walks. <code>yield*</code> delegates to another iterable, and communication is two-way: <code>gen.next(v)</code> feeds a value back into the paused <code>yield</code>, while <code>gen.throw()</code>/<code>gen.return()</code> inject an error or an early finish.</p>
+    <p>Why it matters: async generators (<code>async function*</code>) extend the idea to data that arrives over time — you <code>await</code> inside the generator and consume it with <code>for await...of</code>, the clean pattern for paginated APIs and streams. Interviewers use generators to test whether you understand lazy, pull-based evaluation versus eager arrays.</p>
+    <pre class="code-block" data-label="JS"><code>function* ids() {
+  yield 1;
+  yield* [2, 3];          // delegate to another iterable
+}
+[...ids()];               // [1, 2, 3]
+
+async function* pages(url) {
+  let next = url;
+  while (next) {
+    const res = await fetch(next);   // await inside the generator
+    const page = await res.json();
+    yield page.items;
+    next = page.nextUrl;
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function*" rel="noopener">function* (generator functions) — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function*" rel="noopener">async function* (async generators) — MDN reference</a></li>
+      <li>[Article] <a href="https://javascript.info/generators" rel="noopener">Generators — javascript.info (covers yield* composition)</a></li>
+      <li>[Article] <a href="https://javascript.info/async-iterators-generators" rel="noopener">Async iteration and generators — javascript.info</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IJ6EgdiI_wU" rel="noopener">Learn JavaScript Generators in 12 Minutes — Web Dev Simplified</a></li>
+    </ul>
+
+    <h3>Iterator helpers (map/filter/take/drop/reduce/toArray)</h3>
+    <p>Iterator helpers (ES2025, Baseline since March 2025) add array-style methods directly to iterators: <code>map</code>, <code>filter</code>, <code>take</code>, <code>drop</code>, <code>flatMap</code>, <code>reduce</code>, <code>toArray</code>, plus <code>some</code>/<code>every</code>/<code>find</code>/<code>forEach</code> and the static <code>Iterator.from()</code>. The crucial difference from <code>Array.prototype</code> methods is that they are <em>lazy</em> — each element flows through the whole chain one at a time, so nothing intermediate is allocated and infinite sequences become safe to process.</p>
+    <p>Why it matters: chaining <code>.map().filter().take()</code> on a generator processes only as many elements as <code>take</code> actually needs, which is impossible with eager array methods that would try to build the full array first. This is the modern answer to "how do you handle a huge or infinite data source efficiently?" — expect it in senior front-end and full-stack rounds now that it ships in every engine.</p>
+    <pre class="code-block" data-label="JS"><code>function* naturals() { let n = 1; while (true) yield n++; }
+
+naturals()
+  .map((n) =&gt; n * n)
+  .filter((n) =&gt; n % 2 === 1)
+  .take(3)
+  .toArray();            // [1, 9, 25] — lazy; the infinite array is never built</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator" rel="noopener">Iterator (all helper methods) — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Iterator/take" rel="noopener">Iterator.prototype.take() — MDN reference</a></li>
+      <li>[Official] <a href="https://v8.dev/features/iterator-helpers" rel="noopener">Iterator helpers — V8 (Chrome engine team)</a></li>
+      <li>[Article] <a href="https://web.dev/blog/baseline-iterator-helpers" rel="noopener">Iterator helpers have become Baseline — web.dev (Google)</a></li>
+      <li>[Reference] <a href="https://github.com/tc39/proposal-iterator-helpers" rel="noopener">proposal-iterator-helpers (Stage 4) — TC39</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-numbers-math.html">← Numbers, Math and BigInt</a>
+    <a href="index.html">All JavaScript modules</a>
+    <a href="12-collections.html">Collections →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Symbols and iteration come up constantly in Indian front-end and full-stack rounds — from "make this object work in for...of" screens to lazy-evaluation deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Symbol and why was it added to JavaScript?</summary>
+      <div class="answer"><p>A Symbol is a primitive whose every instance is unique. Its main uses: collision-proof object keys (a library can add a Symbol key without clashing with your string keys, and it stays out of <code>for...in</code>/<code>Object.keys</code>), and the well-known symbols that let objects hook into built-in language operations like iteration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Are two Symbols with the same description equal?</summary>
+      <div class="answer"><p>No. <code>Symbol("id") === Symbol("id")</code> is <code>false</code> — the description is only a debug label, not an identity. The one exception is the global registry: <code>Symbol.for("id") === Symbol.for("id")</code> is <code>true</code> because both look the key up in the same shared table.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes an object iterable, and what does for...of need?</summary>
+      <div class="answer"><p>An object is iterable if it has a <code>[Symbol.iterator]()</code> method returning an iterator. <code>for...of</code> calls that method once, then repeatedly calls the iterator's <code>next()</code> until it returns <code>{ done: true }</code>. Arrays, strings, Maps and Sets are iterable out of the box; plain objects are not.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does an iterator's next() return?</summary>
+      <div class="answer"><p>An object <code>{ value, done }</code>. While iterating, <code>done</code> is <code>false</code> and <code>value</code> is the current element; when exhausted, <code>done</code> becomes <code>true</code> (and <code>value</code> is usually <code>undefined</code>, or the generator's return value).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a generator function and how do you write one?</summary>
+      <div class="answer"><p>A function declared with <code>function*</code> that can pause and resume. Calling it does not run the body — it returns a generator object. Each <code>next()</code> runs until the next <code>yield</code>, returns that yielded value, and suspends. It is a much shorter way to author an iterator than writing <code>next()</code> by hand.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Symbol() vs Symbol.for() — what is the global symbol registry?</summary>
+      <div class="answer"><p><code>Symbol()</code> always makes a brand-new unique symbol. <code>Symbol.for(key)</code> looks the key up in a runtime-wide registry and returns the existing symbol or creates one — so the same key yields the same symbol everywhere, including across iframes and workers. <code>Symbol.keyFor(sym)</code> reverses it. Registry symbols are never garbage-collected, so avoid them for per-object private state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are well-known symbols? Name a few and what they customize.</summary>
+      <div class="answer"><p>Static symbols on <code>Symbol</code> that the engine reads to customize built-ins: <code>Symbol.iterator</code> (for...of/spread), <code>Symbol.asyncIterator</code> (for await...of), <code>Symbol.hasInstance</code> (<code>instanceof</code>), <code>Symbol.toPrimitive</code> (type coercion), and <code>Symbol.toStringTag</code> (the tag in <code>Object.prototype.toString</code>). They are the public extension points of the language's own protocols.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between an iterable and an iterator — can one object be both?</summary>
+      <div class="answer"><p>An iterable has <code>[Symbol.iterator]()</code>; an iterator has <code>next()</code>. Yes, an object can be both — a generator object is the classic case: it has <code>next()</code> and its <code>[Symbol.iterator]()</code> returns itself. That self-return is why you can spread a generator or drop it straight into <code>for...of</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does yield* do?</summary>
+      <div class="answer"><p><code>yield*</code> delegates to another iterable/generator, yielding all of its values in place as if inlined, and evaluates to that inner generator's return value. It is how you compose generators — e.g. a tree traversal that <code>yield*</code>s over each child's traversal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are async generators and when do you reach for them?</summary>
+      <div class="answer"><p><code>async function*</code> can <code>await</code> inside and <code>yield</code> values that arrive over time; you consume it with <code>for await...of</code>. Each <code>next()</code> returns a Promise. It is the natural fit for paginated REST endpoints, streamed responses, or any source where the next value is not ready synchronously.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How are iterator helpers different from Array methods like map/filter?</summary>
+      <div class="answer"><p>Array methods are eager: <code>arr.map().filter()</code> builds a full intermediate array at each step. Iterator helpers (<code>Iterator.prototype.map/filter/take/...</code>) are lazy: one element flows through the entire chain at a time, allocating no intermediate collections. That makes them memory-efficient on large data and usable on infinite generators, where array methods would never finish.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do generators and take() let you work with an infinite sequence?</summary>
+      <div class="answer"><p>A generator like <code>function* naturals(){ let n=1; while(true) yield n++; }</code> produces values only on demand, so it never overflows. Wrapping it with iterator helpers — <code>naturals().map(...).filter(...).take(3).toArray()</code> — pulls exactly as many elements as <code>take(3)</code> needs and then stops, because laziness propagates back up the chain. The infinite array is never materialized.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain two-way communication in generators: next(value), throw() and return().</summary>
+      <div class="answer"><p><code>gen.next(v)</code> resumes the generator and makes the paused <code>yield</code> expression evaluate to <code>v</code> — so a generator can receive input, not just produce output (the basis of coroutine patterns). <code>gen.throw(err)</code> raises <code>err</code> at the paused <code>yield</code> (catchable inside), and <code>gen.return(v)</code> forces an early, clean finish that still runs <code>finally</code> blocks for cleanup.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Are Symbol keys truly private, and how do they compare to #private class fields?</summary>
+      <div class="answer"><p>No. Symbol keys are hidden from <code>Object.keys</code>/<code>for...in</code>/<code>JSON.stringify</code>, but they are reachable via <code>Object.getOwnPropertySymbols</code> and <code>Reflect.ownKeys</code> — so they are "soft" privacy, good for de-conflicting, not for secrecy. <code>#private</code> fields are hard private: enforced by the language, invisible to reflection, and accessing one from outside the class is a syntax error.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the JavaScript track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>js.sym.symbols</li>
+      <li>js.iter.protocols</li>
+      <li>js.iter.generators</li>
+      <li>js.iter.helpers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the JavaScript track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -45,16 +45,21 @@ if (uncovered.length) {
 if (checkLinks) {
   console.log(`\nChecking ${urls.size} unique URL(s)...`);
   let dead = 0;
-  for (const u of urls) {
-    let ok = false, note = "";
+  async function check(u) {
+    // Try HEAD, then GET if HEAD is not ok (many hosts reject/404 HEAD but serve GET fine).
     try {
-      let res = await fetch(u, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(12000) });
-      if (res.status === 405 || res.status === 403) // some hosts reject HEAD; retry GET
-        res = await fetch(u, { method: "GET", redirect: "follow", signal: AbortSignal.timeout(15000) });
-      ok = res.ok;
-      note = String(res.status);
-    } catch (e) { note = e.name === "TimeoutError" ? "timeout" : e.message.slice(0, 40); }
-    if (!ok) { dead++; console.log(`  DEAD [${note}] ${u}`); }
+      const res = await fetch(u, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(12000) });
+      if (res.ok) return { ok: true, note: String(res.status) };
+    } catch { /* fall through to GET */ }
+    try {
+      const res = await fetch(u, { method: "GET", redirect: "follow", signal: AbortSignal.timeout(20000) });
+      return { ok: res.ok, note: String(res.status) };
+    } catch (e) { return { ok: false, note: e.name === "TimeoutError" ? "timeout" : e.message.slice(0, 40) }; }
+  }
+  for (const u of urls) {
+    let r = await check(u);
+    if (!r.ok) r = await check(u); // one retry to absorb transient network blips
+    if (!r.ok) { dead++; console.log(`  DEAD [${r.note}] ${u}`); }
   }
   console.log(dead ? `\n${dead} dead link(s) — fix before shipping.` : "\nAll links reachable.");
   if (dead) process.exit(1);

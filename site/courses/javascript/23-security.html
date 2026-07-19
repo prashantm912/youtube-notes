@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JavaScript security module: the XSS families and their defenses (output encoding, the Sanitizer API and Trusted Types), how CSP, CORS preflight and credentials, and SameSite/HttpOnly cookies actually work, plus Subresource Integrity, clickjacking, prototype pollution, the Web Crypto API and supply-chain hygiene — with verified official resources and the interview questions they power.">
+  <title>Security for JS Developers — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-js lesson-page">
+<header class="page-header">
+  <h1>Module: Security for JS Developers</h1>
+  <p class="standfirst">Front-end code runs in a hostile environment: every string a user controls is a potential script, and every cross-origin call is a policy negotiation. This module maps the browser's security model and the defenses that keep an app from becoming the attacker's tool.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → JavaScript → Security for JS Developers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Security is where JavaScript stops being about features and starts being about trust boundaries. This module orients you on the attacks a front-end developer owns — cross-site scripting first and foremost — and the platform mechanisms that contain them: the Sanitizer API and Trusted Types, Content Security Policy, the CORS handshake, cookie attributes, Subresource Integrity, clickjacking and prototype-pollution defenses, the Web Crypto API, and dependency hygiene. Depth lives in the linked specifications and cheat sheets; the goal here is a correct mental model of who can do what, and why.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>XSS classes and defenses, Trusted Types + Sanitizer API</h3>
+    <p>Cross-site scripting (XSS) is the browser attack every JavaScript developer owns: the attacker gets your page to execute their script, which then runs with the victim's origin and session — reading the DOM, calling your APIs with the user's cookies, and exfiltrating data. It comes in three classes: <em>stored</em> (malicious markup persisted server-side and served to every visitor), <em>reflected</em> (echoed straight back from a request parameter), and <em>DOM-based</em> (the dangerous flow never leaves the browser — untrusted input reaches a sink like <code>innerHTML</code>, <code>document.write</code>, <code>eval</code>, or an event-handler attribute).</p>
+    <p>The durable defense is discipline about sinks. Prefer <code>textContent</code> over <code>innerHTML</code>, use a templating layer that context-encodes by default, and when you truly must insert HTML, run it through a vetted sanitizer (DOMPurify) or the built-in <code>Element.setHTML()</code> from the HTML Sanitizer API, which parses and strips scripts for you. For a systemic guarantee, enforce Trusted Types with <code>require-trusted-types-for 'script'</code>: the browser then rejects raw strings at every injection sink, accepting only objects minted by an audited policy — turning "did we miss a sink?" into a compile-and-review problem. Why it matters: XSS sits at the top of nearly every security interview and OWASP list.</p>
+    <pre class="code-block" data-label="JavaScript"><code>el.innerHTML = userInput;      // XSS sink — never with untrusted data
+el.textContent = userInput;    // safe: inserted as text, never parsed
+el.setHTML(userInput);         // Sanitizer API: parses, then strips scripts
+
+// Enforce platform-wide via a response header:
+// Content-Security-Policy: require-trusted-types-for 'script'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/XSS" rel="noopener">Cross-site scripting (XSS) — MDN</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html" rel="noopener">Cross Site Scripting Prevention Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Trusted_Types_API" rel="noopener">Trusted Types API — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/HTML_Sanitizer_API" rel="noopener">HTML Sanitizer API — MDN</a></li>
+      <li>[Article] <a href="https://web.dev/articles/trusted-types" rel="noopener">Prevent DOM-based XSS with Trusted Types — web.dev (Google)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EoaDgUgS6QA" rel="noopener">Cross-Site Scripting (XSS) Explained — PwnFunction</a></li>
+    </ul>
+
+    <h3>CSP, CORS mechanics (preflight/credentials), cookies (SameSite/HttpOnly)</h3>
+    <p>Content Security Policy is a response header that whitelists where scripts, styles, frames and other resources may come from. Its headline use is defense-in-depth against XSS — a strict CSP built on per-response nonces or hashes plus <code>'strict-dynamic'</code> neutralizes injected inline scripts even when a sink slips through — but the same header also carries <code>frame-ancestors</code> (anti-clickjacking) and <code>upgrade-insecure-requests</code>. Roll it out with <code>Content-Security-Policy-Report-Only</code> so violations are reported without breaking the page.</p>
+    <p>CORS is often misread as a server protection; it is the opposite. The browser's same-origin policy blocks a page from <em>reading</em> a cross-origin response by default, and CORS is the server's opt-in to relax that, via <code>Access-Control-Allow-Origin</code>. "Simple" requests go straight through; anything with a non-simple method, a custom header, or a non-simple content type triggers a <em>preflight</em> — an <code>OPTIONS</code> request advertising the intended method and headers that the server must approve first. To send cookies cross-origin you need all three: <code>fetch(url, {credentials: 'include'})</code>, a server responding with <code>Access-Control-Allow-Credentials: true</code>, and an explicit (never wildcard) origin.</p>
+    <p>Cookies carry their own attributes. <code>SameSite</code> controls cross-site sending — <code>Lax</code> (the modern default) blocks cookies on cross-site subrequests but allows top-level navigation, <code>Strict</code> blocks even that, and <code>None</code> (which requires <code>Secure</code>) sends everywhere; this is the primary CSRF mitigation. <code>HttpOnly</code> hides the cookie from <code>document.cookie</code>, so an XSS payload cannot read a session token, and <code>Secure</code> restricts it to HTTPS.</p>
+    <pre class="code-block" data-label="HTTP"><code>Content-Security-Policy: default-src 'self'; script-src 'nonce-Rk9Pd2'
+Access-Control-Allow-Origin: https://app.example.com
+Access-Control-Allow-Credentials: true
+Set-Cookie: sid=abc; HttpOnly; Secure; SameSite=Lax</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP" rel="noopener">Content Security Policy (CSP) — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS" rel="noopener">Cross-Origin Resource Sharing (CORS) — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie" rel="noopener">Set-Cookie: SameSite, HttpOnly, Secure — MDN reference</a></li>
+      <li>[Article] <a href="https://web.dev/articles/samesite-cookies-explained" rel="noopener">SameSite cookies explained — web.dev (Google)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=PNtFSVU-YTI" rel="noopener">Learn CORS In 6 Minutes — Web Dev Simplified</a></li>
+    </ul>
+
+    <h3>SRI, clickjacking, prototype pollution, Web Crypto basics, supply-chain hygiene</h3>
+    <p>Subresource Integrity closes a supply-chain gap: add an <code>integrity</code> attribute holding a base64 hash to a <code>&lt;script&gt;</code> or <code>&lt;link&gt;</code> and the browser refuses to run a CDN file that has been tampered with, as long as you also set <code>crossorigin</code>. Clickjacking is the framing attack — your real page is loaded invisibly over decoy UI so the victim's clicks land on your buttons; defend it with <code>Content-Security-Policy: frame-ancestors 'none'</code> (or <code>'self'</code>), the legacy <code>X-Frame-Options: DENY</code> header, and <code>SameSite</code> cookies so framed requests carry no session.</p>
+    <p>Prototype pollution is JavaScript's own class of injection: an unsafe recursive merge or deep-clone that copies an attacker-controlled <code>__proto__</code> or <code>constructor.prototype</code> key writes onto <code>Object.prototype</code>, so <em>every</em> object suddenly inherits a malicious property — a gadget that can escalate to denial of service, XSS, or remote code execution. Reject those keys, build lookup maps with <code>Object.create(null)</code> or a real <code>Map</code>, and freeze prototypes you never mutate. The Web Crypto API (<code>crypto.subtle</code> for hashing, signing and AES/RSA; <code>crypto.getRandomValues</code> and <code>crypto.randomUUID()</code> for cryptographically strong randomness) gives you real primitives, but it is low-level and secure-context-only — never hand-roll crypto around it. Finally, supply-chain hygiene is now table stakes: commit a lockfile, run <code>npm audit</code>, pin and minimize dependencies, and review packages' install scripts.</p>
+    <pre class="code-block" data-label="JavaScript"><code>const id = crypto.randomUUID();                    // CSPRNG identifier
+const bytes = crypto.getRandomValues(new Uint8Array(16));
+const hash = await crypto.subtle.digest("SHA-256", data);
+
+// Prototype-pollution guard when merging untrusted keys:
+if (key === "__proto__" || key === "constructor") continue;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/Subresource_Integrity" rel="noopener">Subresource Integrity — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API" rel="noopener">Web Crypto API — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/Clickjacking" rel="noopener">Clickjacking — MDN</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Clickjacking_Defense_Cheat_Sheet.html" rel="noopener">Clickjacking Defense Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/prototype-pollution" rel="noopener">Prototype pollution — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://docs.npmjs.com/auditing-package-dependencies-for-security-vulnerabilities" rel="noopener">Auditing package dependencies for security vulnerabilities — npm Docs</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="22-streams-workers-pwa.html">← Streams, Workers and PWA</a>
+    <a href="index.html">All JavaScript modules</a>
+    <a href="24-debugging-legacy.html">Debugging, Legacy and Beyond →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The security round is where Indian product-company interviews separate juniors from seniors — these recur from service-company screening to FAANG-adjacent deep dives, hardest last:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is XSS and what are its three classes?</summary>
+      <div class="answer"><p>Cross-site scripting is getting a target site to execute attacker-supplied JavaScript, which then runs with the victim's origin and session. Three classes: <strong>stored</strong> (payload persisted server-side, served to everyone), <strong>reflected</strong> (echoed back from a request parameter), and <strong>DOM-based</strong> (untrusted input reaches a sink like <code>innerHTML</code> entirely in the browser).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> innerHTML vs textContent for user-supplied data?</summary>
+      <div class="answer"><p><code>innerHTML</code> parses the string as HTML, so <code>&lt;img onerror&gt;</code> or a script-bearing element executes — a classic XSS sink. <code>textContent</code> inserts the value as literal text; nothing is parsed or run. Default to <code>textContent</code>; reach for sanitized HTML only when you genuinely need markup.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the HttpOnly cookie attribute do?</summary>
+      <div class="answer"><p>It forbids JavaScript from reading the cookie through <code>document.cookie</code>, so an XSS payload cannot steal a session token. The cookie is still attached to requests the browser makes, so authentication keeps working — it only removes script-level read access.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Does CORS protect my server? What is it actually for?</summary>
+      <div class="answer"><p>No. CORS relaxes a <em>browser</em> rule — the same-origin policy that stops a page from reading a cross-origin response. The server opts in with <code>Access-Control-Allow-Origin</code>. It is not authorization: a non-browser client ignores CORS entirely, so your API must still authenticate and authorize every request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is CSP and how do you deliver it?</summary>
+      <div class="answer"><p>Content Security Policy is a browser-enforced allowlist of resource sources, delivered as the <code>Content-Security-Policy</code> response header (a <code>&lt;meta&gt;</code> tag covers a subset). It is defense-in-depth against XSS and can also block framing via <code>frame-ancestors</code>. Use <code>Content-Security-Policy-Report-Only</code> to trial a policy without breaking the page.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When does the browser send a CORS preflight, and what is in it?</summary>
+      <div class="answer"><p>When a request is not "simple" — a method beyond GET/POST/HEAD, a custom header, or a content type other than the three form-safe ones. The browser first sends an <code>OPTIONS</code> preflight carrying <code>Access-Control-Request-Method</code> and <code>Access-Control-Request-Headers</code>; only if the server approves them does the real request go out.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you send cookies on a cross-origin fetch?</summary>
+      <div class="answer"><p>Three things must all line up: the client sets <code>fetch(url, {credentials: 'include'})</code>, the server returns <code>Access-Control-Allow-Credentials: true</code> with a specific origin (a wildcard <code>*</code> is rejected with credentials), and the cookie itself must be <code>SameSite=None; Secure</code> to be sent cross-site at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> SameSite Lax vs Strict vs None — and why is Lax the default?</summary>
+      <div class="answer"><p><code>Strict</code> never sends the cookie on any cross-site request; <code>Lax</code> withholds it on cross-site subrequests but allows it on top-level navigations (so following a link keeps you logged in); <code>None</code> sends it everywhere but demands <code>Secure</code>. Browsers default absent cookies to <code>Lax</code> because it blocks most CSRF while keeping ordinary navigation working.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are Trusted Types and how do they stop DOM XSS?</summary>
+      <div class="answer"><p>With <code>Content-Security-Policy: require-trusted-types-for 'script'</code>, dangerous DOM sinks stop accepting plain strings and accept only <code>TrustedHTML</code>/<code>TrustedScript</code> objects produced by a named policy you define. Every unsafe assignment either goes through the audited policy or throws — converting an open-ended "find every sink" problem into a small, reviewable set of policies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you prevent clickjacking?</summary>
+      <div class="answer"><p>Stop other sites from framing yours: <code>Content-Security-Policy: frame-ancestors 'none'</code> (or <code>'self'</code>) is the modern control, with <code>X-Frame-Options: DENY</code> as legacy backup. Pair it with <code>SameSite</code> cookies so any framed request carries no session, defeating the point of the overlay.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Subresource Integrity protect a page using a CDN?</summary>
+      <div class="answer"><p>You add <code>integrity="sha384-..."</code> (plus <code>crossorigin</code>) to the <code>&lt;script&gt;</code> or <code>&lt;link&gt;</code>. The browser hashes the fetched file and refuses to execute it if the hash does not match — so a compromised or swapped CDN asset simply fails to load instead of running attacker code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you reduce npm supply-chain risk?</summary>
+      <div class="answer"><p>Commit a lockfile so installs are reproducible, run <code>npm audit</code> (and keep it in CI), pin versions and minimize the dependency count, review or disable untrusted post-install scripts, and use SRI for third-party CDN assets. The threat is transitive dependencies and typosquats, not just your direct ones.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is prototype pollution, how does it arise, and how do you prevent it?</summary>
+      <div class="answer"><p>An unsafe recursive merge or deep-clone copies an attacker-controlled <code>__proto__</code> or <code>constructor.prototype</code> key onto <code>Object.prototype</code>, so every object inherits the injected property — a gadget that can become DoS, XSS, or RCE. Prevent it by rejecting <code>__proto__</code>/<code>constructor</code> keys, using <code>Object.create(null)</code> or <code>Map</code> for dynamic key stores, freezing prototypes with <code>Object.freeze</code>, and validating input shapes with a schema.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is a CSP with script-src 'unsafe-inline' nearly worthless, and what is a strict CSP?</summary>
+      <div class="answer"><p><code>'unsafe-inline'</code> re-permits exactly the inline scripts an injection creates, so the policy no longer blocks XSS. A strict CSP drops it and allowlists inline scripts by a per-response <code>nonce-</code> or a content <code>hash-</code>, then adds <code>'strict-dynamic'</code> so trusted scripts can load their own dependencies without allowlisting every host. That is Google's recommended, XSS-resistant shape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why use crypto.getRandomValues/randomUUID over Math.random(), and name a common Web Crypto misuse?</summary>
+      <div class="answer"><p><code>Math.random()</code> is not cryptographically secure and is predictable, so tokens, IDs and keys built from it are guessable; <code>crypto.getRandomValues</code> and <code>crypto.randomUUID()</code> draw from a CSPRNG. Common misuses: rolling your own scheme instead of <code>crypto.subtle</code>, using AES in ECB mode or reusing an IV, mishandling key storage, and forgetting that <code>subtle</code> only exists in a secure (HTTPS) context.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the JavaScript track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>js.sec.xss</li>
+      <li>js.sec.csp-cors</li>
+      <li>js.sec.misc</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the JavaScript track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

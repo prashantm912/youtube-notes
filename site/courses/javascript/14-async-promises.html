@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JavaScript async foundations: the event loop with its call stack and task/microtask queues, the callback pattern and callback hell, and Promises — states, chaining, error flow and all/allSettled/any/race/withResolvers/try. Best official resources plus India-weighted, output-order interview questions.">
+  <title>Async: Event Loop and Promises</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-js lesson-page">
+<header class="page-header">
+  <h1>Module: Async — the Event Loop and Promises</h1>
+  <p class="standfirst">JavaScript runs your code on a single thread and still never blocks. The trick is an event loop feeding two queues, plus the promise object that rides the microtask queue — get their ordering right and the rest of async JavaScript falls into place.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → JavaScript → Async: Event Loop and Promises</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the mental-model layer under everything asynchronous: the call stack and the event loop, the task and microtask queues that decide execution order, the callback pattern that promises replaced, and the <code>Promise</code> object itself — states, chaining, error flow, and the <code>all</code>/<code>allSettled</code>/<code>any</code>/<code>race</code>/<code>withResolvers</code>/<code>try</code> combinators. It is one of the most heavily screened areas in JavaScript interviews, output-order questions above all.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The event loop: call stack, task and microtask queues</h3>
+    <p>A JavaScript engine has one call stack and runs one thing at a time to completion — it never pauses a function midway to run another. Anything slow (timers, network, user events) is handed to the host environment (browser Web APIs, Node's libuv); when the result is ready the host places a callback on a queue. The event loop is the coordinator: each time the stack empties it takes the next queued job and runs it. There are two priorities — the <em>macrotask</em> (task) queue holds timer, I/O and UI-event callbacks, while the <em>microtask</em> queue holds promise reactions, <code>queueMicrotask</code> and <code>MutationObserver</code>.</p>
+    <p>Why it matters: after the current script and after every single macrotask, the engine drains the <strong>entire</strong> microtask queue — including microtasks added while draining — before it renders or picks up the next macrotask. That one rule is why a <code>Promise.then</code> always fires before a <code>setTimeout(fn, 0)</code> queued at the same moment, and predicting this interleaving is a classic interview exercise.</p>
+    <pre class="code-block" data-label="JS"><code>console.log("A");
+setTimeout(() =&gt; console.log("B"), 0);          // macrotask: runs later
+Promise.resolve().then(() =&gt; console.log("C")); // microtask: runs first
+console.log("D");
+// prints:  A  D  C  B</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Execution_model" rel="noopener">JavaScript execution model (call stack, job queue, event loop) — MDN</a></li>
+      <li>[Article] <a href="https://javascript.info/event-loop" rel="noopener">Event loop: microtasks and macrotasks — javascript.info</a></li>
+      <li>[Article] <a href="https://jakearchibald.com/2015/tasks-microtasks-queues-and-schedules/" rel="noopener">Tasks, microtasks, queues and schedules — Jake Archibald</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8aGhZQkoFbQ" rel="noopener">What the heck is the event loop anyway? — Philip Roberts, JSConf EU</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8zKuNo4ay8E" rel="noopener">Asynchronous JavaScript &amp; EVENT LOOP from scratch (Ep.15) — Akshay Saini, Namaste JavaScript</a></li>
+    </ul>
+
+    <h3>Callbacks and callback hell</h3>
+    <p>Before promises, an async result was delivered by passing a function to be called later — the callback. Node standardised the <em>error-first</em> shape <code>callback(err, data)</code>. It works, but chaining dependent async steps nests each callback inside the previous one, marching the code rightward into the "pyramid of doom" (callback hell), with error handling repeated at every level.</p>
+    <p>Why it matters: the real problems run deeper than looks. There is no unified error channel — a value thrown inside a callback does not reach the surrounding <code>try/catch</code> because that stack frame is long gone — and there is <em>inversion of control</em>: you hand your continuation to someone else's function and simply trust it to call you back exactly once. Promises were designed to fix both, and interviewers want those two reasons named, not just "it looks messy".</p>
+    <pre class="code-block" data-label="JS"><code>getUser(id, (err, user) =&gt; {
+  if (err) return handle(err);
+  getOrders(user, (err, orders) =&gt; {
+    if (err) return handle(err);
+    getInvoice(orders[0], (err, invoice) =&gt; {  // marching right...
+      if (err) return handle(err);
+      render(invoice);
+    });
+  });
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Learn_web_development/Extensions/Async_JS/Introducing" rel="noopener">Introducing asynchronous JavaScript (events &amp; callbacks) — MDN Learn</a></li>
+      <li>[Article] <a href="https://javascript.info/callbacks" rel="noopener">Introduction: callbacks (the pyramid of doom) — javascript.info</a></li>
+      <li>[Article] <a href="http://callbackhell.com/" rel="noopener">Callback Hell — callbackhell.com</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yEKtJGha3yM" rel="noopener">Callback Hell (S02 Ep.01) — Akshay Saini, Namaste JavaScript</a></li>
+    </ul>
+
+    <h3>Promises: states, chaining, error flow and combinators</h3>
+    <p>A <code>Promise</code> is an object standing in for a value that may arrive later. It has three states — <em>pending</em>, then either <em>fulfilled</em> (with a value) or <em>rejected</em> (with a reason) — and once it settles it is frozen; later resolve/reject calls are ignored. <code>.then</code> registers a fulfillment reaction, <code>.catch</code> a rejection reaction, <code>.finally</code> a settlement callback, and each returns a <strong>new</strong> promise so calls chain flatly instead of nesting. Returning a value from a handler fulfils the next promise; throwing rejects it — giving one error channel that a single trailing <code>.catch</code> can service.</p>
+    <p>Why it matters: real code coordinates several promises at once. <code>Promise.all</code> fulfils with an array when every input fulfils but rejects fast on the first failure; <code>Promise.allSettled</code> never short-circuits and reports every outcome; <code>Promise.race</code> settles with the first to settle (fulfil or reject); <code>Promise.any</code> takes the first fulfilment and only rejects (with an <code>AggregateError</code>) if all reject. Two newer statics round it out: <code>Promise.withResolvers</code> hands you the resolve/reject functions to settle from outside, and <code>Promise.try</code> runs a possibly-synchronous function so even a synchronous throw lands in the chain. Chaining, error flow, and the combinators are staple interview ground.</p>
+    <pre class="code-block" data-label="JS"><code>fetchUser(id)
+  .then(user =&gt; fetchOrders(user.id))  // return a promise: chain stays flat
+  .then(orders =&gt; render(orders))
+  .catch(err =&gt; showError(err))         // one channel for every step above
+  .finally(() =&gt; hideSpinner());
+
+Promise.all([fetchA(), fetchB()])       // run concurrently, wait for both
+  .then(([a, b]) =&gt; combine(a, b));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Using_promises" rel="noopener">Using promises (chaining, error handling, composition) — MDN Guide</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise" rel="noopener">Promise — MDN reference (every static method, incl. withResolvers &amp; try)</a></li>
+      <li>[Article] <a href="https://javascript.info/promise-basics" rel="noopener">Promise (states, then/catch/finally) — javascript.info</a></li>
+      <li>[Article] <a href="https://javascript.info/promise-api" rel="noopener">Promise API (all/allSettled/race/any) — javascript.info</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ap-6PPAuK1Y" rel="noopener">Promises (S02 Ep.02) — Akshay Saini, Namaste JavaScript</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="13-destructuring-syntax.html">← Destructuring and Modern Syntax</a>
+    <a href="index.html">All JavaScript modules</a>
+    <a href="15-async-await.html">Async: async/await and Cancellation →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The event loop and promises are two of the most-asked JavaScript topics in Indian interviews — from service-company screens to product-company rounds — and the output-order puzzles below appear constantly. Hardest last.</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Is JavaScript single-threaded? How does it do async work then?</summary>
+      <div class="answer"><p>Single-threaded — one call stack, one thing at a time. Async work is offloaded to the host environment (browser Web APIs, Node's libuv); when it finishes, a callback is queued and the event loop runs it once the stack is empty. The language isn't running things in parallel — the environment does the waiting and hands work back.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the event loop, in one sentence?</summary>
+      <div class="answer"><p>A loop that, whenever the call stack is empty, takes the next queued job and pushes it onto the stack to run — repeated forever. That is the mechanism by which queued callbacks eventually execute.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three states of a Promise? Can a settled promise change?</summary>
+      <div class="answer"><p><em>pending</em>, <em>fulfilled</em>, <em>rejected</em>. It begins pending and transitions once — to fulfilled (with a value) or rejected (with a reason). Settled is final and immutable: any later resolve/reject is ignored, and handlers still receive the original outcome.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is "callback hell", and what actually causes it?</summary>
+      <div class="answer"><p>Deeply nested callbacks for dependent async steps — the pyramid of doom. Cause: each step needs the previous step's result, so you nest to keep it in scope, and error handling is duplicated at every level. Promises flatten the nesting; async/await removes it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Microtasks vs macrotasks — which runs first, with examples of each?</summary>
+      <div class="answer"><p>After the current synchronous run (and after each macrotask), the engine empties the <em>entire</em> microtask queue before the next macrotask or a render. Microtasks: promise <code>.then/.catch/.finally</code> reactions, <code>queueMicrotask</code>, <code>MutationObserver</code>. Macrotasks: <code>setTimeout/setInterval</code>, I/O, UI events, <code>setImmediate</code> (Node). So a promise callback always beats a <code>setTimeout(fn, 0)</code> queued alongside it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Predict the output: a log of "A", a <code>setTimeout(…,0)</code> logging "B", a <code>Promise.resolve().then</code> logging "C", then a log of "D".</summary>
+      <div class="answer">
+      <pre class="code-block" data-label="JS"><code>console.log("A");
+setTimeout(() =&gt; console.log("B"), 0);
+Promise.resolve().then(() =&gt; console.log("C"));
+console.log("D");</code></pre>
+      <p><strong>A, D, C, B.</strong> The synchronous lines run first (A, D). The stack empties, so the microtask queue drains next (C). Only then does the timer macrotask run (B). <code>setTimeout(…, 0)</code> never means "now" — it means "after the current task and all its microtasks".</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Predict the output: a <code>setTimeout(…,0)</code> logging "timeout" and a two-step chain <code>Promise.resolve().then(p1).then(p2)</code>, with "start" logged first and "end" logged last synchronously.</summary>
+      <div class="answer">
+      <pre class="code-block" data-label="JS"><code>console.log("start");
+setTimeout(() =&gt; console.log("timeout"), 0);
+Promise.resolve()
+  .then(() =&gt; console.log("p1"))
+  .then(() =&gt; console.log("p2"));
+console.log("end");</code></pre>
+      <p><strong>start, end, p1, p2, timeout.</strong> Sync first (start, end). Then microtasks drain: running p1's reaction enqueues p2's reaction, and the loop keeps draining newly-added microtasks to completion — so both p1 and p2 run before the timer macrotask fires.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Promise.all vs allSettled vs race vs any?</summary>
+      <div class="answer"><p><code>all</code> — fulfils with a result array when every input fulfils; rejects immediately on the first rejection (fail-fast). <code>allSettled</code> — never short-circuits; fulfils with a <code>{status, value|reason}</code> array once all settle. <code>race</code> — settles as soon as the first input settles, fulfil <em>or</em> reject. <code>any</code> — fulfils with the first fulfilment; rejects with an <code>AggregateError</code> only if every input rejects.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does error handling flow through a promise chain?</summary>
+      <div class="answer"><p>A throw or rejection anywhere skips the following <code>.then</code> fulfillment handlers and jumps to the next rejection handler / <code>.catch</code> downstream — so one <code>.catch</code> at the end covers every step above it. If a rejection handler returns normally, the chain resumes on the fulfilled path. <code>.finally</code> runs on either outcome and passes the settlement straight through.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What do promises give you that plain callbacks don't?</summary>
+      <div class="answer"><p>One error channel (<code>.catch</code>) instead of per-callback <code>err</code> checks; flat chaining instead of nesting; a guaranteed single settlement (a promise can't fulfil twice, unlike a buggy API that calls a callback zero or many times); and they return control to you — you compose the flow rather than surrendering it (fixing inversion of control). Plus combinators like <code>all</code>/<code>race</code> for coordinating many at once.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Predict the output: sync logs 1 and 6, a timer logging 2, a microtask that logs 3 and schedules a timer logging 4, and a second microtask logging 5.</summary>
+      <div class="answer">
+      <pre class="code-block" data-label="JS"><code>console.log(1);
+setTimeout(() =&gt; console.log(2), 0);
+Promise.resolve().then(() =&gt; {
+  console.log(3);
+  setTimeout(() =&gt; console.log(4), 0);
+});
+Promise.resolve().then(() =&gt; console.log(5));
+console.log(6);</code></pre>
+      <p><strong>1, 6, 3, 5, 2, 4.</strong> Sync: 1, 6. Microtasks in order: 3 (which schedules a <em>new</em> timer for 4, appended behind the timer for 2), then 5. The microtask queue is now empty, so macrotasks run FIFO: 2, then 4. The key insight is that the timer created inside the microtask queues behind the timer that was already waiting.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is <code>Promise.withResolvers</code> and when is it useful?</summary>
+      <div class="answer"><p>An ES2024 static that returns <code>{ promise, resolve, reject }</code>, letting you settle the promise from <em>outside</em> the executor. It's ideal when the settle trigger arrives elsewhere — an event listener, a socket message, a one-shot you resolve later — and it removes the old "declare <code>let resolve</code> outside, capture it inside <code>new Promise</code>" boilerplate.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is an unhandled / "floating" promise rejection, and why does it bite?</summary>
+      <div class="answer"><p>A rejected promise that nothing catches or awaits — the failure is silently lost. Browsers fire an <code>unhandledrejection</code> event; recent Node versions crash the process by default. "Floating" means you never chained or awaited the returned promise, so its errors and ordering vanish. Fix: always return/await your promises and terminate chains with <code>.catch</code>. Interviewers use this to check you don't treat promises as fire-and-forget.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why does <code>Promise.resolve().then(cb)</code> run <code>cb</code> asynchronously even though the promise is already resolved — and what does <code>Promise.try</code> add?</summary>
+      <div class="answer"><p>The spec guarantees <code>.then</code> callbacks are always delivered as microtasks, never synchronously — so ordering is consistent whether the promise was already settled or settles later, avoiding the "sometimes sync, sometimes async" (Zalgo) bug. <code>Promise.try(fn)</code> (ES2025) runs <code>fn</code> and funnels its result into a promise chain whether it returns a value, returns a promise, or throws synchronously — so a synchronous throw is caught by <code>.catch</code> instead of escaping the chain.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the JavaScript track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>js.async.eventloop</li>
+      <li>js.async.callbacks</li>
+      <li>js.async.promises</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the JavaScript track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

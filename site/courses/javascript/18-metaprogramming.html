@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JavaScript Meta-programming and Built-ins module: Proxy traps with Reflect, JSON serialization with replacer/reviver plus structuredClone deep cloning, the legacy Date object and its modern Temporal replacement, and the Intl internationalization APIs — best official resources and the interview questions they power.">
+  <title>Meta-programming and Built-ins — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-js lesson-page">
+<header class="page-header">
+  <h1>Module: Meta-programming and Built-ins</h1>
+  <p class="standfirst">Some of the language's most powerful tools sit one layer below everyday code: objects that intercept their own operations, serializers and cloners, a long-overdue date API, and formatting that already knows how the world writes numbers and time. This module maps each built-in to the problem it exists to solve.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → JavaScript → Meta-programming and Built-ins</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Meta-programming is code that acts on the behaviour of other code. In JavaScript that means <code>Proxy</code> and <code>Reflect</code> for intercepting an object's fundamental operations, plus the platform's core built-ins you reach for constantly: <code>JSON</code> serialization with its replacer/reviver hooks and <code>structuredClone</code> for real deep copies, the legacy <code>Date</code> object together with its modern replacement <code>Temporal</code>, and the <code>Intl</code> family for locale-aware formatting. These are deep-dive interview topics precisely because the naive answer and the senior answer diverge sharply.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Proxy (all traps), Reflect</h3>
+    <p>A <code>Proxy</code> wraps a target object and lets you intercept the fundamental operations performed on it through handler functions called <em>traps</em>: property reads (<code>get</code>), writes (<code>set</code>), existence checks (<code>has</code>), deletion (<code>deleteProperty</code>), key enumeration (<code>ownKeys</code>), descriptor access (<code>getOwnPropertyDescriptor</code>, <code>defineProperty</code>), prototype and extensibility operations, and — for callable targets — <code>apply</code> and <code>construct</code>. Any operation you don't trap passes straight through to the target. <code>Reflect</code> is the companion namespace: for every trap there is a same-named <code>Reflect</code> method with the same signature that performs the default operation, so a trap can do its custom work and then forward to <code>Reflect</code> to get correct default behaviour.</p>
+    <p>Why it matters: Proxy is the engine behind reactive frameworks (Vue 3's reactivity, MobX), validation and access-control layers, logging and observability wrappers, and negative-index or default-value shims. <code>Reflect.get(target, key, receiver)</code> is preferred over <code>target[key]</code> inside a trap because it threads the correct <code>receiver</code>, so an inherited getter sees the right <code>this</code>; and Reflect methods return booleans instead of throwing, which pairs cleanly with traps that must return a boolean. Interviewers probe whether you understand the invariants — a <code>get</code> trap must return the real value of a non-writable, non-configurable data property or the engine throws a <code>TypeError</code>.</p>
+    <pre class="code-block" data-label="JavaScript"><code>const user = new Proxy({ age: 30 }, {
+  set(target, key, value, receiver) {
+    if (key === "age" &amp;&amp; !Number.isInteger(value))
+      throw new TypeError("age must be an integer");
+    return Reflect.set(target, key, value, receiver); // default write, correct receiver
+  }
+});
+user.age = 31;      // ok
+user.age = "old";   // throws TypeError</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy" rel="noopener">Proxy — MDN reference (full trap-to-internal-method table)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Reflect" rel="noopener">Reflect — MDN reference</a></li>
+      <li>[Article] <a href="https://javascript.info/proxy" rel="noopener">Proxy and Reflect — javascript.info</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gZ4MCb2nlfQ" rel="noopener">JavaScript Proxy — Web Dev Simplified</a></li>
+    </ul>
+
+    <h3>JSON (parse/stringify, replacer/reviver), structuredClone</h3>
+    <p><code>JSON.stringify</code> serializes a value to a JSON string and <code>JSON.parse</code> does the reverse. The second argument of each is a transform hook: stringify's <em>replacer</em> — a function, or an allow-list array of property names — filters and rewrites values on the way out; parse's <em>reviver</em> runs on every key/value on the way in, the standard place to rehydrate <code>Date</code> objects from ISO strings. The third stringify argument, <code>space</code>, controls pretty-print indentation, and any object can define a <code>toJSON()</code> method to customize its own serialized form. The gotchas are heavily tested: <code>undefined</code>, functions, and symbols are dropped from objects (and become <code>null</code> in arrays), <code>Map</code>/<code>Set</code> serialize to <code>{}</code>, <code>BigInt</code> throws, and circular references throw.</p>
+    <p>Why it matters: <code>JSON.parse(JSON.stringify(x))</code> is the old deep-clone hack, and knowing why it is wrong is the point of the question — it silently loses <code>Date</code>, <code>Map</code>, <code>Set</code>, and typed arrays, and blows up on cycles. <code>structuredClone(value)</code> is the built-in deep clone using the structured-clone algorithm: it preserves cycles, <code>Date</code>, <code>RegExp</code>, <code>Map</code>, <code>Set</code>, <code>ArrayBuffer</code> and typed arrays, and can transfer transferables. It cannot clone functions, DOM nodes, or an object's prototype chain (the result is a plain object). The senior answer to "how do you copy an object" separates a shallow spread, the lossy JSON round-trip, and <code>structuredClone</code>.</p>
+    <pre class="code-block" data-label="JavaScript"><code>const data = { when: new Date(), tags: new Set(["a", "b"]) };
+
+const text = JSON.stringify(data, (key, val) =&gt;
+  val instanceof Set ? [...val] : val, 2);   // replacer + pretty-print
+
+const revived = JSON.parse(text, (key, val) =&gt;
+  key === "when" ? new Date(val) : val);      // reviver rehydrates the Date
+
+const clone = structuredClone(data);          // keeps Date &amp; Set intact, no round-trip loss</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON" rel="noopener">JSON — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/stringify" rel="noopener">JSON.stringify() — MDN reference (replacer, space, toJSON)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/structuredClone" rel="noopener">structuredClone() — MDN Web API reference</a></li>
+      <li>[Article] <a href="https://javascript.info/json" rel="noopener">JSON methods, toJSON — javascript.info</a></li>
+    </ul>
+
+    <h3>Date + Temporal (Instant/PlainDate/ZonedDateTime/Duration)</h3>
+    <p>The legacy <code>Date</code> object represents a single instant as milliseconds since the Unix epoch, but it is famously error-prone: it is mutable, months are zero-indexed, parsing anything but ISO strings is implementation-defined, and it conflates wall-clock time with an exact instant while really only understanding the local zone and UTC. <code>Temporal</code> is the modern replacement, built as a namespace of distinct, <em>immutable</em> types for distinct concepts: <code>Temporal.Instant</code> (an exact point on the timeline), <code>Temporal.ZonedDateTime</code> (an instant tied to an IANA time zone), the zone-less <code>Temporal.PlainDate</code> / <code>PlainTime</code> / <code>PlainDateTime</code> calendar-and-wall-clock values, and <code>Temporal.Duration</code> (a length of time), with DST-safe arithmetic and non-ISO calendar support.</p>
+    <p>Why it matters: at TC39's March 2026 plenary Temporal advanced to <strong>Stage 4</strong> and is slated for ECMAScript 2026 — it is done and shipping (Firefox 139, Chrome 144, Node 26). It is not yet Baseline across every browser, so MDN marks it "Limited availability" and an official polyfill remains prudent for broad support, but new code should target Temporal rather than <code>Date</code>. Being able to name the four core type families and explain why an immutable, zone-aware API removes an entire class of bugs is exactly the kind of "do you keep up with the language" signal interviewers look for.</p>
+    <pre class="code-block" data-label="JavaScript"><code>const now = Temporal.Now.zonedDateTimeISO("Asia/Kolkata"); // an instant in a zone
+const start = Temporal.PlainDate.from("2026-08-01");
+const shifted = start.add({ months: 1, days: 10 });         // immutable → new value
+
+const gap = start.until("2026-12-25", { largestUnit: "day" }); // a Temporal.Duration
+gap.days;                                                   // whole days between the dates</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal" rel="noopener">Temporal — MDN reference (marked "Limited availability")</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date" rel="noopener">Date — MDN reference (the legacy object)</a></li>
+      <li>[Official] <a href="https://tc39.es/proposal-temporal/docs/" rel="noopener">Temporal documentation — TC39 proposal (the authoritative API guide)</a></li>
+      <li>[Article] <a href="https://javascript.info/date" rel="noopener">Date and time — javascript.info</a></li>
+      <li>[Article] <a href="https://www.igalia.com/2026/03/13/Temporal-Reaches-Stage-4.html" rel="noopener">Temporal Reaches Stage 4 — Igalia (implementers' write-up)</a></li>
+    </ul>
+
+    <h3>Intl (NumberFormat/DateTimeFormat/Collator/RelativeTimeFormat/Segmenter)</h3>
+    <p>The <code>Intl</code> namespace is the built-in internationalization toolkit: locale-aware formatting and comparison with no external libraries. The workhorses are <code>Intl.NumberFormat</code> (decimals, currency, units, percentages, compact notation), <code>Intl.DateTimeFormat</code> (locale date/time formatting, ranges, and <code>formatToParts</code>), <code>Intl.Collator</code> (locale-correct string comparison and sorting), <code>Intl.RelativeTimeFormat</code> (phrasing such as "3 days ago"), and <code>Intl.Segmenter</code> (locale-correct grapheme, word, and sentence segmentation — the right way to count user-perceived characters or split words in scripts written without spaces). The family also includes <code>PluralRules</code>, <code>ListFormat</code>, <code>DisplayNames</code>, and <code>DurationFormat</code>.</p>
+    <p>Why it matters, especially for an Indian audience: hand-rolled formatting breaks the moment locale enters the picture. Manual comma grouping cannot produce the Indian numbering system's lakh/crore grouping (1,23,456), naive concatenation fumbles the ₹ symbol placement and right-to-left scripts, and <code>String.length</code> miscounts emoji and combining marks because it counts UTF-16 code units, not characters. <code>Intl.NumberFormat("en-IN")</code> yields correct digit grouping and currency, <code>Collator</code> sorts Devanagari properly, and <code>Segmenter</code> counts what a user would call a character. Reaching for <code>Intl</code> instead of bespoke string code is a recurring code-review and interview signal.</p>
+    <pre class="code-block" data-label="JavaScript"><code>new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" })
+  .format(123456.5);                 // "₹1,23,456.50"  (lakh/crore grouping)
+
+new Intl.NumberFormat("en-IN", { notation: "compact" })
+  .format(12300000);                 // "1.2Cr"
+
+const seg = new Intl.Segmenter("hi", { granularity: "grapheme" });
+[...seg.segment("👍🏽")].length;       // 1 user-perceived character, not 4 code units</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl" rel="noopener">Intl — MDN reference (all constructors)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat" rel="noopener">Intl.NumberFormat — MDN reference (currency, units, compact)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat" rel="noopener">Intl.DateTimeFormat — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/Segmenter" rel="noopener">Intl.Segmenter — MDN reference</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="17-regex.html">← Regular Expressions</a>
+    <a href="index.html">All JavaScript modules</a>
+    <a href="19-dom-events-storage.html">Browser: DOM, Events, Storage →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked meta-programming and built-ins questions in Indian interviews, from screening rounds to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Proxy in JavaScript?</summary>
+      <div class="answer"><p>An object that wraps a <em>target</em> and intercepts fundamental operations on it via <em>traps</em> defined on a handler — <code>get</code>, <code>set</code>, <code>has</code>, <code>deleteProperty</code>, <code>ownKeys</code>, <code>apply</code>, <code>construct</code>, and more. Operations you don't trap fall through to the target. It powers reactivity systems, validation, and logging wrappers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What values does JSON.stringify silently drop or fail on?</summary>
+      <div class="answer"><p><code>undefined</code>, functions, and symbols are dropped from objects and become <code>null</code> inside arrays. <code>Map</code>/<code>Set</code> serialize to <code>{}</code>, <code>BigInt</code> throws a TypeError, and a circular reference throws. Dates are serialized via their <code>toISOString()</code> (through <code>toJSON</code>) but come back as strings, not Date objects.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between the replacer and the reviver?</summary>
+      <div class="answer"><p>The <em>replacer</em> is the second argument to <code>JSON.stringify</code> — a function or an allow-list array that filters/transforms values on the way <em>out</em>. The <em>reviver</em> is the second argument to <code>JSON.parse</code> — a function run on each key/value on the way <em>in</em>, typically to turn ISO strings back into <code>Date</code> objects.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is the classic Date object considered problematic, and what replaces it?</summary>
+      <div class="answer"><p>It is mutable, months are zero-indexed, parsing non-ISO strings is implementation-defined, and it only really models UTC and the local zone. <code>Temporal</code> replaces it with immutable, zone- and calendar-aware types (<code>Instant</code>, <code>ZonedDateTime</code>, <code>PlainDate</code>/<code>PlainTime</code>/<code>PlainDateTime</code>, <code>Duration</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you deep-clone an object, and what is wrong with JSON.parse(JSON.stringify(x))?</summary>
+      <div class="answer"><p>Use <code>structuredClone(x)</code>. The JSON round-trip loses <code>Date</code>, <code>Map</code>, <code>Set</code>, typed arrays, and <code>undefined</code>, converts everything to plain objects, and throws on cycles or <code>BigInt</code>. <code>structuredClone</code> preserves those types and handles circular references, but still cannot clone functions, DOM nodes, or prototypes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is Reflect and why call it inside a Proxy trap?</summary>
+      <div class="answer"><p><code>Reflect</code> is a namespace whose methods mirror the Proxy traps one-for-one and perform the default operation. Inside a trap you forward to it — e.g. <code>Reflect.get(target, key, receiver)</code> — so the correct <code>receiver</code> reaches inherited getters/setters, and because Reflect returns booleans (rather than throwing) it slots straight into traps like <code>set</code> and <code>defineProperty</code> that must return a boolean.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name several Proxy traps and what each intercepts.</summary>
+      <div class="answer"><p><code>get</code> (property read), <code>set</code> (write), <code>has</code> (the <code>in</code> operator), <code>deleteProperty</code> (<code>delete</code>), <code>ownKeys</code> (<code>Object.keys</code>/enumeration), <code>getOwnPropertyDescriptor</code> and <code>defineProperty</code> (descriptors), <code>getPrototypeOf</code>/<code>setPrototypeOf</code>, and for callable targets <code>apply</code> (calling) and <code>construct</code> (<code>new</code>). Thirteen traps map to the object's internal methods.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you format an amount as Indian Rupees with correct lakh/crore grouping?</summary>
+      <div class="answer"><p><code>new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(amount)</code>. The <code>en-IN</code> locale applies the Indian grouping (1,23,456 rather than 123,456) and prepends the ₹ symbol. Never hand-roll the comma placement — the grouping is not uniform every three digits.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between Temporal.Instant, Temporal.PlainDateTime, and Temporal.ZonedDateTime?</summary>
+      <div class="answer"><p><code>Instant</code> is an exact point on the global timeline (like an epoch timestamp), with no calendar or zone. <code>PlainDateTime</code> is a calendar date plus wall-clock time with <em>no</em> zone — "8 a.m. on 1 Aug" in the abstract. <code>ZonedDateTime</code> ties the two together via an IANA time zone, so it knows the exact instant and survives DST transitions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does str.length give the "wrong" count for emoji, and how does Intl.Segmenter help?</summary>
+      <div class="answer"><p><code>String.length</code> counts UTF-16 code units, so an emoji built from surrogate pairs and modifiers (like a skin-toned thumbs-up) counts as several units. <code>Intl.Segmenter</code> with <code>granularity: "grapheme"</code> iterates user-perceived characters, giving the count and slicing a human would expect; with <code>"word"</code> it also splits languages without spaces (Thai, Japanese) correctly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What invariants must Proxy get/set traps respect?</summary>
+      <div class="answer"><p>The engine enforces consistency with the target. A <code>get</code> trap must return the actual value of a non-writable, non-configurable data property; a <code>set</code> trap cannot report success when writing to such a property; <code>has</code> cannot hide a non-configurable own property; and <code>ownKeys</code> must include all non-configurable own keys. Violating an invariant throws a <code>TypeError</code> — you cannot lie about a locked-down property.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is Temporal's standardization status, and would you ship it in production today?</summary>
+      <div class="answer"><p>Temporal reached <strong>Stage 4</strong> at TC39's March 2026 meeting and is part of ECMAScript 2026 — the spec is final. It ships natively in Firefox 139, Chrome 144, and Node 26, but is not yet Baseline across all engines (MDN flags "Limited availability"). So: use it directly where you control the runtime, and load the official Temporal polyfill for broad browser support.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Compare a spread copy, the JSON round-trip, and structuredClone for copying data.</summary>
+      <div class="answer"><p>Spread (<code>{...obj}</code> / <code>[...arr]</code>) is a one-level shallow copy — nested objects stay shared. The JSON round-trip is deep but lossy: no <code>Date</code>/<code>Map</code>/<code>Set</code>/typed arrays/<code>undefined</code>, no cycles, everything flattened to plain objects. <code>structuredClone</code> is deep and type-faithful (Dates, Maps, Sets, typed arrays, cycles) but drops functions, DOM nodes, and prototypes. Choose by how deep the data goes and which types it contains.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the JavaScript track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>js.meta.proxy</li>
+      <li>js.meta.json</li>
+      <li>js.meta.temporal</li>
+      <li>js.meta.intl</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the JavaScript track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

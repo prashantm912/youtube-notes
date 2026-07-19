@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JavaScript async/await and Cancellation module: async/await patterns with top-level await and error handling, cancelling work with AbortController and AbortSignal, and scheduling with timers, queueMicrotask, requestAnimationFrame and requestIdleCallback — best official resources and the interview questions they power.">
+  <title>Async: async/await and Cancellation — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-js lesson-page">
+<header class="page-header">
+  <h1>Module: Async — async/await and Cancellation</h1>
+  <p class="standfirst">Promises made asynchronous code composable; async/await made it readable. This module orients you on writing await-based flows, cancelling work you no longer need, and choosing the right scheduler so the main thread stays responsive.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → JavaScript → Async: async/await and Cancellation</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the second half of JavaScript's asynchrony story. It builds on promises and the event loop (previous module) to cover three practical skills: writing sequential-looking asynchronous code with <code>async</code>/<code>await</code> — including top-level await and try/catch error handling; cancelling in-flight work with <code>AbortController</code> and <code>AbortSignal</code> so a stale request or a slow operation doesn't waste effort; and picking the correct scheduling primitive — timers, <code>queueMicrotask</code>, <code>requestAnimationFrame</code>, or <code>requestIdleCallback</code> — for the job. Together these are among the most heavily tested asynchronous topics in front-end interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>async/await patterns, top-level await, error handling</h3>
+    <p>An <code>async</code> function always returns a promise: a plain <code>return</code> value becomes a fulfilled promise and a thrown error becomes a rejected one. Inside it, <code>await</code> pauses that one function until the awaited promise settles, then resumes with the fulfilment value — or, if the promise rejected, throws that reason at the await point. This lets you write asynchronous steps as ordinary top-to-bottom code and catch failures with a familiar <code>try</code>/<code>catch</code>/<code>finally</code> block, instead of threading <code>.then()</code>/<code>.catch()</code> callbacks by hand. Crucially, awaiting does not block the thread; it yields control back to the event loop and the function continues later as a microtask.</p>
+    <p>Why it matters: the two classic mistakes here are structural, not syntactic. First, <code>await</code> inside a loop runs each iteration serially — three requests take the sum of their times, not the maximum — so independent work should be started together and combined with <code>Promise.all</code>. Second, forgetting <code>await</code> (or returning a promise without awaiting inside a try) means errors escape your <code>catch</code> and surface as unhandled rejections. Top-level <code>await</code>, usable only at the top level of an ES module, removes the old IIFE wrapper but delays that module's execution — and everything that imports it — until the awaited value resolves, so use it deliberately. Interviewers in India routinely ask candidates to convert a promise chain to async/await, explain error handling, and spot accidental serialization.</p>
+    <pre class="code-block" data-label="JavaScript"><code>async function loadDashboard(userId) {
+  try {
+    // independent -&gt; run concurrently, not one-after-another
+    const [profile, orders] = await Promise.all([
+      fetchProfile(userId),
+      fetchOrders(userId),
+    ]);
+    return { profile, orders };
+  } catch (err) {
+    // any rejection above is thrown right here
+    console.error("dashboard failed:", err);
+    throw err;               // re-throw so the caller's promise rejects too
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function" rel="noopener">async function — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await" rel="noopener">await — MDN reference (incl. top-level await)</a></li>
+      <li>[Official] <a href="https://v8.dev/features/top-level-await" rel="noopener">Top-level await — V8 (engine team)</a></li>
+      <li>[Article] <a href="https://javascript.info/async-await" rel="noopener">Async/await — javascript.info</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V_Kr9OSfDeU" rel="noopener">JavaScript Async Await — Web Dev Simplified</a></li>
+    </ul>
+
+    <h3>AbortController, cancellation</h3>
+    <p>A promise, once created, cannot be cancelled — it will settle regardless of whether anyone still cares. <code>AbortController</code> is the platform's standard cancellation mechanism built around that limitation. You create a controller, hand its <code>controller.signal</code> (an <code>AbortSignal</code>) to an operation that understands it — <code>fetch</code>, <code>addEventListener</code>, streams, and a growing list of APIs — and later call <code>controller.abort(reason)</code>. The signal then flips <code>signal.aborted</code> to <code>true</code>, fires an <code>abort</code> event, and causes the awaited operation to reject: for <code>fetch</code>, with a <code>DOMException</code> named <code>"AbortError"</code> by default, or with your custom reason if you passed one.</p>
+    <p>Why it matters: cancellation is what prevents wasted work and stale-response bugs. In a search-as-you-type box, aborting the previous request before firing a new one guarantees a slow older response can't overwrite a newer one. Because the reject looks like any other error, real code must distinguish a deliberate abort from a genuine failure — typically by checking <code>err.name === "AbortError"</code> — and treat the abort as a no-op rather than showing an error to the user. Two ergonomic helpers appear often in interviews and reviews: <code>AbortSignal.timeout(ms)</code> returns a signal that auto-aborts after a delay (rejecting with a <code>TimeoutError</code>), and <code>AbortSignal.any([...signals])</code> aborts as soon as any input signal does — the idiomatic way to combine a user-initiated cancel with a timeout.</p>
+    <pre class="code-block" data-label="JavaScript"><code>const controller = new AbortController();
+// cancel from anywhere:  controller.abort()
+
+try {
+  const res = await fetch("/api/search?q=js", { signal: controller.signal });
+  const data = await res.json();
+  render(data);
+} catch (err) {
+  if (err.name === "AbortError") return;   // expected: we cancelled, do nothing
+  throw err;                                // a real network/parse failure
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController" rel="noopener">AbortController — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal" rel="noopener">AbortSignal (incl. any/timeout/throwIfAborted) — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal/timeout_static" rel="noopener">AbortSignal.timeout() — MDN reference</a></li>
+      <li>[Article] <a href="https://javascript.info/fetch-abort" rel="noopener">Fetch: Abort — javascript.info</a></li>
+    </ul>
+
+    <h3>Timers, queueMicrotask, requestAnimationFrame, requestIdleCallback</h3>
+    <p>Not all "run this later" is the same, and the queue you choose decides <em>when</em> the callback runs relative to rendering and to other work. <code>setTimeout</code>/<code>setInterval</code> schedule a <em>task</em> (macrotask): it runs in a future event-loop turn, after the current call stack and the entire microtask queue have drained, and even <code>setTimeout(fn, 0)</code> is subject to a minimum clamp (about 4ms once timers are nested). <code>queueMicrotask</code> schedules a <em>microtask</em> — the same queue promise reactions use — which runs right after the current synchronous code finishes and before the browser gets a chance to render or run the next task. Because the whole microtask queue is drained before each task, microtasks let you defer work while still keeping it in the current turn.</p>
+    <p>Why it matters: <code>requestAnimationFrame</code> registers a callback to run just before the next repaint, synchronised to the display's refresh rate and paused in background tabs — making it the correct tool for animation, where <code>setTimeout</code> drifts and can tear. <code>requestIdleCallback</code> schedules low-priority background work during the browser's idle periods, handing your callback an <code>IdleDeadline</code> so you can yield before you cause jank (note it is not yet Baseline across all browsers, so guard or provide a fallback). The single most common interview exercise on this topic is predicting the output order of synchronous code, a <code>setTimeout(…, 0)</code>, and a promise/microtask — a direct test of whether you understand that microtasks always run ahead of the next timer.</p>
+    <pre class="code-block" data-label="JavaScript"><code>console.log("1 sync");
+setTimeout(() =&gt; console.log("4 timeout (macrotask)"), 0);
+Promise.resolve().then(() =&gt; console.log("3 promise (microtask)"));
+queueMicrotask(() =&gt; console.log("3b microtask"));
+console.log("2 sync");
+// order: 1 sync, 2 sync, 3 promise, 3b microtask, 4 timeout</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/setTimeout" rel="noopener">setTimeout() — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/queueMicrotask" rel="noopener">queueMicrotask() — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame" rel="noopener">requestAnimationFrame() — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/requestIdleCallback" rel="noopener">requestIdleCallback() — MDN reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=cCOL7MC4Pl0" rel="noopener">Jake Archibald: the event loop, setTimeout, microtasks &amp; requestAnimationFrame — JSConf</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="14-async-promises.html">← Async: Event Loop and Promises</a>
+    <a href="index.html">All JavaScript modules</a>
+    <a href="16-modules.html">Modules →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked async/await and cancellation questions in Indian interviews, from screening rounds to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does an async function return?</summary>
+      <div class="answer"><p>Always a promise. A returned value becomes the fulfilment value of that promise; a thrown error becomes its rejection reason. Even <code>return 5</code> yields a promise that resolves to <code>5</code>, so callers still use <code>await</code> or <code>.then()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What exactly does await do?</summary>
+      <div class="answer"><p>It pauses the current async function until the awaited promise settles, then evaluates to its fulfilment value — or throws its rejection reason at that line. It does not block the thread: control returns to the event loop and the rest of the function resumes later as a microtask.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you handle errors with async/await?</summary>
+      <div class="answer"><p>Wrap awaits in <code>try</code>/<code>catch</code> (with optional <code>finally</code> for cleanup). Since an async function returns a promise, you can also handle failures at the call site with <code>.catch()</code>. A rejected await behaves exactly like a synchronous <code>throw</code> inside the function.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is top-level await and where can you use it?</summary>
+      <div class="answer"><p>The ability to use <code>await</code> at the top level of a module, without an enclosing async function. It works only in ES modules (not classic scripts or CommonJS). It delays that module's evaluation — and any module importing it — until the awaited promise resolves, so it should be used sparingly for genuine initialization.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you cancel a fetch request?</summary>
+      <div class="answer"><p>Create an <code>AbortController</code>, pass <code>controller.signal</code> to <code>fetch(url, { signal })</code>, and call <code>controller.abort()</code> when you want to cancel. The pending fetch rejects with a <code>DOMException</code> named <code>"AbortError"</code>, which you check for and treat as an expected cancellation rather than an error.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> await in a loop is running requests one by one. How do you parallelize them?</summary>
+      <div class="answer"><p><code>await</code> in a <code>for</code> loop is serial — each iteration waits for the previous. Start the independent operations first and await them together: <code>await Promise.all(ids.map(id =&gt; fetchOne(id)))</code>. Use <code>Promise.allSettled</code> if you need every result regardless of individual failures.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between setTimeout(fn, 0) and queueMicrotask(fn)?</summary>
+      <div class="answer"><p><code>setTimeout</code> queues a task (macrotask) that runs in a later event-loop turn, after the microtask queue drains and subject to a minimum clamp. <code>queueMicrotask</code> queues a microtask that runs right after the current synchronous code, before the next render or task. So the microtask always runs first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In a catch block, how do you tell a deliberate abort from a real network error?</summary>
+      <div class="answer"><p>Check the error: <code>err.name === "AbortError"</code> (a <code>DOMException</code>) means you cancelled it — usually a no-op. Anything else is a genuine failure to surface. If you aborted with a custom reason, that reason is thrown instead, so branch on it. You can also inspect <code>signal.aborted</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why use requestAnimationFrame instead of setTimeout for animation?</summary>
+      <div class="answer"><p><code>requestAnimationFrame</code> runs your callback just before the next repaint, synchronised to the display refresh rate, and is paused in background tabs to save battery. <code>setTimeout</code> is not aligned to the paint cycle, so it drifts, can drop or double frames, and wastes work when the tab is hidden. rAF also passes a high-resolution timestamp for frame-rate-independent motion.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does an await inside one function block other code or the UI?</summary>
+      <div class="answer"><p>No. <code>await</code> suspends only that async function and returns control to the event loop, so timers, events, and other tasks keep running. It is cooperative pausing, not thread blocking — very different from a synchronous busy-wait, which would freeze the page.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the difference between AbortSignal.timeout() and AbortSignal.any(), and when would you combine them?</summary>
+      <div class="answer"><p><code>AbortSignal.timeout(ms)</code> returns a signal that auto-aborts after a delay (rejecting with a <code>TimeoutError</code>). <code>AbortSignal.any([...])</code> returns a signal that aborts as soon as any input signal does. Combine them to enforce a timeout while still letting the user cancel: <code>AbortSignal.any([userController.signal, AbortSignal.timeout(5000)])</code> — whichever fires first wins.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Predict the output: a synchronous log, setTimeout(…, 0), a Promise.then, and a queueMicrotask.</summary>
+      <div class="answer"><p>All synchronous logs run first, in order. Then the event loop drains the entire microtask queue — the <code>Promise.then</code> and the <code>queueMicrotask</code> callbacks, in the order they were enqueued — before running any task. The <code>setTimeout</code> callback (a macrotask) runs last. The rule tested: microtasks always run to completion before the next task.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A "cancelled" fetch's response still seems to arrive and update the UI. What went wrong and how do you fix it?</summary>
+      <div class="answer"><p>Almost always the signal was never wired up — the request was started without <code>{ signal }</code>, or a stale controller was reused, or the <code>AbortError</code> was swallowed and the code fell through to render. Fix: create a fresh <code>AbortController</code> per request, abort the previous one before starting the next, pass its <code>signal</code> into <code>fetch</code>, and in <code>catch</code> return early on <code>AbortError</code> so aborted responses never touch the UI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can top-level await be dangerous, and what is the safer pattern for expensive startup work?</summary>
+      <div class="answer"><p>Top-level await blocks the evaluation of the module and its entire import chain until the promise resolves, so a slow dependency can stall the whole graph and delay first render. It also serializes sibling imports that could have loaded in parallel. Safer: export an async initializer or a promise the app awaits where it actually needs the value, keeping module loading fast and the dependency explicit.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the JavaScript track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>js.async.await</li>
+      <li>js.async.abort</li>
+      <li>js.async.timers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the JavaScript track — Web Platform course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
