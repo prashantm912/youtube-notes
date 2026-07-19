@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot security starter module: what spring-boot-starter-security secures by default, the generated password and default user, the default filter chain, and taking control with a SecurityFilterChain bean and user config — with official docs first and the interview questions they power.">
+  <title>Security with the Boot Starter — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Security with the Boot Starter</h1>
+  <p class="standfirst">Add one starter and every endpoint is suddenly behind a login you never wrote. Spring Boot's security auto-configuration is equal parts gift and interview trap — this module maps exactly what you get for free and the single bean that takes back control.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Security with the Boot Starter</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Adding <code>spring-boot-starter-security</code> flips a Spring Boot app from wide-open to locked-down with no code: every request needs authentication, a login form and HTTP Basic appear, CSRF and security headers switch on, and a random password is generated for a single built-in user. This module covers those defaults, the generated password and the default filter chain, then the one customization Boot expects you to make — a <code>SecurityFilterChain</code> bean, plus user configuration. Deep Spring Security (JWT, OAuth2, method security, database-backed users) is a separate upcoming track; here we stay at the Boot-integration layer.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The security starter and its defaults</h3>
+    <p>When <code>spring-boot-starter-security</code> is on the classpath, Boot's <code>SecurityAutoConfiguration</code> and <code>UserDetailsServiceAutoConfiguration</code> apply Spring Security's default chain for you. The result: every endpoint (including Boot's <code>/error</code>) requires authentication, both a generated form-login page and HTTP Basic are offered — the choice keys off the request's <code>Accept</code> header — CSRF protection and a standard set of security response headers are on, and a single in-memory user named <code>user</code> is created.</p>
+    <p>Why it matters: that user's password is a random UUID generated on <em>every</em> startup and printed once to the console. It exists so an app is never accidentally shipped wide open, but it is explicitly development-only — it changes each restart and lives only in memory. Recognising this as a safety net rather than a configuration is a routine screening check.</p>
+    <pre class="code-block" data-label="Console"><code>Using generated security password: 8e557245-73e2-4286-969a-ff57fe326336
+
+This generated password is for development use only. Your security
+configuration must be updated before running your application in production.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/spring-security.html" rel="noopener">Spring Security — Spring Boot reference (the defaults, generated password and how to override them)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/getting-started.html" rel="noopener">Hello Spring Security — Spring Security reference (what auto-config enables end to end)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-security-autoconfiguration" rel="noopener">Spring Boot Security Auto-Configuration — Baeldung</a></li>
+    </ul>
+
+    <h3>The default filter chain</h3>
+    <p>Spring Security runs as a single servlet filter, <code>FilterChainProxy</code>, inserted into the container through a <code>DelegatingFilterProxy</code> that bridges the servlet lifecycle to the Spring application context. <code>FilterChainProxy</code> holds one or more <code>SecurityFilterChain</code> instances; for each request it selects the first whose matcher applies and runs that chain's ordered filters — authentication, CSRF, authorization and the rest.</p>
+    <p>Why it matters: Boot's auto-configuration publishes exactly one default <code>SecurityFilterChain</code> that matches every request. Once you can picture that chain — and see that declaring your own bean replaces it — the rest of the module follows naturally.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html" rel="noopener">Architecture — Spring Security reference (DelegatingFilterProxy, FilterChainProxy, SecurityFilterChain)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zYop3D8EXYU" rel="noopener">Finally. A Real Spring Security Course — Dan Vega (Spring Developer Advocate)</a></li>
+    </ul>
+
+    <h3>Taking control with a SecurityFilterChain bean</h3>
+    <p>The moment you declare your own <code>SecurityFilterChain</code> <code>@Bean</code>, Boot backs off its default web-security auto-configuration and hands you the <code>HttpSecurity</code> builder. This is where you state which paths are public, which require authentication, and whether to keep form login, HTTP Basic, or both. Since Spring Security 6 / Boot 3 this bean-based style fully replaced the old <code>WebSecurityConfigurerAdapter</code>, which was removed.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -&gt; auth
+            .requestMatchers("/", "/public/**").permitAll()
+            .anyRequest().authenticated())
+        .formLogin(withDefaults())
+        .httpBasic(withDefaults());
+    return http.build();
+}</code></pre>
+    <p>One subtlety catches people out: defining this bean switches off the default request-authorization rules, but it does <em>not</em> by itself remove the built-in in-memory user — that comes from a separate auto-configuration, covered next.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/security.html" rel="noopener">Security how-to — Spring Boot (switching off the default config, changing the user service)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-config-spring-security" rel="noopener">Introduction to Java Config for Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-login" rel="noopener">Spring Security Form Login — Baeldung</a></li>
+    </ul>
+
+    <h3>Configuring users</h3>
+    <p>The generated user is meant to be replaced. The lightest override is configuration-only: set <code>spring.security.user.name</code>, <code>spring.security.user.password</code> and <code>spring.security.user.roles</code>, and Boot uses those instead of generating a password. For anything real, provide a bean — a <code>UserDetailsService</code> (in-memory, JDBC, or a custom implementation), or an <code>AuthenticationProvider</code> / <code>AuthenticationManager</code>. Supplying any one of these suppresses <code>UserDetailsServiceAutoConfiguration</code>, so the default <code>user</code> disappears.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.security.user.name=admin
+spring.security.user.password=s3cr3t
+spring.security.user.roles=ADMIN</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/user-details-service.html" rel="noopener">UserDetailsService — Spring Security reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-basic-authentication" rel="noopener">Spring Security Basic Authentication — Baeldung</a></li>
+    </ul>
+
+    <h3>Where Boot integration stops — the Spring Security track ahead</h3>
+    <p>This module deliberately stops at the Boot integration seam: the starter, the defaults, one filter-chain bean, and user configuration. Real applications go much further — JWT and OAuth2 resource servers, method-level security, role and authority models, password encoders, and database-backed authentication — and that depth belongs to a dedicated Spring Security track rather than a Boot chapter. The resources below are solid on-ramps to that deeper study when you are ready.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/security-spring" rel="noopener">Security with Spring (series) — Baeldung (the map of the wider topic)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=her_7pa0vrg" rel="noopener">Spring Security — Full Course — Amigoscode</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-testing.html">← Testing with Boot</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="10-caching-messaging-scheduling.html">Caching, Messaging and Scheduling Starters →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>How the Boot security starter is probed in Indian interviews — a favourite because the "it just works" defaults hide several gotchas:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens the moment you add spring-boot-starter-security to an app?</summary>
+      <div class="answer"><p>Auto-configuration secures everything: every endpoint (including <code>/error</code>) needs authentication, a generated form-login page and HTTP Basic are offered, CSRF protection and security headers turn on, and one in-memory user named <code>user</code> is created with a random password.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where does the login password come from, and what is the default username?</summary>
+      <div class="answer"><p>The username is <code>user</code>. The password is a random UUID generated at each startup and printed once to the console ("Using generated security password: …"). It is explicitly development-only — regenerated every restart, held only in memory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set a fixed username and password without writing any code?</summary>
+      <div class="answer"><p>Use properties: <code>spring.security.user.name</code>, <code>spring.security.user.password</code> and optionally <code>spring.security.user.roles</code>. Boot then uses those instead of generating a password. Fine for demos; not a real user store.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which auto-configurations drive the default behaviour?</summary>
+      <div class="answer"><p><code>SecurityAutoConfiguration</code> applies Spring Security's default web security (effectively the <code>@EnableWebSecurity</code> default chain), and <code>UserDetailsServiceAutoConfiguration</code> creates the in-memory <code>user</code>. Both are conditional on Spring Security being on the classpath and no user-defined equivalents present.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a SecurityFilterChain bean, and what happens to Boot's defaults when you declare one?</summary>
+      <div class="answer"><p>It is the bean that defines the ordered security filters and matching rules for requests. Declaring your own turns off Boot's default web-security auto-configuration and gives you the <code>HttpSecurity</code> builder to set authorization rules and login mechanisms. It does not, on its own, remove the default in-memory user.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the default filter chain: FilterChainProxy and DelegatingFilterProxy.</summary>
+      <div class="answer"><p><code>DelegatingFilterProxy</code> is a servlet filter that bridges the container to the Spring context. It delegates to <code>FilterChainProxy</code>, which holds the <code>SecurityFilterChain</code>(s); for each request it picks the first matching chain and runs its ordered filters (authentication, CSRF, authorization, …). Boot publishes one default chain matching every request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you replace the built-in user with real users?</summary>
+      <div class="answer"><p>Provide a bean — a <code>UserDetailsService</code> (in-memory, JDBC or custom), or an <code>AuthenticationProvider</code> / <code>AuthenticationManager</code>. Any of these suppresses <code>UserDetailsServiceAutoConfiguration</code>, so the default <code>user</code> is no longer created.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What security defaults beyond authentication does the starter switch on?</summary>
+      <div class="answer"><p>CSRF protection, session-fixation protection, and a standard set of security response headers (HSTS, X-Content-Type-Options, X-Frame-Options, Cache-Control), plus both form login and HTTP Basic. Passwords are stored/compared through a <code>PasswordEncoder</code> (BCrypt by default).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Boot decide between the form login page and an HTTP Basic 401?</summary>
+      <div class="answer"><p>By the request's <code>Accept</code> header. A browser sending <code>Accept: text/html</code> is redirected to the generated login form; an API client that does not ask for HTML gets an HTTP Basic <code>401</code> challenge. The same default chain serves both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You added a SecurityFilterChain that permits all requests, yet the default user still exists. Why, and how do you remove it?</summary>
+      <div class="answer"><p>Declaring a <code>SecurityFilterChain</code> only disables the default web-security config; the in-memory user comes from <code>UserDetailsServiceAutoConfiguration</code>, which is still active. Define a <code>UserDetailsService</code>, <code>AuthenticationProvider</code> or <code>AuthenticationManager</code> bean and that auto-configuration backs off, removing the default <code>user</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Since Spring Security 6 / Boot 3, WebSecurityConfigurerAdapter is gone. What replaced it, and why?</summary>
+      <div class="answer"><p>Component-based configuration: a <code>SecurityFilterChain</code> bean instead of overriding <code>configure(HttpSecurity)</code>, and a <code>UserDetailsService</code> / <code>AuthenticationManager</code> bean instead of <code>configure(AuthenticationManagerBuilder)</code>. It favours composition over inheritance, works cleanly with the lambda DSL, and lets you define multiple chains as ordered beans.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is the generated password labelled "development use only," and what must change for production?</summary>
+      <div class="answer"><p>It is a single user, in memory, with a password that changes on every restart — no persistence, no roles model, no real credential store. Production needs a proper user source (database-backed <code>UserDetailsService</code> or an external identity provider), encoded passwords, and an authorization model — which is where the dedicated Spring Security track picks up.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.security.defaults</li>
+      <li>boot.security.customize</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot testing module: @SpringBootTest and the test starter, the test slices (@WebMvcTest, @DataJpaTest and family), driving the web layer with MockMvc and WebTestClient, and Testcontainers with @ServiceConnection — with the best official and community resources plus the interview questions they power.">
+  <title>Testing with Boot — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Testing with Boot</h1>
+  <p class="standfirst">Boot's test support lets you load exactly as much of the application as a test needs — the whole context, or a single slice — and interview panels probe hard on whether a candidate grasps the difference and its cost.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Testing with Boot</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring Boot ships a testing toolkit on top of the Spring TestContext framework: the <code>spring-boot-starter-test</code> bundle, <code>@SpringBootTest</code> for full-context integration tests, and a family of <em>test slices</em> that boot only one layer. It also owns the web-layer test clients (MockMvc, WebTestClient) and, since Boot 3.1, first-class Testcontainers integration through <code>@ServiceConnection</code>. Slices and the orElse-style trade-offs between them are among the most-asked Spring Boot interview topics.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>@SpringBootTest and the test starter</h3>
+    <p>Adding <code>spring-boot-starter-test</code> pulls in JUnit Jupiter, Spring Test, AssertJ, Hamcrest, Mockito, JSONassert and JsonPath in one dependency — the assumed baseline for every Boot test. <code>@SpringBootTest</code> then bootstraps a real <code>ApplicationContext</code> from your <code>@SpringBootApplication</code> class, so beans are wired exactly as in production; its <code>webEnvironment</code> attribute decides whether a mock or a real embedded server comes up.</p>
+    <p>Why it matters: a full-context test is the highest-fidelity and the slowest option, so you reach for it deliberately — for flows that cross several layers — and lean on the context cache and <code>@MockitoBean</code> (the successor to <code>@MockBean</code>) to keep the suite fast. Knowing <em>when not</em> to use <code>@SpringBootTest</code> is what separates a screening answer from a senior one.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
+class OrderApiTests {
+    @Autowired TestRestTemplate rest;      // real HTTP against an embedded server
+    @MockitoBean PaymentGateway gateway;   // swap one collaborator in the context
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html" rel="noopener">Testing Spring Boot Applications — Spring Boot reference (@SpringBootTest, webEnvironment, mocking beans)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/index.html" rel="noopener">Testing — Spring Boot reference (what spring-boot-starter-test bundles)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-testing" rel="noopener">Testing in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Test slices: @WebMvcTest, @DataJpaTest and the family</h3>
+    <p>A test slice boots a narrow, purpose-built context instead of the whole application: <code>@WebMvcTest</code> loads the Spring MVC infrastructure and your controllers (plus <code>MockMvc</code>) but no <code>@Service</code> or <code>@Repository</code> beans — you supply those as mocks; <code>@DataJpaTest</code> loads JPA, your repositories and a test datasource, wraps each test in a transaction and rolls it back afterwards. The appendix lists the full set: <code>@JsonTest</code>, <code>@RestClientTest</code>, <code>@DataJdbcTest</code>, <code>@JooqTest</code> and more.</p>
+    <p>Why it matters: slices load a fraction of the beans, so they start faster and fail more precisely — and because Spring caches contexts by configuration, consistent slices are reused across the suite. This is the single most-tested Boot testing topic; expect to explain exactly what a given slice does and does not wire up.</p>
+    <pre class="code-block" data-label="Java"><code>@WebMvcTest(OrderController.class)      // only the web layer boots
+class OrderControllerTests {
+    @Autowired MockMvc mvc;
+    @MockitoBean OrderService service;  // the real service is NOT in this context
+}
+
+@DataJpaTest                            // only JPA + a test datasource; rolls back per test
+class OrderRepositoryTests {
+    @Autowired OrderRepository repo;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/appendix/test-auto-configuration/slices.html" rel="noopener">Test Slices — Spring Boot appendix (every slice annotation and what it auto-configures)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/junit-datajpatest-repository" rel="noopener">@DataJpaTest and the Repository Class — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NzMIKpYpiZ4" rel="noopener">Spring Boot Tips: Unit, Slice &amp; Integration Tests — SivaLabs</a></li>
+    </ul>
+
+    <h3>Driving the web layer: MockMvc and WebTestClient</h3>
+    <p><code>MockMvc</code> performs full Spring MVC request handling against mock request and response objects — no socket, no running server — which is why it pairs with <code>@WebMvcTest</code> and with <code>@SpringBootTest(webEnvironment = MOCK)</code>. <code>WebTestClient</code> is the fluent alternative: it drives WebFlux endpoints, can plug MockMvc in as its server for MVC apps, or bind to a live server started with <code>RANDOM_PORT</code> for true end-to-end HTTP — the same test API either way.</p>
+    <p>Why it matters: choosing the right client is a common follow-up to the slice question. MockMvc for controller-level assertions without a server, WebTestClient (or <code>TestRestTemplate</code>) when a real port is up. Both let you assert status, headers and JSON with JsonPath in one chain.</p>
+    <pre class="code-block" data-label="Java"><code>mvc.perform(get("/orders/42"))
+   .andExpect(status().isOk())
+   .andExpect(jsonPath("$.id").value(42));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/testing/mockmvc.html" rel="noopener">MockMvc — Spring Framework testing reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/testing/webtestclient.html" rel="noopener">WebTestClient — Spring Framework testing reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mockmvc-vs-webmvctest" rel="noopener">MockMvc with @SpringBootTest vs. @WebMvcTest — Baeldung</a></li>
+    </ul>
+
+    <h3>Testcontainers and @ServiceConnection</h3>
+    <p>Testcontainers spins up throwaway Docker containers — Postgres, Kafka, Redis and more — so integration tests run against the real engine instead of an in-memory stand-in. Before Boot 3.1 you wired the container's host and port into the context by hand with <code>@DynamicPropertySource</code>; <code>@ServiceConnection</code> (Boot 3.1+, and the current recommended approach) replaces that boilerplate by generating the right <code>ConnectionDetails</code> bean straight from the container, matching it to the service automatically.</p>
+    <p>Why it matters: production-like data tests are now a baseline expectation, and Testcontainers plus <code>@ServiceConnection</code> is the idiom interviewers look for. Keep the container <code>static</code> so it is shared across the class — startup is expensive — and remember it needs the <code>spring-boot-testcontainers</code> module and a running Docker environment.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootTest
+@Testcontainers
+class OrderIntegrationTests {
+    @Container
+    @ServiceConnection                    // JDBC url/user/password wired into the context
+    static PostgreSQLContainer&lt;?&gt; db = new PostgreSQLContainer&lt;&gt;("postgres:16");
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers — Spring Boot reference (@ServiceConnection, dynamic properties)</a></li>
+      <li>[Official] <a href="https://testcontainers.com/guides/testing-spring-boot-rest-api-using-testcontainers/" rel="noopener">Getting started with Testcontainers in a Java Spring Boot project — Testcontainers guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-built-in-testcontainers" rel="noopener">Built-in Testcontainers Support in Spring Boot (3.1, @ServiceConnection) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=erp-7MCK5BU" rel="noopener">Spring Boot Testcontainers — Integration Testing made easy! — Dan Vega</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q-0Z6KZF1xM" rel="noopener">Spring Boot 3 Integration Testing With TestContainers (JUnit 5) — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-observability.html">← Observability</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="09-security-starter.html">Security with the Boot Starter →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked Spring Boot testing questions in Indian interviews — test slices are a screening-round staple from service companies to product teams:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @SpringBootTest do, and when do you reach for it?</summary>
+      <div class="answer"><p>It bootstraps a full <code>ApplicationContext</code> from your <code>@SpringBootApplication</code> class, wiring beans as in production. Use it for integration tests that cross several layers; for a single layer, prefer a slice — the full context is the slowest, highest-fidelity option.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What comes bundled in spring-boot-starter-test?</summary>
+      <div class="answer"><p>JUnit Jupiter, Spring Test and Spring Boot Test, AssertJ, Hamcrest, Mockito, JSONassert and JsonPath — one dependency that covers most testing needs, which is why it is the assumed baseline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a test slice, and why use one?</summary>
+      <div class="answer"><p>A slice annotation boots only the beans and auto-configuration for one layer (web, JPA, JSON…) rather than the whole app. Result: faster startup, fewer beans to go wrong, and failures scoped to that layer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @WebMvcTest load — and what does it deliberately leave out?</summary>
+      <div class="answer"><p>It loads the Spring MVC infrastructure, your <code>@Controller</code>/<code>@RestController</code> beans, and auto-configures <code>MockMvc</code>. It does NOT load <code>@Service</code>, <code>@Repository</code> or <code>@Component</code> beans — you provide collaborators as <code>@MockitoBean</code> mocks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @WebMvcTest vs @SpringBootTest with @AutoConfigureMockMvc — what is the difference?</summary>
+      <div class="answer"><p>Both give you a <code>MockMvc</code>. <code>@WebMvcTest</code> loads only the web slice, so service/repository beans are absent and must be mocked; <code>@SpringBootTest</code> loads the entire context, so real collaborators are present. The slice is faster and more focused; the full context is a genuine integration test.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does @DataJpaTest configure, and what is its default transaction behaviour?</summary>
+      <div class="answer"><p>It boots JPA, your Spring Data repositories and a test datasource (by default replacing your <code>DataSource</code> with an embedded one). Each test runs in a transaction that is rolled back at the end, so tests stay isolated and leave no data behind.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> MockMvc vs WebTestClient vs TestRestTemplate — when do you use each?</summary>
+      <div class="answer"><p><code>MockMvc</code>: mock servlet request handling, no server — controller-level tests. <code>WebTestClient</code>: fluent client for WebFlux, or for MVC (via MockMvc) or a live server. <code>TestRestTemplate</code>: real HTTP against an embedded server started with <code>RANDOM_PORT</code>/<code>DEFINED_PORT</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does @MockitoBean (formerly @MockBean) do, and what is the catch?</summary>
+      <div class="answer"><p>It adds or replaces a bean in the <code>ApplicationContext</code> with a Mockito mock. The catch: it changes the context definition, so Spring cannot reuse a cached context — you get a fresh one, which can slow a suite if applied inconsistently across many tests.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do slice tests run faster than @SpringBootTest, and how does context caching fit in?</summary>
+      <div class="answer"><p>Slices instantiate far fewer beans, so each context starts quickly. Spring also caches contexts keyed by their configuration and reuses them across test classes; tests sharing an identical slice configuration share one context. <code>@MockitoBean</code> and <code>@DirtiesContext</code> create new cache entries and forfeit that reuse.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What problem does @ServiceConnection solve, and since which version?</summary>
+      <div class="answer"><p>Since Boot 3.1. It reads a Testcontainers container and auto-generates the matching <code>ConnectionDetails</code> bean, wiring host/port/credentials into the context automatically — removing the manual <code>@DynamicPropertySource</code> plumbing you needed before.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the webEnvironment options of @SpringBootTest and what changes with each?</summary>
+      <div class="answer"><p><code>MOCK</code> (default): a mock servlet environment, no real port — pair with <code>MockMvc</code>. <code>RANDOM_PORT</code> and <code>DEFINED_PORT</code>: a real embedded server on a random or fixed port — use <code>WebTestClient</code> or <code>TestRestTemplate</code>. <code>NONE</code>: context loads with no web environment at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> @DataJpaTest replaces your datasource by default — how do you test against the real database engine?</summary>
+      <div class="answer"><p>Annotate with <code>@AutoConfigureTestDatabase(replace = Replace.NONE)</code> so Boot keeps your configured <code>DataSource</code>, then point it at a Testcontainers instance (ideally via <code>@ServiceConnection</code>). Now the repository tests run against the same engine as production, catching dialect and migration issues an embedded database would hide.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why keep a Testcontainer static, and how do @Container, @ServiceConnection and @DynamicPropertySource relate?</summary>
+      <div class="answer"><p>Container startup is expensive, so a <code>static</code> field is started once and shared across all methods in the class (a JUnit-lifecycle detail), rather than per test. <code>@Container</code> manages the container lifecycle; <code>@ServiceConnection</code> is the modern way to feed its connection details into the context; <code>@DynamicPropertySource</code> is the manual predecessor, still useful for properties no service connection covers.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.test.slices</li>
+      <li>boot.test.containers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

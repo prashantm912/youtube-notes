@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot Actuator module: enabling and exposing endpoints, the health endpoint with indicators and groups, the info endpoint, securing Actuator, building custom endpoints, and Kubernetes liveness/readiness probes — with verified official docs and the interview questions they power.">
+  <title>Spring Boot Actuator — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Actuator</h1>
+  <p class="standfirst">Actuator is the difference between an app you can start and one you can operate — it ships the health checks, endpoints, and probes that ops teams, load balancers, and Kubernetes actually query in production.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Actuator</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Add one starter and your application grows a management surface: HTTP (and JMX) endpoints that report health, expose configuration, and let operators manage a running process. This module orients you on enabling and exposing those endpoints, the health endpoint and its indicators and groups, the info endpoint, securing the management surface, writing your own endpoints, and the liveness/readiness probes that make Boot a first-class Kubernetes citizen. Depth lives in the linked official docs; the framing here is what interviews test.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Enabling Actuator and exposing endpoints</h3>
+    <p>Adding <code>spring-boot-starter-actuator</code> registers a set of built-in endpoints (health, info, metrics, env, beans, mappings, loggers, threaddump, heapdump, shutdown, and more). Two independent controls decide what a caller can reach: <em>exposure</em> — which endpoints are published over a transport (<code>management.endpoints.web.exposure.include</code>/<code>exclude</code>) — and <em>access</em> — whether an exposed endpoint responds and at what level (<code>management.endpoint.&lt;id&gt;.access</code>, or the blanket <code>management.endpoints.access.default</code>). Keeping the two distinct is the point most candidates miss.</p>
+    <p>The defaults are deliberately conservative: over HTTP only <code>health</code> is exposed, and sensitive endpoints such as <code>shutdown</code> are not openly accessible. You opt in per environment — a little in production, more on an internal ops network.</p>
+    <pre class="code-block" data-label="properties"><code># expose a curated set over HTTP; never blindly use "*" in prod
+management.endpoints.web.exposure.include=health,info,metrics,prometheus
+management.endpoints.web.exposure.exclude=env,beans</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/enabling.html" rel="noopener">Enabling Production-ready Features — Spring Boot Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html" rel="noopener">Endpoints (access, exposure, and the built-in list) — Spring Boot Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-actuators" rel="noopener">Spring Boot Actuator — Baeldung (the standard end-to-end walkthrough)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CCMAhpVvpyk" rel="noopener">Spring Boot Actuator Full Tutorial — Cameron McKenzie (TheServerSide)</a></li>
+    </ul>
+
+    <h3>The health endpoint: indicators, groups, and info</h3>
+    <p><code>/actuator/health</code> aggregates the worst status of every registered <code>HealthIndicator</code> — Boot auto-configures indicators for the datasource, Redis, disk space, message brokers, and more, and you can add your own by implementing <code>HealthIndicator</code>. By default the response is just an overall <code>status</code>; <code>management.endpoint.health.show-details</code> (<code>never</code>, <code>when-authorized</code>, <code>always</code>) controls whether per-component detail is returned. <em>Health groups</em> bundle a subset of indicators under their own sub-path (for example a <code>readiness</code> group), which is exactly the machinery Kubernetes probes reuse.</p>
+    <p>The sibling <code>/actuator/info</code> endpoint surfaces static application facts — build version, git commit, arbitrary <code>info.*</code> properties — useful for confirming which artifact is actually deployed.</p>
+    <pre class="code-block" data-label="properties"><code>management.endpoint.health.show-details=when-authorized
+management.endpoint.health.group.readiness.include=readinessState,db
+info.app.name=orders-service
+info.app.version=1.4.2</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/rest/actuator/health.html" rel="noopener">Health endpoint REST API (response shape, components, groups) — Spring Boot</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-health-indicators" rel="noopener">Health Indicators in Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-info-actuator-custom" rel="noopener">Custom Information in the Info Endpoint — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z16fBE-k1oQ" rel="noopener">Spring Boot Actuator Endpoints (health, env, metrics, dumps) — Cameron McKenzie</a></li>
+    </ul>
+
+    <h3>Securing Actuator and the management server</h3>
+    <p>Because endpoints like <code>env</code>, <code>heapdump</code>, <code>configprops</code>, and <code>shutdown</code> expose or affect internals, the management surface needs the same care as any other. Three layers combine: expose narrowly, restrict access, and put authentication in front. With Spring Security on the classpath, a <code>SecurityFilterChain</code> can require a role for <code>EndpointRequest.toAnyEndpoint()</code> while leaving <code>health</code> open. You can also isolate the surface entirely — a separate <code>management.server.port</code> and a bound <code>management.server.address</code> (or a changed <code>management.endpoints.web.base-path</code>) keep operational endpoints off the public application port.</p>
+    <pre class="code-block" data-label="properties"><code># run management endpoints on a separate, internal-only port
+management.server.port=9001
+management.server.address=127.0.0.1</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/monitoring.html" rel="noopener">Monitoring and Management Over HTTP (port, address, base-path) — Spring Boot Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/actuator.html" rel="noopener">Actuator How-to Guides (port/address, sanitizing sensitive values) — Spring Boot</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-actuator-enable-endpoints" rel="noopener">Enabling and Securing Actuator Endpoints — Baeldung</a></li>
+    </ul>
+
+    <h3>Custom endpoints</h3>
+    <p>When a built-in endpoint does not fit, annotate a bean with <code>@Endpoint(id = "...")</code> and expose operations with <code>@ReadOperation</code> (GET), <code>@WriteOperation</code> (POST), and <code>@DeleteOperation</code> (DELETE); the operations are automatically available over both HTTP and JMX. Transport-specific variants — <code>@WebEndpoint</code> and <code>@JmxEndpoint</code> — let you target one protocol. This is the sanctioned way to publish domain-specific operational actions (feature toggles, cache flushes, on-demand diagnostics) through the same secured, discoverable surface as the built-ins rather than as ad-hoc controllers.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+@Endpoint(id = "features")
+public class FeaturesEndpoint {
+    @ReadOperation
+    public Map&lt;String, Boolean&gt; features() { return toggles.snapshot(); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.danvega.dev/blog/spring-boot-actuator" rel="noopener">Spring Boot Actuator, including a custom @Endpoint — Dan Vega</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=otcYECeFS6Y" rel="noopener">Mastering Spring Boot's Actuator — SpringDeveloper (Madhura Bhave)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hR-IdJZ9N7I" rel="noopener">Create a Custom Spring Boot Actuator Endpoint — Cameron McKenzie</a></li>
+    </ul>
+
+    <h3>Kubernetes readiness and liveness probes</h3>
+    <p>Boot models two orthogonal availability states: <em>liveness</em> (is the internal state still valid, or is the process broken beyond recovery and in need of a restart) and <em>readiness</em> (can it accept traffic right now). With Actuator present, these are exposed as health groups at <code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code> — auto-enabled when Boot detects Kubernetes, or switched on with <code>management.endpoint.health.probes.enabled</code>. Application code can flip the state by publishing an <code>AvailabilityChangeEvent</code>. The interview trap: liveness must depend only on the process itself (a stuck deadlock), never on external dependencies — otherwise a transient database outage triggers a pointless restart storm, when failing <em>readiness</em> to drain traffic is the correct response.</p>
+    <pre class="code-block" data-label="properties"><code>management.endpoint.health.probes.enabled=true
+management.endpoints.web.exposure.include=health
+# probes then answer at /actuator/health/liveness and /actuator/health/readiness</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/blog/2020/03/25/liveness-and-readiness-probes-with-spring-boot/" rel="noopener">Liveness and Readiness Probes with Spring Boot — Spring Blog (Brian Clozel)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html" rel="noopener">Application Availability (LivenessState / ReadinessState) — Spring Boot Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-liveness-readiness-probes" rel="noopener">Liveness and Readiness Probes in Spring Boot — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-data-access.html">← Data Access with Boot</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="07-observability.html">Observability →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Actuator recurs in Indian backend and DevOps interviews — health, probes, and securing the management surface are the reliable ones:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Spring Boot Actuator and what does it give you?</summary>
+      <div class="answer"><p>A module (<code>spring-boot-starter-actuator</code>) that adds production-ready monitoring and management endpoints — health, info, metrics, env, loggers, threaddump and more — over HTTP and JMX, without you writing them. It is the standard way to make a Boot app observable and operable in production.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> After adding the starter, why can you only reach /actuator/health?</summary>
+      <div class="answer"><p>By default only the <code>health</code> endpoint is exposed over HTTP. Others exist but are not published until you list them under <code>management.endpoints.web.exposure.include</code>. The conservative default avoids leaking internals by accident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the default base path, and how do you expose all endpoints?</summary>
+      <div class="answer"><p>Endpoints live under <code>/actuator</code> (so health is <code>/actuator/health</code>). <code>management.endpoints.web.exposure.include=*</code> exposes everything — convenient in dev, but a security risk in production, so prefer an explicit list.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between exposing an endpoint and its access level?</summary>
+      <div class="answer"><p>Exposure decides which endpoints are published over a transport (<code>...web.exposure.include/exclude</code>). Access (<code>management.endpoint.&lt;id&gt;.access</code> or <code>management.endpoints.access.default</code>) decides whether an exposed endpoint actually responds, and at what level (none, read-only, unrestricted). Both must permit a call for it to succeed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does /actuator/health compute its status, and what are health indicators?</summary>
+      <div class="answer"><p>It aggregates every registered <code>HealthIndicator</code> and returns the worst status (DOWN beats OUT_OF_SERVICE beats UP). Boot auto-configures indicators for datasource, disk space, Redis, brokers, etc.; you add custom ones by implementing <code>HealthIndicator</code> and returning a <code>Health</code> object.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you show full health details, and why is it guarded?</summary>
+      <div class="answer"><p><code>management.endpoint.health.show-details</code> takes <code>never</code> (default), <code>when-authorized</code>, or <code>always</code>. Per-component detail (database name, disk paths, validation queries) is sensitive, so it is hidden unless you opt in — typically <code>when-authorized</code> behind Spring Security.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a health group and when do you use one?</summary>
+      <div class="answer"><p>A named subset of indicators exposed at its own sub-path, e.g. <code>management.endpoint.health.group.readiness.include=...</code> answers at <code>/actuator/health/readiness</code>. Groups let you assemble a purpose-built check — the mechanism the Kubernetes liveness/readiness probes are built on.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you secure Actuator endpoints in production?</summary>
+      <div class="answer"><p>Layer three controls: expose only what you need, restrict access levels, and add authentication. With Spring Security, a <code>SecurityFilterChain</code> can require a role for <code>EndpointRequest.toAnyEndpoint()</code> while leaving <code>health</code> public. Optionally move the whole surface to a separate <code>management.server.port</code> bound to an internal address.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Liveness vs readiness probe — what is the difference?</summary>
+      <div class="answer"><p>Liveness answers "is the process broken and unrecoverable?" — failing it makes Kubernetes restart the pod. Readiness answers "can it serve traffic now?" — failing it makes Kubernetes stop routing to the pod without restarting it. Boot exposes them at <code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you build a custom Actuator endpoint?</summary>
+      <div class="answer"><p>Annotate a bean with <code>@Endpoint(id = "...")</code> and add <code>@ReadOperation</code>/<code>@WriteOperation</code>/<code>@DeleteOperation</code> methods (GET/POST/DELETE), automatically served over HTTP and JMX. Use <code>@WebEndpoint</code> or <code>@JmxEndpoint</code> to target a single transport. It reuses the same secured, discoverable infrastructure as built-in endpoints — unlike a hand-rolled controller.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why must a liveness probe not depend on external systems like the database?</summary>
+      <div class="answer"><p>Liveness failure triggers a restart, which cannot fix an external outage — so a database blip would restart every pod repeatedly (a crash/restart storm) while making nothing better. Liveness should reflect only internal, unrecoverable state; a downed dependency should fail <em>readiness</em> instead, draining traffic until it recovers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> During graceful shutdown, what should happen to each probe, and why?</summary>
+      <div class="answer"><p>Readiness should flip to REFUSING_TRAFFIC first so the platform stops routing new requests while in-flight ones finish; liveness should stay valid so the orchestrator does not kill the pod mid-drain. Boot wires this into its graceful-shutdown and availability events, which is why draining works cleanly behind a load balancer.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.actuator.endpoints</li>
+      <li>boot.actuator.security</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

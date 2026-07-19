@@ -359,7 +359,7 @@ Prereq: web-platform PLAN.md Phase 0 infra (shared). Then phases here are sequen
 independent of the web course phases — the two courses can interleave by user choice:
 - **Phase E1:** J1 Core Java (DONE, 22 modules, 61/61) → J2 Advanced Java (DONE 2026-07-19, 14 modules, 42/42, 259 links)
 - **Phase E2:** D1 Databases (DONE 2026-07-19, 14 modules, 28/28, 238 links)
-- **Phase E3:** S1 Spring (DONE 2026-07-19, 15 modules, 34/34, 241 links) → S2 Boot → H1 JPA → S3 Security
+- **Phase E3:** S1 Spring (DONE 2026-07-19, 15 modules, 34/34, 241 links) → S2 Boot (DONE 2026-07-19, 12 modules, 24/24, 187 links) → H1 JPA → S3 Security
 - **Phase E3b:** J3 Jakarta EE (after the Spring stack — taught with constant Spring contrast)
 - **Phase E4:** T2 Backend Testing
 - **Phase E5:** A1 → A2 → A3 Angular + T1 Frontend Testing

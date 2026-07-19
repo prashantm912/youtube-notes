@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot Observability module: Micrometer metrics and the Prometheus registry, common tags, distributed tracing with Micrometer Tracing/OpenTelemetry, and structured logging with correlation IDs — the best official and community resources, plus the interview questions they power.">
+  <title>Observability — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Observability</h1>
+  <p class="standfirst">Actuator tells you the app is up; observability tells you <em>why</em> a request was slow. This module maps Boot's three pillars — metrics, traces, logs — to the Micrometer stack that produces them, and points you at the resources that teach each properly.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Observability</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Observability in Spring Boot is delivered through Micrometer: an application metrics facade (think SLF4J, but for telemetry) that Boot auto-configures. This module covers the meter model and common tags, exporting to Prometheus, distributed tracing via Micrometer Tracing over Brave or OpenTelemetry, and structured JSON logging with trace-correlated IDs. It builds directly on the Actuator module — the same <code>/actuator</code> surface exposes <code>/prometheus</code> and drives probes.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Micrometer: meters, registries and common tags</h3>
+    <p>Micrometer is the metrics facade underneath Spring Boot. You instrument against its API — <code>Counter</code>, <code>Gauge</code>, <code>Timer</code>, <code>DistributionSummary</code> — and Boot auto-configures a composite <code>MeterRegistry</code> that fans each meter out to whatever monitoring backends are on the classpath, without vendor lock-in. Out of the box you already get JVM, system, HTTP-server, datasource and cache meters.</p>
+    <p>Why it matters: every meter carries <em>dimensions</em> (tags). <code>http.server.requests</code> tagged by <code>uri</code>, <code>method</code> and <code>status</code> is what lets you slice one metric a hundred ways. Common tags (region, instance, stack) are stamped onto every meter for environment-level drill-down — knowing how and where to set them is standard senior-round material.</p>
+    <pre class="code-block" data-label="YAML"><code>management:
+  metrics:
+    tags:                 # common tags applied to every meter
+      region: "ap-south-1"
+      application: "orders-api"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html" rel="noopener">Metrics — Spring Boot Actuator reference (auto-configured meters, supported registries, common tags)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts.html" rel="noopener">Concepts — Micrometer reference (meters, tags, naming, filters)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/micrometer" rel="noopener">Quick Guide to Micrometer — Baeldung</a></li>
+    </ul>
+
+    <h3>Exporting to Prometheus</h3>
+    <p>Prometheus is the pull-based default: add the <code>micrometer-registry-prometheus</code> dependency and Boot exposes an <code>/actuator/prometheus</code> endpoint in the text exposition format that a Prometheus server scrapes on an interval. Micrometer translates its dimensional meters into Prometheus time series, applying naming conventions (dots become underscores, base units appended).</p>
+    <p>Why it matters: Prometheus + Grafana is the de-facto open-source dashboarding stack in Indian product teams, and the endpoint must be deliberately exposed and secured — it is not on by default. Understanding the scrape model (and why high-cardinality tags blow up a Prometheus server) separates people who <em>use</em> a dashboard from people who can <em>build</em> one.</p>
+    <pre class="code-block" data-label="Properties"><code>management.endpoints.web.exposure.include=health,info,prometheus
+# scraped by Prometheus at GET /actuator/prometheus</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/implementations/prometheus.html" rel="noopener">Micrometer Prometheus — Micrometer reference (registry setup, scrape format, exemplars)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-prometheus" rel="noopener">Monitor a Spring Boot App Using Prometheus — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=PT2yZTBnUwQ" rel="noopener">Spring Boot 3 Observability with Grafana Stack — Programming Techie</a></li>
+    </ul>
+
+    <h3>Distributed tracing: Micrometer Tracing, OpenTelemetry and the Observation API</h3>
+    <p>A trace follows one request across service boundaries; each hop is a <em>span</em> under a shared <em>trace id</em>. Micrometer Tracing is the facade (the successor to the now-deprecated Spring Cloud Sleuth) that bridges to a real tracer — OpenZipkin Brave or OpenTelemetry — and Boot auto-configures propagation so trace context rides along your <code>RestClient</code>/<code>WebClient</code> calls automatically. Sampling (<code>management.tracing.sampling.probability</code>, default 0.1) controls how many traces are actually recorded.</p>
+    <p>Why it matters: the unifying idea is the <strong>Observation API</strong> — you instrument a piece of work <em>once</em> and get a metric, a span, and log context out of the same recording. Interviewers probe whether you understand that one abstraction rather than three parallel libraries, and why you sample instead of tracing every request in production.</p>
+    <pre class="code-block" data-label="Java"><code>Observation.createNotStarted("order.checkout", registry)
+    .lowCardinalityKeyValue("channel", "web")   // safe as a metric tag
+    .highCardinalityKeyValue("orderId", id)      // trace-only detail
+    .observe(() -&gt; processCheckout(id));          // one meter + one span</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/tracing.html" rel="noopener">Tracing — Spring Boot Actuator reference (Brave/OTel bridges, propagation, sampling)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/observability.html" rel="noopener">Observability — Spring Boot Actuator reference (Observation API, @Observed, common key-values)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/tracing/reference/index.html" rel="noopener">Tracing support — Micrometer Tracing reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-3-observability" rel="noopener">Observability With Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ssje93u2GWM" rel="noopener">Observability 101 with Spring and Micrometer — SpringDeveloper (Nele Uhlemann)</a></li>
+    </ul>
+
+    <h3>Structured logging and correlation IDs</h3>
+    <p>The third pillar is logs — but plain text logs are hard to query at scale. Since Boot 3.4 structured logging is built in: set <code>logging.structured.format.console</code> to <code>ecs</code>, <code>gelf</code> or <code>logstash</code> and each line becomes machine-readable JSON that ships straight into Elasticsearch, Graylog or Loki. When tracing is active, Boot injects the trace and span IDs into the logging MDC so every line can be correlated back to its request.</p>
+    <p>Why it matters: correlated logs are what turn "an error happened somewhere" into "click this trace id, see every log line for that exact request across three services." It is the payoff that ties the three pillars together, and the <code>logging.pattern.correlation</code> / structured-format properties are the concrete knobs interviewers expect you to name.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/logging.html" rel="noopener">Logging — Spring Boot reference (Structured Logging: ECS, GELF, Logstash; correlation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-structured-logging" rel="noopener">Structured Logging in Spring Boot — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-actuator.html">← Actuator</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="08-testing.html">Testing with Boot →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked observability questions in Indian interviews — metrics and tracing are a microservices-round staple:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Micrometer and how does Spring Boot use it?</summary>
+      <div class="answer"><p>A vendor-neutral metrics (and, with the Observation API, tracing) facade — "SLF4J for observability." You code against its API; Boot auto-configures a composite <code>MeterRegistry</code> that exports to whatever backend (Prometheus, Datadog, OTLP…) is on the classpath, so you can swap monitoring systems without changing instrumentation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three pillars of observability?</summary>
+      <div class="answer"><p>Metrics (aggregated numbers over time), traces (the path of one request across services), and logs (discrete events). Boot produces all three from the Micrometer stack, and correlation IDs stitch logs and traces together.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you expose Prometheus metrics from a Spring Boot app?</summary>
+      <div class="answer"><p>Add <code>spring-boot-starter-actuator</code> and <code>micrometer-registry-prometheus</code>, then expose the endpoint with <code>management.endpoints.web.exposure.include=prometheus</code>. Prometheus scrapes <code>GET /actuator/prometheus</code>. It is not exposed by default — that is deliberate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are tags (dimensions) on a meter, and what are common tags?</summary>
+      <div class="answer"><p>Key-value pairs that let one metric be sliced many ways — e.g. <code>http.server.requests</code> by <code>uri</code>/<code>status</code>. Common tags are values stamped onto <em>every</em> meter (region, instance, application) for environment-level drill-down; configured under <code>management.metrics.tags</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Counter vs Gauge vs Timer vs DistributionSummary?</summary>
+      <div class="answer"><p>Counter: a monotonically increasing count (requests served). Gauge: a value that can go up and down, sampled on scrape (queue depth). Timer: counts events <em>and</em> records their duration (latency). DistributionSummary: like a Timer but for non-time magnitudes (payload size). Timers/summaries can also emit percentiles and histograms.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does distributed tracing identify one request across services?</summary>
+      <div class="answer"><p>A trace id is generated at the entry point and propagated over the network (via headers like W3C <code>traceparent</code>); each unit of work is a span with its own span id and a parent pointer. Boot auto-instruments <code>RestClient</code>/<code>WebClient</code>/<code>RestTemplate</code> so the context travels automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What replaced Spring Cloud Sleuth in Spring Boot 3?</summary>
+      <div class="answer"><p>Micrometer Tracing. Sleuth was deprecated; its tracing functionality moved into Micrometer Tracing, a facade that bridges to Brave or OpenTelemetry. Naming it — and knowing it is a migration, not a rewrite of your instrumentation — is a common Boot 3 question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do trace and span IDs end up in your logs?</summary>
+      <div class="answer"><p>When tracing is on, Boot populates the logging MDC with <code>traceId</code>/<code>spanId</code> and adds them to the default log pattern (customizable via <code>logging.pattern.correlation</code>). That is what lets you jump from a log line to the full trace, and vice versa.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Brave vs OpenTelemetry — what do you actually choose between?</summary>
+      <div class="answer"><p>Both are tracer implementations behind Micrometer Tracing, selected by dependency: <code>micrometer-tracing-bridge-brave</code> (OpenZipkin Brave, pairs naturally with Zipkin) or <code>micrometer-tracing-bridge-otel</code> (OpenTelemetry, exports via OTLP to Tempo/Jaeger/most vendors). Your instrumentation code is identical either way.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the Observation API and why "instrument once"?</summary>
+      <div class="answer"><p>A single Micrometer abstraction: you wrap work in an <code>Observation</code> and registered handlers derive a timer metric, a trace span, and log context from that one recording — instead of writing three separate instrumentations that can drift out of sync. <code>@Observed</code> is the annotation-driven shortcut.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is trace sampling and why not record every request?</summary>
+      <div class="answer"><p>Sampling records only a fraction of traces (<code>management.tracing.sampling.probability</code>, default 0.1 = 10%) to bound storage and overhead. In production you rarely trace 100% — the cost and volume are prohibitive; you raise it in dev or for targeted debugging.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Low-cardinality vs high-cardinality tags — why does the distinction matter?</summary>
+      <div class="answer"><p>Every unique tag-value combination is a separate metric time series, so high-cardinality values (user id, order id, request id) as <em>metric</em> tags cause a cardinality explosion that can take down Prometheus. Rule: low-cardinality key-values go on metrics; high-cardinality detail belongs only on spans/traces — the Observation API makes you declare which is which.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does Micrometer map its meters onto Prometheus, and what naming rules apply?</summary>
+      <div class="answer"><p>Dimensional meters become Prometheus time series with tags as labels; Micrometer normalizes names to Prometheus conventions — dots to underscores, base units appended (<code>_seconds</code>, <code>_bytes</code>), and Timers expand into <code>_count</code>/<code>_sum</code>/<code>_max</code> (plus <code>_bucket</code> when histograms are enabled). This is why the metric name you register is not byte-for-byte what you query.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why use built-in structured logging over a Logstash encoder, and what formats does Boot support?</summary>
+      <div class="answer"><p>Since Boot 3.4 structured logging ships out of the box (<code>logging.structured.format.console=ecs|gelf|logstash</code>), so you get queryable JSON without adding a Logback encoder dependency or XML config — and it stays consistent across console and file, integrates with correlation IDs, and supports custom fields plus your own <code>StructuredLogFormatter</code>. The old <code>LogstashEncoder</code> route still works but is more setup and less integrated.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.obs.metrics</li>
+      <li>boot.obs.tracing</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

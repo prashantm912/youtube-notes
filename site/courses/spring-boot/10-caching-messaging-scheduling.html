@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot's caching, messaging and scheduling starters: the cache abstraction and providers (Simple, Caffeine, Redis), what the Kafka/AMQP/JMS starters auto-configure, and @Scheduled/@Async — official docs first, plus the interview questions they power.">
+  <title>Caching, Messaging and Scheduling Starters — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Caching, Messaging and Scheduling Starters</h1>
+  <p class="standfirst">Three cross-cutting concerns Boot turns into a dependency plus an annotation: cache a method's result, hand work to a broker, or run a job on a timer. This module maps what each starter auto-configures — and points clearly at where the real depth lives.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Caching, Messaging and Scheduling Starters</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Boot doesn't reinvent caching, messaging or scheduling — those live in the Spring Framework and its sibling projects (Spring for Apache Kafka, Spring AMQP, Spring JMS). What Boot adds is <em>auto-configuration</em>: put the right starter on the classpath, set a few properties, and a <code>CacheManager</code>, a <code>KafkaTemplate</code>, or a task scheduler appears ready to inject. This page is deliberately integration-focused — it explains the wiring Boot gives you and defers the deep protocol-level material to the dedicated tracks and linked resources.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The cache abstraction and the cache starter</h3>
+    <p>Spring's cache abstraction is a thin, provider-neutral layer: annotate a method with <code>@Cacheable</code> and its return value is stored keyed by the arguments, so the second call with the same inputs skips the method body entirely. <code>@CachePut</code> always runs the method and refreshes the entry; <code>@CacheEvict</code> removes entries. <code>@EnableCaching</code> switches the machinery on. Because it is annotation- and proxy-based, the same code works whether the backing store is an in-memory map or a Redis cluster.</p>
+    <p>Why it matters: caching is one of the cheapest performance wins in a service, and interviewers probe whether you understand it is a proxy AOP feature (with all the self-invocation caveats that implies) rather than magic. Knowing the three core annotations and what <code>@EnableCaching</code> actually enables is baseline for a Boot role.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+class BookService {
+  @Cacheable("books")                 // second call with same isbn is served from cache
+  Book findByIsbn(String isbn) { return slowLookup(isbn); }
+
+  @CacheEvict(value = "books", key = "#book.isbn")
+  void update(Book book) { repository.save(book); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/io/caching.html" rel="noopener">Caching — Spring Boot Reference (what the cache starter auto-configures)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/cache.html" rel="noopener">Cache Abstraction — Spring Framework Reference (the annotations in depth)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/caching/" rel="noopener">Caching Data with Spring — Getting Started guide (spring.io)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cache-tutorial" rel="noopener">A Guide To Caching in Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Cache providers: Simple, Caffeine and Redis</h3>
+    <p>With <code>spring-boot-starter-cache</code> and no provider on the classpath, Boot falls back to the <strong>Simple</strong> provider — a <code>ConcurrentHashMap</code>-backed <code>CacheManager</code>, fine for a single instance and tests. Add Caffeine and you get a high-performance local cache with size limits and time-based eviction; add <code>spring-boot-starter-data-redis</code> and Boot auto-configures a <code>RedisCacheManager</code> so entries are shared across every instance of a horizontally-scaled service. Boot auto-detects the provider, and <code>spring.cache.type</code> lets you pin it explicitly.</p>
+    <p>Why it matters: "local vs distributed cache" is a standard design question. Caffeine is fast but per-node (each instance has its own copy, which can go stale); Redis is a network hop but shared and survives a restart. Picking the wrong one is a real production incident, so this trade-off comes up often.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-redis-cache" rel="noopener">Spring Boot Cache with Redis — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-caffeine-cache" rel="noopener">Spring Boot and Caffeine Cache — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vpe4aDu5ixI" rel="noopener">Spring Data Redis as Cache — @Cacheable, @CacheEvict, @CachePut — Java Techie</a></li>
+    </ul>
+
+    <h3>Messaging starters: Kafka and RabbitMQ (AMQP)</h3>
+    <p>Boot ships a starter per broker family. With <code>spring-kafka</code> present, a <code>KafkaTemplate</code> is auto-configured for producing and any <code>@KafkaListener</code> bean gets a default container factory for consuming — all driven by <code>spring.kafka.*</code> properties. The AMQP starter does the parallel job for RabbitMQ: a <code>RabbitTemplate</code> and <code>ConnectionFactory</code> for sending, and a <code>SimpleRabbitListenerContainerFactory</code> so <code>@RabbitListener</code> methods receive. You write the producer and consumer; Boot wires the connection, serializers and listener plumbing.</p>
+    <p>This is a survey by design: partitions and consumer-group rebalancing, exchange and routing-key topology, delivery guarantees and stream processing are the substance of a dedicated messaging track. Here the goal is to recognise what the starter hands you and how little boilerplate remains.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+class OrderListener {
+  @KafkaListener(topics = "orders", groupId = "billing")
+  void handle(String message) { process(message); }   // container + factory are auto-configured
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/index.html" rel="noopener">Messaging — Spring Boot Reference (starters overview)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/kafka.html" rel="noopener">Apache Kafka Support — Spring Boot Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/amqp.html" rel="noopener">AMQP (RabbitMQ) — Spring Boot Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-kafka" rel="noopener">Intro to Apache Kafka with Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rVqAoUIPO7I" rel="noopener">Apache Kafka Producer Example using Spring Boot 3.x — Java Techie</a></li>
+    </ul>
+
+    <h3>JMS and choosing a messaging technology</h3>
+    <p>JMS is the Jakarta standard, and Boot auto-configures a <code>JmsTemplate</code> plus a listener container for <code>@JmsListener</code> when an ActiveMQ "Classic" or Artemis broker is on the classpath — the same send/receive shape as Kafka and AMQP, just over a different API. The three feel similar in Boot precisely because the auto-configuration normalises them; the differences that matter are in the brokers, not the annotations. Kafka is a partitioned, replayable log for high-throughput event streaming; RabbitMQ/AMQP excels at flexible routing through exchanges; JMS is the portable enterprise-standard choice, often over ActiveMQ.</p>
+    <p>Why it matters: senior interviews ask you to <em>justify</em> a broker, not just wire one. The honest answer is that Boot only auto-configures the plumbing — topology, error handling, dead-letter queues and delivery semantics remain your design decisions whichever technology you pick.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/jms.html" rel="noopener">JMS — Spring Boot Reference (ActiveMQ / Artemis auto-config)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/messaging-rabbitmq/" rel="noopener">Messaging with RabbitMQ — Getting Started guide (spring.io)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-amqp" rel="noopener">Messaging Using Spring AMQP — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-jms" rel="noopener">Getting Started with Spring JMS — Baeldung</a></li>
+    </ul>
+
+    <h3>Scheduling and async execution: @Scheduled and @Async</h3>
+    <p>Boot auto-configures the executor and scheduler infrastructure, then two Framework annotations do the work. <code>@Scheduled</code> (switched on by <code>@EnableScheduling</code>) runs a method on a timer — <code>fixedRate</code> starts runs at a set interval regardless of duration, <code>fixedDelay</code> waits after each run finishes, and <code>cron</code> takes a six-field expression for calendar-based jobs. <code>@Async</code> (switched on by <code>@EnableAsync</code>) hands a method call to a background thread so the caller returns immediately, optionally yielding a <code>CompletableFuture</code>.</p>
+    <p>Why it matters: both are proxy-based, so both share the self-invocation trap — calling an annotated method from within the same class bypasses the proxy and the behaviour silently does not apply. And the default scheduler is single-threaded, so one slow job can stall every other scheduled task. These two gotchas are among the most-asked follow-ups on the topic.</p>
+    <pre class="code-block" data-label="Java"><code>@Configuration
+@EnableScheduling
+class Jobs {
+  @Scheduled(fixedDelay = 5000)          // 5000 ms after each run completes
+  void poll() { checkQueue(); }
+
+  @Scheduled(cron = "0 0 3 * * *")       // once a day, at hour 3
+  void nightlyReport() { buildReport(); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/task-execution-and-scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Boot Reference (executor/scheduler auto-config)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Framework Reference (@Scheduled and @Async)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-scheduled-tasks" rel="noopener">The @Scheduled Annotation in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-async" rel="noopener">How To Do @Async in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=l-40aP9jCok" rel="noopener">Spring Boot Scheduler — @Scheduled Annotation and Async Scheduler — Techno Town Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-security-starter.html">← Security with the Boot Starter</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="11-packaging-deployment.html">Packaging and Deployment →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The caching, scheduling and messaging questions that recur in Indian Spring Boot interviews — screening rounds through product-company system-design follow-ups:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does spring-boot-starter-cache give you, and how do you turn caching on?</summary>
+      <div class="answer"><p>The starter pulls in Spring's cache abstraction and auto-configures a <code>CacheManager</code>. You still enable it explicitly with <code>@EnableCaching</code> on a configuration class; without that annotation the cache annotations are inert. After enabling, <code>@Cacheable</code>/<code>@CachePut</code>/<code>@CacheEvict</code> start taking effect.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do @Cacheable, @CachePut and @CacheEvict each do?</summary>
+      <div class="answer"><p><code>@Cacheable</code> checks the cache first and skips the method on a hit. <code>@CachePut</code> always runs the method and stores (updates) the result — use it to refresh an entry. <code>@CacheEvict</code> removes one entry (or all, with <code>allEntries=true</code>) so stale data is dropped.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> If you add no cache provider, which cache does Spring Boot use?</summary>
+      <div class="answer"><p>The "Simple" provider — a <code>ConcurrentHashMap</code>-backed <code>ConcurrentMapCacheManager</code>. It is in-memory, per-instance and unbounded, which makes it fine for tests and single-node apps but wrong for a scaled-out service, where you would move to Caffeine (local) or Redis (shared).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you make a method run on a schedule in Spring Boot?</summary>
+      <div class="answer"><p>Add <code>@EnableScheduling</code> to a configuration class, then annotate a no-argument method with <code>@Scheduled</code>, giving it a <code>fixedRate</code>, <code>fixedDelay</code> or <code>cron</code> attribute. Boot auto-configures the scheduler; you provide the timing and the method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @Scheduled fixedRate vs fixedDelay vs cron — when do you use each?</summary>
+      <div class="answer"><p><code>fixedRate</code> starts a run every N milliseconds measured from the previous <em>start</em> — steady cadence, runs can overlap if slow. <code>fixedDelay</code> waits N milliseconds after the previous run <em>finishes</em> — no overlap, cadence drifts with duration. <code>cron</code> uses a six-field expression for calendar-based schedules (e.g. every day at a fixed hour).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Boot choose a cache provider, and how do you force Caffeine or Redis?</summary>
+      <div class="answer"><p>Boot auto-detects in a fixed order (Generic, JCache, Hazelcast, Infinispan, Couchbase, Redis, Caffeine, Cache2k, then Simple as the fallback) based on what is on the classpath and configured. To pin it, set <code>spring.cache.type=caffeine</code> or <code>redis</code> — useful when several providers are present or you want to disable caching in a profile with <code>none</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does @Async need to work, and why might it seem to do nothing?</summary>
+      <div class="answer"><p>It needs <code>@EnableAsync</code>, and the method should return <code>void</code>, <code>Future</code> or <code>CompletableFuture</code>. The classic "it ran synchronously" bug is self-invocation: calling the <code>@Async</code> method from another method of the <em>same</em> bean bypasses the Spring proxy, so the async advice never fires. Call it through an injected reference to another bean instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which messaging starters does Boot auto-configure, and what beans do you get?</summary>
+      <div class="answer"><p>Kafka (<code>spring-kafka</code>): a <code>KafkaTemplate</code> plus a default listener container factory for <code>@KafkaListener</code>. AMQP/RabbitMQ: a <code>ConnectionFactory</code>, <code>RabbitTemplate</code> and a container factory for <code>@RabbitListener</code>. JMS: a <code>ConnectionFactory</code> (ActiveMQ/Artemis), <code>JmsTemplate</code> and a factory for <code>@JmsListener</code>. Boot also covers Pulsar and RSocket. You supply properties; it supplies the plumbing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the common programming model across @KafkaListener, @RabbitListener and @JmsListener?</summary>
+      <div class="answer"><p>All three are message-driven POJOs: annotate a bean method, name the topic/queue, and a listener container (auto-configured by Boot) invokes it for each message, converting the payload to the method's parameter type. The uniform shape is deliberate — swapping brokers is mostly a starter and configuration change at the edges, not a rewrite of consumer logic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> By default @Scheduled tasks share a single thread — what breaks, and how do you fix it?</summary>
+      <div class="answer"><p>Boot's default task scheduler is single-threaded, so all <code>@Scheduled</code> methods run on one thread — a long or hung job delays or skips every other scheduled task. Fix it by raising <code>spring.task.scheduling.pool.size</code>, defining your own <code>ThreadPoolTaskScheduler</code>/<code>TaskScheduler</code> bean, or (Boot 4) enabling virtual threads so a <code>SimpleAsyncTaskScheduler</code> is used. Also guard long jobs against overlap.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the caveats of Spring's proxy-based caching?</summary>
+      <div class="answer"><p>Self-invocation: an internal call to a <code>@Cacheable</code> method in the same class skips the proxy and the cache. Keys: without a <code>key</code> SpEL expression, a <code>SimpleKeyGenerator</code> derives one from all parameters, so overloads or mutable args can collide or surprise you. Null handling: <code>@Cacheable</code> caches <code>null</code> results by default (control with <code>unless</code>/<code>condition</code>), and <code>sync=true</code> avoids a cache-stampede when many threads miss at once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Kafka vs RabbitMQ vs JMS — how do you choose, and what does "Boot only auto-configures the plumbing" mean in production?</summary>
+      <div class="answer"><p>Choose by semantics: Kafka for high-throughput, partitioned, replayable event streams and log-style consumption; RabbitMQ/AMQP for flexible routing (exchanges, routing keys) and per-message workflows; JMS for a portable Jakarta-standard broker in traditional enterprise stacks. Boot's auto-configuration only wires templates, connection factories and listener containers — partition/consumer-group strategy, exchange topology, delivery guarantees, retries and dead-letter handling are still your design, and that ownership is the real answer interviewers want.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.integration.cache</li>
+      <li>boot.integration.messaging</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

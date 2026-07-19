@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot Data Access module: DataSource auto-configuration, the HikariCP connection pool, the JPA/JDBC starters, SQL init scripts, and Flyway vs Liquibase migrations — with the best official docs and community resources, plus the interview questions they power.">
+  <title>Data Access with Boot — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Data Access with Boot</h1>
+  <p class="standfirst">Add a driver and three properties and Boot hands you a pooled, migration-ready datasource — this module maps what it auto-configures, how to tune HikariCP, and how Flyway and Liquibase keep your schema under version control.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Data Access with Boot</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring Boot turns data access into configuration: put a JDBC driver on the classpath, set a few properties, and you get a HikariCP-pooled <code>DataSource</code>, an auto-configured <code>JdbcTemplate</code>, and — with a starter — Spring Data repositories. This module stays on the Boot integration layer: auto-configured datasources, connection pooling, the JPA/JDBC starters, SQL initialization, and versioned schema migrations.</p>
+    <p>Deep JPA and Hibernate mapping (entities, relationships, the persistence context) live in a separate track. Here the focus is what Boot wires up for you and the knobs you actually turn — with HikariCP tuning and "Flyway vs Liquibase" flagged because both are perennial interview ground.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>DataSource auto-configuration</h3>
+    <p>When a JDBC driver is on the classpath and connection properties are present, Boot auto-configures a single <code>DataSource</code> bean — no <code>@Bean</code> needed. An in-memory database (H2, HSQLDB, Derby) needs no URL at all: Boot detects the driver and wires an embedded instance. For a real database you supply <code>spring.datasource.url</code>, <code>username</code> and <code>password</code>; the driver class is normally inferred from the URL.</p>
+    <p>Why it matters: this one <code>DataSource</code> is the backbone every data feature consumes — repositories, <code>JdbcTemplate</code>, and Flyway all draw from it. Interviewers probe the auto-config reasoning: that "driver plus three properties" yields a pooled, production-ready datasource, and that an accidental H2 on the classpath can silently shadow the database you meant to use.</p>
+    <pre class="code-block" data-label="properties"><code>spring.datasource.url=jdbc:postgresql://localhost:5432/orders
+spring.datasource.username=app
+spring.datasource.password=secret
+# driver-class-name is inferred from the URL; set it only to override</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/data/sql.html" rel="noopener">SQL Databases — Spring Boot reference (datasource, pools, embedded DBs, JDBC/JPA)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-configure-data-source-programmatic" rel="noopener">Configuring a DataSource Programmatically in Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-configure-multiple-datasources" rel="noopener">Configure and Use Multiple DataSources in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>HikariCP — the default connection pool</h3>
+    <p>Since Spring Boot 2.0, HikariCP is the default connection pool. It ships transitively with <code>spring-boot-starter-jdbc</code> and <code>spring-boot-starter-data-jpa</code>, so pooling is on with zero extra dependencies. You tune it under <code>spring.datasource.hikari.*</code>: <code>maximum-pool-size</code>, <code>minimum-idle</code>, <code>connection-timeout</code>, <code>idle-timeout</code> and <code>max-lifetime</code>.</p>
+    <p>Why it matters: pool sizing is a classic performance-and-scaling question. HikariCP's own guidance is counter-intuitive — a small pool usually outperforms a large one, because more connections than the database can serve in parallel just add contention. And <code>max-lifetime</code> should sit a little under the database's own connection timeout, so the pool retires connections before the server drops them. Explaining those two points separates rote answers from real operational understanding.</p>
+    <pre class="code-block" data-label="properties"><code>spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.minimum-idle=5
+spring.datasource.hikari.connection-timeout=30000   # ms to wait for a free connection
+spring.datasource.hikari.max-lifetime=1800000       # retire a connection before the DB does</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/brettwooldridge/HikariCP" rel="noopener">HikariCP — project README (config reference and pool-sizing guidance)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-hikari" rel="noopener">Configuring a Hikari Connection Pool with Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hikaricp" rel="noopener">Introduction to HikariCP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q8Dx8EzIveM" rel="noopener">Using HikariCP in your next Spring Boot Project — Dan Vega</a></li>
+    </ul>
+
+    <h3>Choosing a data starter: JDBC, Spring Data JDBC, or JPA</h3>
+    <p>Boot offers three levels of abstraction over the same <code>DataSource</code>. <code>spring-boot-starter-jdbc</code> brings <code>JdbcTemplate</code>/<code>JdbcClient</code> — you write the SQL and Spring handles the boilerplate. <code>spring-boot-starter-data-jdbc</code> adds Spring Data repositories with a deliberately simple model — no lazy loading, no proxies — that still maps to plain SQL. <code>spring-boot-starter-data-jpa</code> brings Hibernate and the full JPA/ORM model: entity graphs, lazy loading and a persistence context.</p>
+    <p>Why it matters: "JDBC vs JPA vs Spring Data JPA — when would you pick each?" is one of the most common Spring data questions. JPA is powerful but hides a lot (N+1 queries, lazy-initialization exceptions); Spring Data JDBC is simpler and more predictable. The deep ORM mechanics belong to a dedicated JPA track — here the point is which starter to reach for and what Boot auto-wires for each: repository scanning, a transaction manager, and dialect detection.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/using/build-systems.html" rel="noopener">Build Systems and Starters — Spring Boot reference (the data-jpa / data-jdbc / jdbc starters)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jdbc-intro" rel="noopener">Introduction to Spring Data JDBC — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-jdbc-jdbctemplate" rel="noopener">Spring JDBC (JdbcTemplate) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KLQqK03TziI" rel="noopener">Spring Data JPA vs JDBC vs REST — SpringDeveloper (Spring Office Hours)</a></li>
+    </ul>
+
+    <h3>SQL initialization scripts: schema.sql and data.sql</h3>
+    <p>Boot can run plain SQL at startup: place <code>schema.sql</code> (DDL) and <code>data.sql</code> (DML) on the classpath and Boot executes them against the <code>DataSource</code> — schema first, then data. It is controlled by <code>spring.sql.init.*</code> (<code>mode</code>, <code>schema-locations</code>, <code>data-locations</code>, <code>platform</code>). By default this basic initialization runs only for embedded databases; set <code>spring.sql.init.mode=always</code> to enable it for a real one.</p>
+    <p>Why it matters: this is the quick path for demos, tests and seeding an in-memory H2 — but it is not schema management. There is no versioning, no history, no ordering beyond two files. A common gotcha: when Hibernate also creates the schema, <code>data.sql</code> may run before it, so you set <code>spring.jpa.defer-datasource-initialization=true</code> to fix the ordering. And you must not mix these scripts with Flyway or Liquibase — one tool should own the schema.</p>
+    <pre class="code-block" data-label="properties"><code>spring.sql.init.mode=always            # run schema.sql/data.sql for non-embedded DBs too
+spring.sql.init.schema-locations=classpath:sql/schema.sql
+spring.jpa.defer-datasource-initialization=true   # let Hibernate build the schema before data.sql</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/data-initialization.html" rel="noopener">Database Initialization — Spring Boot how-to guides</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-data-sql-and-schema-sql" rel="noopener">Guide on Loading Initial Data with Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Schema migrations: Flyway vs Liquibase</h3>
+    <p>For anything past a demo you want versioned, repeatable migrations. Boot auto-detects Flyway or Liquibase on the classpath and runs pending migrations at startup, before the JPA <code>EntityManagerFactory</code> initializes, so the schema is ready. Flyway uses versioned SQL files (<code>V1__init.sql</code>, <code>V2__add_orders.sql</code>) applied in order and tracked in a <code>flyway_schema_history</code> table. Liquibase uses a changelog (XML, YAML, JSON or SQL) of changesets — database-agnostic and tracked in <code>DATABASECHANGELOG</code>.</p>
+    <p>Why it matters: "Flyway vs Liquibase" is a staple comparison. Flyway is SQL-first, simple and linear — great when you are comfortable writing database-specific SQL. Liquibase abstracts changes into a database-independent changelog with contexts, labels, preconditions and (paid) rollback — more power, more ceremony. Both make schema changes reviewable, ordered and reproducible across environments, which is the real reason teams adopt them over hand-run scripts. Boot config lives under <code>spring.flyway.*</code> and <code>spring.liquibase.*</code>.</p>
+    <pre class="code-block" data-label="properties"><code># Flyway: versioned scripts in classpath:db/migration
+#   V1__create_orders.sql, V2__add_index.sql
+spring.flyway.enabled=true
+# Liquibase alternative — a master changelog of changesets:
+spring.liquibase.change-log=classpath:db/changelog/db.changelog-master.yaml</code></pre>
+    <ul class="resources">
+      <li>[Docs] <a href="https://documentation.red-gate.com/fd/getting-started-with-flyway-184127223.html" rel="noopener">Getting Started with Flyway — Redgate Flyway documentation</a></li>
+      <li>[Docs] <a href="https://docs.liquibase.com/start/home.html" rel="noopener">Get Started — Liquibase documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-migrations-with-flyway" rel="noopener">Database Migrations with Flyway — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/liquibase-vs-flyway" rel="noopener">Liquibase vs Flyway — Baeldung (the head-to-head interviewers ask about)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jyTr5OJfIXw" rel="noopener">Database Migrations using Flyway — Crash Course — Learn Code With Durgesh</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-web.html">← Web Applications with Boot</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="06-actuator.html">Actuator →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Data access is a guaranteed section in Indian Spring Boot interviews — HikariCP tuning and "Flyway vs Liquibase" come up in nearly every backend round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does Spring Boot auto-configure when it finds a JDBC driver and datasource properties?</summary>
+      <div class="answer"><p>A pooled <code>DataSource</code> bean (HikariCP by default), an auto-configured <code>JdbcTemplate</code>/<code>JdbcClient</code>, and a transaction manager. For an embedded database it needs no URL at all — it detects the driver and starts an in-memory instance.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which connection pool does Spring Boot use by default, and how does it get there?</summary>
+      <div class="answer"><p>HikariCP, since Spring Boot 2.0. It is pulled in transitively by <code>spring-boot-starter-jdbc</code> and <code>spring-boot-starter-data-jpa</code>, so no extra dependency is needed. You configure it under <code>spring.datasource.hikari.*</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which properties configure a production datasource?</summary>
+      <div class="answer"><p><code>spring.datasource.url</code>, <code>spring.datasource.username</code> and <code>spring.datasource.password</code>; the driver class is inferred from the URL. Pool settings go under <code>spring.datasource.hikari.*</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where do schema.sql and data.sql go, and in what order do they run?</summary>
+      <div class="answer"><p>On the classpath (usually <code>src/main/resources</code>). Boot runs <code>schema.sql</code> first, then <code>data.sql</code>. By default this happens only for embedded databases unless you set <code>spring.sql.init.mode=always</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> HikariCP: why can a smaller pool outperform a larger one, and what is max-lifetime for?</summary>
+      <div class="answer"><p>More connections than the database can serve in parallel cause contention and context-switching, so a modest pool often yields higher throughput — HikariCP's own guidance. <code>max-lifetime</code> retires each connection a little before the database's own idle/timeout, so the pool never hands out a connection the server has just closed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> JdbcTemplate vs Spring Data JDBC vs Spring Data JPA — when would you pick each?</summary>
+      <div class="answer"><p><code>JdbcTemplate</code>/<code>JdbcClient</code>: full SQL control, minimal magic. Spring Data JDBC: repositories over plain SQL, no lazy loading or proxies — simple and predictable. Spring Data JPA: full ORM via Hibernate — entity graphs, lazy loading, a persistence context — powerful but with more to reason about (N+1, lazy-init exceptions).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> data.sql runs, but the table does not exist yet because Hibernate manages the schema. How do you fix it?</summary>
+      <div class="answer"><p>Set <code>spring.jpa.defer-datasource-initialization=true</code> so Hibernate creates the schema before <code>data.sql</code> executes. Better still, hand schema ownership to a migration tool and keep <code>data.sql</code> for embedded/test seeding only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Boot run Flyway or Liquibase, and when relative to JPA?</summary>
+      <div class="answer"><p>If Flyway or Liquibase is on the classpath, Boot auto-configures it and runs pending migrations at application startup — before the JPA <code>EntityManagerFactory</code> is initialized — so the schema is in place when entities are validated or mapped.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Flyway vs Liquibase — the core differences?</summary>
+      <div class="answer"><p>Flyway is SQL-first with linear versioned files (<code>V1__</code>, <code>V2__</code>) tracked in <code>flyway_schema_history</code>. Liquibase uses a database-agnostic changelog (XML/YAML/JSON/SQL) of changesets with contexts, labels and preconditions, tracked in <code>DATABASECHANGELOG</code>. Flyway is simpler; Liquibase is more portable and feature-rich.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why prefer a migration tool over spring.jpa.hibernate.ddl-auto=update in production?</summary>
+      <div class="answer"><p><code>ddl-auto=update</code> is non-deterministic, cannot perform data migrations or drops, and leaves no history or review trail. Migrations are versioned, ordered, reviewable and reproducible across environments. The common production combo is <code>ddl-auto=validate</code> plus Flyway or Liquibase owning the schema.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can you mix schema.sql/data.sql with Flyway, and should you?</summary>
+      <div class="answer"><p>Boot can technically run both, but you should not: mixing basic SQL init with a migration tool creates conflicting schema ownership, and Boot is removing support for mixing. Let one tool own the schema and use <code>data.sql</code> only for embedded or test seeding.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A Flyway migration that was already applied gets edited, and startup now fails with a checksum error. What happened, and how do you handle it?</summary>
+      <div class="answer"><p>Flyway stores a checksum of each applied migration in <code>flyway_schema_history</code>; editing an already-applied file changes the checksum and validation fails by design — applied migrations are immutable. Fix forward with a new versioned migration. Use <code>flyway repair</code> only to realign the history table for legitimate cases (a failed or edited pending migration), never to paper over changing applied history in shared environments.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.data.datasource</li>
+      <li>boot.data.migration</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

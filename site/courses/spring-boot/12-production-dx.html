@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot production and developer-experience module: DevTools, Spring Initializr, graceful shutdown, application lifecycle events and runners, custom banners, and the Boot 3-to-4 migration with the Jakarta namespace — curated official resources and interview questions.">
+  <title>Production and Developer Experience — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Production and Developer Experience</h1>
+  <p class="standfirst">The last mile of a Spring Boot app: the tools that make the inner development loop fast, the switches that make shutdown and startup safe, and the migration story that carries you from Boot 3's Jakarta break to Boot 4's modular rebuild.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Production and Developer Experience</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This closing module is two halves. The developer-experience half is the day-to-day workflow: bootstrapping a project on Spring Initializr, tightening the edit-run loop with DevTools, hooking into the application lifecycle through events and runners, shutting down without dropping in-flight requests, and branding the startup banner. The production half is forward motion: what changed moving to Spring Boot 3 (the Jakarta namespace) and to Spring Boot 4 (module restructuring, Jackson 3, a new Spring Framework baseline), and how to migrate an existing app across both.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Spring Boot DevTools</h3>
+    <p>The <code>spring-boot-devtools</code> module exists to shorten the feedback loop while you code. It watches the classpath and triggers an automatic restart when your compiled classes change, ships a LiveReload server that refreshes the browser on a resource change, and applies development-friendly property defaults (template and static-resource caching switched off, extra debug logging). Its restart is faster than a cold boot because it uses two classloaders — a base loader for unchanging third-party jars and a throwaway restart loader for your own classes, so only your code is reloaded.</p>
+    <p>Why it matters: it is a development-only convenience and is engineered to disappear in production — DevTools deactivates itself when the app is launched from a fully packaged jar, and the repackaging plugins exclude it by default. Marking the dependency <code>optional</code> keeps it off the classpath of anything that depends on your module.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-devtools&lt;/artifactId&gt;
+  &lt;optional&gt;true&lt;/optional&gt;   &lt;!-- kept out of the production jar --&gt;
+&lt;/dependency&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/using/devtools.html" rel="noopener">Developer Tools — Spring Boot reference (restart, LiveReload, property defaults, remote)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-devtools" rel="noopener">Overview of Spring Boot DevTools — Baeldung</a></li>
+    </ul>
+
+    <h3>Spring Initializr — bootstrapping a project</h3>
+    <p>Spring Initializr (the service behind <code>start.spring.io</code>) is the canonical way to start: you pick the build tool (Maven or Gradle), language, Spring Boot version and dependencies, and it generates a correctly wired project zip — the parent POM or plugin, a BOM-managed dependency set, a main class annotated <code>@SpringBootApplication</code>, and a test skeleton. Most IDEs embed the same service, so "New Spring Boot project" is really Initializr behind a dialog.</p>
+    <p>Why it matters: it removes the whole class of "wrong version combination" problems by handing you a dependency set that Spring already tested together. Knowing that it is a public REST service — not magic in the IDE — is a common follow-up in interviews, as is naming what a fresh project actually contains.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://start.spring.io/" rel="noopener">Spring Initializr — start.spring.io (the project generator)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/spring-boot/" rel="noopener">Building an Application with Spring Boot — Spring getting-started guide</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/tutorial/first-application/index.html" rel="noopener">Developing Your First Spring Boot Application — Spring Boot tutorial</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4cRbPH_GkBQ" rel="noopener">Full Stack Java Development with Spring Boot — Dan Vega</a></li>
+    </ul>
+
+    <h3>Graceful shutdown</h3>
+    <p>When a running instance is asked to stop — a rolling deploy, a Kubernetes pod eviction — you do not want it to sever requests mid-flight. Graceful shutdown gives in-flight requests a grace period to finish while the server stops accepting new ones at the network layer, then closes the context. In current Spring Boot it is enabled by default for the embedded servers; you opt out with <code>server.shutdown=immediate</code>, and you size the grace window with <code>spring.lifecycle.timeout-per-shutdown-phase</code> (30 seconds by default). It runs as the earliest phase of stopping the <code>SmartLifecycle</code> beans.</p>
+    <p>Why it matters: without it, a redeploy shows up as a burst of client-side 5xx errors and half-committed work. Pair it with Actuator's readiness probe so the load balancer stops routing new traffic before the grace period even begins.</p>
+    <pre class="code-block" data-label="Properties"><code>server.shutdown=graceful                          # default now; 'immediate' opts out
+spring.lifecycle.timeout-per-shutdown-phase=30s   # window for in-flight requests to finish</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html" rel="noopener">Graceful Shutdown — Spring Boot reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-web-server-shutdown" rel="noopener">Web Server Graceful Shutdown in Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-shutdown" rel="noopener">Shutdown a Spring Boot Application — Baeldung</a></li>
+    </ul>
+
+    <h3>Application lifecycle: events, listeners and runners</h3>
+    <p>A <code>SpringApplication</code> publishes an ordered sequence of events as it comes up — starting, environment prepared, context prepared, context loaded, started, ready, and (on failure) failed — that you can hook with an <code>ApplicationListener</code> or an <code>@EventListener</code> method. For the common "do this once, after everything is wired" case, Boot supplies two callbacks: <code>CommandLineRunner</code> (raw <code>String[]</code> arguments) and <code>ApplicationRunner</code> (a parsed <code>ApplicationArguments</code>); both run after the context is fully initialized, which is why they are safer than a constructor or <code>@PostConstruct</code> for work that needs the whole application ready. For diagnosing slow starts, <code>ApplicationStartup</code> / <code>BufferingApplicationStartup</code> record startup steps you can inspect through Actuator.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+CommandLineRunner seed(UserRepository repo) {
+    return args -&gt; repo.save(new User("admin"));  // runs once, after the context is ready
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html" rel="noopener">SpringApplication: events, listeners, runners, startup tracking — Spring Boot reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/running-setup-logic-on-startup-in-spring" rel="noopener">Guide to Running Logic on Startup in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-events" rel="noopener">Spring Events — Baeldung (custom events, listeners, @EventListener)</a></li>
+    </ul>
+
+    <h3>Customizing the startup banner</h3>
+    <p>The ASCII banner printed at startup is more than decoration — teams use it to make it obvious at a glance which service and which build a log stream belongs to. Drop a <code>banner.txt</code> on the classpath (or point <code>spring.banner.location</code> elsewhere) and Boot renders it, expanding variables such as <code>${application.version}</code> and <code>${spring-boot.version}</code>, and honouring ANSI colour codes. From Spring Boot 3 the image-banner formats were removed, leaving text as the supported form; set <code>spring.main.banner-mode=off</code> to silence it entirely.</p>
+    <pre class="code-block" data-label="Text"><code>  ::  My Service  ::   (v${application.version})
+  running on Spring Boot ${spring-boot.version}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-custom-banners" rel="noopener">Using Custom Banners in Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-color-banner" rel="noopener">Using a Color Startup Banner — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-disable-banner" rel="noopener">Disable the Spring Boot Banner at Startup — Baeldung</a></li>
+    </ul>
+
+    <h3>Spring Boot 3 to 4 migration, Jakarta namespace and what's new</h3>
+    <p>Two upgrades define the current landscape. Spring Boot 3 moved to a Java 17 baseline, Spring Framework 6 and Jakarta EE — the breaking change everyone remembers is the package rename from <code>javax.*</code> to <code>jakarta.*</code> for EE specifications (Servlet, Persistence, Validation, and friends), while core-JDK <code>javax</code> packages like <code>javax.sql</code> and <code>javax.crypto</code> stayed put. Spring Boot 4 then rebuilt on Spring Framework 7 and Spring Security 7, restructured the codebase into fine-grained <code>org.springframework.boot.&lt;module&gt;</code> modules (some features now need an explicit starter), adopted Jackson 3 (new <code>tools.jackson</code> group and packages), dropped Undertow on the Servlet 6.1 baseline, and renamed test annotations such as <code>@MockBean</code> to <code>@MockitoBean</code>. The recommended path is to reach the latest 3.5.x first, then step up.</p>
+    <pre class="code-block" data-label="Java"><code>// Spring Boot 2 (Java EE)          Spring Boot 3+ (Jakarta EE)
+import javax.persistence.Entity;    import jakarta.persistence.Entity;
+import javax.servlet.Filter;        import jakarta.servlet.Filter;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide" rel="noopener">Spring Boot 4.0 Migration Guide — spring-projects wiki</a></li>
+      <li>[Official] <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Release-Notes" rel="noopener">Spring Boot 4.0 Release Notes — spring-projects wiki (what's new)</a></li>
+      <li>[Official] <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.0-Migration-Guide" rel="noopener">Spring Boot 3.0 Migration Guide — spring-projects wiki (Jakarta namespace)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-3-migration" rel="noopener">Migrate an Application from Spring Boot 2 to Spring Boot 3 — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jvDSWwlzeOk" rel="noopener">From Spring Boot 2 to Spring Boot 3 with Java 21 and Jakarta EE — Ivar Grimstad</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-packaging-deployment.html">← Packaging and Deployment</a>
+    <a href="index.html">All Spring Boot modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Production readiness and the Boot 3/4 upgrade are staples of Indian Spring interviews — screening rounds probe the tooling, product-company rounds probe the migration:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does Spring Boot DevTools give you, and is it safe in production?</summary>
+      <div class="answer"><p>Automatic restart on classpath changes, browser LiveReload, and development-friendly property defaults (caching off, extra debug logging). It is safe because it deactivates when the app runs from a packaged jar and the repackaging plugins exclude it — so it never ships to production. Declaring the dependency <code>optional</code> also keeps it off downstream classpaths.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Spring Initializr and what does a generated project contain?</summary>
+      <div class="answer"><p>A web service (start.spring.io, also embedded in IDEs) that generates a ready-to-build project from your choices of build tool, language, Boot version and dependencies. You get the parent POM or Gradle plugin, a BOM-managed dependency set, a main class with <code>@SpringBootApplication</code>, and a test skeleton — a version-consistent starting point.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you customize or disable the startup banner?</summary>
+      <div class="answer"><p>Put a <code>banner.txt</code> on the classpath (or set <code>spring.banner.location</code>); Boot renders it and expands variables like <code>${application.version}</code>. It supports ANSI colours. Turn it off with <code>spring.main.banner-mode=off</code>. Since Boot 3, image-format banners were removed, leaving text.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between CommandLineRunner and ApplicationRunner?</summary>
+      <div class="answer"><p>Both run once after the context is fully initialized. <code>CommandLineRunner.run</code> receives the raw <code>String[]</code> program arguments; <code>ApplicationRunner.run</code> receives an <code>ApplicationArguments</code> that parses option arguments (<code>--name=value</code>) from non-option ones. Order multiple runners with <code>@Order</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is graceful shutdown and how do you control it?</summary>
+      <div class="answer"><p>On stop, the server refuses new requests but lets in-flight ones complete before closing the context. Current Boot enables it by default for embedded servers; disable with <code>server.shutdown=immediate</code>, and size the window with <code>spring.lifecycle.timeout-per-shutdown-phase</code> (30s default). Older versions were immediate by default and needed <code>server.shutdown=graceful</code> to opt in. Combine with a readiness probe so traffic drains first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through the application events published during startup.</summary>
+      <div class="answer"><p>In order: <code>ApplicationStartingEvent</code>, <code>ApplicationEnvironmentPreparedEvent</code>, <code>ApplicationContextInitializedEvent</code>, <code>ApplicationPreparedEvent</code>, <code>ApplicationStartedEvent</code>, an availability change, then <code>ApplicationReadyEvent</code> when the app is ready to serve. If startup fails, <code>ApplicationFailedEvent</code> fires. Listeners for the earliest events must be registered very early (they run before the context exists).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why prefer a runner over @PostConstruct for startup work?</summary>
+      <div class="answer"><p><code>@PostConstruct</code> runs during that bean's initialization — other beans, and the web server, may not be ready yet. <code>ApplicationRunner</code>/<code>CommandLineRunner</code> (and <code>ApplicationReadyEvent</code>) run after the whole context is refreshed, so work that depends on the fully wired application — seeding data, warming caches, calling other beans — is safe there.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What exactly changed in the package namespace for Spring Boot 3, and what did not?</summary>
+      <div class="answer"><p>Jakarta EE specification packages were renamed from <code>javax.*</code> to <code>jakarta.*</code> — for example <code>javax.persistence</code> becomes <code>jakarta.persistence</code>, <code>javax.servlet</code> becomes <code>jakarta.servlet</code>. Core-JDK packages that were never part of Java EE — <code>javax.sql</code>, <code>javax.crypto</code>, <code>javax.swing</code> — are unchanged. The trigger was Oracle keeping the <code>javax</code> trademark after donating Java EE to the Eclipse Foundation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the Java and Spring baselines for Boot 3 versus Boot 4?</summary>
+      <div class="answer"><p>Spring Boot 3 requires Java 17, Spring Framework 6 and Jakarta EE 9/10. Spring Boot 4 keeps a Java 17+ baseline but moves to Spring Framework 7 and Spring Security 7, a Jakarta EE 11 / Servlet 6.1 baseline, and Jackson 3. Knowing that a major Boot bump drags the whole Spring portfolio with it is the point.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do DevTools' two classloaders make restart fast, and where does that bite you?</summary>
+      <div class="answer"><p>Unchanging third-party jars load in a base classloader that is kept across restarts; your own classes load in a disposable restart classloader that is thrown away and rebuilt on each change — so only your code reloads, far faster than a cold JVM boot. The catch: objects created before a restart live in a different classloader than those after, so caching or deserializing instances across a restart can throw <code>ClassCastException</code>. It also is not a hot-swap of method bodies inside a single run.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the headline breaking changes when moving from Boot 3 to Boot 4?</summary>
+      <div class="answer"><p>The codebase is split into fine-grained <code>org.springframework.boot.&lt;module&gt;</code> modules, so some features now need an explicit starter instead of being auto-detected. Jackson 3 arrives with new <code>tools.jackson</code> group and package names and renamed annotations (<code>@JsonComponent</code> becomes <code>@JacksonComponent</code>). Undertow is dropped on the Servlet 6.1 baseline. Test annotations change (<code>@MockBean</code>/<code>@SpyBean</code> to <code>@MockitoBean</code>/<code>@MockitoSpyBean</code>), and MockMvc/TestRestTemplate are no longer auto-configured by <code>@SpringBootTest</code>. Reach the latest 3.5.x first, then upgrade.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you migrate a large javax-based Boot 2 app to Boot 3 with minimal manual editing?</summary>
+      <div class="answer"><p>Upgrade to the latest 2.7.x first so deprecations surface, then apply automated tooling: OpenRewrite's Jakarta recipe (<code>org.openrewrite.java.migrate.jakarta.JavaxMigrationToJakarta</code>) and the Spring Boot Migrator rewrite imports and configuration en masse. Let the Boot BOM manage versions, watch for third-party libraries without Jakarta releases, and lean on a strong test suite to catch behavioural changes the recipes cannot see. Migrate incrementally and verify at each step.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.prod.dx</li>
+      <li>boot.prod.whatsnew</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

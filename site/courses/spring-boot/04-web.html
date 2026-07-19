@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot web module: the spring-boot-starter-web stack, embedded Tomcat/Jetty/Undertow and server.* configuration, the whitelabel error page and error handling, CORS, Jackson JSON and static content — with official docs, Baeldung and the interview questions they power.">
+  <title>Web Applications with Boot — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Web Applications with Boot</h1>
+  <p class="standfirst">Add one starter and you get a running HTTP server, JSON in and out, and a ready-made error page before writing a line of config — this module names those defaults and the switches that change them.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Web Applications with Boot</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p><code>spring-boot-starter-web</code> is the on-ramp to server-side web apps on Boot: it wires Spring MVC, an embedded servlet container and Jackson, then applies opinionated defaults for JSON responses, the whitelabel error page and static-content serving. This module orients you on that stack — choosing and tuning the embedded server, controlling error handling and CORS, shaping JSON, and locating static assets — and points to the official reference and community write-ups that teach each in depth.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>spring-boot-starter-web and the embedded server</h3>
+    <p><code>spring-boot-starter-web</code> pulls in Spring MVC, Jackson, Bean Validation and — the defining Boot move — an embedded <strong>Tomcat</strong>, so the application is a self-contained jar that owns its HTTP server rather than a war deployed into an external container. Boot also supports <strong>Jetty</strong> and <strong>Undertow</strong>: exclude <code>spring-boot-starter-tomcat</code> and add the alternative starter.</p>
+    <p>Why it matters: "why does Boot embed a server, and how does a fat jar boot its own Tomcat?" is one of the most-asked Boot interview questions, along with the Tomcat / Jetty / Undertow trade-offs (Undertow is lean and fast; Jetty is lightweight; Tomcat is the default and most familiar).</p>
+    <pre class="code-block" data-label="XML"><code>&lt;!-- pom.xml: swap the default Tomcat for Jetty --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+  &lt;exclusions&gt;&lt;exclusion&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-tomcat&lt;/artifactId&gt;
+  &lt;/exclusion&gt;&lt;/exclusions&gt;
+&lt;/dependency&gt;
+&lt;!-- then add spring-boot-starter-jetty (or -undertow) --&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/webserver.html" rel="noopener">Embedded Web Servers — Spring Boot how-to (switching servers, disabling the server)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-servlet-containers" rel="noopener">Comparing Embedded Servlet Containers in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xPMa9m-00pw" rel="noopener">Embedded Servers — Tomcat, Jetty, and Undertow — Java Guides (Ramesh Fadatare)</a></li>
+    </ul>
+
+    <h3>Configuring the server: port, context path, threads, compression</h3>
+    <p>Almost everything about the running server is a <code>server.*</code> property: <code>server.port</code> (default 8080; <code>0</code> picks a random free port), <code>server.servlet.context-path</code>, thread limits (<code>server.tomcat.threads.max</code>), response compression, SSL (<code>server.ssl.*</code>) and graceful shutdown. For anything the properties don't expose, register a <code>WebServerFactoryCustomizer</code> bean and configure the factory programmatically.</p>
+    <p>Why it matters: port conflicts, mounting an app under a context path, and tuning the connector's thread pool are day-one operational questions — and knowing that these live in the <code>server.*</code> namespace (not <code>spring.*</code>) is a common relaxed-binding gotcha.</p>
+    <pre class="code-block" data-label="Properties"><code>server.port=8081
+server.servlet.context-path=/api
+server.tomcat.threads.max=200
+server.compression.enabled=true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/appendix/application-properties/index.html" rel="noopener">Common Application Properties — Spring Boot (the full server.* reference)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-change-port" rel="noopener">How to Change the Default Port in Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-configure-tomcat" rel="noopener">How to Configure Spring Boot Tomcat — Baeldung</a></li>
+    </ul>
+
+    <h3>Default error handling: the whitelabel page and BasicErrorController</h3>
+    <p>When an unhandled exception reaches the container, Boot's <code>ErrorMvcAutoConfiguration</code> renders the "whitelabel" error page — a plain HTML page for browsers, and a JSON body (<code>{timestamp, status, error, path}</code>) for API clients — through a <code>BasicErrorController</code> mapped to <code>/error</code>. Content negotiation on the request's <code>Accept</code> header is what makes the same <code>/error</code> path serve HTML or JSON. Turn it off with <code>server.error.whitelabel.enabled=false</code>, override it with an <code>error.html</code> template (or per-status <code>error/404.html</code>), or replace the controller entirely; shape API errors with <code>@ControllerAdvice</code> + <code>@ExceptionHandler</code>, ideally returning an RFC 9457 <code>ProblemDetail</code>.</p>
+    <p>Why it matters: the whitelabel page is the single most recognizable Boot default, and "what produces it and how do you customize it?" is a staple interview question — followed by "how would you return a consistent JSON error contract across the API?".</p>
+    <pre class="code-block" data-label="Java"><code>@RestControllerAdvice
+class ApiErrors {
+  @ExceptionHandler(EntityNotFoundException.class)
+  ProblemDetail notFound(EntityNotFoundException e) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/spring-mvc.html" rel="noopener">Spring MVC how-to — Spring Boot (Customize the 'Whitelabel' Error Page)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-custom-error-page" rel="noopener">Spring Boot: Customize Whitelabel Error Page — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/exception-handling-for-rest-with-spring" rel="noopener">Error Handling for REST with Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hLlGAQ5NfTE" rel="noopener">Global Exception Handling in Spring Boot with @ControllerAdvice — Code Decode</a></li>
+    </ul>
+
+    <h3>CORS: cross-origin requests</h3>
+    <p>Browsers block cross-origin <code>fetch</code>/XHR unless the server returns the right <code>Access-Control-*</code> headers. Spring MVC adds them either fine-grained with <code>@CrossOrigin</code> on a controller or method, or globally via a <code>WebMvcConfigurer</code> that overrides <code>addCorsMappings</code>. CORS is a Spring Framework feature (Boot exposes a few knobs), and the preflight <code>OPTIONS</code> request plus the interaction with Spring Security — CORS must be enabled inside the security filter chain — are where it usually breaks.</p>
+    <p>Why it matters: every React/Angular front end talking to a Boot API hits CORS, and debugging the preflight failure or the "credentials with wildcard origin" conflict is a routine screening and on-the-job question.</p>
+    <pre class="code-block" data-label="Java"><code>@Configuration
+class CorsConfig implements WebMvcConfigurer {
+  @Override public void addCorsMappings(CorsRegistry r) {
+    r.addMapping("/api/**")
+     .allowedOrigins("https://app.example.com")
+     .allowedMethods("GET", "POST");
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc-cors.html" rel="noopener">CORS — Spring Framework reference (@CrossOrigin and global config)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cors" rel="noopener">CORS with Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BmDSsmUpMjI" rel="noopener">Demystifying CORS in Spring Boot — Ram N Java</a></li>
+    </ul>
+
+    <h3>JSON with Jackson</h3>
+    <p>With Jackson on the classpath, Boot auto-configures a <code>JsonMapper</code>/<code>ObjectMapper</code> so <code>@RestController</code> return values serialize to JSON and <code>@RequestBody</code> deserializes automatically through the registered <code>HttpMessageConverters</code>. Tune it globally with <code>spring.jackson.*</code> properties (date format, null inclusion, property-naming strategy) or, for custom (de)serializers, a builder-customizer bean or a <code>@JacksonComponent</code>. Boot 4 defaults to Jackson 3.</p>
+    <p>Why it matters: JSON is the default REST wire format, and controlling ISO date formatting, dropping nulls, and snake_case naming come up constantly — as does knowing that no manual <code>ObjectMapper</code> wiring is needed because Boot already provides one.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.jackson.serialization.write-dates-as-timestamps=false
+spring.jackson.default-property-inclusion=non_null
+spring.jackson.property-naming-strategy=SNAKE_CASE</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/json.html" rel="noopener">JSON — Spring Boot reference (Jackson auto-configuration)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/rest-service" rel="noopener">Building a RESTful Web Service — Spring getting-started guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-customize-jackson-objectmapper" rel="noopener">Spring Boot: Customize the Jackson ObjectMapper — Baeldung</a></li>
+    </ul>
+
+    <h3>Serving static content</h3>
+    <p>Boot serves static files from <code>/static</code>, <code>/public</code>, <code>/resources</code> and <code>/META-INF/resources</code> on the classpath, mapped at <code>/**</code>, and treats an <code>index.html</code> in any of them as the welcome page. Change the URL pattern with <code>spring.mvc.static-path-pattern</code> and the source locations with <code>spring.web.resources.static-locations</code>; versioned resource chains give you cache-busting for production assets.</p>
+    <p>Why it matters: in full-stack setups, knowing where Boot looks for assets — and how the welcome-page <code>index.html</code> supports a bundled single-page app — saves hours of "why is my CSS 404-ing?" debugging.</p>
+    <pre class="code-block" data-label="Properties"><code># default lookup: /static, /public, /resources, /META-INF/resources
+spring.mvc.static-path-pattern=/assets/**
+spring.web.resources.static-locations=classpath:/assets/</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/servlet.html" rel="noopener">Servlet Web Applications — Spring Boot reference (Static Content and welcome page)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-static-resources" rel="noopener">Serve Static Resources with Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cachable-static-assets-with-spring-mvc" rel="noopener">Cachable Static Assets with Spring MVC — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-config-advanced.html">← Advanced Configuration</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="05-data-access.html">Data Access with Boot →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The web module is interview-dense in Indian service- and product-company rounds alike — embedded servers and the whitelabel error page come up again and again:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does spring-boot-starter-web give you out of the box?</summary>
+      <div class="answer"><p>Spring MVC (dispatcher servlet, <code>@RestController</code>), an embedded Tomcat, Jackson for JSON, and Bean Validation — all auto-configured. The app becomes a runnable jar that starts its own HTTP server on port 8080, with no external container or web.xml.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the default embedded server and port, and how do you change the port?</summary>
+      <div class="answer"><p>Embedded Tomcat on port 8080. Set <code>server.port</code> in application.properties/YAML (e.g. <code>server.port=8081</code>), pass it as <code>--server.port=</code> on the command line, or use <code>0</code> for a random free port. It lives in the <code>server.*</code> namespace, not <code>spring.*</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you switch the embedded server from Tomcat to Jetty or Undertow?</summary>
+      <div class="answer"><p>Exclude <code>spring-boot-starter-tomcat</code> from <code>spring-boot-starter-web</code> and add <code>spring-boot-starter-jetty</code> or <code>spring-boot-starter-undertow</code>. Boot auto-configures whichever container it finds on the classpath.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the whitelabel error page?</summary>
+      <div class="answer"><p>Boot's default error view. For an unhandled error it shows a generic HTML page to browsers and a JSON body (<code>timestamp, status, error, path</code>) to API clients, served by <code>BasicErrorController</code> at <code>/error</code>. Disable it with <code>server.error.whitelabel.enabled=false</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does the same /error endpoint return HTML to a browser but JSON to an API client?</summary>
+      <div class="answer"><p>Content negotiation. <code>BasicErrorController</code> has two handler methods — one produces <code>text/html</code>, the other JSON — and Spring picks based on the request's <code>Accept</code> header. Browsers send <code>Accept: text/html</code> (whitelabel page); REST clients send <code>application/json</code> (the error map).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you customize or replace the whitelabel error page?</summary>
+      <div class="answer"><p>Several ways: drop an <code>error.html</code> (or per-status <code>error/404.html</code>) template on the classpath; disable whitelabel and let the container show its own page; implement a custom <code>ErrorController</code>; or, for APIs, use <code>@ControllerAdvice</code>/<code>@ExceptionHandler</code> returning a <code>ProblemDetail</code> for a consistent JSON contract.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is CORS and how do you enable it in Spring Boot?</summary>
+      <div class="answer"><p>Cross-Origin Resource Sharing lets a browser call an API on a different origin, gated by <code>Access-Control-*</code> response headers. Enable it fine-grained with <code>@CrossOrigin</code> on a controller/method, or globally by overriding <code>addCorsMappings</code> in a <code>WebMvcConfigurer</code>. Preflight <code>OPTIONS</code> requests are handled automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Boot serialize responses to JSON, and how do you change date format or null handling?</summary>
+      <div class="answer"><p>Boot auto-configures a Jackson <code>ObjectMapper</code>/<code>JsonMapper</code> and registers it as an <code>HttpMessageConverter</code>, so controller return values serialize automatically. Change behavior with <code>spring.jackson.*</code> — e.g. <code>write-dates-as-timestamps=false</code>, <code>default-property-inclusion=non_null</code>, <code>property-naming-strategy=SNAKE_CASE</code> — or a builder-customizer bean.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where does Spring Boot serve static content from by default?</summary>
+      <div class="answer"><p>From <code>classpath:/static</code>, <code>/public</code>, <code>/resources</code> and <code>/META-INF/resources</code>, mapped at <code>/**</code>. An <code>index.html</code> in any of these becomes the welcome page. Override with <code>spring.mvc.static-path-pattern</code> and <code>spring.web.resources.static-locations</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @ControllerAdvice vs @RestControllerAdvice — what's the difference?</summary>
+      <div class="answer"><p>Both centralize <code>@ExceptionHandler</code> methods across controllers. <code>@RestControllerAdvice</code> = <code>@ControllerAdvice</code> + <code>@ResponseBody</code>, so handler return values are serialized (to JSON) instead of resolved as view names — the right choice for REST APIs replacing whitelabel behavior.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Fat jar with embedded server vs traditional war — how does it change deployment, and when would you still build a war?</summary>
+      <div class="answer"><p>The fat jar bundles the app plus an embedded container, so <code>java -jar</code> is the whole deployment — ideal for containers and cloud/12-factor setups where each app owns its server. Build a war (extend <code>SpringBootServletInitializer</code>, package <code>war</code>) only when you must deploy into a shared external application server mandated by ops or licensing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your @CrossOrigin config stops working once Spring Security is added. Why, and how do you fix it?</summary>
+      <div class="answer"><p>Security's filter chain runs before Spring MVC, so it can reject the unauthenticated preflight <code>OPTIONS</code> before <code>@CrossOrigin</code> is ever reached. Fix it by enabling CORS in the security filter chain (<code>http.cors(...)</code>) and exposing a <code>CorsConfigurationSource</code> bean, so Security's <code>CorsFilter</code> applies the same policy up front.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does allowCredentials(true) with allowedOrigins("*") fail, and what's the correct fix?</summary>
+      <div class="answer"><p>The CORS spec forbids returning <code>Access-Control-Allow-Origin: *</code> together with <code>Allow-Credentials: true</code>; Spring throws at startup/handling rather than emit an invalid header. Use <code>allowedOriginPatterns("*")</code> (which reflects the actual request origin) or list explicit origins when credentials are required.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist (module 04):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.web.starter — spring-boot-starter-web, embedded servers (Tomcat/Jetty/Undertow), server config</li>
+      <li>boot.web.behavior — default error handling (ErrorController/whitelabel), CORS, JSON (Jackson), static content</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Boot Packaging and Deployment module: executable/fat jars and the Maven/Gradle plugins, layered jars for cache-friendly images, Cloud Native Buildpacks and OCI images, multi-stage Dockerfiles, and GraalVM native images with AOT — the best official and community resources plus the interview questions they power.">
+  <title>Packaging and Deployment — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Packaging and Deployment</h1>
+  <p class="standfirst">Turning a Spring Boot app into something you can ship — a runnable jar, a cache-friendly image, or a native binary — is where build tooling, Docker and GraalVM meet, and where most deployment interview questions live.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Packaging and Deployment</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Packaging is the last mile: how Spring Boot bundles your code and its dependencies into an artifact, and how that artifact becomes a container or a standalone executable. This module covers the executable (fat) jar and the Maven/Gradle plugins that build it, layered jars for cache-friendly Docker images, Cloud Native Buildpacks and hand-written Dockerfiles for OCI images, and GraalVM native images produced through Spring's ahead-of-time processing. Layered jars, buildpacks and native images are the current hot topics — expect all three in interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The executable (fat) jar and the build plugins</h3>
+    <p>A Spring Boot executable jar (uber/fat jar) is one self-contained archive: your compiled classes under <code>BOOT-INF/classes</code>, every runtime dependency under <code>BOOT-INF/lib</code>, Boot's loader classes at the root, and an embedded server — launched with <code>java -jar app.jar</code>. It is made "executable" by the <code>spring-boot-maven-plugin</code>'s <code>repackage</code> goal (or the Gradle plugin's <code>bootJar</code> task), which rewrites the plain jar and sets a launcher <code>Main-Class</code> that drives Boot's nested-jar classloader.</p>
+    <p>Why it matters: this is the default deployment unit — no external application server to install, and the same artifact runs on a laptop, a CI runner or a container. Interviewers probe the difference between <code>mvn package</code> and <code>spring-boot:repackage</code>, and why you cannot simply drop a fat jar onto the classpath (the nested jars need Boot's own loader to be read).</p>
+    <pre class="code-block" data-label="Shell"><code>mvn clean package          # produces target/app.jar (repackaged, executable)
+java -jar target/app.jar   # embedded server starts — no external container</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/specification/executable-jar/index.html" rel="noopener">The Executable Jar Format — Spring Boot reference (nested jars, launcher, structure)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/maven-plugin/index.html" rel="noopener">Spring Boot Maven Plugin — official documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/gradle-plugin/index.html" rel="noopener">Spring Boot Gradle Plugin — official documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/deployable-fat-jar-spring-boot" rel="noopener">Create a Fat Jar App with Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-repackage-vs-mvn-package" rel="noopener">Difference Between spring-boot:repackage and Maven package — Baeldung</a></li>
+    </ul>
+
+    <h3>Layered jars for efficient images</h3>
+    <p>A plain fat jar is one large blob: change a single line of code and the whole archive — including hundreds of megabytes of unchanged dependencies — becomes a new Docker layer. A layered jar adds a <code>layers.idx</code> metadata file that splits the archive into four default layers — <code>dependencies</code>, <code>spring-boot-loader</code>, <code>snapshot-dependencies</code> and <code>application</code> — ordered least- to most-frequently changed. Docker then caches the stable dependency layers and rebuilds only the small application layer on each code change.</p>
+    <p>Why it matters: faster builds, smaller pushes and cheaper registry storage. The ordering (stable content at the bottom, volatile on top) is the whole trick, and it is a favourite follow-up once Docker comes up. Layering is on by default since Boot 2.4, and both buildpacks and the recommended Dockerfiles consume the same layer index.</p>
+    <pre class="code-block" data-label="Shell"><code>java -Djarmode=tools -jar app.jar list-layers
+# dependencies / spring-boot-loader / snapshot-dependencies / application</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/efficient-images.html" rel="noopener">Efficient Container Images (layered jars) — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/maven-plugin/packaging.html" rel="noopener">Packaging Executable Archives, incl. Layered Jar config — Maven plugin</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/docker-layers-spring-boot" rel="noopener">Reusing Docker Layers with Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Container images with Cloud Native Buildpacks</h3>
+    <p>Spring Boot can build an OCI image with no Dockerfile at all: <code>mvn spring-boot:build-image</code> or <code>gradle bootBuildImage</code> hands your jar to Cloud Native Buildpacks (the Paketo implementation), which detect Java, add a right-sized JRE, apply the layer index and output a runnable image straight to your local Docker daemon.</p>
+    <p>Why it matters: sensible, reproducible, non-root images with no Dockerfile to write, review or patch — the buildpack owns base-image CVEs and JRE selection. Know the command, that Paketo is the default builder, that images run as a non-root user, and that any <code>layers.idx</code> customization is honoured by the buildpack too.</p>
+    <pre class="code-block" data-label="Shell"><code>mvn spring-boot:build-image -Dspring-boot.build-image.imageName=demo/app:1.0
+# or with Gradle:  gradle bootBuildImage --imageName=demo/app:1.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/index.html" rel="noopener">Container Images — the two containerization options — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/cloud-native-buildpacks.html" rel="noopener">Cloud Native Buildpacks — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/maven-plugin/build-image.html" rel="noopener">Packaging OCI Images (build-image goal) — Maven plugin</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-docker-images" rel="noopener">Creating Docker Images with Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Writing your own Dockerfile</h3>
+    <p>When you need full control — a specific base image, extra OS packages, particular JVM flags — write a multi-stage Dockerfile. The recommended pattern runs <code>java -Djarmode=tools -jar app.jar extract --layers</code> in a builder stage, then copies each extracted layer in its own <code>COPY</code> instruction so Docker caches dependencies independently of application code — the manual equivalent of what buildpacks do automatically.</p>
+    <p>Why it matters: buildpacks cover the common case, but Dockerfiles remain the fallback for bespoke requirements and are still asked about constantly. The <code>jarmode=tools</code> extractor replaced the older manual-unzip approach; it also lays files out to be friendly to Class Data Sharing (CDS) and the newer AOT cache for faster startup.</p>
+    <pre class="code-block" data-label="Dockerfile"><code>FROM bellsoft/liberica-openjre-debian:25 AS builder
+WORKDIR /builder
+COPY target/*.jar application.jar
+RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
+
+FROM bellsoft/liberica-openjre-debian:25
+WORKDIR /application
+COPY --from=builder /builder/extracted/dependencies/ ./
+COPY --from=builder /builder/extracted/spring-boot-loader/ ./
+COPY --from=builder /builder/extracted/snapshot-dependencies/ ./
+COPY --from=builder /builder/extracted/application/ ./
+ENTRYPOINT ["java", "-jar", "application.jar"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/dockerfiles.html" rel="noopener">Dockerfiles (multi-stage, jarmode tools) — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/spring-boot-docker" rel="noopener">Spring Boot with Docker — official Getting Started guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/dockerizing-spring-boot-application" rel="noopener">Dockerizing a Spring Boot Application — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e3YERpG2rMs" rel="noopener">Dockerizing your Spring Boot Application — Java Techie</a></li>
+    </ul>
+
+    <h3>GraalVM native images (AOT)</h3>
+    <p>A GraalVM native image compiles your application ahead-of-time into a standalone, platform-specific executable with no JVM shipped — startup in tens of milliseconds and a much smaller memory footprint, ideal for serverless and fast-scaling containers. Spring makes this possible through AOT processing: at build time it evaluates your bean definitions, generates equivalent Java configuration code, and emits GraalVM reachability hints (reflection, resources, serialization, proxies) so the closed-world native compiler can see everything it needs.</p>
+    <p>Why it matters: the trade-offs are the interview. Builds are long and memory-hungry; dynamic features (reflection, dynamic proxies, beans decided at runtime) must be known at build time or registered with hints; and you test against a real native binary. Two build paths: buildpacks (<code>mvn -Pnative spring-boot:build-image</code> / <code>gradle bootBuildImage</code>) for a native container, or the GraalVM Native Build Tools (<code>mvn -Pnative native:compile</code> / <code>gradle nativeCompile</code>) for a local executable.</p>
+    <pre class="code-block" data-label="Shell"><code>mvn -Pnative native:compile           # local native executable (Native Build Tools)
+mvn -Pnative spring-boot:build-image  # native image inside an OCI container</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/native-image/introducing-graalvm-native-images.html" rel="noopener">Introducing GraalVM Native Images (AOT processing explained) — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/native-image/developing-your-first-application.html" rel="noopener">Developing Your First GraalVM Native Application — Spring Boot how-to</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-native-intro" rel="noopener">Native Images with Spring Boot and GraalVM — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-6-ahead-of-time-optimizations" rel="noopener">Ahead-of-Time Optimizations in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FjRBHKUP-NA" rel="noopener">Getting started with Spring Boot AOT + GraalVM Native Images — Dan Vega</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-caching-messaging-scheduling.html">← Caching, Messaging and Scheduling Starters</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="12-production-dx.html">Production and Developer Experience →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Packaging and deployment questions asked in Indian interviews — from screening rounds through product-company system-design deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Spring Boot fat (executable) jar, and how do you run it?</summary>
+      <div class="answer"><p>A single self-contained archive holding your compiled classes (<code>BOOT-INF/classes</code>), all runtime dependencies (<code>BOOT-INF/lib</code>), Boot's loader classes and an embedded server. It is produced by the build plugin and run with <code>java -jar app.jar</code> — no external application server required.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How is spring-boot:repackage different from a normal mvn package?</summary>
+      <div class="answer"><p><code>mvn package</code> builds an ordinary (thin) jar with just your classes. The plugin's <code>repackage</code> goal — bound to the package phase — takes that jar and rebuilds it as an executable fat jar, nesting dependencies under <code>BOOT-INF/lib</code> and setting a launcher <code>Main-Class</code>. Without repackage the jar is not runnable with <code>java -jar</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is inside a Spring Boot executable jar, and why can't you just add it to the classpath?</summary>
+      <div class="answer"><p>Your code under <code>BOOT-INF/classes</code>, dependency jars under <code>BOOT-INF/lib</code>, Boot's loader at the root, and a manifest pointing at <code>JarLauncher</code>. The dependencies are nested jars-within-a-jar, which the standard JVM classloader cannot read directly; Boot's own launcher and classloader resolve them at startup.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> jar or war — how do you deploy a Spring Boot app today?</summary>
+      <div class="answer"><p>The default and recommended unit is the executable jar with an embedded server (Tomcat/Jetty/Undertow). A war (extending <code>SpringBootServletInitializer</code>, embedded server marked provided) is only for deploying into an existing external servlet container — increasingly rare.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are layered jars and what problem do they solve?</summary>
+      <div class="answer"><p>A layered jar adds a <code>layers.idx</code> that partitions the fat jar into <code>dependencies</code>, <code>spring-boot-loader</code>, <code>snapshot-dependencies</code> and <code>application</code>. Docker can then cache the rarely-changing dependency layers and rebuild only the small application layer when your code changes — far faster image builds and smaller pushes than a single-blob fat jar.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the four default layers, and why does their order matter?</summary>
+      <div class="answer"><p><code>dependencies</code> (released libraries), <code>spring-boot-loader</code>, <code>snapshot-dependencies</code>, and <code>application</code> (your classes and resources). They are ordered least- to most-frequently changed so the volatile application layer sits on top. Docker invalidates a changed layer and everything above it, so keeping stable content at the bottom maximises cache hits.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the two ways to containerize a Spring Boot app, and their trade-offs?</summary>
+      <div class="answer"><p>Cloud Native Buildpacks (<code>spring-boot:build-image</code> / <code>bootBuildImage</code>) — no Dockerfile, sensible non-root image, buildpack maintains the base image and JRE, but less control. A hand-written Dockerfile — full control over base image, packages and JVM flags, but you own patching and layer optimisation. Buildpacks for the common case, Dockerfile when you need customisation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does mvn spring-boot:build-image do, and what is Paketo?</summary>
+      <div class="answer"><p>It builds an OCI image from your jar using Cloud Native Buildpacks without a Dockerfile, publishing it to your local Docker daemon. Paketo is the default buildpack implementation Boot uses: it detects Java, adds a right-sized JRE, applies the layer index and produces a non-root, reproducible image.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In a multi-stage Dockerfile, how do you take advantage of layered jars?</summary>
+      <div class="answer"><p>In a builder stage run <code>java -Djarmode=tools -jar app.jar extract --layers</code> to unpack the jar into its layer directories, then use a separate <code>COPY</code> for each (<code>dependencies</code>, <code>spring-boot-loader</code>, <code>snapshot-dependencies</code>, <code>application</code>). Each COPY becomes its own Docker layer, so dependencies stay cached across code-only rebuilds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a GraalVM native image, and how does it differ from running on the JVM?</summary>
+      <div class="answer"><p>An ahead-of-time-compiled, platform-specific executable containing your app and a minimal runtime but no full JVM. Versus the JVM: near-instant startup and lower memory, but no JIT peak-performance warm-up, a closed-world assumption (no arbitrary runtime class loading), longer and memory-heavy builds, and platform-specific binaries.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is Spring AOT processing, and why is it required for native images?</summary>
+      <div class="answer"><p>At build time Spring AOT evaluates the application context, generates explicit bean-registration code, and produces GraalVM hints for reflection, resources, serialization and proxies. Native compilation is closed-world — anything reached only via runtime reflection or dynamic proxies is invisible unless declared — so AOT (plus <code>RuntimeHints</code> / <code>@RegisterReflectionForBinding</code> for your own cases) makes Spring's dynamic behaviour statically reachable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the practical gotchas when moving a Spring Boot app to a native image?</summary>
+      <div class="answer"><p>Reflection, dynamic proxies, resource loading and conditionally-created beans must be known at build time or registered with hints; some libraries lack GraalVM metadata; profiles and conditions are largely fixed at build time rather than runtime; builds are slow and RAM-hungry (size your CI accordingly); and you must run tests against the actual native binary, since JVM-passing code can still fail natively. Mitigate with the native build tools' testing support and by preferring libraries that publish reachability metadata.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.deploy.jar</li>
+      <li>boot.deploy.container</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

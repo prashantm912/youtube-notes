@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Advanced Spring Boot configuration: validating @ConfigurationProperties at startup, registering them with @EnableConfigurationProperties / @ConfigurationPropertiesScan, configuration metadata for IDE auto-completion, and importing external config, config trees and secrets — with verified official and community resources and the interview questions they power.">
+  <title>Advanced Configuration — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Advanced Configuration</h1>
+  <p class="standfirst">Beyond binding: this is where configuration grows teeth — validated at startup so a bad value stops the app instead of a request, documented so your IDE completes it, and pulled from files, config trees and mounted secrets the code never hard-codes.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Boot → Advanced Configuration</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Advanced Boot configuration turns <code>@ConfigurationProperties</code> from a convenience into a contract: how the classes are registered (<code>@EnableConfigurationProperties</code> vs <code>@ConfigurationPropertiesScan</code>), JSR-380 validation that fails the application fast on bad input, a configuration-metadata file that powers IDE auto-completion, and the <code>spring.config.import</code> family — extra property files, config trees and mounted secrets — that keeps sensitive values out of source control. These are the features interviewers probe once you are past "what is <code>@Value</code>".</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Registering property beans: @EnableConfigurationProperties and @ConfigurationPropertiesScan</h3>
+    <p>A <code>@ConfigurationProperties</code> class is inert until Spring registers it as a bean. Two idioms do that: name the types explicitly with <code>@EnableConfigurationProperties(MyProps.class)</code> on a configuration class, or drop <code>@ConfigurationPropertiesScan</code> on the application and let Boot classpath-scan for every <code>@ConfigurationProperties</code> type under the given packages (defaulting to the main class's package, like <code>@ComponentScan</code>). Scan is the low-ceremony choice for application code; explicit enabling is precise and keeps library types free of stereotype annotations.</p>
+    <p>Why it matters: "how does Boot know about your properties class?" is a routine interview probe. The senior detail is that a <code>@ConfigurationProperties</code> POJO should <em>not</em> also be a <code>@Component</code> — registering it through the stereotype path bypasses the dedicated binding and can double-register the bean. Pick one mechanism.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootApplication
+@ConfigurationPropertiesScan          // auto-register @ConfigurationProperties types
+public class App {
+    public static void main(String[] args) { SpringApplication.run(App.class, args); }
+}
+
+@Configuration
+@EnableConfigurationProperties(MailProperties.class)  // or register specific types
+class MailConfig { }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/context/properties/ConfigurationPropertiesScan.html" rel="noopener">@ConfigurationPropertiesScan — Spring Boot API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-application-configuration-tutorial/" rel="noopener">Spring Boot Application Configuration Tutorial — SivaLabs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=23FaI_EWH4w" rel="noopener">Spring Boot @ConfigurationProperties Annotation Tutorial — Java Guides</a></li>
+    </ul>
+
+    <h3>Validating @ConfigurationProperties</h3>
+    <p>Add <code>@Validated</code> to a <code>@ConfigurationProperties</code> class and Boot runs Jakarta Bean Validation (JSR-380) against the bound values while the context starts. Standard constraints — <code>@NotBlank</code>, <code>@Min</code>, <code>@Max</code>, <code>@Email</code>, <code>@Pattern</code> — sit on the fields, and any violation aborts startup with a descriptive error instead of surfacing much later as a mysterious NullPointerException in production. Nested objects need <code>@Valid</code> on the field (Bean Validation does not cascade on its own); a non-inner nested type also wants <code>@NestedConfigurationProperty</code> so its metadata is generated.</p>
+    <p>Why it matters: fail-fast configuration is a hallmark of production-grade services and a favourite interview theme. You need the constraint API on the classpath (<code>spring-boot-starter-validation</code>). For logic too complex for annotations, declare a <code>static</code> bean named <code>configurationPropertiesValidator</code> implementing Spring's <code>Validator</code> — static so it is created very early, before the beans it guards exist.</p>
+    <pre class="code-block" data-label="Java"><code>@ConfigurationProperties(prefix = "app.mail")
+@Validated
+public class MailProperties {
+    @NotBlank private String host;
+    @Min(1) @Max(65535) private int port;
+    @Valid  private final Credentials credentials = new Credentials(); // cascade
+    // getters and setters
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html" rel="noopener">Java Bean Validation (@Validated, JSR-380) — Spring Framework docs</a></li>
+      <li>[Article] <a href="https://reflectoring.io/validate-spring-boot-configuration-parameters-at-startup/" rel="noopener">Validate Spring Boot Configuration Parameters at Startup — Reflectoring</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/configuration-properties-in-spring-boot" rel="noopener">Guide to @ConfigurationProperties in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Configuration metadata and IDE auto-completion</h3>
+    <p>The <code>spring-boot-configuration-processor</code> is a compile-time annotation processor that reads your <code>@ConfigurationProperties</code> classes and emits <code>META-INF/spring-configuration-metadata.json</code>, describing every key with its type, default and Javadoc. IDEs read that file to offer auto-completion, inline documentation and deprecation strike-through for <em>your</em> properties — the same experience Boot's built-in keys already give you. It runs at build time only; nothing is needed at runtime.</p>
+    <p>Why it matters: for hand-written keys, values the processor cannot infer (a fixed set of allowed strings, a value provider), or properties not bound to a class, you add <code>META-INF/additional-spring-configuration-metadata.json</code> with hints and the processor merges it into the generated file. <code>@DeprecatedConfigurationProperty</code> documents a retired key with a reason and replacement. Knowing where IDE auto-completion comes from — and that it is opt-in via a build dependency — is a common interview follow-up.</p>
+    <pre class="code-block" data-label="JSON"><code>{ "hints": [
+    { "name": "app.mail.protocol",
+      "values": [ { "value": "smtp" }, { "value": "smtps" } ] }
+] }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/specification/configuration-metadata/annotation-processor.html" rel="noopener">Generating Metadata with the Annotation Processor — Spring Boot docs</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/specification/configuration-metadata/format.html" rel="noopener">Configuration Metadata Format (groups, properties, hints) — Spring Boot docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-configuration-metadata" rel="noopener">A Guide to Spring Boot Configuration Metadata — Baeldung</a></li>
+    </ul>
+
+    <h3>Importing external config: spring.config.import, config trees and secrets</h3>
+    <p><code>spring.config.import</code> (Boot 2.4+) pulls additional configuration into the Environment from within <code>application.properties</code>/<code>yml</code> itself — extra property files, extensionless files, whole directories, even non-file sources such as <code>configtree:</code> and <code>vault:</code>. Each import is inserted as a new document just below its declaration, and imported values take precedence over the importing file. The <code>optional:</code> prefix keeps startup from failing when a location is absent, so the same build runs whether or not that file exists.</p>
+    <p>Why it matters: for secrets, a config tree maps a mounted directory to properties — each file's name becomes the key and its contents the value, exactly how Kubernetes and Docker expose Secrets as files (<code>spring.config.import=optional:configtree:/run/secrets/</code>). That keeps credentials out of <code>application.properties</code> and out of Git; the file-per-secret model also underlies HashiCorp Vault via Spring Cloud Vault. "How do you inject secrets without hard-coding them?" is a standard, system-design-flavoured interview question.</p>
+    <pre class="code-block" data-label="Properties"><code># application.properties
+spring.config.import=optional:file:./secret.properties,\
+                     optional:configtree:/run/secrets/</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/external-config.html" rel="noopener">Externalized Configuration — importing data and config trees — Spring Boot reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/properties-and-configuration.html" rel="noopener">Properties and Configuration how-to (config location, profiles) — Spring Boot docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/properties-with-spring" rel="noopener">Properties with Spring and Spring Boot (incl. spring.config.import) — Baeldung</a></li>
+      <li>[Article] <a href="https://ik.am/entries/626/en" rel="noopener">Kubernetes Secret values as Boot properties with Config Tree — IK.AM (Toshiaki Maki)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=PmGLn3ua_lU" rel="noopener">Spring Boot Secret Properties: storing secrets in configuration — Dan Vega</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-externalized-config.html">← Externalized Configuration</a>
+    <a href="index.html">All Spring Boot modules</a>
+    <a href="04-web.html">Web Applications with Boot →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked advanced-configuration questions in Indian Spring Boot interviews — the follow-ups once the screening round has confirmed you can use <code>@ConfigurationProperties</code>:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you tell Spring Boot about a @ConfigurationProperties class?</summary>
+      <div class="answer"><p>Two ways: <code>@EnableConfigurationProperties(MyProps.class)</code> on a configuration class to register specific types, or <code>@ConfigurationPropertiesScan</code> on the application to classpath-scan and auto-register every <code>@ConfigurationProperties</code> type under the given packages. The POJO itself should not also be a <code>@Component</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you validate values bound to @ConfigurationProperties?</summary>
+      <div class="answer"><p>Put <code>@Validated</code> on the class and Jakarta Bean Validation (JSR-380) constraints — <code>@NotBlank</code>, <code>@Min</code>, <code>@Email</code>, <code>@Pattern</code> — on the fields. It needs a validation provider on the classpath, added via <code>spring-boot-starter-validation</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens when a @ConfigurationProperties validation constraint fails at startup?</summary>
+      <div class="answer"><p>The application context fails to start — Boot throws a binding/validation error naming the offending properties and constraints. That fail-fast behaviour is the whole point: a misconfigured app never comes up and never serves traffic with a bad value.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is spring.config.import used for?</summary>
+      <div class="answer"><p>It imports additional configuration into the Environment from inside <code>application.properties</code>/<code>yml</code> — extra files, directories, config trees, or sources such as Vault — without needing command-line flags. Imported values take precedence over the importing document.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @EnableConfigurationProperties vs @ConfigurationPropertiesScan — when do you use which?</summary>
+      <div class="answer"><p><code>@EnableConfigurationProperties</code> registers named types explicitly — precise, good for library code or when you want tight control. <code>@ConfigurationPropertiesScan</code> scans packages (defaulting to the app's package) and auto-registers all <code>@ConfigurationProperties</code> types — less boilerplate for application code. Use one; do not also mark the class <code>@Component</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you validate a nested configuration object?</summary>
+      <div class="answer"><p>Bean Validation does not cascade automatically — annotate the nested field with <code>@Valid</code> so its constraints are checked too. For a non-inner nested type, also add <code>@NestedConfigurationProperty</code> so the annotation processor generates metadata for its keys.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does spring-boot-configuration-processor do, and is it needed at runtime?</summary>
+      <div class="answer"><p>It is a compile-time annotation processor that generates <code>META-INF/spring-configuration-metadata.json</code> from your <code>@ConfigurationProperties</code> classes, powering IDE auto-completion and inline docs. It is build/IDE-only — declared optional (Maven) or in the <code>annotationProcessor</code> configuration (Gradle) and not required at runtime.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are config trees (configtree:) and when do you use them?</summary>
+      <div class="answer"><p>A config tree maps a mounted directory to properties: each filename becomes a key and the file contents become its value. You use it to consume Kubernetes/Docker Secrets and ConfigMaps mounted as files, e.g. <code>spring.config.import=optional:configtree:/run/secrets/</code>, so secrets never live in the packaged properties.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does the optional: prefix do on a config location?</summary>
+      <div class="answer"><p>It marks the location as non-mandatory — if the file or tree is missing, startup continues instead of aborting. It works with <code>spring.config.import</code>, <code>spring.config.location</code> and <code>spring.config.additional-location</code>, letting one artifact run across environments where some sources are absent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> spring.config.import vs spring.config.additional-location — what's the difference?</summary>
+      <div class="answer"><p><code>additional-location</code> adds a directory to the set of locations Boot searches for <code>application.properties</code>/<code>yml</code>, supplementing the defaults. <code>import</code> pulls specific documents or sources into the Environment inline, as a new higher-precedence document below the declaration. Different mechanisms, different precedence rules.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why must a custom configurationPropertiesValidator bean be declared static?</summary>
+      <div class="answer"><p>It has to exist very early — before ordinary <code>@Configuration</code> classes and the <code>@ConfigurationProperties</code> beans it validates are instantiated. A <code>static</code> <code>@Bean</code> method can be invoked without creating its enclosing configuration instance, so the validator is available at that early phase and avoids triggering premature bean creation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A property's valid values aren't an enum, yet you want IDE auto-completion. How?</summary>
+      <div class="answer"><p>Provide hints in <code>META-INF/additional-spring-configuration-metadata.json</code> — a <code>hints</code> entry listing the allowed <code>values</code>, or a <code>providers</code> value provider (such as a class reference or logger-name handler). The configuration processor merges it into the generated metadata, and IDEs then offer those completions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you feed secrets into a Boot app without hard-coding them in application.properties or committing them to Git?</summary>
+      <div class="answer"><p>Keep them out of the packaged config and import them at runtime via <code>spring.config.import</code>: <code>optional:file:</code> for an un-committed local file, <code>configtree:</code> for secrets mounted by Kubernetes/Docker, or <code>vault://</code> through Spring Cloud Vault for a secrets manager. Property-source precedence and environment variables then let each deployment override safely, so no credential ever reaches source control.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Boot track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>boot.config.validation</li>
+      <li>boot.config.validation.validated</li>
+      <li>boot.config.validation.jsr380-constraints</li>
+      <li>boot.config.validation.nested</li>
+      <li>boot.config.enable-configuration-properties</li>
+      <li>boot.config.properties-scan</li>
+      <li>boot.config.metadata.annotation-processor</li>
+      <li>boot.config.metadata.additional-hints</li>
+      <li>boot.config.import</li>
+      <li>boot.config.import.optional</li>
+      <li>boot.config.import.configtree</li>
+      <li>boot.config.import.secrets</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Boot track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
