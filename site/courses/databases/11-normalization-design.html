@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases module 11: functional dependencies and keys, normalization from 1NF through BCNF with the anomalies each form removes, when to denormalize, and production schema patterns — soft delete, audit trails, multi-tenancy — with verified resources and India-focused interview questions.">
+  <title>Normalization and Schema Design — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Normalization and Schema Design</h1>
+  <p class="standfirst">Normalization is theory with a daily payoff — the reasoning that turns a spreadsheet dumped into one table into a schema that cannot drift out of sync. Walking 1NF to BCNF on a whiteboard is close to guaranteed in Indian interviews, so this module orients you on each form and points to the resources that drill them.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Normalization and Schema Design</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module covers relational schema design end to end: the functional dependencies and keys that normalization is defined against, the walk from 1NF through BCNF with the anomalies each form removes, when deliberate denormalization earns its keep, and the everyday patterns — soft delete, audit trails, multi-tenancy — that production tables grow into. The forms are theory; the patterns are what you actually ship. Both are interview staples for backend and data roles.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Functional dependencies, keys, and the anomalies that motivate normalization</h3>
+    <p>A functional dependency <code>X → Y</code> means each value of X determines exactly one value of Y (an <code>employee_id</code> determines one name). Keys are the special dependencies: a <em>candidate key</em> is a minimal set of attributes that determines every other attribute; a <em>prime</em> attribute belongs to some candidate key, a <em>non-prime</em> attribute belongs to none. Every normal form above 1NF is stated in terms of how non-prime attributes depend on keys, so this vocabulary is the whole foundation.</p>
+    <p>Why it matters: normalization exists to kill three redundancy-born bugs. The <em>insertion anomaly</em> (you cannot record a fact without inventing unrelated data), the <em>update anomaly</em> (a value duplicated across rows must be changed everywhere at once or the data diverges), and the <em>deletion anomaly</em> (removing one row silently loses an unrelated fact). Spotting which anomaly a badly-shaped table causes is the framing interviewers want.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/what-is-functional-dependency-in-dbms/" rel="noopener">Functional Dependency in DBMS — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/candidate-key-in-dbms/" rel="noopener">Candidate Key in DBMS — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/functional-dependency-and-attribute-closure/" rel="noopener">Attribute Closure in DBMS (finding candidate keys) — GeeksforGeeks</a></li>
+    </ul>
+
+    <h3>First, Second and Third Normal Forms</h3>
+    <p>The classic progression, each form assuming the one before it. <strong>1NF</strong>: every column holds a single atomic value — no arrays, comma-lists, or repeating <code>Class1/Class2/Class3</code> columns. <strong>2NF</strong>: no <em>partial dependency</em> — no non-prime attribute depends on only part of a composite candidate key (only an issue when the key spans several columns). <strong>3NF</strong>: no <em>transitive dependency</em> — no non-prime attribute depends on another non-prime attribute. If <code>student → zip</code> and <code>zip → city</code>, then <code>city</code> reaches the key only through <code>zip</code>, so it belongs in its own table.</p>
+    <p>Why it matters: 3NF is the practical target for almost every transactional schema — it removes the common anomalies while keeping writes to a single place. Interviewers routinely hand you an unnormalized table and ask you to decompose it form by form, naming the dependency each split removes.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Transitive dependency in one table: student -&gt; advisor -&gt; advisor_room
+-- 3NF split moves the advisor -&gt; room fact out of the student row
+CREATE TABLE advisor (id INT PRIMARY KEY, name TEXT, room TEXT);
+CREATE TABLE student (id INT PRIMARY KEY, name TEXT,
+                      advisor_id INT REFERENCES advisor(id));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/troubleshoot/microsoft-365-apps/access/database-normalization-description" rel="noopener">Database normalization description (with the classic student/advisor walkthrough) — Microsoft Learn</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/introduction-of-database-normalization/" rel="noopener">Introduction to Database Normalization — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/normal-forms-in-dbms/" rel="noopener">Normal Forms in DBMS (1NF–5NF with examples) — GeeksforGeeks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EGEwkad_llA" rel="noopener">All Normal Forms with real-life examples (1NF–5NF) — Gate Smashers</a></li>
+    </ul>
+
+    <h3>Boyce-Codd Normal Form and higher forms</h3>
+    <p>BCNF tightens 3NF to a single rule: for every non-trivial dependency <code>X → Y</code>, X must be a superkey. 3NF is more forgiving — it lets a determinant that is not a superkey stand as long as the attribute it determines is itself prime. The textbook failing case has <em>overlapping candidate keys</em>: a relation is in 3NF yet a non-key determinant still exists, so BCNF fails. Decomposing into BCNF can cost dependency preservation, which is exactly why some designs deliberately stop at 3NF.</p>
+    <p>Why it matters: the "give me a table that is in 3NF but not BCNF" question separates people who memorized the forms from people who understand them. Beyond BCNF, 4NF (multivalued dependencies) and 5NF (join dependencies) exist but are mostly academic — worth naming, rarely worth reaching for.</p>
+    <pre class="code-block" data-label="Dependencies"><code>-- R(student, subject, teacher)
+--   {student, subject} -&gt; teacher    each student-subject pair has one teacher
+--   teacher            -&gt; subject     each teacher teaches exactly one subject
+-- Candidate keys: {student, subject} and {student, teacher}
+-- teacher -&gt; subject has a determinant that is NOT a superkey
+--   => 3NF holds (subject is prime) but BCNF is violated</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/boyce-codd-normal-form-bcnf/" rel="noopener">Boyce-Codd Normal Form (BCNF) — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/3nf-vs-bcnf-database-normalization" rel="noopener">3NF and BCNF in DBMS — Baeldung on Computer Science</a></li>
+      <li>[Reference] <a href="https://en.wikipedia.org/wiki/Database_normalization" rel="noopener">Database normalization (all forms, UNF through 6NF) — Wikipedia</a></li>
+    </ul>
+
+    <h3>Denormalization and its trade-offs</h3>
+    <p>Denormalization deliberately reintroduces redundancy — duplicated columns, precomputed aggregates, materialized views — to cut joins and aggregations on hot read paths. It is not the opposite of normalization but an optimization applied <em>after</em> a clean design, and only once indexing, caching, and query tuning have proven insufficient. It shines for read-heavy and reporting workloads with predictable access patterns, which is why analytics warehouses use denormalized star schemas.</p>
+    <p>Why it matters: the trade-off is the answer interviewers grade. Normalization gives simple, single-place writes and slower multi-join reads; denormalization gives fast reads and write amplification with a real risk of stale or inconsistent copies. Any denormalized value needs a keep-it-correct mechanism — a trigger, a scheduled job, or change-data-capture. The maxim: normalize until it hurts, denormalize until it works.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Cache an aggregate that would otherwise need a JOIN + GROUP BY per read
+ALTER TABLE author ADD COLUMN book_count INT NOT NULL DEFAULT 0;
+-- The redundant column is only safe if a trigger or job keeps it in sync;
+-- a stale book_count is the classic denormalization bug.</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/denormalization-in-databases/" rel="noopener">Denormalization in Databases — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/difference-between-normalization-and-denormalization/" rel="noopener">Normalization vs. Denormalization (OLTP vs OLAP) — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.datacamp.com/tutorial/denormalization" rel="noopener">Denormalization in Databases: When and How to Use It — DataCamp</a></li>
+    </ul>
+
+    <h3>Schema design patterns: soft delete, audit trails, multi-tenancy</h3>
+    <p>Real tables grow three recurring shapes. <em>Soft delete</em> keeps a <code>deleted_at</code> timestamp (NULL means live) instead of removing rows — every query must then filter it, and unique constraints must become <em>partial</em> indexes so a deleted row does not block reuse of its key. <em>Audit trails</em> record who changed what and when, most robustly with an AFTER trigger that writes old and new row values into a history table (PostgreSQL's trigger + hstore recipe is the canonical example). <em>Multi-tenancy</em> chooses among database-per-tenant (silo), schema-per-tenant (bridge), and shared tables keyed by <code>tenant_id</code> (pool).</p>
+    <p>Why it matters: the pool model is the cheapest at scale but leaks across tenants the moment an application query forgets its <code>tenant_id</code> filter. PostgreSQL row-level security moves that isolation into the database, so a policy — not application discipline — decides which rows a tenant can see. These patterns show up in system-design and backend rounds far more than the pure theory does.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Soft delete: NULL = live; uniqueness must ignore deleted rows
+ALTER TABLE document ADD COLUMN deleted_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX ON document (tenant_id, slug) WHERE deleted_at IS NULL;
+
+-- Multi-tenancy: enforce isolation in the DB, not just the app
+ALTER TABLE document ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON document
+  USING (tenant_id = current_setting('app.tenant_id')::int);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html" rel="noopener">Row Security Policies — PostgreSQL documentation</a></li>
+      <li>[Official] <a href="https://wiki.postgresql.org/wiki/Audit_trigger_91plus" rel="noopener">Audit trigger (trigger + hstore change log) — PostgreSQL wiki</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/multi-tenant-data-isolation-with-postgresql-row-level-security/" rel="noopener">Multi-tenant data isolation with PostgreSQL Row Level Security (silo/bridge/pool) — AWS Database Blog</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/row-level-security-for-tenants-in-postgres" rel="noopener">Row Level Security for Tenants in Postgres — Crunchy Data</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-transactions.html">← Transactions and Concurrency</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="12-views-ops.html">Views, Procedures and Operations →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Normalization is one of the most reliably asked database topics in Indian interviews — expect to define the forms, spot the dependency that breaks one, and defend a denormalization decision:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is normalization and what problem does it solve?</summary>
+      <div class="answer"><p>Structuring tables — guided by functional dependencies — so each fact lives in exactly one place. It removes redundancy and the insertion, update, and deletion anomalies redundancy causes. The price is more tables and more joins, which is a deliberate trade for correctness.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the three anomalies normalization prevents.</summary>
+      <div class="answer"><p>Insertion anomaly — you cannot record a fact without inventing unrelated data (no way to list a course with no enrolled student). Update anomaly — a value duplicated across rows must be changed everywhere at once or the data diverges. Deletion anomaly — removing one row silently loses an unrelated fact. All three come from storing a fact in more than one place.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is First Normal Form?</summary>
+      <div class="answer"><p>Every column holds a single atomic value and there are no repeating groups — no comma-separated <code>phones</code> column, no <code>Class1/Class2/Class3</code> columns faking a list. Move the repeating data into its own table with a one-to-many relationship.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a functional dependency, and what are prime vs non-prime attributes?</summary>
+      <div class="answer"><p><code>X → Y</code> means each X value determines exactly one Y value (<code>id → name</code>). A prime attribute belongs to some candidate key; a non-prime attribute belongs to none. 2NF and 3NF are both defined by how non-prime attributes depend on the keys.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Primary key vs candidate key vs super key?</summary>
+      <div class="answer"><p>A super key is any attribute set that uniquely identifies a row (may carry extra columns). A candidate key is a <em>minimal</em> super key — no removable column. The primary key is the one candidate key you choose to enforce and reference; the rest remain alternate keys.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is 2NF and what is a partial dependency?</summary>
+      <div class="answer"><p>2NF is 1NF plus no partial dependency: no non-prime attribute depends on only part of a composite candidate key. It only arises when the key spans multiple columns. In <code>(order_id, product_id) → …</code>, a <code>product_name</code> that depends on <code>product_id</code> alone is partial — split product into its own table.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is 3NF and what is a transitive dependency?</summary>
+      <div class="answer"><p>3NF is 2NF plus no transitive dependency: no non-prime attribute depends on another non-prime attribute. If <code>student → zip</code> and <code>zip → city</code>, then <code>city</code> reaches the key only through <code>zip</code>; move <code>zip</code>/<code>city</code> to their own table. 3NF is the everyday target for OLTP schemas.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between a partial and a transitive dependency?</summary>
+      <div class="answer"><p>Partial: a non-prime attribute depends on part of a composite key — a 2NF violation, and it needs a multi-column key to even exist. Transitive: a non-prime attribute depends on another non-prime attribute — a 3NF violation that can occur even with a single-column key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In practice, which normal form do you design to, and why?</summary>
+      <div class="answer"><p>3NF (or BCNF) for transactional/OLTP schemas — it removes the common anomalies while keeping writes to a single place. Reporting and analytics (OLAP, warehouses) deliberately denormalize into star schemas for read speed. The rule of thumb: normalize until it hurts, denormalize until it works.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you implement a soft delete, and what does it break?</summary>
+      <div class="answer"><p>Add a <code>deleted_at</code> (or <code>is_deleted</code>) column; NULL means live. Then every query must filter it, unique constraints must become partial indexes (<code>WHERE deleted_at IS NULL</code>) so a deleted key can be reused, and foreign keys and reports must account for hidden rows. You gain recoverability and history; you pay with bigger tables and easy-to-forget filters.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you isolate tenants in a multi-tenant database?</summary>
+      <div class="answer"><p>Three models: silo (database per tenant), bridge (schema per tenant), and pool (shared tables with a <code>tenant_id</code> column). Pool is cheapest but leaks the moment a query forgets its tenant filter — PostgreSQL row-level security fixes that by enforcing <code>tenant_id = current tenant</code> in the database, so an application bug cannot cross tenants.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is BCNF, and when is a 3NF table not in BCNF?</summary>
+      <div class="answer"><p>BCNF requires that for every non-trivial dependency <code>X → Y</code>, X is a superkey. It is stricter than 3NF, which still allows a non-superkey determinant as long as the attribute it determines is prime. The classic failing case has overlapping candidate keys — <code>R(student, subject, teacher)</code> with <code>{student,subject} → teacher</code> and <code>teacher → subject</code>: it is 3NF (subject is prime) but <code>teacher</code> is not a superkey, so BCNF fails. Decomposing to BCNF can lose dependency preservation, which is why 3NF is sometimes kept on purpose.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is denormalization and when is it the right call?</summary>
+      <div class="answer"><p>Deliberately reintroducing redundancy — duplicated columns, precomputed aggregates, materialized views — to cut joins on hot read paths. Justified after indexing, caching, and query tuning fall short, for read-heavy or reporting workloads with predictable access. The cost is write amplification and stale-copy risk, so every denormalized value needs a trigger, scheduled job, or change-data-capture to stay correct.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Does more normalization always mean better performance?</summary>
+      <div class="answer"><p>No. Normalization optimizes for correctness and cheap writes, not read latency — more tables means more joins. A heavily normalized schema can be slower for read-dominated queries, which is exactly why warehouses denormalize. The right level balances anomaly-free writes against join cost for the actual workload, not an abstract ideal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are 4NF and 5NF about, briefly?</summary>
+      <div class="answer"><p>4NF removes multivalued dependencies: two independent multi-valued facts (a person's skills and their spoken languages) in one table create a spurious cross-product — split them into separate tables. 5NF (project-join normal form) removes join dependencies not implied by candidate keys. Both are rare in practice; most real designs stop at 3NF or BCNF.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.design.normalization</li>
+      <li>db.design.patterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases module on transactions and concurrency: ACID, the SQL isolation levels and their read anomalies, PostgreSQL MVCC, explicit locking and SELECT FOR UPDATE, deadlocks and lost updates — with official docs, community guides and the interview questions they power.">
+  <title>Transactions and Concurrency</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Transactions and Concurrency</h1>
+  <p class="standfirst">A transaction is a promise: all of it happens, or none of it does — and concurrency control is how that promise survives thousands of sessions hitting the same rows at once. This module names each guarantee and points you to the definitive reference for it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Transactions and Concurrency</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two connected ideas: the ACID contract a single transaction gives you, and the concurrency machinery that upholds isolation when many transactions overlap. We cover the SQL isolation levels and the read anomalies they forbid, PostgreSQL's MVCC snapshot model, explicit row and table locking with <code>SELECT FOR UPDATE</code>, and the two failure modes every backend engineer meets — deadlocks and lost updates. ACID and isolation levels are among the most heavily interviewed database topics in India, so treat this as a core module, not a footnote.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Transactions and the ACID guarantees</h3>
+    <p>A transaction groups statements into one unit of work that either commits in full or rolls back entirely. In PostgreSQL you open one with <code>BEGIN</code> and close it with <code>COMMIT</code> (or <code>ROLLBACK</code>); outside an explicit block every statement autocommits on its own. <code>SAVEPOINT</code> lets you undo part of a transaction without abandoning the whole thing.</p>
+    <p>ACID names the four guarantees. <em>Atomicity</em> is all-or-nothing. <em>Consistency</em> means every constraint, trigger and check still holds at commit. <em>Isolation</em> means concurrent transactions do not see each other's uncommitted work. <em>Durability</em> means once <code>COMMIT</code> returns, the change survives a crash — PostgreSQL guarantees this by flushing the write-ahead log (WAL) first. "Expand ACID" opens the transactions round in almost every Indian interview, so be able to give a one-line example of each.</p>
+    <pre class="code-block" data-label="SQL"><code>BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;   -- both rows change, or ROLLBACK leaves neither changed</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-transactions.html" rel="noopener">Transactions — PostgreSQL Tutorial (atomicity, BEGIN/COMMIT/ROLLBACK, savepoints)</a></li>
+      <li>[Reference] <a href="https://en.wikipedia.org/wiki/ACID" rel="noopener">ACID — Wikipedia (the canonical definition and history of the four properties)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-acid-and-database-transactions/" rel="noopener">A Beginner's Guide to ACID and Database Transactions — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pomxJOFVcQs" rel="noopener">Relational Database ACID Transactions (Explained by Example) — Hussein Nasser</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-GS0OxFJsYQ" rel="noopener">ACID Properties of a Transaction (Lec-88) — Gate Smashers</a></li>
+    </ul>
+
+    <h3>Isolation levels and read anomalies</h3>
+    <p>The SQL standard defines four isolation levels — Read Uncommitted, Read Committed, Repeatable Read, Serializable — and defines them by which read anomalies they forbid. A <em>dirty read</em> sees another transaction's uncommitted row. A <em>non-repeatable read</em> is a row whose value changes when you read it a second time. A <em>phantom read</em> is a range query that returns new or missing rows on re-execution. A <em>serialization anomaly</em> is a set of transactions that commits to a state no serial ordering could have produced.</p>
+    <p>PostgreSQL defaults to Read Committed and never permits dirty reads at any level. It maps Read Uncommitted onto Read Committed, and — thanks to MVCC — its Repeatable Read is stronger than the standard, blocking phantoms as well. You pick a level with <code>BEGIN ISOLATION LEVEL …</code> or <code>SET TRANSACTION</code>. Reproducing the grid of "which level stops which anomaly" is the single most-drilled concurrency question in interviews.</p>
+    <pre class="code-block" data-label="SQL"><code>BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT count(*) FROM orders WHERE status = 'NEW';
+-- concurrent INSERTs stay invisible; this transaction's snapshot is fixed
+COMMIT;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/transaction-iso.html" rel="noopener">Transaction Isolation — PostgreSQL (the four levels and the anomalies each prevents)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-set-transaction.html" rel="noopener">SET TRANSACTION — PostgreSQL (syntax for choosing an isolation level)</a></li>
+      <li>[Reference] <a href="https://en.wikipedia.org/wiki/Isolation_(database_systems)" rel="noopener">Isolation (database systems) — Wikipedia (read phenomena vs isolation levels table)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/dbms/transaction-isolation-levels-dbms/" rel="noopener">Transaction Isolation Levels in DBMS — GeeksforGeeks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=t5hsV9lC1rU" rel="noopener">Introduction to Transaction Concurrency (Lec-87) — Gate Smashers</a></li>
+    </ul>
+
+    <h3>MVCC: isolation without read locks</h3>
+    <p>Instead of blocking readers, PostgreSQL hands each transaction a snapshot. Every row carries hidden <code>xmin</code>/<code>xmax</code> system columns — the transaction that created it and the one that expired it — so a read sees only the versions valid for its snapshot. An <code>UPDATE</code> writes a new row version and marks the old one expired; a <code>DELETE</code> just marks it. The headline consequence: readers never block writers and writers never block readers.</p>
+    <p>The cost of keeping old versions is dead tuples. They linger until <code>VACUUM</code> (normally autovacuum) reclaims the space, so a heavily updated table bloats without maintenance. <code>VACUUM</code> also freezes old transaction IDs to prevent 32-bit XID wraparound. Understanding "where do the old rows go?" separates engineers who have <em>operated</em> PostgreSQL from those who have only queried it.</p>
+    <pre class="code-block" data-label="SQL"><code>UPDATE products SET price = 199 WHERE id = 42;
+-- the old version (xmax set) and the new version (xmin set) coexist;
+-- concurrent snapshots keep reading the old one until VACUUM cleans up</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/mvcc-intro.html" rel="noopener">Introduction to MVCC — PostgreSQL Concurrency Control chapter</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/routine-vacuuming.html" rel="noopener">Routine Vacuuming — PostgreSQL (dead tuples, bloat, transaction ID wraparound)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-does-mvcc-multi-version-concurrency-control-work/" rel="noopener">How Does MVCC Work — Vlad Mihalcea (xmin/xmax visibility walkthrough)</a></li>
+    </ul>
+
+    <h3>Explicit locking and SELECT FOR UPDATE</h3>
+    <p>When application logic must serialize access to specific rows — a read, then a decision, then a write — a plain MVCC snapshot is not enough, because two sessions can each read the same starting value. Take an explicit row lock with <code>SELECT … FOR UPDATE</code>: it blocks other writers and lockers of those rows until you commit, while ordinary <code>SELECT</code>s still read them. <code>FOR SHARE</code> is the shared variant; <code>FOR NO KEY UPDATE</code> and <code>FOR KEY SHARE</code> are weaker forms that conflict less. Table-level locks, from <code>ACCESS SHARE</code> up to <code>ACCESS EXCLUSIVE</code>, are mostly acquired automatically by DDL and DML.</p>
+    <p><code>FOR UPDATE</code> is frequently stronger than you need — the standard advice is to prefer <code>FOR NO KEY UPDATE</code> unless you change a key column or delete the row. <code>NOWAIT</code> fails fast rather than waiting on a locked row; <code>SKIP LOCKED</code> skips already-locked rows, the idiomatic trick for building a concurrent job queue where each worker claims a different row.</p>
+    <pre class="code-block" data-label="SQL"><code>BEGIN;
+SELECT * FROM jobs WHERE state = 'ready'
+  ORDER BY id
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1;                 -- claim one row; other workers skip it
+UPDATE jobs SET state = 'running' WHERE id = /* claimed id */ 7;
+COMMIT;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/explicit-locking.html" rel="noopener">Explicit Locking — PostgreSQL (table and row lock modes, deadlock handling)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT: The Locking Clause — PostgreSQL (FOR UPDATE/SHARE, NOWAIT, SKIP LOCKED)</a></li>
+      <li>[Article] <a href="https://www.cybertec-postgresql.com/en/select-for-update-considered-harmful-postgresql/" rel="noopener">SELECT FOR UPDATE Considered Harmful — CYBERTEC (why FOR NO KEY UPDATE is usually right)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/optimistic-vs-pessimistic-locking/" rel="noopener">Optimistic vs. Pessimistic Locking — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Deadlocks and the lost update anomaly</h3>
+    <p>A deadlock is a cycle: transaction A holds a lock B wants, while B holds a lock A wants, so neither can move. PostgreSQL runs a deadlock detector that spots the cycle and aborts one transaction with an error — it gives no guarantee which one. The prevention is discipline: acquire locks in a consistent order across your code paths, keep transactions short, and wrap them in retry logic so an aborted transaction re-runs cleanly.</p>
+    <p>The lost update anomaly is the classic race — two sessions read the same row, both compute a new value, and the second write silently overwrites the first. Prevent it with a pessimistic lock (<code>SELECT FOR UPDATE</code>), with optimistic locking (a version column tested in the <code>WHERE</code> clause, so a conflicting update affects zero rows), or by running at Repeatable Read, which aborts the losing writer. This anomaly is behind most "why did my counter lose increments?" bugs.</p>
+    <pre class="code-block" data-label="SQL"><code>-- optimistic locking: only succeeds if nobody else changed the row
+UPDATE accounts
+   SET balance = 500, version = version + 1
+ WHERE id = 1 AND version = 7;
+-- 0 rows affected => someone else won the race; reload and retry</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/database-deadlock/" rel="noopener">A Beginner's Guide to Database Deadlock — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-database-locking-and-the-lost-update-phenomena/" rel="noopener">Database Locking and the Lost Update Phenomena — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.cybertec-postgresql.com/en/postgresql-understanding-deadlocks/" rel="noopener">PostgreSQL: Understanding Deadlocks — CYBERTEC</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-query-optimization.html">← Query Optimization</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="11-normalization-design.html">Normalization and Schema Design →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Transactions and concurrency is one of the most heavily interviewed database areas in India — ACID and the isolation-level grid come up in nearly every backend and SDE screen:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does ACID stand for?</summary>
+      <div class="answer"><p>Atomicity (a transaction is all-or-nothing), Consistency (every constraint, trigger and check holds across the transaction), Isolation (concurrent transactions do not see each other's uncommitted work), and Durability (once committed, data survives a crash — PostgreSQL uses the write-ahead log). Give a one-line example of each; interviewers usually ask you to.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you start and end a transaction in PostgreSQL?</summary>
+      <div class="answer"><p><code>BEGIN</code> (or <code>START TRANSACTION</code>) opens one, <code>COMMIT</code> makes its changes permanent, and <code>ROLLBACK</code> discards them. Without an explicit block, each statement autocommits on its own. <code>SAVEPOINT</code> plus <code>ROLLBACK TO</code> lets you undo part of a transaction while keeping the rest.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the four SQL isolation levels from weakest to strongest.</summary>
+      <div class="answer"><p>Read Uncommitted, Read Committed, Repeatable Read, Serializable. Each stronger level forbids more read anomalies at the cost of concurrency.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a dirty read?</summary>
+      <div class="answer"><p>Reading a row another transaction has written but not yet committed. If that transaction rolls back, you acted on data that never truly existed. Only Read Uncommitted permits it in the standard — and PostgreSQL never allows it, even at that level.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is PostgreSQL's default isolation level?</summary>
+      <div class="answer"><p>Read Committed. Each statement sees only rows committed before that statement began, so it forbids dirty reads but still allows non-repeatable reads and phantom reads within a multi-statement transaction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Dirty read vs non-repeatable read vs phantom read?</summary>
+      <div class="answer"><p>Dirty read: you see uncommitted data. Non-repeatable read: the same row returns a different value on a second read because a concurrent transaction committed an UPDATE in between. Phantom read: the same range query returns a different set of rows because a concurrent transaction committed an INSERT or DELETE. They form a progression of severity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which isolation level prevents which anomaly?</summary>
+      <div class="answer"><p>Read Committed stops dirty reads. Repeatable Read additionally stops non-repeatable reads — and in PostgreSQL also stops phantoms. Serializable stops everything, including the serialization anomaly. Being able to draw this grid on a whiteboard is a staple ask.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is MVCC and what problem does it solve?</summary>
+      <div class="answer"><p>Multiversion Concurrency Control keeps multiple versions of each row so every transaction reads a consistent snapshot without taking read locks. The result is that readers never block writers and writers never block readers, giving high concurrency. PostgreSQL, Oracle and InnoDB all use MVCC.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does SELECT … FOR UPDATE do, and when do you use it?</summary>
+      <div class="answer"><p>It locks the selected rows for writing, so no other transaction can update, delete, or re-lock them until you commit — while plain SELECTs can still read them. Use it for read-modify-write correctness, where a snapshot alone would let two sessions overwrite each other. <code>FOR SHARE</code> is the shared-lock variant.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a deadlock and how does PostgreSQL resolve it?</summary>
+      <div class="answer"><p>Two transactions each wait on a lock the other holds, forming a cycle so neither can proceed. PostgreSQL's deadlock detector breaks it by aborting one transaction (no guarantee which) with a deadlock error; the survivor continues. Avoid deadlocks by locking rows in a consistent order, keeping transactions short, and retrying on failure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the lost update problem and how do you prevent it?</summary>
+      <div class="answer"><p>Two transactions read the same value, both write a new one, and the second write silently discards the first. Prevent it with pessimistic locking (<code>SELECT FOR UPDATE</code>), optimistic locking (a version column checked in the WHERE clause so a stale update affects zero rows), or Repeatable Read, which aborts the losing writer with a serialization error.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does PostgreSQL's Repeatable Read differ from the SQL standard?</summary>
+      <div class="answer"><p>The standard allows phantom reads at Repeatable Read; PostgreSQL's snapshot-based implementation forbids them too, so it behaves like snapshot isolation. A write conflict raises "could not serialize access," which the application is expected to catch and retry.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> NOWAIT vs SKIP LOCKED on a locking SELECT — when do you use each?</summary>
+      <div class="answer"><p><code>NOWAIT</code> raises an error immediately if a target row is already locked — fail fast and surface contention. <code>SKIP LOCKED</code> silently ignores locked rows so each worker claims a different unlocked one — the idiomatic pattern for a concurrent queue or job dispatcher built on a table. Plain <code>FOR UPDATE</code> instead waits for the lock to be released.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does PostgreSQL implement Serializable, and what must the application do?</summary>
+      <div class="answer"><p>Serializable Snapshot Isolation (SSI) adds predicate locks that track read/write dependencies among concurrent transactions; when a dangerous dependency cycle is detected, one transaction is aborted with a serialization failure. Unlike two-phase locking it does not block, but the application must wrap transactions in retry logic. Declaring transactions READ ONLY (and DEFERRABLE where possible) reduces false aborts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does MVCC require VACUUM, and what is transaction ID wraparound?</summary>
+      <div class="answer"><p>UPDATE and DELETE leave dead row versions behind; <code>VACUUM</code> (normally autovacuum) reclaims that space and refreshes the visibility map, otherwise tables bloat and index-only scans slow down. VACUUM also freezes old rows: transaction IDs are 32-bit, so without freezing the counter would wrap after roughly four billion transactions and previously-committed rows would appear to be in the future and vanish. This is why disabled autovacuum and very long-lived idle transactions are dangerous in production.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.tx.acid</li>
+      <li>db.tx.mvcc</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

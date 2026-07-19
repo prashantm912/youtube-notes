@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SQL DML and Queries module: writing rows with INSERT/UPDATE/DELETE, upserts via ON CONFLICT, the RETURNING clause, and the SELECT pipeline — WHERE operators, ORDER BY, LIMIT/OFFSET and DISTINCT — with the best PostgreSQL docs and community resources, plus the interview questions they power.">
+  <title>SQL DML and Queries — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: SQL DML and Queries</h1>
+  <p class="standfirst">DDL builds the table; DML is where the data actually moves — and the SELECT that reads it back is the single most-tested topic in any database interview. This module maps the write and read verbs and points you at the pages that teach each properly.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → SQL DML and Queries</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two halves of everyday SQL. First the write side — <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>, the <code>ON CONFLICT</code> upsert, and <code>RETURNING</code> to read back what a write changed. Then the read side — the anatomy of a <code>SELECT</code>, filtering with <code>WHERE</code>, and shaping the result set with <code>ORDER BY</code>, <code>LIMIT</code>/<code>OFFSET</code> and <code>DISTINCT</code>. The recurring theme interviewers probe is the gap between how you <em>write</em> a query and the order in which the engine actually <em>runs</em> it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>INSERT and upserts with ON CONFLICT</h3>
+    <p><code>INSERT</code> adds rows — single-row, multi-row <code>VALUES</code>, or <code>INSERT ... SELECT</code> to copy from a query. The interview-relevant part is the <em>upsert</em>: <code>INSERT ... ON CONFLICT</code> makes a duplicate-key collision a normal outcome rather than an error. <code>DO NOTHING</code> silently skips the conflicting row; <code>DO UPDATE</code> modifies the existing row, reading the rejected values through the special <code>EXCLUDED</code> pseudo-table.</p>
+    <p>Why it matters: upsert is the idiomatic way to make writes idempotent — safe to retry — which is exactly what queue consumers, sync jobs and "insert if not present" caches need. The conflict target must match a real unique or exclusion constraint, so this ties directly back to the DDL module.</p>
+    <pre class="code-block" data-label="SQL"><code>INSERT INTO orders (id, customer, total)
+VALUES (1, 'Asha', 4999)
+ON CONFLICT (id) DO UPDATE
+  SET total = EXCLUDED.total;   -- insert, or update the existing row</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-insert.html" rel="noopener">INSERT — PostgreSQL 18 reference (ON CONFLICT and RETURNING in full)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-upsert" rel="noopener">PostgreSQL UPSERT using INSERT ON CONFLICT — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/postgresql-upsert-merge-insert" rel="noopener">How to UPSERT (MERGE, INSERT … ON CONFLICT) in PostgreSQL — Baeldung on SQL</a></li>
+    </ul>
+
+    <h3>UPDATE, DELETE and the RETURNING clause</h3>
+    <p><code>UPDATE ... SET ... WHERE</code> changes existing rows; <code>DELETE FROM ... WHERE</code> removes them. The <code>WHERE</code> is doing the real work — omit it and every row in the table is rewritten or deleted, the classic production incident. Both are transactional in PostgreSQL, so wrapping them in a transaction (and running the <code>WHERE</code> as a <code>SELECT</code> first) is the standard safety habit.</p>
+    <p><code>RETURNING</code> is PostgreSQL's answer to "what did that write actually do?" — append it to an <code>INSERT</code>, <code>UPDATE</code> or <code>DELETE</code> and it hands back columns from the affected rows in the same statement, most often a generated id, saving a second round-trip. <code>UPDATE ... FROM</code> and <code>DELETE ... USING</code> let a write join another table.</p>
+    <pre class="code-block" data-label="SQL"><code>UPDATE accounts SET balance = balance - 500
+WHERE id = 7
+RETURNING id, balance;          -- read the new balance back
+
+DELETE FROM sessions
+WHERE last_seen &lt; now() - interval '30 days';</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-update.html" rel="noopener">UPDATE — PostgreSQL 18 reference</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-delete.html" rel="noopener">DELETE — PostgreSQL 18 reference</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/dml-returning.html" rel="noopener">Returning Data From Modified Rows (RETURNING) — PostgreSQL 18</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-update" rel="noopener">PostgreSQL UPDATE — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-delete" rel="noopener">PostgreSQL DELETE — Neon PostgreSQL Tutorial</a></li>
+    </ul>
+
+    <h3>SELECT anatomy and the logical query order</h3>
+    <p>A <code>SELECT</code> is written <code>SELECT … FROM … WHERE … GROUP BY … HAVING … ORDER BY … LIMIT</code>, but the engine does not run it in that order. Logically it processes <code>FROM</code> → <code>WHERE</code> → <code>GROUP BY</code> → <code>HAVING</code> → <code>SELECT</code> → <code>DISTINCT</code> → <code>ORDER BY</code> → <code>LIMIT</code>. That single fact explains a whole class of "why doesn't this work?" bugs.</p>
+    <p>Why it matters: because <code>SELECT</code> runs after <code>WHERE</code>, a column alias you define in the select list is invisible to <code>WHERE</code> — but visible to <code>ORDER BY</code>, which runs later. Understanding the pipeline, not memorising syntax, is what separates a confident answer here.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT   city, count(*) AS n   -- 5. project columns &amp; name them
+FROM     users                 -- 1. read rows
+WHERE    active                -- 2. filter rows
+GROUP BY city                  -- 3. collapse into groups
+HAVING   count(*) &gt; 10         -- 4. filter groups
+ORDER BY n DESC                -- 6. sort (alias visible here)
+LIMIT 5;                       -- 7. take the top slice</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT — PostgreSQL 18 reference (every clause, formally)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-select.html" rel="noopener">Querying a Table — PostgreSQL 18 tutorial</a></li>
+      <li>[Article] <a href="https://sqlbolt.com/lesson/select_queries_order_of_execution" rel="noopener">Order of execution of a Query — SQLBolt (interactive)</a></li>
+      <li>[Article] <a href="https://blog.jooq.org/a-beginners-guide-to-the-true-order-of-sql-operations/" rel="noopener">A Beginner's Guide to the True Order of SQL Operations — Lukas Eder, jOOQ blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=qw--VYLpxG4" rel="noopener">Learn PostgreSQL Tutorial — Full Course for Beginners — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Filtering with WHERE</h3>
+    <p>The <code>WHERE</code> clause keeps only rows for which its condition is <em>true</em> — a subtlety, because SQL uses three-valued logic where a comparison against <code>NULL</code> yields <em>unknown</em>, not false. Beyond the basic operators (<code>=</code>, <code>&lt;&gt;</code>, <code>&lt;</code>, <code>&gt;</code>), the everyday toolkit is <code>BETWEEN</code> (inclusive range), <code>IN</code> (membership), <code>LIKE</code>/<code>ILIKE</code> (pattern match), and <code>IS NULL</code> / <code>IS NOT NULL</code> — the only correct way to test for a null.</p>
+    <p>Why it matters: null handling is a favourite trap. <code>col = NULL</code> never matches, and <code>NOT IN</code> against a list containing a null silently returns nothing. Knowing that the condition must be strictly true is the mental model that prevents both bugs.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT * FROM products
+WHERE price BETWEEN 100 AND 500
+  AND category IN ('books', 'toys')
+  AND name ILIKE '%pro%'
+  AND discontinued IS NOT NULL;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-comparison.html" rel="noopener">Comparison Functions and Operators — PostgreSQL 18</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-table-expressions.html" rel="noopener">Table Expressions (the WHERE clause) — PostgreSQL 18</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-where" rel="noopener">PostgreSQL WHERE — Neon PostgreSQL Tutorial</a></li>
+    </ul>
+
+    <h3>Sorting, paging and DISTINCT</h3>
+    <p><code>ORDER BY</code> sorts the result (ascending by default; <code>DESC</code>, plus <code>NULLS FIRST</code>/<code>NULLS LAST</code> to place nulls). <code>LIMIT</code> caps the row count and <code>OFFSET</code> skips rows first — the standard top-N and pagination pattern. Crucially, <code>LIMIT</code> is only meaningful with an <code>ORDER BY</code> on a unique key: without a defined order the rows returned are arbitrary and can change between runs.</p>
+    <p><code>DISTINCT</code> removes duplicate rows; PostgreSQL's <code>DISTINCT ON (expr)</code> extends this to keep the first row per group under an <code>ORDER BY</code> — a compact "latest per customer" idiom. Note the scaling caveat: <code>OFFSET</code> still reads and throws away every skipped row, so deep pagination gets slower the further you page — the reason keyset (seek) pagination exists.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT DISTINCT ON (customer) customer, id, created
+FROM orders
+ORDER BY customer, created DESC;   -- newest order per customer
+
+SELECT id FROM orders
+ORDER BY id
+LIMIT 20 OFFSET 40;                -- rows 41-60 (page 3)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-order.html" rel="noopener">Sorting Rows (ORDER BY) — PostgreSQL 18</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-limit.html" rel="noopener">LIMIT and OFFSET — PostgreSQL 18</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-select-distinct" rel="noopener">PostgreSQL SELECT DISTINCT (and DISTINCT ON) — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-limit" rel="noopener">PostgreSQL LIMIT — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/no-offset" rel="noopener">Keyset (seek) pagination vs OFFSET — Use The Index, Luke</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-ddl.html">← SQL DDL and Constraints</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="04-joins.html">Joins →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked DML and query questions in Indian interviews — from service-company screening rounds to product-company SQL deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between DELETE, TRUNCATE and DROP?</summary>
+      <div class="answer"><p>DELETE removes selected rows (honours WHERE), is fully transactional, fires row triggers and can be rolled back. TRUNCATE empties the whole table fast without scanning rows and can reset identity, but can't target specific rows. DROP removes the table definition itself. Rule of thumb: rows → DELETE, all rows fast → TRUNCATE, the table → DROP.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens if you run UPDATE or DELETE without a WHERE clause?</summary>
+      <div class="answer"><p>Every row in the table is affected — a full-table update or delete. It's a classic outage cause. Safeguards: run the WHERE as a SELECT first to see the row count, wrap the statement in an explicit transaction so you can ROLLBACK, and never paste a write without its filter.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why can't you write <code>col = NULL</code>, and what do you use instead?</summary>
+      <div class="answer"><p>NULL means "unknown", so any comparison with it — including <code>= NULL</code> — evaluates to unknown, never true, and the row is filtered out. Use <code>IS NULL</code> and <code>IS NOT NULL</code>, which are the dedicated predicates for testing null presence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the RETURNING clause used for?</summary>
+      <div class="answer"><p>Appended to INSERT/UPDATE/DELETE, it returns columns from the rows that were just written, in the same statement — most commonly the auto-generated primary key after an insert, avoiding a second SELECT round-trip. It's a PostgreSQL feature (the SQL-standard equivalent is more limited).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do LIMIT and OFFSET do?</summary>
+      <div class="answer"><p>LIMIT caps how many rows the query returns; OFFSET skips that many rows before it starts returning. Together they implement top-N results and pagination. They only make sense alongside an ORDER BY, otherwise which rows you get is undefined.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain UPSERT in PostgreSQL, including EXCLUDED.</summary>
+      <div class="answer"><p><code>INSERT ... ON CONFLICT (target) DO NOTHING | DO UPDATE</code>. The target names a unique or exclusion constraint. DO NOTHING skips the conflicting row; DO UPDATE modifies the existing row and refers to the values that failed to insert through the <code>EXCLUDED</code> pseudo-table (e.g. <code>SET total = EXCLUDED.total</code>). It's how you make a write idempotent and safe to retry.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the logical order of execution of a SELECT, and why does it matter for aliases?</summary>
+      <div class="answer"><p>FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT. A column alias is created at the SELECT step, which runs after WHERE — so WHERE can't reference the alias, but ORDER BY (which runs after SELECT) can. This ordering also explains why WHERE filters rows and HAVING filters groups.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> DISTINCT vs DISTINCT ON vs GROUP BY?</summary>
+      <div class="answer"><p>DISTINCT removes duplicate whole rows from the output. DISTINCT ON (cols) is PostgreSQL-specific — it keeps the first row of each group defined by those columns, decided by the ORDER BY (handy for "latest per key"). GROUP BY collapses rows into groups so you can apply aggregate functions. DISTINCT dedupes; GROUP BY aggregates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> IN vs BETWEEN vs LIKE — when do you use each?</summary>
+      <div class="answer"><p>IN tests membership in a list or subquery (<code>status IN ('new','paid')</code>). BETWEEN is an inclusive range: <code>x BETWEEN a AND b</code> equals <code>x &gt;= a AND x &lt;= b</code>. LIKE/ILIKE do pattern matching with <code>%</code> (any run) and <code>_</code> (one char); ILIKE is case-insensitive. Caveat: a NULL inside an IN/NOT IN list changes the result.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between WHERE and HAVING?</summary>
+      <div class="answer"><p>WHERE filters individual rows before grouping and cannot use aggregate functions. HAVING filters groups after GROUP BY and aggregation, so it can reference aggregates like <code>count(*) &gt; 10</code>. If there's no GROUP BY, HAVING treats the whole result as one group. Filter rows in WHERE where possible — it's cheaper.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must LIMIT be paired with ORDER BY for reliable results?</summary>
+      <div class="answer"><p>Without ORDER BY, SQL makes no promise about row order, so LIMIT returns an arbitrary subset that can differ between executions (and across plan changes). Order by a unique/tie-broken key so "page 2" is stable and reproducible.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is OFFSET pagination slow at scale, and what replaces it?</summary>
+      <div class="answer"><p>OFFSET still reads and discards every skipped row, so cost grows linearly with page depth, and rows inserted/deleted between requests make pages drift. Keyset (seek) pagination replaces it: remember the last row's sort key and query <code>WHERE key &gt; :last ORDER BY key LIMIT n</code>. That uses an index range scan — constant cost per page and stable under concurrent writes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What's the NOT IN with NULL trap?</summary>
+      <div class="answer"><p>If the list or subquery behind NOT IN contains a NULL, the predicate evaluates to unknown for every row (because <code>x &lt;&gt; NULL</code> is unknown), so the query returns zero rows — silently, no error. Fixes: use NOT EXISTS (correlated), or filter NULLs out of the subquery. It's a direct consequence of three-valued logic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you update one table using values from another?</summary>
+      <div class="answer"><p>PostgreSQL's <code>UPDATE t SET col = s.val FROM src s WHERE t.id = s.id</code> joins another table into the update (DELETE has the analogous USING clause). The danger: if the join matches multiple source rows for one target row, which value wins is undefined — ensure the join key is unique on the source side, or aggregate first. RETURNING confirms what changed.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.dml.write</li>
+      <li>db.dml.select</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

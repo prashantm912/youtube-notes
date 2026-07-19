@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases window functions module: the OVER clause, PARTITION BY and ORDER BY, window frames, and the ranking, offset and aggregate window functions — with the best official PostgreSQL and community resources, plus the interview questions they power.">
+  <title>Window Functions — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Window Functions</h1>
+  <p class="standfirst">A window function computes across a set of related rows yet keeps every row in the output — the one SQL skill that most often separates "can write a query" from "can clear the analytics round."</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Window Functions</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Window functions run a calculation over a "window" of rows related to the current row without collapsing them the way <code>GROUP BY</code> does. This module orients you on the mechanics — the <code>OVER</code> clause, <code>PARTITION BY</code>, <code>ORDER BY</code> and the frame that bounds each calculation — and then on the three families of functions built on top: ranking, offset/value, and aggregates used as windows. They power running totals, moving averages, rankings and top-N-per-group, and they are among the most-tested SQL topics in interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Window functions vs. GROUP BY: the OVER clause</h3>
+    <p>An aggregate with <code>GROUP BY</code> folds many rows into one summary row. A window function computes the same kind of aggregate but leaves every input row in place, attaching the result alongside it. The trigger is the <code>OVER</code> clause after the function call: <code>avg(salary) OVER (PARTITION BY depname)</code> gives each employee their department average without losing the individual rows. An empty <code>OVER ()</code> treats the whole result set as one window — a grand total on every row.</p>
+    <p>Why it matters: this "keep the detail, add the summary" behavior is exactly what reporting and analytics need, and it removes the self-join or correlated-subquery gymnastics people reach for before they learn windows. One catch tested constantly: window functions are evaluated after <code>WHERE</code>, <code>GROUP BY</code> and <code>HAVING</code>, so you cannot reference one in a <code>WHERE</code> clause — you wrap the query in a CTE or subquery to filter on the result.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT depname, empno, salary,
+       avg(salary) OVER (PARTITION BY depname) AS dept_avg
+FROM empsalary;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-window.html" rel="noopener">3.5. Window Functions — PostgreSQL Tutorial (the canonical introduction, with the empsalary examples)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/over" rel="noopener">Understanding the SQL OVER() Clause — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/window-functions-condition-where-clauses" rel="noopener">Why Window Functions Cannot Be Used in the WHERE Clause — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rIcB4zMYMas" rel="noopener">SQL Window Functions — Clearly Explained — A Dash of Data (Alice Zhao)</a></li>
+    </ul>
+
+    <h3>PARTITION BY, ORDER BY, and window frames</h3>
+    <p>The window definition inside <code>OVER (...)</code> has three optional parts. <code>PARTITION BY</code> splits rows into independent groups the function restarts on (like <code>GROUP BY</code>, but the rows survive). <code>ORDER BY</code> sequences rows within each partition — it is what makes running totals, rankings and offset lookups meaningful. The <em>frame</em> then bounds which rows around the current one the function actually sees: <code>ROWS</code> counts physical rows, <code>RANGE</code> works in terms of ORDER BY value peers, and <code>GROUPS</code> counts peer groups, each with boundaries like <code>UNBOUNDED PRECEDING</code>, <code>CURRENT ROW</code> and <code>n FOLLOWING</code>.</p>
+    <p>Why it matters: the default frame surprises people. With <code>ORDER BY</code> present the default is <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code> (a cumulative window); with no <code>ORDER BY</code> the frame is the entire partition. Getting the frame wrong is the difference between a correct running total and a subtly off one, so naming the frame explicitly is a mark of seniority.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT product, category, price,
+       sum(price) OVER (
+         PARTITION BY category
+         ORDER BY price
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS running_total
+FROM products;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS" rel="noopener">4.2.8. Window Function Calls — PostgreSQL (PARTITION BY, ORDER BY and the full frame clause syntax)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-WINDOW" rel="noopener">7.2.5. Window Function Processing — PostgreSQL (where windows sit in query evaluation)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-window-function" rel="noopener">PostgreSQL Window Functions — Neon (worked examples of every clause)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o666k19mZwE" rel="noopener">SQL Window Functions Basics, Visually Explained — Data with Baraa</a></li>
+    </ul>
+
+    <h3>Ranking functions: ROW_NUMBER, RANK, DENSE_RANK, NTILE</h3>
+    <p>Ranking functions number rows within a partition according to the <code>ORDER BY</code>. <code>row_number()</code> gives a strict 1, 2, 3 with no ties. <code>rank()</code> gives tied rows the same rank and then <em>skips</em> the next values (1, 1, 3), while <code>dense_rank()</code> gives ties the same rank with <em>no gap</em> (1, 1, 2). <code>ntile(n)</code> distributes rows into <code>n</code> roughly equal buckets — the basis of quartiles and percentiles — and <code>percent_rank()</code> / <code>cume_dist()</code> express relative standing as a fraction.</p>
+    <p>Why it matters: "second-highest salary per department" and "top 3 per category" are staple interview questions, and the right answer hinges on choosing <code>dense_rank()</code> vs <code>row_number()</code> vs <code>rank()</code> correctly. Confusing them (especially how each handles ties) is the single most common ranking mistake.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT name, department, salary,
+       row_number() OVER w AS rn,
+       rank()       OVER w AS rnk,
+       dense_rank() OVER w AS drnk
+FROM employees
+WINDOW w AS (PARTITION BY department ORDER BY salary DESC);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-window.html" rel="noopener">9.22. Window Functions — PostgreSQL reference (every built-in: row_number, rank, dense_rank, ntile, percent_rank, cume_dist)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/rank-vs-row-number" rel="noopener">Understanding SQL RANK() vs. ROW_NUMBER() — Baeldung</a></li>
+      <li>[Article] <a href="https://www.thoughtspot.com/sql-tutorial/sql-window-functions" rel="noopener">SQL Window Functions — ROW_NUMBER, LAG, LEAD, NTILE (Mode SQL Tutorial)</a></li>
+    </ul>
+
+    <h3>Offset and value functions: LAG, LEAD, FIRST_VALUE, NTH_VALUE</h3>
+    <p>Offset functions read <em>other</em> rows relative to the current one within the ordered partition. <code>lag(x, n, default)</code> looks back <code>n</code> rows, <code>lead(x, n, default)</code> looks forward — the direct way to compute month-over-month change, gaps between events, or "compared to previous". Value functions read from positions in the frame: <code>first_value()</code>, <code>last_value()</code> and <code>nth_value()</code> return an anchor value that every row in the window can compare against.</p>
+    <p>Why it matters: <code>lag</code>/<code>lead</code> replace painful self-joins for time-series deltas. And <code>last_value()</code> hides a classic trap — because the default frame ends at the current row, it returns the current row, not the partition's last; you must widen the frame to <code>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</code> to get the true final value.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT month, revenue,
+       lag(revenue) OVER (ORDER BY month)          AS prev_month,
+       revenue - lag(revenue) OVER (ORDER BY month) AS mom_change
+FROM monthly_sales;</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-window-function/postgresql-lag-function" rel="noopener">PostgreSQL LAG() Function — Neon (access the previous row)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-window-function/postgresql-lead-function" rel="noopener">PostgreSQL LEAD() Function — Neon (access the next row)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-window-function/postgresql-first_value-function" rel="noopener">PostgreSQL FIRST_VALUE() Function — Neon (the frame-anchor trap explained)</a></li>
+    </ul>
+
+    <h3>Aggregate window functions and use cases</h3>
+    <p>Any aggregate — <code>sum</code>, <code>avg</code>, <code>count</code>, <code>min</code>, <code>max</code> — becomes a window function simply by adding <code>OVER</code>. With an ordered frame this yields the everyday analytics workhorses: a running total (<code>sum OVER (ORDER BY ...)</code>), a moving average over the last seven rows (<code>avg OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)</code>), a percent-of-total (<code>value / sum(value) OVER ()</code>), and top-N-per-group by wrapping a <code>row_number()</code> query and filtering the rank.</p>
+    <p>Why it matters: these are the reports businesses actually ask for, and expressing them with one window pass instead of correlated subqueries is both faster and clearer. Interviewers probe the frame details here — a running total on a column with duplicate order-by values behaves differently under <code>RANGE</code> (all peers included) versus <code>ROWS</code> (strict row-by-row).</p>
+    <pre class="code-block" data-label="SQL"><code>-- 7-day moving average
+SELECT day, amount,
+       avg(amount) OVER (
+         ORDER BY day
+         ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+       ) AS rolling_7day_avg
+FROM daily_sales;
+
+-- top 3 products per category
+SELECT * FROM (
+  SELECT *, row_number() OVER (PARTITION BY category ORDER BY sales DESC) AS rn
+  FROM products
+) t
+WHERE rn &lt;= 3;</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/sql/compute-running-totals" rel="noopener">Calculating Running Totals in SQL — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/compute-rolling-seven-day-average" rel="noopener">Calculating a Rolling 7-Day Average in SQL — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/top-n-rows-window-functions" rel="noopener">Restricting Results to Top N Rows per Group — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=OdnxoJitdAg" rel="noopener">SQL Aggregate Window Functions — COUNT, AVG, SUM, MAX, MIN — Data with Baraa</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-subqueries-cte.html">← Subqueries and CTEs</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="08-indexing.html">Indexing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Window functions are a favourite of Indian SQL, data-engineering and backend interviews — expect at least one, often the round's hardest query:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a window function and how does it differ from GROUP BY?</summary>
+      <div class="answer"><p>A window function computes across a set of rows related to the current row (its "window") but returns a value for every row — the rows are not collapsed. <code>GROUP BY</code> folds each group into a single summary row; a window keeps the detail rows and attaches the aggregate alongside each one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the OVER clause do, and what does an empty OVER () mean?</summary>
+      <div class="answer"><p><code>OVER</code> is what turns a function into a window function; it defines the window via optional <code>PARTITION BY</code>, <code>ORDER BY</code> and frame. An empty <code>OVER ()</code> uses the entire result set as the window, so an aggregate like <code>sum(x) OVER ()</code> returns the grand total on every row.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> ROW_NUMBER vs RANK vs DENSE_RANK — what is the difference?</summary>
+      <div class="answer"><p>All number rows within a partition by the ORDER BY. <code>row_number()</code> is always unique (1, 2, 3), ignoring ties. <code>rank()</code> gives ties the same number then skips (1, 1, 3). <code>dense_rank()</code> gives ties the same number with no gap (1, 1, 2). Choose by whether you want gaps after ties.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does PARTITION BY do, and how is it different from GROUP BY?</summary>
+      <div class="answer"><p><code>PARTITION BY</code> divides rows into groups the window function restarts on, resetting counters, rankings and running totals per group. Unlike <code>GROUP BY</code> it does not reduce the number of output rows — the detail rows remain, each carrying its within-partition result.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't you put a window function in a WHERE clause, and how do you filter on its result?</summary>
+      <div class="answer"><p>Window functions are evaluated after <code>FROM</code>/<code>WHERE</code>/<code>GROUP BY</code>/<code>HAVING</code>, so their result does not exist yet when <code>WHERE</code> runs. Compute it in a subquery or CTE, then filter in the outer query — e.g. rank in an inner SELECT and keep rows whose rank is 3 or less outside.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you find the second-highest salary per department?</summary>
+      <div class="answer"><p>Rank within each department and filter for rank 2: <code>dense_rank() OVER (PARTITION BY dept ORDER BY salary DESC)</code> in a CTE, then <code>WHERE rnk = 2</code>. Use <code>dense_rank</code> (not <code>row_number</code>) so tied top salaries do not push the true second value out, and to treat ties at second as a single rank.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a window frame, and what is the default frame?</summary>
+      <div class="answer"><p>The frame is the subset of the partition a function actually reads for each row, set with <code>ROWS</code>/<code>RANGE</code>/<code>GROUPS</code> and boundaries. With an <code>ORDER BY</code> the default is <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code> (cumulative). With no <code>ORDER BY</code>, the frame is the whole partition.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> LAG vs LEAD — give a real use case.</summary>
+      <div class="answer"><p><code>lag(x)</code> reads a preceding row, <code>lead(x)</code> reads a following row, within the ordered partition. Month-over-month growth is the classic use: <code>revenue - lag(revenue) OVER (ORDER BY month)</code>. Both take an optional offset and a default value for when no such row exists (avoiding NULLs at the edges).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you write a running total and a 7-day moving average?</summary>
+      <div class="answer"><p>Running total: <code>sum(amount) OVER (ORDER BY day)</code> — the default cumulative frame. Moving average: <code>avg(amount) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)</code>, which bounds the window to the current row plus the six before it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> ROWS vs RANGE in a frame — when does the choice change the answer?</summary>
+      <div class="answer"><p><code>ROWS</code> counts physical rows; <code>RANGE</code> works on ORDER BY value peers. When the ORDER BY column has duplicates, a running total under the default <code>RANGE</code> includes <em>all</em> tied peers at once (every duplicate row shows the same summed value), whereas <code>ROWS</code> adds strictly one row at a time. For a true per-row cumulative sum on duplicated keys, specify <code>ROWS</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does LAST_VALUE often return the current row instead of the partition's last, and how do you fix it?</summary>
+      <div class="answer"><p>Because with <code>ORDER BY</code> the default frame ends at <code>CURRENT ROW</code>, so the "last" row visible is the current one. Fix by extending the frame to <code>ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING</code> (or use <code>first_value()</code> with a descending order) so the window spans the whole partition.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you fetch the top-N rows per group efficiently, and what are the tradeoffs?</summary>
+      <div class="answer"><p>Assign <code>row_number() OVER (PARTITION BY group ORDER BY metric DESC)</code> in a subquery/CTE and keep rows with number ≤ N. Use <code>rank</code>/<code>dense_rank</code> instead if ties should all qualify. Tradeoff: the window still scans and sorts each partition; for very large tables a <code>LATERAL</code> join with a per-group <code>LIMIT</code> backed by an index can beat it. On Postgres, <code>DISTINCT ON</code> is a concise top-1-per-group alternative.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.win.basics</li>
+      <li>db.win.functions</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases Aggregation and Grouping module: aggregate functions, GROUP BY and HAVING, the FILTER clause, and GROUPING SETS/ROLLUP/CUBE — oriented for study with official PostgreSQL docs and community resources, plus the interview questions they power.">
+  <title>Aggregation and Grouping — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Aggregation and Grouping</h1>
+  <p class="standfirst">Aggregate functions collapse many rows into one number; GROUP BY decides how many groups you get, and HAVING, FILTER and the grouping-set family decide how much you can ask for in a single pass over the data.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Aggregation and Grouping</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Aggregation turns row-level data into answers — totals, averages, and counts per category. This module covers the aggregate functions themselves, the GROUP BY and HAVING machinery that partitions rows and filters the resulting groups, the FILTER clause for conditional aggregates, and the GROUPING SETS / ROLLUP / CUBE extensions that produce subtotals and cross-tabs in one query. It is the backbone of every reporting query and one of the most heavily tested areas in SQL interview rounds.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Aggregate functions</h3>
+    <p>An aggregate function reduces a set of input rows to a single value: <code>count(*)</code> tallies rows, <code>sum()</code> and <code>avg()</code> reduce a numeric column, <code>min()</code> and <code>max()</code> find the extremes, and <code>string_agg()</code> or <code>array_agg()</code> collect values into one field. Used without a GROUP BY, an aggregate treats the whole result set as a single group and returns exactly one row.</p>
+    <p>Why it matters: aggregates are how detail data becomes a report. The detail that trips people up is NULL handling — every aggregate except <code>count(*)</code> skips NULL inputs, so <code>avg()</code> divides by the count of non-null values, not the row count. PostgreSQL also offers ordered-set aggregates such as <code>percentile_cont()</code> and <code>mode()</code> through the <code>WITHIN GROUP</code> syntax.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT count(*)        AS orders,
+       sum(amount)     AS revenue,
+       avg(amount)     AS avg_ticket,
+       max(created_at) AS last_order
+FROM orders;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-aggregate.html" rel="noopener">Aggregate Functions — PostgreSQL documentation (full reference incl. WITHIN GROUP and GROUPING)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-agg.html" rel="noopener">Aggregate Functions — PostgreSQL tutorial (introduces aggregates with GROUP BY and HAVING)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rzbFQnTWhPM" rel="noopener">SQL Aggregate Functions — Simply Coding</a></li>
+    </ul>
+
+    <h3>GROUP BY and HAVING</h3>
+    <p>GROUP BY partitions rows into groups that share the listed column values and produces one output row per group; every column in the SELECT list must then be either a grouping column or wrapped in an aggregate. HAVING filters those groups by an aggregate condition — it is to groups what WHERE is to rows.</p>
+    <p>Why it matters: the WHERE-versus-HAVING distinction is the single most common aggregation interview question. WHERE runs before grouping and cannot reference an aggregate; HAVING runs after and is the only place an aggregate condition like <code>sum(amount) &gt; 10000</code> belongs. Knowing the logical evaluation order — FROM, WHERE, GROUP BY, HAVING, SELECT, ORDER BY — explains both rules at once.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT customer_id, count(*) AS orders, sum(amount) AS spend
+FROM orders
+WHERE status = 'paid'            -- filters rows before grouping
+GROUP BY customer_id
+HAVING sum(amount) &gt; 10000       -- filters groups after aggregation
+ORDER BY spend DESC;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT — PostgreSQL command reference (GROUP BY and HAVING clause grammar)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-group-by" rel="noopener">PostgreSQL GROUP BY — Neon (PostgreSQL Tutorial)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-having" rel="noopener">PostgreSQL HAVING — Neon (PostgreSQL Tutorial)</a></li>
+    </ul>
+
+    <h3>The FILTER clause</h3>
+    <p>FILTER attaches a WHERE condition to a single aggregate, so several conditional totals can be computed in one pass over the data: <code>count(*) FILTER (WHERE status = 'paid')</code> counts only paid rows while a neighbouring <code>count(*)</code> still sees everything. It is the SQL-standard, more readable replacement for the <code>sum(CASE WHEN … THEN 1 ELSE 0 END)</code> idiom.</p>
+    <p>Why it matters: interviewers often ask you to build a pivot-style summary — paid, refunded and pending counts per region — and FILTER answers it cleanly inside one GROUP BY. It reads better than CASE and gives the planner a clearer instruction about intent.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT region,
+       count(*)                                   AS total,
+       count(*) FILTER (WHERE status = 'paid')     AS paid,
+       count(*) FILTER (WHERE status = 'refunded') AS refunded
+FROM orders
+GROUP BY region;</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://modern-sql.com/feature/filter" rel="noopener">The FILTER clause — Modern SQL (cross-database, with the CASE equivalent)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/using-postgres-filter" rel="noopener">Using Postgres FILTER — Crunchy Data (FILTER vs CTE vs CASE)</a></li>
+    </ul>
+
+    <h3>GROUPING SETS, ROLLUP and CUBE</h3>
+    <p>These extensions let one query return several levels of aggregation at once. GROUPING SETS lists the exact groupings you want; <code>ROLLUP (a, b)</code> produces the hierarchical prefixes — <code>(a, b)</code>, <code>(a)</code>, and the grand total <code>()</code> — for running subtotals; <code>CUBE (a, b)</code> produces every combination, the full power set, for cross-tabs. The alternative is a UNION ALL of many separate GROUP BY queries, which scans the table repeatedly.</p>
+    <p>Why it matters: reporting and OLAP work lives here. The subtle part interviewers probe is telling a real NULL apart from a subtotal row's NULL — that is what the <code>GROUPING()</code> function is for, returning a bitmask that marks which columns were rolled up in each row. PostgreSQL computes all the sets in a single pass, so it beats hand-written unions.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT region, product, sum(amount) AS revenue
+FROM sales
+GROUP BY ROLLUP (region, product);
+-- yields: per region+product, per region subtotal, and grand total</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-table-expressions.html" rel="noopener">GROUPING SETS, CUBE, and ROLLUP — PostgreSQL documentation (Table Expressions)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-grouping-sets" rel="noopener">PostgreSQL GROUPING SETS — Neon (PostgreSQL Tutorial)</a></li>
+      <li>[Article] <a href="https://www.cybertec-postgresql.com/en/postgresql-grouping-sets-rollup-cube/" rel="noopener">PostgreSQL grouping sets: ROLLUP and CUBE — CYBERTEC</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ccye_H34hBo" rel="noopener">GROUPING SETS vs ROLLUP vs CUBE in SQL — techTFQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2SMZD0Aw378" rel="noopener">Rollup, Cube and Grouping Sets in SQL — Ankit Bansal</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-joins.html">← Joins</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="06-subqueries-cte.html">Subqueries and CTEs →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Aggregation is a staple of Indian SQL rounds — from service-company screens to product-company data and backend interviews. These are the ones that recur:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an aggregate function? Give examples.</summary>
+      <div class="answer"><p>A function that reduces many input rows to one value. Common ones: <code>count</code>, <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, plus <code>string_agg</code>/<code>array_agg</code> for collecting values. Without GROUP BY they aggregate the entire result set into a single row.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does GROUP BY do?</summary>
+      <div class="answer"><p>It partitions rows into groups sharing the same values in the listed columns and returns one row per group. Any column in SELECT that is not in GROUP BY must be inside an aggregate, otherwise PostgreSQL raises an error.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between WHERE and HAVING?</summary>
+      <div class="answer"><p>WHERE filters individual rows before grouping and cannot use aggregates. HAVING filters whole groups after aggregation and is where aggregate conditions like <code>sum(amount) &gt; 10000</code> go. Use WHERE to cut rows early (cheaper), HAVING only for post-aggregate tests.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> count(*) vs count(column) vs count(DISTINCT column)?</summary>
+      <div class="answer"><p><code>count(*)</code> counts all rows including those with NULLs. <code>count(column)</code> counts rows where that column is non-null. <code>count(DISTINCT column)</code> counts distinct non-null values. The NULL-skipping of the last two is a frequent trap.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do aggregates treat NULL values?</summary>
+      <div class="answer"><p>Every aggregate except <code>count(*)</code> ignores NULL inputs. So <code>avg(x)</code> is <code>sum(x)</code> over the count of non-null <code>x</code> — NULLs neither add to the sum nor to the divisor, which is why AVG can differ from what a manual "sum divided by row count" would give.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which columns are legal in a SELECT that has GROUP BY?</summary>
+      <div class="answer"><p>Only the grouping columns and aggregate expressions. Selecting a non-grouped, non-aggregated column is an error in PostgreSQL. The one relaxation: if you GROUP BY a table's primary key, the other columns of that table are functionally dependent and may be selected.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the FILTER clause and why prefer it to CASE?</summary>
+      <div class="answer"><p>FILTER applies a WHERE to one aggregate only: <code>count(*) FILTER (WHERE status = 'paid')</code>. It replaces the <code>sum(CASE WHEN cond THEN 1 ELSE 0 END)</code> idiom with clearer, standard syntax, lets you compute many conditional aggregates in a single pass, and signals intent more directly to the planner.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can you reference a SELECT alias in ORDER BY but not in WHERE or HAVING?</summary>
+      <div class="answer"><p>Logical evaluation order: FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY. WHERE and HAVING run before the SELECT list is projected, so its aliases do not exist yet; ORDER BY runs after, so they do. (PostgreSQL does allow an output-column name in GROUP BY as a convenience.)</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Over an empty table, what does COUNT return with and without GROUP BY?</summary>
+      <div class="answer"><p>Without GROUP BY, an aggregate over zero rows still returns one row — <code>count(*)</code> gives 0, while <code>sum</code>/<code>avg</code>/<code>max</code> give NULL. With a GROUP BY there are no groups to form, so the query returns zero rows. This asymmetry surprises people.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you compute a per-group percentage, e.g. share of paid orders per region?</summary>
+      <div class="answer"><p>Use FILTER (or CASE) inside the aggregate: <code>count(*) FILTER (WHERE status = 'paid') * 100.0 / count(*)</code>, grouped by region. Multiply by a numeric literal (100.0) so integer division does not truncate the result to zero.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> GROUPING SETS vs ROLLUP vs CUBE — what is the difference?</summary>
+      <div class="answer"><p>All produce multiple grouping levels in one query. <code>ROLLUP (a, b)</code> gives the hierarchical prefixes — (a,b), (a), () — for subtotals plus a grand total. <code>CUBE (a, b)</code> gives every subset — the full power set (2^n sets) — for cross-tabs. <code>GROUPING SETS</code> lets you list exactly the combinations you want; ROLLUP and CUBE are shorthands for common patterns of it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the GROUPING() function for?</summary>
+      <div class="answer"><p>In a ROLLUP/CUBE/GROUPING SETS result, subtotal rows carry NULL in the columns that were rolled up — indistinguishable from a genuine NULL data value. <code>GROUPING(col)</code> returns 1 when that column was aggregated away for the row and 0 otherwise (a bitmask across several columns), so you can label subtotal rows and separate them from real NULLs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why choose grouping sets over UNION ALL of several GROUP BY queries?</summary>
+      <div class="answer"><p>Each separate GROUP BY re-scans the table, so a UNION ALL of N groupings does N passes; PostgreSQL computes all the requested sets in a single scan with one sort/hash stage. Fewer passes, less I/O, and one coherent result — the same argument that favours a single FILTER-based query over multiple correlated subqueries.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.agg.groupby</li>
+      <li>db.agg.grouping-sets</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

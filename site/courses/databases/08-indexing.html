@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PostgreSQL Indexing module: B-tree mechanics, composite indexes and column order, covering, partial and expression indexes, GIN/GiST/BRIN awareness, index-only scans, and when indexes hurt — with official docs, Use The Index Luke, Baeldung and the interview questions they power.">
+  <title>Indexing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Indexing</h1>
+  <p class="standfirst">An index is the difference between a query that scans a million rows and one that touches a handful — and picking the right index, in the right column order, is one of the most heavily tested database skills in Indian interviews.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Indexing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>An index is a separate, sorted data structure the database keeps beside a table so it can find rows without reading every one. This module orients you on the B-tree that backs almost every index, the rules that decide whether a query can actually use one (column order, sargability), the specialised variants — covering, partial, expression — and the non-B-tree access methods (GIN, GiST, BRIN). It closes on the cost side: every index you add slows writes, so knowing when <em>not</em> to index is as important as knowing when to.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>What an index is, and B-tree mechanics</h3>
+    <p>A B-tree index is a balanced search tree whose leaf nodes hold the indexed values in sorted order, chained together as a doubly linked list, each pointing back to its table row. Because the tree stays balanced, any lookup costs a few page reads regardless of table size — the search descends from root to leaf in logarithmic steps instead of scanning the whole heap. This ordering is also why a B-tree serves equality (<code>=</code>), ranges (<code>&lt;</code>, <code>&gt;</code>, <code>BETWEEN</code>), <code>IN</code>, prefix <code>LIKE 'abc%'</code>, and <code>ORDER BY</code> on the same column, all from one structure.</p>
+    <p>Why it matters: B-tree is the default in PostgreSQL and the mental model behind every follow-up question. Understanding that the leaves are sorted explains column order, covering indexes, and why a leading wildcard (<code>LIKE '%abc'</code>) cannot use the index at all.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE INDEX idx_users_email ON users (email);
+-- one B-tree serves all of these:
+--   WHERE email = 'a@b.com'
+--   WHERE email &gt; 'm' AND email &lt; 'n'
+--   ORDER BY email
+--   WHERE email LIKE 'prefix%'   (but NOT '%suffix')</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-intro.html" rel="noopener">Indexes — Introduction — PostgreSQL Documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/btree.html" rel="noopener">B-Tree Indexes — PostgreSQL Documentation (operator classes and internals)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/anatomy" rel="noopener">Anatomy of an SQL Index — Use The Index, Luke (Markus Winand)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/databases-indexing" rel="noopener">How Does Database Indexing Work? — Baeldung on SQL</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BHCSL_ZifI0" rel="noopener">DB Indexing in System Design Interviews — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Composite indexes and column order</h3>
+    <p>A composite (multicolumn) index sorts rows by its first column, then by the second only where the first ties, and so on — exactly like a phone book ordered by surname then first name. This gives the <em>leftmost-prefix rule</em>: an index on <code>(a, b, c)</code> can drive queries filtering on <code>a</code>, on <code>a, b</code>, or on <code>a, b, c</code>, but not on <code>b</code> or <code>c</code> alone. The second design rule is <em>equality before range</em>: once a column is used with a range predicate, columns after it in the index can no longer narrow the scan, so put the equality columns first.</p>
+    <p>Why it matters: "here is a table and three queries, design the index" is a staple interview task, and the wrong column order produces an index the planner quietly ignores. One well-ordered composite index often replaces several single-column ones.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE INDEX idx_orders_cust_date ON orders (customer_id, created_at);
+-- uses the index:  WHERE customer_id = 42
+--                  WHERE customer_id = 42 AND created_at &gt;= '2026-01-01'
+-- CANNOT use it:   WHERE created_at &gt;= '2026-01-01'   (skips leading column)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-multicolumn.html" rel="noopener">Multicolumn Indexes — PostgreSQL Documentation</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/where-clause/the-equals-operator/concatenated-keys" rel="noopener">Concatenated Keys — column order in composite indexes — Use The Index, Luke</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/where-clause/searching-for-ranges/greater-less-between-tuning-sql-access-filter-predicates" rel="noopener">Searching for Ranges — equality first, then range — Use The Index, Luke</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/multiple-indexes-vs-multi-column-indexes" rel="noopener">Multiple Indexes vs. Multi-Column Indexes — Baeldung on SQL</a></li>
+    </ul>
+
+    <h3>Covering indexes and index-only scans</h3>
+    <p>An <em>index-only scan</em> is an execution plan where every column the query needs is already in the index, so PostgreSQL answers it without touching the heap at all — no random row fetches. A <em>covering index</em> is one deliberately built to enable this, using the <code>INCLUDE</code> clause to carry extra payload columns that are stored in the leaves but are not part of the sort key (so they add no uniqueness or ordering constraints). It is a read-latency optimisation, best for hot queries that select a few columns over many rows.</p>
+    <p>Why it matters: it is the answer to "how would you speed up this specific SELECT without changing the query," and it exposes a subtlety interviewers love — an index-only scan can still visit the heap because row visibility (MVCC) lives in the table, not the index, and is only skipped for pages the visibility map marks all-visible. Keep autovacuum healthy or the benefit fades.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE INDEX idx_orders_cust ON orders (customer_id) INCLUDE (status, total);
+-- SELECT status, total FROM orders WHERE customer_id = 42;
+--   -> index-only scan: no heap fetch when pages are all-visible</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-index-only-scans.html" rel="noopener">Index-Only Scans and Covering Indexes — PostgreSQL Documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-createindex.html" rel="noopener">CREATE INDEX — PostgreSQL Documentation (INCLUDE, UNIQUE, CONCURRENTLY, USING)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/clustering/index-only-scan-covering-index" rel="noopener">Index-Only Scan: Avoiding Table Access — Use The Index, Luke</a></li>
+    </ul>
+
+    <h3>Partial and expression indexes</h3>
+    <p>A <em>partial index</em> adds a <code>WHERE</code> predicate so it indexes only the rows you actually query — the classic case being a small "active" subset of a mostly-inactive table. The index is smaller, faster to scan, and cheaper to maintain, and it can even enforce uniqueness on just that subset. An <em>expression (functional) index</em> indexes the result of a computation rather than a raw column, so a query filtering on that same expression becomes a simple indexed lookup — the canonical example being <code>lower(email)</code> for case-insensitive search. Both share one strict rule: the query's condition must match the index's predicate or expression closely, because the planner does not reason about equivalences.</p>
+    <pre class="code-block" data-label="SQL"><code>-- partial: index only the rows that matter
+CREATE INDEX idx_orders_open ON orders (created_at) WHERE status = 'OPEN';
+
+-- expression: index a computed value for case-insensitive lookup
+CREATE INDEX idx_users_lower_email ON users (lower(email));
+-- must be queried as: WHERE lower(email) = lower('A@B.com')</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-partial.html" rel="noopener">Partial Indexes — PostgreSQL Documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-expressional.html" rel="noopener">Indexes on Expressions — PostgreSQL Documentation</a></li>
+    </ul>
+
+    <h3>Index types beyond B-tree: Hash, GIN, GiST, SP-GiST, BRIN</h3>
+    <p>B-tree covers ordered, scalar data, but some workloads need a different structure. <em>Hash</em> handles equality only. <em>GIN</em> (inverted index) is the workhorse for multi-value columns — JSONB containment, arrays, and full-text search — storing each contained element as a key pointing at the rows that hold it. <em>GiST</em> and <em>SP-GiST</em> serve geometric, range, and nearest-neighbour queries (overlaps, "closest points"). <em>BRIN</em> stores tiny per-block-range summaries and shines on very large tables whose values track physical order, such as append-only time-series keyed by timestamp — a fraction of the size of a B-tree.</p>
+    <p>Why it matters: interviewers probe whether you would blindly B-tree a JSONB column (slow, sometimes unusable) or reach for GIN, and whether you recognise that BRIN exists for warehouse-scale, correlated data. A quick note on vocabulary: PostgreSQL has no "clustered index" in the SQL Server / MySQL-InnoDB sense — its indexes are always secondary structures separate from the heap.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE INDEX idx_docs_body   ON documents USING gin  (body jsonb_path_ops);
+CREATE INDEX idx_events_range ON events    USING brin (created_at);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-types.html" rel="noopener">Index Types — PostgreSQL Documentation (B-tree, Hash, GiST, SP-GiST, GIN, BRIN)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/gin.html" rel="noopener">GIN Indexes — PostgreSQL Documentation (JSONB, arrays, full-text)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/brin.html" rel="noopener">BRIN Indexes — PostgreSQL Documentation (large, physically-correlated tables)</a></li>
+      <li>[Article] <a href="https://www.citusdata.com/blog/2017/10/17/tour-of-postgres-index-types/" rel="noopener">A Tour of Postgres Index Types — Citus Data (Craig Kerstiens)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/index-clustered-vs-non-clustered" rel="noopener">Clustered and Non-Clustered Indexes — Baeldung on SQL</a></li>
+    </ul>
+
+    <h3>When indexes hurt</h3>
+    <p>An index is pure redundancy the database must keep in sync: every <code>INSERT</code>, <code>UPDATE</code> of an indexed column, and <code>DELETE</code> pays to maintain every affected index, so a table with six indexes makes writes several times more expensive and consumes real disk. Indexes also stop helping when a query is not selective — if it returns a large fraction of the table, a sequential scan is genuinely cheaper, and the planner will (correctly) skip your index. Other traps: unused or duplicate indexes that only cost maintenance, and non-sargable predicates (a function wrapped around a plain column, or a type mismatch) that silently disable the index. The discipline is to index for real query patterns, then drop what the statistics show nobody uses.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/dml" rel="noopener">The Maintenance Overhead of Indexes (INSERT, DELETE, UPDATE) — Use The Index, Luke</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ykVumkmkbik" rel="noopener">Why creating an index blocks writes — Hussein Nasser</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-window-functions.html">← Window Functions</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="09-query-optimization.html">Query Optimization →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Indexing is a top-tier topic in Indian interviews, from service-company screens to product-company deep dives — expect column-order design tasks and "why isn't my index being used" scenarios:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a database index and why does it speed up reads?</summary>
+      <div class="answer"><p>A separate, sorted data structure kept beside the table that lets the database locate rows without scanning every one — like a book's index. It turns a full table scan into a short tree descent, cutting reads from O(n) to roughly O(log n) for the matching rows.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the default index type in PostgreSQL, and what can a B-tree serve?</summary>
+      <div class="answer"><p>B-tree. Because its leaves are sorted, one B-tree handles equality, range (<code>&lt;</code>, <code>&gt;</code>, <code>BETWEEN</code>), <code>IN</code>, <code>IS NULL</code>, prefix <code>LIKE 'abc%'</code>, and supplies rows in <code>ORDER BY</code> order. It cannot help a leading-wildcard <code>LIKE '%abc'</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Does adding an index always improve performance? What's the cost?</summary>
+      <div class="answer"><p>No. Reads get faster but every write (INSERT, UPDATE of the indexed column, DELETE) must also update the index, so writes slow down and disk usage grows. Index for the queries you actually run and remove unused ones.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a composite (multicolumn) index?</summary>
+      <div class="answer"><p>One index spanning several columns, sorted by the first column, then the second within ties, and so on. It lets a single structure serve queries that filter on the leading columns together.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the leftmost-prefix rule. Given an index on (a, b, c), which queries use it?</summary>
+      <div class="answer"><p>An index helps only when the query constrains a leading prefix. <code>(a, b, c)</code> serves filters on <code>a</code>, on <code>a</code> and <code>b</code>, or on all three; it does not serve <code>b</code> alone, <code>c</code> alone, or <code>b</code> and <code>c</code> without <code>a</code> — because the leaves aren't sorted by those columns first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does column order matter — what is "equality before range"?</summary>
+      <div class="answer"><p>Once a column is matched with a range predicate, columns after it can no longer narrow the index scan (they become filters, not access predicates). So put equality columns first and the range column last. Index <code>(status, created_at)</code> beats <code>(created_at, status)</code> for <code>WHERE status = 'X' AND created_at &gt; ?</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a covering index / index-only scan, and what is INCLUDE for?</summary>
+      <div class="answer"><p>When every column a query needs lives in the index, PostgreSQL answers it from the index alone — an index-only scan, skipping heap fetches. <code>INCLUDE</code> adds non-key payload columns to the leaves (no effect on sort or uniqueness) so more queries can be covered without widening the key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a partial index and when would you use one?</summary>
+      <div class="answer"><p>An index with a <code>WHERE</code> predicate that indexes only matching rows — e.g. only <code>status = 'OPEN'</code> orders. Smaller and cheaper to maintain, ideal when queries always target a small subset; it can also enforce uniqueness on just that subset. The query's condition must match the predicate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an expression (functional) index? Give the classic example.</summary>
+      <div class="answer"><p>An index on a computed value rather than a raw column. The canonical case is <code>lower(email)</code> for case-insensitive lookup: <code>CREATE INDEX ... (lower(email))</code>, queried as <code>WHERE lower(email) = lower(?)</code>. Without it, wrapping the column in a function makes the predicate non-sargable and disables any plain-column index.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does PostgreSQL have clustered indexes like SQL Server or MySQL?</summary>
+      <div class="answer"><p>Not in the same sense. In SQL Server / InnoDB a clustered index stores the table rows in index order (one per table). PostgreSQL indexes are always secondary structures separate from the heap; the <code>CLUSTER</code> command physically reorders a table once but does not keep it ordered.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would the planner ignore your index and choose a sequential scan?</summary>
+      <div class="answer"><p>When the query isn't selective — returning a large fraction of rows makes random index+heap access costlier than a straight sequential read — or on tiny tables, or with stale statistics after a bulk load (run <code>ANALYZE</code>). Also when the predicate is non-sargable (function on the column, type mismatch) so no index applies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you choose between GIN, GiST and BRIN?</summary>
+      <div class="answer"><p>GIN for multi-value containment — JSONB, arrays, full-text <code>tsvector</code> — where each row has many searchable elements (fast reads, heavier writes). GiST/SP-GiST for geometric, range and nearest-neighbour / overlap queries. BRIN for very large tables whose column correlates with physical row order (append-only time-series), giving a tiny index that skips block ranges.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can an index-only scan still access the heap?</summary>
+      <div class="answer"><p>Row visibility (MVCC) is stored in the heap, not the index, so PostgreSQL must confirm a tuple is visible to the current transaction. It skips that check only for pages the visibility map marks all-visible. If autovacuum lags and few pages are all-visible, the "index-only" scan degrades into heap fetches.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you add an index to a large, busy production table without blocking writes?</summary>
+      <div class="answer"><p><code>CREATE INDEX CONCURRENTLY</code> — it builds without taking an exclusive lock, so reads and writes continue. Trade-offs: it does two table scans and takes longer, cannot run inside a transaction block, and on failure can leave an <code>INVALID</code> index that you must drop and rebuild.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.idx.btree</li>
+      <li>db.idx.types</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

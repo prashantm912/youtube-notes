@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases module on Views, Procedures and Operations: views and materialized views, stored procedures, functions and triggers, partitioning, connection pooling, roles and GRANT, row-level security, VACUUM and autovacuum, backup and PITR, full-text search and JSONB operators — with official PostgreSQL docs and the interview questions they power.">
+  <title>Views, Procedures and Operations</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Views, Procedures and Operations</h1>
+  <p class="standfirst">Everything a table needs once real traffic arrives — saved queries, server-side logic, partitions, pooled connections, access control, and the maintenance and backups that keep it all honest — each pointed at its primary source.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Views, Procedures and Operations</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Earlier modules built and queried the schema; this one runs it. You will meet views and materialized views, server-side procedures/functions and triggers, table partitioning and connection pooling, then the database-administration layer interviews probe hardest: roles and GRANT, row-level security, VACUUM and autovacuum, backup and point-in-time recovery, full-text search, and JSONB operators. Each topic here says what it is and why it matters; depth lives in the linked PostgreSQL documentation.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Views</h3>
+    <p>A view is a named <code>SELECT</code> stored in the database. It holds no data of its own — querying it re-runs the underlying query, so it always reflects live rows while hiding join and filter complexity behind a stable interface. Making liberal use of views is, in the documentation's own words, a key aspect of good SQL design.</p>
+    <p>Why it matters: views give you encapsulation and a security boundary. You can expose a curated, permission-limited view instead of base tables, and reshape the tables underneath without breaking callers. Simple single-table views are automatically <em>updatable</em> (no aggregates, <code>DISTINCT</code>, <code>GROUP BY</code> or set operations); anything more complex takes an <code>INSTEAD OF</code> trigger to accept writes.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE VIEW active_customers AS
+  SELECT id, name, email
+  FROM customers
+  WHERE status = 'active';</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-views.html" rel="noopener">Views — PostgreSQL Tutorial (§3.2)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-createview.html" rel="noopener">CREATE VIEW — including the Updatable Views rules — PostgreSQL Reference</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-views" rel="noopener">PostgreSQL Views — Neon Postgres Tutorial</a></li>
+    </ul>
+
+    <h3>Materialized views</h3>
+    <p>A materialized view stores its query result physically, like a table you can index, instead of recomputing on every read. The trade is freshness: the data is a snapshot from the last refresh and goes stale until you run <code>REFRESH MATERIALIZED VIEW</code>. That makes them ideal for expensive aggregations and reporting rollups that tolerate slight lag.</p>
+    <p>Why it matters: the refresh strategy is the whole design. A plain refresh takes an exclusive lock; <code>REFRESH ... CONCURRENTLY</code> lets readers keep querying during the rebuild but requires a unique index on the view and runs slower. Choosing between live views and materialized ones — and how to keep the latter current — is a common design question.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE MATERIALIZED VIEW sales_by_day AS
+  SELECT day, sum(amount) AS total
+  FROM orders
+  GROUP BY day;
+
+CREATE UNIQUE INDEX ON sales_by_day (day);
+REFRESH MATERIALIZED VIEW CONCURRENTLY sales_by_day;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/rules-materializedviews.html" rel="noopener">Materialized Views — PostgreSQL Documentation (§39.3)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-refreshmaterializedview.html" rel="noopener">REFRESH MATERIALIZED VIEW — including CONCURRENTLY — PostgreSQL Reference</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-views/postgresql-materialized-views" rel="noopener">PostgreSQL Materialized Views — Neon Postgres Tutorial</a></li>
+    </ul>
+
+    <h3>Stored procedures, functions and triggers</h3>
+    <p>Server-side logic in PostgreSQL comes in three shapes. A <em>function</em> returns a value and runs inside the surrounding transaction (it cannot commit on its own). A <em>procedure</em> (PostgreSQL 11+) is invoked with <code>CALL</code> and can manage transactions with <code>COMMIT</code>/<code>ROLLBACK</code>, which suits batch and maintenance jobs. Both are usually written in PL/pgSQL. A <em>trigger</em> binds a function to <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>/<code>TRUNCATE</code>, firing <code>BEFORE</code>, <code>AFTER</code>, or <code>INSTEAD OF</code>, per row or per statement.</p>
+    <p>Why it matters: triggers keep invariants next to the data — audit trails, derived columns, validation — but heavy trigger logic hides behaviour and complicates debugging, so interviewers probe both the mechanism and the judgement of when <em>not</em> to use it.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE FUNCTION log_change() RETURNS trigger AS $$
+BEGIN
+  INSERT INTO audit(table_name, changed_at)
+  VALUES (TG_TABLE_NAME, now());
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER accounts_audit
+  AFTER UPDATE ON accounts
+  FOR EACH ROW EXECUTE FUNCTION log_change();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/plpgsql.html" rel="noopener">PL/pgSQL — SQL Procedural Language (functions and trigger functions) — PostgreSQL Documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-createprocedure.html" rel="noopener">CREATE PROCEDURE — PostgreSQL Reference</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/triggers.html" rel="noopener">Triggers — overview and behaviour — PostgreSQL Documentation (Chapter 37)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-createtrigger.html" rel="noopener">CREATE TRIGGER — PostgreSQL Reference</a></li>
+    </ul>
+
+    <h3>Partitioning</h3>
+    <p>Partitioning splits one logical table into physical child partitions by range, list, or hash of a key. The planner then prunes partitions that cannot match a query, indexes on each partition stay small, and you can retire old data by detaching a partition instead of running a mass <code>DELETE</code>. Declarative partitioning (<code>PARTITION BY</code>) is the modern approach; the older inheritance-plus-<code>CHECK</code> method still exists for edge cases.</p>
+    <p>Why it matters: it is the standard answer for very large, growing tables — time-series, events, logs. Note the interview trap: partitioning is not sharding. All partitions live in one server, so it helps maintenance and range queries but does not spread load across machines.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE TABLE events (id bigint, created_at date)
+  PARTITION BY RANGE (created_at);
+
+CREATE TABLE events_2026 PARTITION OF events
+  FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-partitioning.html" rel="noopener">Table Partitioning — PostgreSQL Documentation (§5.12)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/native-partitioning-with-postgres" rel="noopener">Partitioning with Native Postgres and pg_partman — Crunchy Data</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KWyVn0aC3kc" rel="noopener">Database Sharding vs Partitioning (Explained) — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Connection pooling</h3>
+    <p>PostgreSQL forks a dedicated backend process for every connection, so thousands of short-lived application connections — typical of web and serverless apps — burn memory and scheduler time even while idle. A connection pooler such as PgBouncer sits between clients and the server and multiplexes many client connections onto a small, reused set of server connections.</p>
+    <p>Why it matters: pooling is often the cheapest fix for a database that falls over under connection load. The key concept is pool mode: <em>session</em> pooling assigns a server connection for a whole client session, <em>transaction</em> pooling returns it after each transaction (highest reuse, but you lose session-level state and must be careful with prepared statements and <code>SET</code>), and <em>statement</em> pooling is stricter still.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.pgbouncer.org/" rel="noopener">PgBouncer — lightweight connection pooler for PostgreSQL (project docs)</a></li>
+      <li>[Article] <a href="https://www.enterprisedb.com/blog/pgbouncer-tutorial-installing-configuring-and-testing-persistent-postgresql-connection-pooling" rel="noopener">PgBouncer Tutorial: installing, configuring and testing pooling — EDB</a></li>
+    </ul>
+
+    <h3>Roles, GRANT and privileges</h3>
+    <p>Since version 8.1 PostgreSQL has a single access entity — the <em>role</em> — that subsumes the old "users" and "groups". A role that carries the <code>LOGIN</code> attribute is what we casually call a user; a role can own objects, hold privileges, and be granted membership in other roles. <code>GRANT</code>/<code>REVOKE</code> assign object privileges (<code>SELECT</code>, <code>INSERT</code>, <code>UPDATE</code>, <code>DELETE</code>, <code>EXECUTE</code>, <code>USAGE</code>, and more), and role membership bundles them into reusable groups.</p>
+    <p>Why it matters: least privilege. Applications should connect as a limited role rather than a superuser, and you should know that some privileges default to <code>PUBLIC</code> and that <code>WITH GRANT OPTION</code> lets a grantee pass privileges on. Getting this wrong is a common security-review finding.</p>
+    <pre class="code-block" data-label="SQL"><code>CREATE ROLE app_rw LOGIN PASSWORD 'change-me';
+GRANT USAGE ON SCHEMA public TO app_rw;
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO app_rw;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/user-manag.html" rel="noopener">Database Roles — PostgreSQL Documentation (Chapter 21)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-priv.html" rel="noopener">Privileges — PostgreSQL Documentation (§5.8)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-grant.html" rel="noopener">GRANT — PostgreSQL Reference</a></li>
+    </ul>
+
+    <h3>Row-Level Security (RLS)</h3>
+    <p>Row-level security lets the engine decide, per row, which rows a role may see or modify — an extra filter layered on top of table-level <code>GRANT</code>. You turn it on with <code>ALTER TABLE ... ENABLE ROW LEVEL SECURITY</code> and then define policies: a <code>USING</code> expression controls visible rows and a <code>WITH CHECK</code> expression controls which rows may be written. It is the in-database answer to multi-tenant data isolation.</p>
+    <p>Why it matters: the gotchas are the exam. Enabling RLS with no policy is default-deny (nothing is visible). Table owners bypass RLS unless you add <code>FORCE ROW LEVEL SECURITY</code>, and superusers or roles with <code>BYPASSRLS</code> always bypass it. Policies are frequently driven by a session variable set per request, read with <code>current_setting()</code>.</p>
+    <pre class="code-block" data-label="SQL"><code>ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON invoices
+  USING (tenant_id = current_setting('app.tenant_id')::int);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html" rel="noopener">Row Security Policies — PostgreSQL Documentation (§5.9)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-createpolicy.html" rel="noopener">CREATE POLICY — PostgreSQL Reference</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/row-level-security-for-tenants-in-postgres" rel="noopener">Row Level Security for Tenants in Postgres — Crunchy Data</a></li>
+    </ul>
+
+    <h3>VACUUM, autovacuum and bloat</h3>
+    <p>PostgreSQL's MVCC keeps old row versions, so every <code>UPDATE</code> and <code>DELETE</code> leaves dead tuples behind. <code>VACUUM</code> reclaims that space for reuse, updates the visibility map (which enables index-only scans), refreshes planner statistics via <code>ANALYZE</code>, and freezes old rows to prevent transaction-ID wraparound. The autovacuum daemon runs all of this automatically once a table crosses configurable thresholds.</p>
+    <p>Why it matters: neglected vacuuming shows up as bloat and slow queries. Know that plain <code>VACUUM</code> reuses space in place while <code>VACUUM FULL</code> rewrites the table and returns space to the OS but takes an exclusive lock, and that tuning autovacuum scale factors on large, hot tables is a genuine operations skill.</p>
+    <pre class="code-block" data-label="SQL"><code>VACUUM (VERBOSE, ANALYZE) orders;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/routine-vacuuming.html" rel="noopener">Routine Vacuuming and the autovacuum daemon — PostgreSQL Documentation (§24.1)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-vacuum.html" rel="noopener">VACUUM — command reference (FULL, FREEZE, ANALYZE) — PostgreSQL Reference</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/runtime-config-autovacuum.html" rel="noopener">Autovacuum configuration parameters — PostgreSQL Documentation (§19.10)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/checking-for-postgresql-bloat" rel="noopener">Checking for PostgreSQL Bloat — Crunchy Data</a></li>
+    </ul>
+
+    <h3>Backup and restore (pg_dump, PITR)</h3>
+    <p>Backups come in two families. Logical backups (<code>pg_dump</code>, <code>pg_dumpall</code>) emit a portable script or archive of a database that restores across versions and architectures — great for migrations and per-database snapshots, but only as of the moment the dump ran. Physical base backups combined with WAL archiving (continuous archiving) enable point-in-time recovery, letting you restore to any instant after the base backup.</p>
+    <p>Why it matters: interviews want you to match the tool to the goal. Use <code>pg_dump</code> for single databases and moving data around; use base backup plus PITR for large clusters and low-data-loss disaster recovery. The custom format (<code>-Fc</code>) with <code>pg_restore</code> adds selective and parallel restore.</p>
+    <pre class="code-block" data-label="Shell"><code>pg_dump -Fc -d mydb -f mydb.dump      # custom-format logical backup
+pg_restore -d mydb --jobs=4 mydb.dump # parallel restore</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/backup-dump.html" rel="noopener">SQL Dump — pg_dump and pg_dumpall — PostgreSQL Documentation (§25.1)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/app-pgdump.html" rel="noopener">pg_dump — utility reference (formats and options) — PostgreSQL Reference</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/continuous-archiving.html" rel="noopener">Continuous Archiving and Point-in-Time Recovery — PostgreSQL Documentation (§25.3)</a></li>
+    </ul>
+
+    <h3>Full-text search</h3>
+    <p>Full-text search normalizes text into a <code>tsvector</code> — a sorted list of lexemes with optional positions and weights — and matches it against a <code>tsquery</code> using the <code>@@</code> operator. Unlike <code>LIKE</code>/<code>ILIKE</code>, it brings stemming, stop words, ranking, and language configurations, and a GIN index on the <code>tsvector</code> makes it fast. For many applications this means search without bolting on a separate engine.</p>
+    <p>Why it matters: the building blocks are <code>to_tsvector()</code> and <code>to_tsquery()</code>, a matching operator, and an index; ranking with <code>ts_rank</code> orders results by relevance. Knowing why full-text search beats a leading-wildcard <code>LIKE</code> is a frequent question once a resume mentions search.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT id, title
+FROM articles
+WHERE to_tsvector('english', body) @@ to_tsquery('english', 'index &amp; scan');</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch.html" rel="noopener">Full Text Search — PostgreSQL Documentation (Chapter 12)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch-intro.html" rel="noopener">Full Text Search — Introduction and basic matching (§12.1)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/datatype-textsearch.html" rel="noopener">Text Search Types — tsvector and tsquery (§8.11)</a></li>
+    </ul>
+
+    <h3>JSONB operators</h3>
+    <p>The <code>jsonb</code> type stores JSON in a decomposed binary form — slightly slower to insert than plain <code>json</code>, but much faster to query and, crucially, indexable. Its operator set is the day-to-day vocabulary: <code>-&gt;</code> and <code>-&gt;&gt;</code> extract a field or element as <code>jsonb</code> or as text, <code>#&gt;</code> and <code>#&gt;&gt;</code> follow a path, <code>@&gt;</code> and <code>&lt;@</code> test containment, and <code>?</code>, <code>?|</code>, <code>?&amp;</code> test key existence.</p>
+    <p>Why it matters: <code>jsonb</code> lets semi-structured data live beside relational columns, and a GIN index accelerates <code>@&gt;</code> containment and key-existence checks. Default to <code>jsonb</code> unless you specifically need to preserve exact text, whitespace, or key order — in which case <code>json</code> keeps the input verbatim.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT data-&gt;&gt;'email' AS email
+FROM users
+WHERE data @&gt; '{"active": true}';</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-json.html" rel="noopener">JSON Functions and Operators — PostgreSQL Documentation (§9.16)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/datatype-json.html" rel="noopener">JSON Types — json vs jsonb, containment, indexing (§8.14)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/indexing-jsonb-in-postgres" rel="noopener">Indexing JSONB in Postgres — GIN indexes and operators — Crunchy Data</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-normalization-design.html">← Normalization and Schema Design</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="13-redis.html">Redis and Caching →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The operations-and-administration questions that separate a developer who can write SQL from one who can run a database — a frequent second-round theme in Indian product and services interviews:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a view and how does it differ from a table?</summary>
+      <div class="answer"><p>A view is a named stored query. It holds no data of its own (a materialized view is the exception) and re-runs against its base tables on each access, so it always shows current rows. A table stores the rows; a view presents a query over them, mainly for abstraction and access control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> View vs materialized view — when do you pick each?</summary>
+      <div class="answer"><p>A plain view always reflects live data but pays the query cost on every read. A materialized view stores the result for fast, indexable reads but is stale until you <code>REFRESH</code> it. Use plain views for abstraction and security; use materialized views for expensive aggregations and reporting that can tolerate slight staleness.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a trigger, and name a legitimate use?</summary>
+      <div class="answer"><p>A function that runs automatically on <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code>/<code>TRUNCATE</code>, firing <code>BEFORE</code>/<code>AFTER</code> (or <code>INSTEAD OF</code> on a view), per row or per statement. Legitimate uses: audit logging, maintaining a derived/denormalized column, or enforcing a cross-row invariant. Overusing triggers hides business logic and makes debugging harder.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between a function and a procedure in PostgreSQL?</summary>
+      <div class="answer"><p>A function returns a value and runs inside the surrounding transaction — it cannot commit. A procedure (11+), called with <code>CALL</code>, can manage transactions with <code>COMMIT</code>/<code>ROLLBACK</code>, which suits batch jobs. Both are commonly written in PL/pgSQL.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why partition a table, and is it the same as sharding?</summary>
+      <div class="answer"><p>Partitioning splits one large table into child partitions by range/list/hash so the planner prunes irrelevant partitions, per-partition indexes stay small, and old data drops by detaching a partition instead of a mass <code>DELETE</code>. It is not sharding: all partitions live on one server. Sharding spreads data across multiple servers for horizontal scale.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does PostgreSQL need connection pooling, and what are pool modes?</summary>
+      <div class="answer"><p>Each connection is a separate backend process, so many short-lived or idle connections waste memory and scheduling. A pooler such as PgBouncer multiplexes clients onto a few reused server connections. Modes: session (one server connection per client session), transaction (returned after each transaction — highest reuse, but no session-level state and careful with prepared statements), and statement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do roles, users and GRANT relate?</summary>
+      <div class="answer"><p>Since 8.1 there is one entity, the role; a "user" is just a role with <code>LOGIN</code>. <code>GRANT</code>/<code>REVOKE</code> assign object privileges (<code>SELECT</code>, <code>INSERT</code>, <code>EXECUTE</code>, <code>USAGE</code>, and so on) and role membership bundles privileges into groups. Best practice: the application connects as a least-privilege role, never a superuser, and you watch what defaults to <code>PUBLIC</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does REFRESH MATERIALIZED VIEW CONCURRENTLY require, and why use it?</summary>
+      <div class="answer"><p>It rebuilds a materialized view without an exclusive lock, so readers keep querying during the refresh. It requires a <code>UNIQUE</code> index covering all rows, runs slower than a plain refresh, and cannot run on a not-yet-populated view.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is VACUUM and why is it necessary?</summary>
+      <div class="answer"><p>MVCC keeps old row versions, so <code>UPDATE</code>/<code>DELETE</code> leave dead tuples. <code>VACUUM</code> reclaims that space for reuse, updates the visibility map (enabling index-only scans) and planner statistics, and freezes old rows to prevent transaction-ID wraparound. Autovacuum does it automatically; without it, tables bloat and queries slow down.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Full-text search vs LIKE — why bother with tsvector/tsquery?</summary>
+      <div class="answer"><p><code>LIKE</code>/<code>ILIKE</code> do raw substring matching with no stemming, ranking, or stop words, and rarely use an index with a leading wildcard. Full-text search normalizes text to a <code>tsvector</code> of lexemes, matches a <code>tsquery</code> with <code>@@</code>, supports ranking and language configurations, and is GIN-indexable for speed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> json vs jsonb — which do you default to?</summary>
+      <div class="answer"><p><code>json</code> stores the exact input text (preserving whitespace, key order, and duplicate keys) and reparses on each access. <code>jsonb</code> stores a decomposed binary form — slightly slower to insert, much faster to query, and indexable with GIN. Default to <code>jsonb</code> unless you specifically need verbatim text or key-order preservation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How is row-level security enforced, and what bypasses it?</summary>
+      <div class="answer"><p>After <code>ALTER TABLE ... ENABLE ROW LEVEL SECURITY</code>, the engine applies each policy's <code>USING</code>/<code>WITH CHECK</code> expression per row, on top of <code>GRANT</code>. Enabling it with no policy is default-deny. Table owners bypass RLS unless you add <code>FORCE ROW LEVEL SECURITY</code>; superusers and roles with <code>BYPASSRLS</code> always bypass. It is typically driven by a per-request session variable read with <code>current_setting()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> pg_dump vs continuous archiving/PITR — how do you choose?</summary>
+      <div class="answer"><p><code>pg_dump</code>/<code>pg_dumpall</code> are logical backups: portable across versions and architectures, ideal for single databases and migrations, but a single point-in-time snapshot. A physical base backup plus WAL archiving enables point-in-time recovery to any moment and suits large clusters and low-data-loss disaster recovery. Custom format (<code>-Fc</code>) with <code>pg_restore</code> adds selective and parallel restore.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is transaction-ID wraparound, and how does VACUUM prevent it?</summary>
+      <div class="answer"><p>Transaction IDs are 32-bit and compared circularly; if the oldest unfrozen ID falls too far behind, committed rows could suddenly look like they came from the future and disappear. <code>VACUUM</code> freezes old tuples (marks them permanently visible), advancing the frozen-XID horizon, and autovacuum forces an anti-wraparound vacuum near <code>autovacuum_freeze_max_age</code>. Ignored long enough, the database stops accepting writes to protect itself.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.ops.views</li>
+      <li>db.ops.admin</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

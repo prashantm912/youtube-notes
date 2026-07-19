@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Redis and Caching module: what Redis is as a data-structure server, its core and Redis 8 data types, caching patterns (cache-aside/write-through), TTL and eviction, RDB/AOF persistence, distributed locks, and the AGPLv3/Valkey licensing story — with the best official and community resources plus the interview questions they power.">
+  <title>Redis and Caching</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Redis and Caching</h1>
+  <p class="standfirst">An in-memory data-structure server that answers in microseconds, Redis is the caching layer behind most high-traffic systems — and after a turbulent licensing year it is open source again, with a community fork now shipping as the cloud default.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Redis and Caching</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Redis is the standard answer to "how do we make this faster?" This module orients you on Redis as a data-structure server, the structures you cache with (including the ones new in Redis 8), the caching patterns and expiry/eviction policies that keep a cache correct and bounded, how Redis persists to disk, distributed locking, and the 2024–2025 licensing saga that produced the AGPLv3 relicense and the Valkey fork. Depth lives in the linked resources; here you get the map and the interview angles.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Redis and its core data structures</h3>
+    <p>Redis (REmote DIctionary Server) is an in-memory key-value store, but the useful framing is "data-structure server": every value is a typed structure the server manipulates for you, so you push, pop, increment, rank, and intersect server-side instead of round-tripping whole objects. The workhorses are strings (bytes, counters, cached blobs), hashes (field-value maps for objects), lists (ordered and double-ended — queues and timelines), sets (unique members with union/intersection), sorted sets (members ordered by a numeric score — leaderboards, priority queues), and streams (an append-only log with consumer groups for event pipelines).</p>
+    <p>Why it matters: picking the structure that matches the access pattern is most of the skill. A hash updates one field without reserializing the whole object; a sorted set turns "top N by score" into an O(log n) operation; a stream gives Kafka-style fan-out inside Redis. Interviewers probe whether you reach for the right structure rather than defaulting to SET/GET on JSON strings.</p>
+    <pre class="code-block" data-label="redis-cli"><code>SET   user:1:name "Asha"              # string
+HSET  user:1 name "Asha" age 29       # hash (object fields)
+LPUSH queue:jobs "job-42"             # list (queue)
+SADD  tags:post:1 redis cache         # set (unique members)
+ZADD  leaderboard 1500 "asha"         # sorted set (score)
+XADD  events * type "signup" id 1     # stream (append-only log)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/" rel="noopener">Redis data types — Redis docs (overview of every native type)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/" rel="noopener">Redis sorted sets — Redis docs (scores, ranges, leaderboards)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/streams/" rel="noopener">Redis Streams — Redis docs (append-only log, consumer groups)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jedis-java-redis-client-library" rel="noopener">Intro to Jedis — the Java Redis client — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=G1rOthIU-uo" rel="noopener">Redis in 100 Seconds — Fireship</a></li>
+    </ul>
+
+    <h3>Redis 8 and its new data structures</h3>
+    <p>Redis 8 (GA, May 2025) folded the old Redis Stack modules into the core distribution and renamed the free edition from Redis Community Edition to Redis Open Source. JSON documents, time series, and five probabilistic types (Bloom and cuckoo filters, count-min sketch, top-k, t-digest) plus the Redis Query Engine now ship in the box, alongside 30-plus performance improvements and a new multi-threaded I/O implementation.</p>
+    <p>The headline addition is vector sets (beta), the first genuinely new data type in years, built by Redis's original author. Modeled on sorted sets, a vector set associates each member with a high-dimensional embedding instead of a score and answers similarity queries (VADD/VSIM), making Redis a native store for semantic search and recommendations. Recognising that Redis is now an AI-relevant vector store, not just a cache, is an increasingly common talking point.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/blog/redis-8-ga/" rel="noopener">Redis 8 is now GA — Redis blog (new structures, performance, AGPLv3)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/vector-sets/" rel="noopener">Redis vector sets — Redis docs (similarity search, VADD/VSIM)</a></li>
+      <li>[Article] <a href="https://redis.io/blog/announcing-vector-sets-a-new-redis-data-type-for-vector-similarity/" rel="noopener">Announcing vector sets — Redis blog (design and rationale)</a></li>
+    </ul>
+
+    <h3>Caching patterns: cache-aside, write-through, TTL</h3>
+    <p>The dominant pattern is cache-aside (lazy loading): the application checks Redis first and, on a miss, reads the database, writes the value back to Redis with a TTL, and returns it. It caches only what is actually requested and survives an empty cache, but the first read pays a miss and cached data can drift from the source. Write-through updates the cache on every database write so reads are always fresh, trading write latency and some wasted space; write-behind (write-back) buffers writes in the cache and flushes asynchronously for throughput at the cost of durability. A TTL on every key bounds staleness and is the pragmatic glue between these strategies.</p>
+    <p>Separately, Redis 6+ offers server-assisted client-side caching (tracking): the client keeps a local copy and the server sends invalidation messages when a tracked key changes — a second cache tier in front of Redis itself. In Spring, <code>@Cacheable</code>/<code>@CacheEvict</code> wire cache-aside onto method calls with Redis as the backing store.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>val = redis.get(key)
+if val is null:                 # cache miss
+    val = db.query(key)         # read source of truth
+    redis.set(key, val, EX=300) # populate with a 300s TTL
+return val                      # cache hit path skips the DB</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html" rel="noopener">Caching strategies: lazy loading, write-through, adding TTL — Amazon ElastiCache docs</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/clients/client-side-caching/" rel="noopener">Client-side caching introduction — Redis docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-redis-cache" rel="noopener">Spring Boot Cache with Redis — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jgpVdJB2sKQ" rel="noopener">Redis Crash Course — Web Dev Simplified</a></li>
+    </ul>
+
+    <h3>Expiry, TTL and eviction</h3>
+    <p>A cache must forget. Per-key expiry (<code>EXPIRE</code>, <code>SET ... EX</code>, or <code>PEXPIRE</code> for milliseconds) deletes a key automatically after its TTL; Redis removes expired keys both lazily on access and via a background sampler. When memory reaches <code>maxmemory</code>, the <code>maxmemory-policy</code> decides what to drop: <code>noeviction</code> (reject writes), the <code>allkeys-*</code> family (evict any key by LRU, LFU, or random), or the <code>volatile-*</code> family (only keys carrying a TTL). <code>allkeys-lru</code> suits a hot-subset workload; <code>volatile-ttl</code> targets the soonest-expiring keys. Both LRU and LFU are approximate — Redis samples a handful of keys rather than maintaining a global order — which keeps eviction cheap.</p>
+    <pre class="code-block" data-label="redis.conf"><code>maxmemory 512mb
+maxmemory-policy allkeys-lru   # evict least-recently-used across all keys</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/reference/eviction/" rel="noopener">Key eviction — Redis docs (maxmemory, LRU/LFU policies)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/expire/" rel="noopener">EXPIRE — Redis command reference (setting a key TTL)</a></li>
+    </ul>
+
+    <h3>Persistence: RDB and AOF</h3>
+    <p>Although Redis lives in memory, it can persist to disk two ways. RDB writes compact point-in-time snapshots (<code>dump.rdb</code>) on a save schedule by forking a child process — ideal for backups and fast restarts, but a crash can lose everything since the last snapshot. AOF (append-only file) logs every write command and replays it on startup; with the default <code>appendfsync everysec</code> you lose at most about a second of data, at the cost of larger files and slower restarts. Redis can run both and loads the AOF — the more complete record — on restart. For a pure cache, persistence is often disabled entirely.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/" rel="noopener">Redis persistence — Redis docs (RDB vs AOF, fsync policies, backups)</a></li>
+    </ul>
+
+    <h3>Distributed locks with Redis</h3>
+    <p>A distributed lock lets one process at a time act on a shared resource across machines. The single-instance recipe is <code>SET key token NX PX ttl</code>: NX acquires only if the key is absent, PX sets an auto-release TTL so a dead holder cannot deadlock the system, and the unique token lets you release safely — delete the key only if its value still equals your token (via a Lua script or the newer <code>DELEX</code>), never a bare <code>DEL</code>, which could erase another client's lock. For higher fault tolerance, Redlock acquires the lock on a majority of N independent masters.</p>
+    <p>The catch, argued famously by Martin Kleppmann, is that TTL-based locks are safe for efficiency (avoiding duplicate work) but not automatically safe for correctness: a GC pause or clock skew can let two clients believe they hold the lock at once. When correctness is non-negotiable, add fencing tokens or use a consensus system such as ZooKeeper or etcd. Libraries like Redisson package these patterns for Java.</p>
+    <pre class="code-block" data-label="redis-cli"><code>SET lock:order:42 &lt;random-token&gt; NX PX 30000   # acquire, 30s auto-release
+# release: delete only if the stored value == &lt;random-token&gt;
+# (Lua check-and-del or DELEX) — never a bare DEL</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" rel="noopener">Distributed Locks with Redis (the Redlock algorithm) — Redis docs</a></li>
+      <li>[Article] <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html" rel="noopener">How to do distributed locking (a critique of Redlock) — Martin Kleppmann</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/redis-redisson" rel="noopener">A Guide to Redis with Redisson (distributed locks and objects) — Baeldung</a></li>
+    </ul>
+
+    <h3>Licensing and the Valkey fork</h3>
+    <p>Redis's license became interview-worthy in 2024–2025. Redis shipped under the permissive BSD license for over a decade. In March 2024, Redis Ltd relicensed new versions (7.4 onward) under dual source-available terms (RSALv2 and SSPLv1) — which the OSI does not consider open source — to stop hyperscalers from monetizing Redis without contributing back. Within days the Linux Foundation, with AWS, Google, and Oracle, forked the last BSD release (7.2.4) into Valkey, a drop-in, BSD-licensed, community-governed alternative.</p>
+    <p>In May 2025, Redis 8 added the OSI-approved AGPLv3 as an additional license, so Redis is open source again (now offered under AGPLv3 alongside RSALv2 and SSPLv1). The practical fallout persists: AWS ElastiCache and MemoryDB now default new instances to Valkey — API-compatible with Redis 7.2, actively developed, and cheaper — while still offering Redis. For an architect the differences that matter are licensing exposure, cost, and whose roadmap you follow, since the command surface is nearly identical.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/blog/agplv3/" rel="noopener">Redis is now available under the AGPLv3 open source license — Redis blog</a></li>
+      <li>[Article] <a href="https://antirez.com/news/151" rel="noopener">Redis is open source again — antirez (the creator's take)</a></li>
+      <li>[Official] <a href="https://valkey.io/" rel="noopener">Valkey — the Linux Foundation open source (BSD) fork</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/opensource/why-aws-supports-valkey/" rel="noopener">Why AWS Supports Valkey — AWS Open Source Blog</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-views-ops.html">← Views, Procedures and Operations</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="14-nosql.html">NoSQL →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The Redis questions Indian interviewers reach for — from screening rounds at service companies to caching and system-design rounds at product firms:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Redis, and why is it so fast?</summary>
+      <div class="answer"><p>An in-memory data-structure server: data lives in RAM and is addressed by key. Speed comes from RAM (no disk on the read path), an efficient single-threaded command loop with no lock contention, and purpose-built structures with O(1) or O(log n) operations. Optional persistence (RDB/AOF) and replication add durability and scale without slowing the hot path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Redis vs Memcached — when would you pick Redis?</summary>
+      <div class="answer"><p>Memcached is a pure key-value string cache: simple, multi-threaded, no persistence, values only. Redis adds rich data types, persistence, replication, pub/sub, Lua scripting, and transactions. Pick Memcached for a plain get/set cache; pick Redis when you need structures, durability, or atomic operations — which covers most real systems.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the core Redis data types with a use case for each.</summary>
+      <div class="answer"><p>String (counters, cached JSON), hash (an object's fields), list (queues, recent-items feeds), set (unique tags, membership tests), sorted set (leaderboards, priority by score), stream (event log or message queue with consumer groups). Redis 8 also adds JSON, time series, probabilistic types, and vector sets to the core.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you expire a key, and what does TTL return?</summary>
+      <div class="answer"><p><code>SET key val EX 300</code> or <code>EXPIRE key 300</code> gives a 300-second time-to-live; the key is deleted automatically when it lapses. <code>TTL key</code> returns the remaining seconds, <code>-1</code> if the key exists with no expiry, and <code>-2</code> if the key does not exist. Redis expires keys both lazily on access and via a periodic background sampler.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain cache-aside versus write-through.</summary>
+      <div class="answer"><p>Cache-aside (lazy loading): the app reads the cache, and on a miss reads the DB, populates the cache with a TTL, and returns; writes go to the DB and invalidate or refresh the key. Only requested data is cached, but the first read misses and data can go stale. Write-through: every DB write also updates the cache, so reads are always fresh, at the cost of write latency and caching data that may never be read. A TTL bounds staleness in both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a cache stampede, and how do you prevent it?</summary>
+      <div class="answer"><p>When a hot key expires, many concurrent requests miss at once and all hit the database (thundering herd). Mitigations: a short lock or single-flight so one request recomputes while others wait, probabilistic early recomputation before expiry, jittered/staggered TTLs so keys do not expire together, and serving slightly stale data while refreshing in the background.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which eviction policies does Redis offer, and what does maxmemory do?</summary>
+      <div class="answer"><p><code>maxmemory</code> caps memory; when reached, <code>maxmemory-policy</code> decides what to drop: <code>noeviction</code> (error on writes), <code>allkeys-lru</code>/<code>lfu</code>/<code>random</code> (any key), and <code>volatile-lru</code>/<code>lfu</code>/<code>ttl</code>/<code>random</code> (only keys with a TTL). <code>allkeys-lru</code> is a sensible default when a hot subset dominates. LRU and LFU are approximated by sampling a few keys rather than tracking global order.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> RDB vs AOF persistence — differences and when to use each?</summary>
+      <div class="answer"><p>RDB takes periodic point-in-time snapshots: compact, fast to restore, great for backups, but a crash loses everything since the last snapshot. AOF logs every write and replays it on restart: far more durable (fsync every second by default), with larger files and slower restarts. Many production setups enable both and load the AOF on restart; pure cache workloads often disable persistence entirely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is Redis single-threaded? How does it stay correct under concurrency?</summary>
+      <div class="answer"><p>Command execution is effectively single-threaded, so each command runs to completion without locks — that is why <code>INCR</code> and similar are atomic. Redis 6+ added I/O threads for network read/write (Redis 8 improved the implementation and can double throughput), but the command-processing core stays serialized. <code>MULTI</code>/<code>EXEC</code> and Lua scripts group multiple operations atomically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you build a leaderboard in Redis?</summary>
+      <div class="answer"><p>Use a sorted set: <code>ZADD board score member</code> to insert or update a player, <code>ZREVRANGE board 0 9 WITHSCORES</code> for the top ten, <code>ZREVRANK board member</code> for a player's rank, and <code>ZINCRBY</code> to bump a score. Writes and ranked reads are O(log n), which is what makes the sorted set ideal for this.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you implement a distributed lock in Redis safely, and what are the pitfalls?</summary>
+      <div class="answer"><p>Single instance: <code>SET key token NX PX ttl</code> to acquire, then release with a check-and-delete (Lua or <code>DELEX</code>) that removes the key only if the stored token matches — a bare <code>DEL</code> can delete another client's lock. The TTL auto-releases a crashed holder. Across nodes, Redlock acquires the lock on a majority of N masters. Pitfall: a GC pause or clock skew can let two clients hold the lock at once; Kleppmann argues you need fencing tokens for correctness. Use Redis locks for efficiency, a consensus system (ZooKeeper/etcd) when correctness is critical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Redis was in the news over licensing — walk me through it.</summary>
+      <div class="answer"><p>Redis was BSD-licensed for years. In March 2024 Redis Ltd switched new versions (7.4 onward) to dual source-available licenses (RSALv2 and SSPLv1), which the OSI does not recognise as open source, to stop cloud providers reselling Redis. The community — the Linux Foundation with AWS, Google, and Oracle — forked the last BSD release (7.2.4) into Valkey. In May 2025 Redis 8 GA added the OSI-approved AGPLv3, making Redis open source again, folded the Redis Stack modules into core, and introduced vector sets.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> On AWS ElastiCache today, do you get Redis or Valkey — and why does it matter?</summary>
+      <div class="answer"><p>New ElastiCache (and MemoryDB) instances default to Valkey, the BSD-licensed community fork; Redis OSS is still selectable. Valkey is API-compatible with Redis 7.2, Linux-Foundation governed, actively developed, and priced lower by AWS. It matters for licensing exposure (AGPLv3 vs BSD), cost, and whose roadmap you follow — even though day-to-day the commands behave the same.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.redis.structures</li>
+      <li>db.redis.patterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

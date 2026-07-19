@@ -25,7 +25,8 @@ const allIds = checklist.modules.flatMap((m) => m.items.map((i) => i.id));
 const coveredIds = new Set();
 const urls = new Set();
 for (const { html } of pages) {
-  for (const m of html.matchAll(/<li>([a-z0-9.\-]+)<\/li>/gi)) coveredIds.add(m[1]);
+  // Match a dotted checklist id at the start of an <li> (tolerate an optional " — description").
+  for (const m of html.matchAll(/<li>\s*([a-z][a-z0-9]*(?:\.[a-z0-9\-]+)+)\s*(?:—|<\/li>)/gi)) coveredIds.add(m[1]);
   // Only vet URLs inside resource lists — illustrative href demos in prose/snippets are not
   // resources we vouch for (and often use RFC 2606 reserved example domains).
   for (const block of html.matchAll(/<ul class="resources">([\s\S]*?)<\/ul>/gi))

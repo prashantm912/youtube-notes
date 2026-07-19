@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases Joins module: INNER/LEFT/RIGHT/FULL, CROSS, SELF and LATERAL joins, the ON/USING/NATURAL conditions, and the nested-loop/hash/merge algorithms PostgreSQL runs underneath — with the best official and community resources, plus the interview questions joins power in Indian interviews.">
+  <title>Joins — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Joins</h1>
+  <p class="standfirst">A normalized schema deliberately scatters related facts across tables; joins are how you put them back together — and no single SQL topic is asked more often in Indian interviews than this one.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Joins</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Joins combine rows from two or more tables on a related key. This module walks the everyday four (INNER, LEFT, RIGHT, FULL OUTER), the special shapes (CROSS, SELF, LATERAL), the three ways to write a join condition (ON, USING, NATURAL), and — the part that separates a screening pass from a senior answer — the physical algorithms PostgreSQL's planner chooses to actually execute them. It builds directly on the SELECT anatomy from the previous module and underpins aggregation, subqueries and every real reporting query.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>INNER, LEFT, RIGHT, and FULL OUTER joins</h3>
+    <p>Because a normalized design splits related data apart (orders in one table, customers in another), a join re-assembles it on a matching key. <code>INNER JOIN</code> keeps only rows that match on both sides. The three OUTER joins preserve unmatched rows and fill the missing side with NULLs: <code>LEFT JOIN</code> keeps every row from the left table, <code>RIGHT JOIN</code> keeps every row from the right, and <code>FULL OUTER JOIN</code> keeps every row from both.</p>
+    <p>Why it matters: picking the wrong join type silently drops or duplicates rows — the most common data-correctness bug in reports, and the single most-asked SQL interview topic in Indian screening rounds. LEFT JOIN is the one you reach for most: "give me all customers, and their orders if any."</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT c.name, o.id AS order_id
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id;
+-- every customer appears; o.id is NULL for customers with no orders</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-join.html" rel="noopener">Joins Between Tables — PostgreSQL Tutorial (2.6)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/sql/sql-join-set-1-inner-left-right-and-full-joins/" rel="noopener">SQL Joins (Inner, Left, Right and Full Join) — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://blog.codinghorror.com/a-visual-explanation-of-sql-joins/" rel="noopener">A Visual Explanation of SQL Joins — Jeff Atwood, Coding Horror</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Jh_pvk48jHA" rel="noopener">SQL Joins Examples — Socratica</a></li>
+    </ul>
+
+    <h3>CROSS, SELF, and LATERAL joins</h3>
+    <p>A <code>CROSS JOIN</code> is the Cartesian product — every left row paired with every right row, so <em>m</em> rows and <em>n</em> rows produce <em>m×n</em>. It is rarely intentional (generating grids or a numbers series is the honest use); an accidental cross join from a forgotten <code>ON</code> is a classic runaway query. A <em>self join</em> is a table joined to itself under two aliases, used to relate rows within one table — employee to manager, a node to its parent, or comparing a row against others. A <code>LATERAL</code> join lets a subquery (or set-returning function) in the <code>FROM</code> clause reference columns from the tables listed <em>before</em> it — a correlated join, and the clean way to express "the latest N rows per group."</p>
+    <p>Why it matters: LATERAL turns awkward correlated-subquery-in-SELECT patterns into readable, index-friendly queries; the top-order-per-customer question below is a product-round favorite that LATERAL answers directly.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT c.name, latest.total
+FROM customers c
+CROSS JOIN LATERAL (
+  SELECT total FROM orders o
+  WHERE o.customer_id = c.id
+  ORDER BY o.created_at DESC LIMIT 1
+) AS latest;                       -- one most-recent order per customer</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-table-expressions.html" rel="noopener">Table Expressions: Joined Tables and LATERAL Subqueries — PostgreSQL docs (7.2)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/developers/playground/lateral-join" rel="noopener">LATERAL JOIN — Crunchy Data interactive tutorial</a></li>
+      <li>[Article] <a href="https://www.w3schools.com/sql/sql_join_self.asp" rel="noopener">SQL Self Join — W3Schools</a></li>
+    </ul>
+
+    <h3>Join conditions: ON, USING, and NATURAL</h3>
+    <p><code>ON</code> is the general form: any boolean predicate, columns may have different names, and non-equality conditions are allowed. <code>USING (col)</code> is shorthand for the common case where both sides share the join column name — it also collapses the two matched columns into a single output column. <code>NATURAL JOIN</code> goes further and joins automatically on <em>all</em> identically-named columns, writing no condition at all.</p>
+    <p>Why it matters: USING and NATURAL read cleanly but are fragile — later adding a column with a coincidentally shared name (an <code>id</code>, a <code>created_at</code>) silently changes what the query joins on. Most teams standardize on explicit <code>ON</code>, and interviewers ask about the trade-off to see whether you understand the risk rather than just the syntax.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT * FROM orders o JOIN customers c ON o.customer_id = c.id; -- general
+SELECT * FROM orders JOIN customers USING (customer_id);         -- one shared name
+SELECT * FROM orders NATURAL JOIN customers;                     -- all shared names (risky)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT — the FROM/join grammar (join_type, ON, USING, NATURAL) — PostgreSQL reference</a></li>
+      <li>[Article] <a href="https://database.guide/join-on-vs-using-vs-natural-join-whats-the-difference/" rel="noopener">JOIN ON vs USING vs NATURAL JOIN: What's the Difference? — Database.Guide</a></li>
+      <li>[Article] <a href="https://www.w3schools.com/sql/sql_join.asp" rel="noopener">SQL Joins overview — W3Schools</a></li>
+    </ul>
+
+    <h3>How PostgreSQL executes joins: nested loop, hash, merge</h3>
+    <p>The join keyword says <em>what</em> to combine; the cost-based planner decides <em>how</em>. There are three physical algorithms. A <em>nested loop join</em> scans the inner relation once for every outer row — excellent when the inner side is small or reachable by an index, catastrophic across two large unindexed tables. A <em>hash join</em> builds a hash table on one side and probes it with the other — the workhorse for large equi-joins whose hash table fits in <code>work_mem</code>. A <em>merge join</em> sorts both sides on the join key and zips them together in one pass — the winner when the inputs already arrive sorted (for example, straight off a B-tree index).</p>
+    <p>Why it matters: writing <code>USING</code> or <code>NATURAL</code> instead of <code>ON</code> does not change any of this — the planner still picks by estimated cost. Reading an <code>EXPLAIN</code> plan, recognizing a nested loop over two big tables as the reason a query got slow after data growth, and knowing that an index or fresher statistics fixes it, is exactly what product-company rounds probe.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/planner-optimizer.html" rel="noopener">Planner/Optimizer — the three join strategies — PostgreSQL internals</a></li>
+      <li>[Article] <a href="https://severalnines.com/blog/overview-join-methods-postgresql/" rel="noopener">An Overview of the JOIN Methods in PostgreSQL — Severalnines</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/join" rel="noopener">The Join Operation — Use The Index, Luke! (Markus Winand)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-htbah3eCYg" rel="noopener">How nested loop, hash, and merge joins work — Arpit Bhayani</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-dml-queries.html">← SQL DML and Queries</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="05-aggregation.html">Aggregation and Grouping →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Joins are the single most-tested SQL area in Indian interviews — service-company screening through product-company deep dives. These run from definitions to the execution and gotcha questions that separate answers:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a JOIN and why do we need one?</summary>
+      <div class="answer"><p>A JOIN combines rows from two or more tables based on a related column. Normalization deliberately spreads related data across tables to avoid duplication; joins re-assemble that data at query time, so you can, for instance, list each order alongside the customer who placed it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> INNER JOIN vs LEFT JOIN — what is the difference?</summary>
+      <div class="answer"><p>INNER JOIN returns only rows that have a match on both sides. LEFT JOIN returns every row from the left table plus matching right-table rows, filling the right-side columns with NULL where there is no match. Use LEFT when you must keep unmatched left rows (all customers, even those with zero orders).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What does a LEFT JOIN put in the right-side columns when there is no match?</summary>
+      <div class="answer"><p>NULL. That is the whole point of an outer join — the left row is preserved and every column that would have come from the unmatched right row is NULL. Filtering with <code>WHERE right.col IS NULL</code> is how you isolate the unmatched left rows.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a CROSS JOIN and how big is its result?</summary>
+      <div class="answer"><p>A CROSS JOIN is the Cartesian product: every row of the left table paired with every row of the right. With <em>m</em> and <em>n</em> rows the result has <em>m×n</em> rows. It has no join condition; an accidental one (a missing ON) is a common cause of a query exploding in size.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Is RIGHT JOIN necessary, given LEFT JOIN exists?</summary>
+      <div class="answer"><p>No — any RIGHT JOIN can be rewritten as a LEFT JOIN by swapping the two tables. RIGHT JOIN is rare in practice; most developers keep every join LEFT for readability so the "table we must keep all of" is always on the same side.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a FULL OUTER JOIN, and does MySQL support it?</summary>
+      <div class="answer"><p>FULL OUTER JOIN keeps every row from both tables, matching where possible and NULL-padding the missing side otherwise — effectively LEFT and RIGHT combined. PostgreSQL supports it directly. MySQL historically does not, so there you emulate it with <code>LEFT JOIN ... UNION ... RIGHT JOIN</code> — a frequent interview follow-up since many Indian shops use MySQL.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a SELF JOIN and give a real use case?</summary>
+      <div class="answer"><p>A self join joins a table to itself using two different aliases. Classic uses: an <code>employees</code> table where each row's <code>manager_id</code> points to another row (list each employee with their manager's name), traversing one level of a hierarchy, or comparing rows within the same table.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> ON vs USING vs NATURAL — the differences, and why is NATURAL risky?</summary>
+      <div class="answer"><p><code>ON</code> takes any predicate and allows different column names and non-equality conditions. <code>USING (col)</code> is shorthand when both sides share the column name and collapses it to one output column. <code>NATURAL JOIN</code> auto-joins on all identically-named columns. NATURAL is risky because adding a coincidentally-named column later (like <code>id</code> or <code>created_at</code>) silently changes the join — prefer explicit ON.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A LEFT JOIN is returning the same rows as an INNER JOIN. Why?</summary>
+      <div class="answer"><p>Almost always because a condition on the right table sits in <code>WHERE</code> instead of <code>ON</code>. The LEFT JOIN produces NULLs for unmatched rows, then <code>WHERE right.col = x</code> discards every NULL row, collapsing the result to an inner join. Move the filter into the ON clause to keep the outer behavior.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you find rows in table A that have no matching row in table B?</summary>
+      <div class="answer"><p>An anti-join: <code>SELECT a.* FROM a LEFT JOIN b ON b.a_id = a.id WHERE b.a_id IS NULL</code>, or equivalently <code>WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)</code>. Example: customers who have never placed an order. NOT EXISTS is often the cleaner and NULL-safe choice.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Does the order in which you list tables in an INNER JOIN change the result?</summary>
+      <div class="answer"><p>Logically no — INNER JOIN is commutative, so the row set is identical either way. Physically it can matter: the planner decides which relation is the outer/driving side and which algorithm to use based on cost, so join order is a planner concern, not a correctness one. For OUTER joins the order <em>does</em> change meaning (which side is preserved).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is a LATERAL join and when do you actually need it?</summary>
+      <div class="answer"><p>LATERAL lets a subquery or set-returning function in the FROM clause reference columns from the FROM items listed before it — a correlated join. You need it for per-row correlated computations that a plain join cannot express, most famously top-N-per-group: for each customer, run a small <code>ORDER BY ... LIMIT n</code> subquery over their orders. It also drives functions like <code>jsonb_array_elements</code> per parent row.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What are the three join algorithms, and when does the planner pick each?</summary>
+      <div class="answer"><p>Nested loop: scan the inner side once per outer row — chosen when one side is small or the inner side has a usable index. Hash join: build a hash table on one input and probe with the other — chosen for large equi-joins that fit in <code>work_mem</code> with no useful sort order. Merge join: sort both sides on the key and merge in one pass — chosen when inputs already arrive sorted (e.g. via an index). The cost-based planner enumerates these and picks the cheapest; <code>EXPLAIN</code> shows which it used.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A join query was fast in testing but slow in production after the data grew. What happened and how do you fix it?</summary>
+      <div class="answer"><p>Typically the planner chose a nested loop that was fine on small data but scans the inner side once per outer row as both tables grow — quadratic work. Diagnose with <code>EXPLAIN (ANALYZE)</code> to compare estimated vs actual rows. Fixes: add an index on the inner join key so the loop uses an index scan (or so a hash/merge becomes cheaper), run <code>ANALYZE</code> to refresh planner statistics, and ensure <code>work_mem</code> is large enough for a hash join to be preferred. Stale statistics and a missing index are the usual culprits.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.join.types</li>
+      <li>db.join.algorithms</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

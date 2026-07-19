@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Query Optimization module: reading query plans with EXPLAIN and EXPLAIN ANALYZE, how the cost-based planner uses statistics, sargable rewrite patterns, and keyset pagination at scale — with the best official PostgreSQL docs and community resources, plus the interview questions they power.">
+  <title>Query Optimization — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Query Optimization</h1>
+  <p class="standfirst">A query is only as fast as the plan the planner picks for it — this module teaches you to read that plan, keep the statistics behind it honest, and rewrite the handful of patterns that quietly force a full-table scan.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Query Optimization</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>PostgreSQL uses a cost-based optimizer: for every query it estimates how many rows each step will produce and chooses the cheapest plan it can find. Optimization here means four skills — reading the plan with <code>EXPLAIN</code>, understanding the statistics that drive it, rewriting queries into shapes the planner can index, and replacing <code>OFFSET</code> pagination with keyset seeks. This builds directly on Indexing: an index only helps if the plan actually uses it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Reading a query plan: EXPLAIN and EXPLAIN ANALYZE</h3>
+    <p><code>EXPLAIN</code> prints the plan tree the planner chose <em>without</em> running the query — a set of nodes (<code>Seq Scan</code>, <code>Index Scan</code>, <code>Index Only Scan</code>, <code>Bitmap Heap Scan</code>, <code>Nested Loop</code>, <code>Hash Join</code>, <code>Sort</code>, <code>Limit</code>) read inside-out, each annotated <code>cost=startup..total rows=estimate width=bytes</code>. <code>EXPLAIN ANALYZE</code> actually executes it and adds the <em>actual</em> time, row count, and loop count next to every estimate, so the gap between estimate and reality jumps out.</p>
+    <p>Why it matters: this is the one tool that turns "the query is slow" into "this node is slow, and here is why." Adding <code>BUFFERS</code> shows how many pages came from cache (shared hit) versus disk (read) — the difference between a warm and a cold query. Reading a plan out loud is a standard interview task.</p>
+    <pre class="code-block" data-label="SQL"><code>EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM orders
+WHERE customer_id = 42
+ORDER BY created_at DESC
+LIMIT 20;
+-- Limit  (cost=0.42..8.11 rows=20 width=72)
+--   -&gt;  Index Scan using orders_cust_created_idx on orders
+--         (actual time=0.018..0.041 rows=20 loops=1)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/using-explain.html" rel="noopener">Using EXPLAIN — PostgreSQL docs (14.1, the definitive walkthrough of plan nodes)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-explain.html" rel="noopener">EXPLAIN — PostgreSQL SQL command reference (every option: ANALYZE, BUFFERS, VERBOSE, FORMAT)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/explain-plan/postgresql/operations" rel="noopener">PostgreSQL execution plan operations — Use The Index, Luke! (Markus Winand)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=31EmOKBP1PY" rel="noopener">A beginners guide to EXPLAIN ANALYZE — Michael Christofides (pgMustard)</a></li>
+    </ul>
+
+    <h3>The planner and its statistics</h3>
+    <p>Every plan choice — sequential versus index scan, which join algorithm, which table to join first — is driven by row-count estimates the planner reads from column statistics in <code>pg_statistic</code> (viewable through <code>pg_stats</code>). Those statistics — most-common values, histograms, null fraction, distinct counts — are gathered by <code>ANALYZE</code> and kept current by autovacuum. When they are stale or missing, estimates go wrong and the planner picks a bad plan for the right reasons.</p>
+    <p>Why it matters: most "why did it choose a seq scan?" mysteries are estimation errors, not planner stupidity. Knowing to run <code>ANALYZE</code>, raise <code>default_statistics_target</code> on a skewed column, or add extended statistics (<code>CREATE STATISTICS</code>) for correlated columns is what separates a guess from a diagnosis.</p>
+    <pre class="code-block" data-label="SQL"><code>ANALYZE orders;                       -- refresh planner statistics now
+ALTER TABLE orders
+  ALTER COLUMN status SET STATISTICS 500;  -- finer histogram on a skewed column
+CREATE STATISTICS addr_stats (dependencies)
+  ON city, state FROM addresses;      -- teach the planner these correlate</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/planner-stats.html" rel="noopener">Statistics Used by the Planner — PostgreSQL docs (14.2, single-column and extended stats)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/row-estimation-examples.html" rel="noopener">Row Estimation Examples — PostgreSQL docs (69.1, the selectivity math worked out)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=k9xLdhKwQBA" rel="noopener">Does Postgres Scan Every Row? — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Rewrite patterns that let the planner win</h3>
+    <p>Often the fastest fix is not a new index but the same result expressed so the planner can use one. The recurring patterns: keep predicates <em>sargable</em> (never wrap the indexed column in a function — compare a range instead); prefer <code>EXISTS</code> to <code>IN</code> for correlated existence checks; avoid <code>SELECT *</code> when a covering index could give an index-only scan; and for large multi-table queries, constrain join order with explicit <code>JOIN</code> syntax and <code>join_collapse_limit</code> when the planner's search space explodes.</p>
+    <p>Why it matters: PostgreSQL has no query hints in the Oracle sense — you steer it by writing queries it can optimize and by feeding it good statistics. Recognising a non-sargable predicate on sight is a frequent screening question.</p>
+    <pre class="code-block" data-label="SQL"><code>-- non-sargable: the function on created_at hides it from the index
+WHERE date(created_at) = '2026-07-01'
+
+-- sargable rewrite: a half-open range an index can seek
+WHERE created_at &gt;= '2026-07-01'
+  AND created_at &lt;  '2026-07-02'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/explicit-joins.html" rel="noopener">Controlling the Planner with Explicit JOIN Clauses — PostgreSQL docs (14.3)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/where-clause" rel="noopener">The WHERE clause — Use The Index, Luke! (writing index-friendly predicates)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/sargability" rel="noopener">What Is Sargability in SQL? — Baeldung on SQL</a></li>
+    </ul>
+
+    <h3>Pagination at scale: keyset over OFFSET</h3>
+    <p><code>LIMIT 20 OFFSET 100000</code> looks cheap but the database still computes and throws away the first hundred thousand rows — cost grows linearly with page depth, and rows shift under the reader when data changes between requests. Keyset (seek) pagination instead carries the sort key of the last row seen and filters with a <code>WHERE</code>, so an index seeks straight to the next page in constant time. It requires a deterministic <code>ORDER BY</code> with a unique tie-breaker and a row-value comparison for multi-column keys.</p>
+    <p>Why it matters: this is the standard cure for the slow "jump to page 5000" and for infinite-scroll feeds, and it comes up constantly in both API design and SQL interviews.</p>
+    <pre class="code-block" data-label="SQL"><code>-- page after the last row seen: (created_at, id) = ($1, $2)
+SELECT id, created_at, total
+FROM orders
+WHERE (created_at, id) &lt; ($1, $2)
+ORDER BY created_at DESC, id DESC
+LIMIT 20;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-limit.html" rel="noopener">LIMIT and OFFSET — PostgreSQL docs (7.6, incl. why large OFFSET is slow)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/partial-results/fetch-next-page" rel="noopener">Paging Through Results: the seek method — Use The Index, Luke!</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/no-offset" rel="noopener">We need tool support for keyset pagination — Use The Index, Luke!</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gfRJBoOuNUA" rel="noopener">Extremely FAST Paging With Cursor Pagination and Database Index Seek — Milan Jovanović</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-indexing.html">← Indexing</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="10-transactions.html">Transactions and Concurrency →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked query optimization questions in Indian interviews — a favourite of product-company and backend rounds, where reading a plan on the whiteboard is expected:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does EXPLAIN do, and how is EXPLAIN ANALYZE different?</summary>
+      <div class="answer"><p><code>EXPLAIN</code> shows the execution plan the planner chose, with estimated cost and row counts, without running the query. <code>EXPLAIN ANALYZE</code> actually runs it and adds the real execution time and actual row counts per node — so you can compare estimate against reality. Because it runs the query, avoid <code>EXPLAIN ANALYZE</code> on writes unless inside a transaction you roll back.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> In a plan node, what do cost, rows, and width mean?</summary>
+      <div class="answer"><p><code>cost=startup..total</code> is the planner's estimated effort in arbitrary units (roughly page fetches) — startup is the cost before the first row, total is for all rows. <code>rows</code> is the estimated number of rows the node emits; <code>width</code> is the estimated average row size in bytes. The planner compares total costs of alternative plans and picks the cheapest.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Sequential Scan vs Index Scan — when does the planner choose each?</summary>
+      <div class="answer"><p>A Seq Scan reads the whole table; an Index Scan walks the index then fetches matching rows. For a small, selective result an index wins. But when a query returns a large fraction of the table, a seq scan is actually cheaper (sequential I/O, no random heap fetches), so the planner deliberately chooses it — that is correct behaviour, not a bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why can estimated rows differ from actual rows, and why does it matter?</summary>
+      <div class="answer"><p>Estimates come from sampled statistics; reality comes from the data. A large gap (say estimate 10, actual 100000) means the planner optimized for the wrong size and likely chose a bad join or scan. The estimate-vs-actual mismatch in <code>EXPLAIN ANALYZE</code> is the first thing to inspect when a plan looks wrong.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does EXPLAIN (ANALYZE, BUFFERS) add, and what do shared hit and read tell you?</summary>
+      <div class="answer"><p><code>BUFFERS</code> reports page access per node: <em>shared hit</em> is pages served from PostgreSQL's cache, <em>shared read</em> is pages fetched from the operating system or disk. High reads mean a cold cache or a plan touching far more data than needed; comparing a warm and cold run tells you whether slowness is I/O or the plan itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How are planner statistics kept fresh, and what breaks when they go stale?</summary>
+      <div class="answer"><p><code>ANALYZE</code> (run manually, or automatically by autovacuum) samples each table and stores most-common values, histograms and distinct counts in <code>pg_statistic</code>. Stale stats — after a bulk load, or when autovacuum falls behind — give the planner wrong selectivity, so it misjudges row counts and picks poor plans. Fix: run <code>ANALYZE</code>, and raise the statistics target on skewed columns.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What makes a WHERE predicate sargable? Give a non-sargable example and its rewrite.</summary>
+      <div class="answer"><p>Sargable = "Search ARGument ABLE": the predicate can drive an index seek. Wrapping the indexed column in a function defeats that — <code>WHERE date(created_at) = '2026-07-01'</code> forces a scan. Rewrite as a half-open range on the bare column: <code>created_at &gt;= '2026-07-01' AND created_at &lt; '2026-07-02'</code>, which an index on <code>created_at</code> can seek. (An expression index on <code>date(created_at)</code> is the alternative.)</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is OFFSET-based pagination slow on deep pages?</summary>
+      <div class="answer"><p><code>OFFSET n</code> does not skip work — the database still produces the first <em>n</em> rows in order and discards them, so cost grows with page depth. It is also unstable: inserts or deletes between requests shift the window, duplicating or skipping rows. Deep pages get progressively slower; keyset pagination avoids both problems.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Nested Loop vs Hash Join vs Merge Join — which does the planner pick and why?</summary>
+      <div class="answer"><p>Nested Loop suits a small outer set with an indexed inner side (few lookups). Hash Join suits large unsorted inputs with an equality condition — it builds a hash of one side and probes it. Merge Join suits inputs already sorted (or cheaply sortable) on the join key. The planner estimates each from row counts and available indexes and takes the cheapest; wrong row estimates are what push it to the wrong one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain keyset (seek) pagination, including the tie-breaker requirement.</summary>
+      <div class="answer"><p>Instead of an offset, carry the sort key of the last row seen and filter beyond it: <code>WHERE (created_at, id) &lt; ($1, $2) ORDER BY created_at DESC, id DESC LIMIT 20</code>. A matching index seeks straight to the next page, so cost is constant regardless of depth. The unique tie-breaker (<code>id</code>) is mandatory — without it, rows sharing a <code>created_at</code> value are ordered non-deterministically and pages overlap or drop rows. The trade-off: you can only go next/previous, not jump to an arbitrary page number.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> The planner uses a Seq Scan even though a relevant index exists. What are the likely causes and fixes?</summary>
+      <div class="answer"><p>Common causes: the query is not selective enough (returns a big fraction of the table, so a scan is genuinely cheaper); stale statistics overestimate the result; a non-sargable predicate hides the column from the index; a type mismatch prevents index use; or the table is tiny. Fixes: run <code>ANALYZE</code>, make the predicate sargable, match the parameter type, or accept that the seq scan is correct. Setting <code>enable_seqscan = off</code> is only a diagnostic, never a production fix.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are extended statistics (CREATE STATISTICS) and which estimation error do they fix?</summary>
+      <div class="answer"><p>By default the planner assumes columns are independent, so it multiplies selectivities. When columns are correlated — city and state, or a status that implies a type — that assumption undercounts, e.g. estimating 1 row where 10000 exist. <code>CREATE STATISTICS ... (dependencies, ndistinct, mcv)</code> records the correlation so multi-column predicates and <code>GROUP BY</code> estimates become accurate, steering the planner to the right join and scan choices.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.opt.explain</li>
+      <li>db.opt.patterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

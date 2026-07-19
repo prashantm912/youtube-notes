@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Databases module on subqueries and CTEs: scalar and correlated subqueries, EXISTS/IN vs JOIN, WITH and recursive CTEs, and UNION/INTERSECT/EXCEPT set operations — curated official PostgreSQL docs and community resources, plus the interview questions they power.">
+  <title>Subqueries and CTEs</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-db lesson-page">
+<header class="page-header">
+  <h1>Module: Subqueries and CTEs</h1>
+  <p class="standfirst">A subquery is a query nested inside another; a CTE is that same idea given a name and lifted to the top of the statement. This module maps every form — scalar, correlated, EXISTS/IN, recursive WITH — and points to the resources that teach each fully, official PostgreSQL docs first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Databases → Subqueries and CTEs</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Subqueries let one query feed another: a scalar value in a SELECT list, a set to test membership against, or a derived table in the FROM clause. Common Table Expressions (the <code>WITH</code> clause) name those subqueries so a complex statement reads top-to-bottom — and, with <code>RECURSIVE</code>, walk hierarchies and graphs that plain SQL cannot. The module closes with set operations (<code>UNION</code>, <code>INTERSECT</code>, <code>EXCEPT</code>), which stack result sets vertically rather than joining them side by side.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Scalar and correlated subqueries</h3>
+    <p>A subquery is a <code>SELECT</code> wrapped in parentheses inside another statement. A <em>scalar</em> subquery returns exactly one row and one column, so it can stand anywhere a single value is expected — the SELECT list, a <code>WHERE</code> comparison, an <code>UPDATE ... SET</code>. A <em>correlated</em> subquery references a column from the outer query, which means it cannot run on its own and is conceptually re-evaluated once per outer row.</p>
+    <p>Why it matters: placement changes meaning and cost. An uncorrelated subquery runs once; a correlated one is the classic "executes per row" performance conversation that interviewers reach for. Two runtime rules trip people up — a scalar subquery that returns more than one row is an error, and one that returns no rows evaluates to <code>NULL</code> rather than failing.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Employees paid above their own department's average (correlated)
+SELECT e.name, e.salary
+FROM   employees e
+WHERE  e.salary &gt; (
+    SELECT avg(d.salary)
+    FROM   employees d
+    WHERE  d.dept_id = e.dept_id   -- correlation to the outer row
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-expressions.html#SQL-SYNTAX-SCALAR-SUBQUERIES" rel="noopener">Scalar Subqueries — PostgreSQL Value Expressions (§4.2.11)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/sql/sql-correlated-subqueries/" rel="noopener">SQL Correlated Subqueries — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql/subquery-vs-correlated-subquery" rel="noopener">Subquery vs. Correlated Subquery — Baeldung on SQL</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m1KcNV-Zhmc" rel="noopener">Advanced SQL Tutorial — Subqueries — techTFQ</a></li>
+    </ul>
+
+    <h3>Subquery predicates: EXISTS, IN, ANY/ALL — and when a JOIN is better</h3>
+    <p>Three predicate forms test a value against a subquery's rows. <code>EXISTS</code> asks only whether the subquery returns any row (a semi-join — it can stop at the first match); <code>IN</code> checks membership in the returned list; <code>ANY</code>/<code>SOME</code> and <code>ALL</code> pair a comparison operator with the whole set. The infamous trap is <code>NOT IN</code> against a subquery that can produce a <code>NULL</code>: the whole predicate collapses to unknown and the query returns nothing — which is why <code>NOT EXISTS</code> is the safer default.</p>
+    <p>Why it matters: these are interchangeable with a <code>JOIN</code> surprisingly often, and choosing well is both a correctness and a performance question. A correlated <code>EXISTS</code> usually expresses "does a related row exist" more clearly than a join that risks duplicating rows; the planner may even rewrite one into the other, but the interviewer wants to hear that you can explain the difference.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Customers with at least one order — EXISTS short-circuits per customer
+SELECT c.id, c.name
+FROM   customers c
+WHERE  EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id);
+
+-- Same intent with IN; watch NOT IN if customer_id can be NULL
+SELECT c.id, c.name
+FROM   customers c
+WHERE  c.id IN (SELECT o.customer_id FROM orders o);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-subquery.html" rel="noopener">Subquery Expressions: EXISTS, IN, NOT IN, ANY/SOME, ALL — PostgreSQL (§9.24)</a></li>
+      <li>[Article] <a href="https://www.thoughtspot.com/sql-tutorial/sql-subquery/" rel="noopener">SQL Subqueries: How to Write Nested Queries — ThoughtSpot (Mode SQL Tutorial)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nJIEIzF7tDw" rel="noopener">Subquery in SQL — Correlated Subquery, Complete Tutorial — techTFQ</a></li>
+    </ul>
+
+    <h3>Common Table Expressions: WITH and recursive CTEs</h3>
+    <p>The <code>WITH</code> clause defines a named, temporary result set that exists for the duration of one statement. It turns a nest of subqueries into a readable pipeline: define <code>regional</code>, then query it — and a single <code>WITH</code> can hold several CTEs, each able to reference the ones before it. In PostgreSQL a CTE may be inlined into the outer plan or materialized; a plain CTE used more than once, or one marked <code>MATERIALIZED</code>, is computed once (before version 12 every CTE was an optimization fence).</p>
+    <p>Why it matters: <code>WITH RECURSIVE</code> is the only standard-SQL way to walk a hierarchy or graph — org charts, category trees, bill-of-materials, shortest paths. A recursive CTE has an <em>anchor</em> member (the starting rows) and a <em>recursive</em> member that references the CTE itself, combined by <code>UNION</code> or <code>UNION ALL</code> and iterated until it produces no new rows. Forgetting the termination condition, or using <code>UNION ALL</code> on cyclic data, is how you write an infinite loop.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Named pipeline: one CTE feeds the final query
+WITH regional AS (
+    SELECT region, sum(amount) AS total
+    FROM   sales
+    GROUP  BY region
+)
+SELECT region, total FROM regional WHERE total &gt; 1000000;
+
+-- Recursive: walk an org chart down from the top
+WITH RECURSIVE chart AS (
+    SELECT id, name, manager_id, 1 AS depth          -- anchor
+    FROM   employees WHERE manager_id IS NULL
+  UNION ALL
+    SELECT e.id, e.name, e.manager_id, c.depth + 1   -- recursive member
+    FROM   employees e JOIN chart c ON e.manager_id = c.id
+)
+SELECT depth, name FROM chart ORDER BY depth;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-with.html" rel="noopener">WITH Queries (Common Table Expressions), incl. Recursive Queries — PostgreSQL (§7.8)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-cte" rel="noopener">PostgreSQL CTE — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-recursive-query" rel="noopener">PostgreSQL Recursive Query — Neon PostgreSQL Tutorial</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=K1WeoKxLZ5o" rel="noopener">Advanced SQL Tutorial — CTE (Common Table Expression) — techTFQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7hZYh9qXxe4" rel="noopener">Recursive SQL Queries Tutorial — techTFQ</a></li>
+    </ul>
+
+    <h3>Set operations: UNION, INTERSECT, EXCEPT</h3>
+    <p>Set operations stack the results of two queries vertically instead of joining them side by side. The inputs must be union-compatible — the same number of columns with compatible types. <code>UNION</code> concatenates and removes duplicate rows; <code>UNION ALL</code> keeps every row and is faster because it skips the de-duplication sort. <code>INTERSECT</code> returns rows present in both queries, and <code>EXCEPT</code> returns rows in the first query that are absent from the second.</p>
+    <p>Why it matters: these express "combine", "in both", and "in one but not the other" directly, which is cleaner than emulating them with outer joins and <code>NULL</code> checks. A common interview note: an <code>ORDER BY</code> applies to the combined result, not the individual arms, and every operator has an <code>ALL</code> variant that preserves duplicates.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Emails active in 2024 but not in 2023 (churn-in)
+SELECT email FROM customers_2024
+EXCEPT
+SELECT email FROM customers_2023;
+
+-- Combine two sources, keeping duplicates, then sort the whole result
+SELECT city FROM warehouses
+UNION ALL
+SELECT city FROM stores
+ORDER BY city;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-union.html" rel="noopener">Combining Queries (UNION, INTERSECT, EXCEPT) — PostgreSQL (§7.4)</a></li>
+      <li>[Article] <a href="https://neon.com/postgresql/postgresql-tutorial/postgresql-union" rel="noopener">PostgreSQL UNION — Neon PostgreSQL Tutorial</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/sql/set-operators-in-sql/" rel="noopener">Set Operators in SQL — GeeksforGeeks</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-aggregation.html">← Aggregation and Grouping</a>
+    <a href="index.html">All Databases modules</a>
+    <a href="07-window-functions.html">Window Functions →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked subquery and CTE questions in Indian interviews — SQL is a screening staple for backend, data-engineering and analyst roles alike:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a subquery and where can it appear?</summary>
+      <div class="answer"><p>A query nested inside another statement. It can appear in the SELECT list (as a scalar value), in <code>FROM</code> (as a derived table), and in <code>WHERE</code>/<code>HAVING</code> (as a value or a set to test against). It runs first — or per outer row if correlated — and feeds the enclosing query.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a scalar subquery, and what if it returns more than one row?</summary>
+      <div class="answer"><p>A subquery that returns exactly one row and one column, usable wherever a single value fits. If it returns more than one row it is a runtime error; if it returns no rows the result is <code>NULL</code> (not an error). That NULL behavior is a frequent gotcha.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a correlated subquery?</summary>
+      <div class="answer"><p>A subquery that references a column from the outer query, so it cannot be run independently and is logically re-evaluated for each outer row. Example: comparing each employee's salary to the average of <em>their</em> department. Uncorrelated subqueries, by contrast, run once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> UNION vs UNION ALL?</summary>
+      <div class="answer"><p><code>UNION</code> removes duplicate rows (it sorts/hashes to de-duplicate); <code>UNION ALL</code> keeps every row and skips that work, so it is faster. Use <code>UNION ALL</code> when the arms are known to be disjoint or duplicates are acceptable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> EXISTS vs IN — how do they differ and when do you pick each?</summary>
+      <div class="answer"><p><code>EXISTS</code> is a semi-join: it returns true at the first matching row and pairs naturally with correlation. <code>IN</code> compares against the full list of returned values. For large or correlated checks <code>EXISTS</code> often reads clearer and lets the planner stop early; for a small static list <code>IN</code> is fine. Modern planners frequently transform between them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can NOT IN with a subquery return no rows unexpectedly?</summary>
+      <div class="answer"><p>If the subquery yields any <code>NULL</code>, <code>NOT IN</code> evaluates to unknown for every outer row (because "x not in {…, NULL}" can never be proven true), so the query returns nothing. Fix by filtering the NULLs out or, better, using <code>NOT EXISTS</code>, which has the correct semantics.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a CTE and why use one instead of a subquery?</summary>
+      <div class="answer"><p>A Common Table Expression is a named temporary result set defined with <code>WITH</code>, scoped to a single statement. It improves readability by naming steps, lets you reference the same result more than once, chains multiple named steps, and is the entry point for recursion — advantages a deeply nested subquery lacks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Correlated subquery vs JOIN — which performs better?</summary>
+      <div class="answer"><p>It depends on the planner. Naively a correlated subquery runs per outer row, while a join processes sets in bulk — so joins often win at scale. But PostgreSQL can rewrite a correlated <code>EXISTS</code> into a semi-join, making them equivalent. Read <code>EXPLAIN</code> rather than assuming; pick the form that expresses intent, then verify the plan.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What do INTERSECT and EXCEPT return, and how would you emulate them with joins?</summary>
+      <div class="answer"><p><code>INTERSECT</code> returns rows in both queries; <code>EXCEPT</code> returns rows in the first but not the second (both de-duplicate unless you add <code>ALL</code>). Emulate INTERSECT with an inner join on all columns, and EXCEPT with a <code>LEFT JOIN ... WHERE right IS NULL</code> anti-join (or <code>NOT EXISTS</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through how a recursive CTE executes.</summary>
+      <div class="answer"><p>PostgreSQL evaluates the anchor member once to seed a working table. It then repeatedly runs the recursive member against the rows produced in the previous step, appending results, until an iteration returns no new rows. <code>UNION</code> de-duplicates across iterations (helping terminate on cyclic data); <code>UNION ALL</code> does not, so cycles need an explicit path/visited guard or a <code>CYCLE</code> clause.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is a CTE an optimization fence in PostgreSQL?</summary>
+      <div class="answer"><p>Historically yes — before version 12 every CTE was materialized and never folded into the outer query. Since 12, a non-recursive CTE referenced once is inlined by default (<code>NOT MATERIALIZED</code>); you can force the old behavior with <code>MATERIALIZED</code>. Recursive and multiply-referenced CTEs are still materialized. Knowing this explains sudden plan changes after an upgrade.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A scalar subquery in a SELECT list is slow. How do you diagnose and rewrite it?</summary>
+      <div class="answer"><p>A correlated scalar subquery in the SELECT list runs per output row. Confirm with <code>EXPLAIN (ANALYZE)</code> — look for a repeated subplan or high loop count. Typical rewrites: convert to a <code>LEFT JOIN</code> against a pre-aggregated derived table or CTE, or a <code>LATERAL</code> join, so the aggregate is computed once per group instead of once per row. A covering index on the correlation key helps either way.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Databases track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>db.sub.subqueries</li>
+      <li>db.sub.cte</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Databases track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
