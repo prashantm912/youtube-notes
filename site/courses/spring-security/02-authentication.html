@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security Authentication module: the AuthenticationManager and ProviderManager, AuthenticationProvider and DaoAuthenticationProvider, UserDetailsService and UserDetails, form login and HTTP Basic, and the SecurityFilterChain bean with the lambda DSL — the best official docs and the interview questions they power.">
+  <title>Spring Security Authentication — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Authentication</h1>
+  <p class="standfirst">Authentication answers one question — who is making this request — and Spring Security routes that question through an AuthenticationManager, an AuthenticationProvider and a UserDetailsService that interviewers ask you to trace by heart.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → Authentication</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Authentication is the "prove who you are" half of Spring Security. This module traces the engine that verifies a credential — the AuthenticationManager, its ProviderManager implementation, and the AuthenticationProvider that does the real check — then the UserDetailsService/UserDetails pair that loads the account, and finally the mechanisms (form login, HTTP Basic) that read credentials off the request. All of it is wired by a SecurityFilterChain bean using the current 6.x/7.x lambda DSL. UserDetailsService and a custom AuthenticationProvider are two of the most-asked topics in Indian Spring interviews, so this page weights them heavily.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The authentication engine: AuthenticationManager, ProviderManager, AuthenticationProvider</h3>
+    <p>An authentication filter builds an unauthenticated <code>Authentication</code> token (username + raw password) and hands it to the <code>AuthenticationManager</code> — the single API that says "verify this". Its standard implementation is <code>ProviderManager</code>, which holds an ordered list of <code>AuthenticationProvider</code> instances and delegates to the first one whose <code>supports()</code> accepts the token type. A provider either returns a fully populated, authenticated token (principal, authorities, credentials erased) or throws an <code>AuthenticationException</code>; returning <code>null</code> means "not my job, try the next provider".</p>
+    <p>Why it matters: this is the extension seam. For anything beyond username/password — an API key, an OTP, a legacy SSO — you write a custom <code>AuthenticationProvider</code>, and the built-in <code>DaoAuthenticationProvider</code> (which combines a UserDetailsService with a PasswordEncoder) is the concrete example every interviewer wants you to walk through step by step.</p>
+    <pre class="code-block" data-label="Java"><code>public class TokenAuthProvider implements AuthenticationProvider {
+    public Authentication authenticate(Authentication a) { /* do the check */ }
+    public boolean supports(Class&lt;?&gt; type) {                 // which token can I handle?
+        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(type);
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html" rel="noopener">Servlet Authentication Architecture — Spring Security Reference (SecurityContextHolder, AuthenticationManager, ProviderManager, AuthenticationProvider)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/dao-authentication-provider.html" rel="noopener">DaoAuthenticationProvider — Spring Security Reference (the username/password provider, step by step)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-authentication-provider" rel="noopener">Spring Security Custom Authentication Provider — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=caCJAJC41Rk" rel="noopener">How Spring Security Authentication works — Java Brains</a></li>
+    </ul>
+
+    <h3>Loading the user: UserDetailsService and UserDetails</h3>
+    <p><code>UserDetailsService</code> is the one-method interface that abstracts "where do users live": <code>loadUserByUsername(String)</code> returns a <code>UserDetails</code> or throws <code>UsernameNotFoundException</code>. <code>UserDetails</code> is the account snapshot the framework needs — username, the <em>encoded</em> password, granted authorities, and the enabled/expired/locked flags. Spring ships implementations (in-memory, JDBC, caching); a real application supplies its own that reads from a database.</p>
+    <p>Why it matters: <code>DaoAuthenticationProvider</code> calls your UserDetailsService, then compares the submitted password against the stored one with the PasswordEncoder — so "connect Spring Security to my users table" almost always means "implement a UserDetailsService", the single most common practical task and interview question on this topic.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+UserDetailsService users(PasswordEncoder encoder) {
+    UserDetails user = User.withUsername("asha")
+        .password(encoder.encode("secret"))  // never store raw passwords
+        .roles("USER")                        // stored as authority ROLE_USER
+        .build();
+    return new InMemoryUserDetailsManager(user);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/user-details-service.html" rel="noopener">UserDetailsService — Spring Security Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/user-details.html" rel="noopener">UserDetails — Spring Security Reference (and CredentialsContainer)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/in-memory.html" rel="noopener">In-Memory Authentication — Spring Security Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-authentication-with-a-database" rel="noopener">Database-backed UserDetailsService — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=iyXne7dIn7U" rel="noopener">How to configure Spring Security Authentication — Java Brains</a></li>
+    </ul>
+
+    <h3>Authentication mechanisms: form login and HTTP Basic</h3>
+    <p>A mechanism is how credentials are <em>read off the request</em>. <strong>Form login</strong> redirects an unauthenticated browser to a login page, then <code>UsernamePasswordAuthenticationFilter</code> reads the posted <code>username</code>/<code>password</code> and starts a session — the default for server-rendered web apps. <strong>HTTP Basic</strong> sends a <code>WWW-Authenticate</code> challenge and reads credentials from the <code>Authorization</code> header on every request via <code>BasicAuthenticationFilter</code> — stateless and convenient for scripts, tools and simple APIs.</p>
+    <p>Why it matters: choosing the mechanism is a design decision interviewers probe. Basic is trivial but resends credentials each call (only safe over TLS); form login gives a real UX and session but needs CSRF handling. Both funnel into the same AuthenticationManager — only the filter that reads the credential differs.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/form.html" rel="noopener">Form Login — Spring Security Reference (formLogin DSL, custom login page)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/basic.html" rel="noopener">Basic Authentication — Spring Security Reference (httpBasic DSL)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-login" rel="noopener">Spring Security Form Login — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-basic-authentication" rel="noopener">Spring Security Basic Authentication — Baeldung</a></li>
+    </ul>
+
+    <h3>Wiring it together: the SecurityFilterChain bean and the lambda DSL</h3>
+    <p>In Spring Security 6 and 7 there is no <code>WebSecurityConfigurerAdapter</code>. You configure security by declaring a <code>SecurityFilterChain</code> bean: take the injected <code>HttpSecurity</code>, configure it with the lambda DSL, and return <code>http.build()</code>. Each configurer (<code>authorizeHttpRequests</code>, <code>formLogin</code>, <code>httpBasic</code>) takes a <code>Customizer</code> lambda instead of the old <code>.and()</code> chaining, so the shape of the config reads top to bottom.</p>
+    <p>Why it matters: this is the exact code every modern Spring Boot app writes, and migrating from the removed adapter is a guaranteed question. Expose a UserDetailsService and a PasswordEncoder bean and Spring Boot auto-builds a DaoAuthenticationProvider behind an AuthenticationManager for you; declare the SecurityFilterChain to control which requests need authentication and which mechanisms are active.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+SecurityFilterChain security(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -&gt; auth.anyRequest().authenticated())
+        .formLogin(Customizer.withDefaults())
+        .httpBasic(Customizer.withDefaults());
+    return http.build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/configuration/java.html" rel="noopener">Java Configuration — Spring Security Reference (the SecurityFilterChain bean and HttpSecurity)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-config-spring-security" rel="noopener">Introduction to Java Config for Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KuzdIOIugJ4" rel="noopener">The New Spring Security With Spring Boot Using SecurityFilterChain — Dan Vega</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-architecture.html">← Architecture and the Filter Chain</a>
+    <a href="index.html">All Spring Security modules</a>
+    <a href="03-password-management.html">Password Management →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The authentication questions Indian interviewers lean on — UserDetailsService and a custom AuthenticationProvider come up in almost every Spring backend round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is authentication in Spring Security, and which component performs it?</summary>
+      <div class="answer"><p>Authentication verifies identity — "who are you". The <code>AuthenticationManager</code> is the API that performs it: a filter passes it an unauthenticated <code>Authentication</code> token, and it returns an authenticated one (or throws). The result is stored in the <code>SecurityContextHolder</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the AuthenticationManager and its most common implementation?</summary>
+      <div class="answer"><p>An interface with one method, <code>authenticate(Authentication)</code>. The common implementation is <code>ProviderManager</code>, which delegates to a list of <code>AuthenticationProvider</code> instances rather than authenticating itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is UserDetailsService and what method must you implement?</summary>
+      <div class="answer"><p>The abstraction for loading a user by name. It has one method: <code>loadUserByUsername(String)</code>, returning a <code>UserDetails</code> or throwing <code>UsernameNotFoundException</code>. It does not check the password — it only loads the account.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> UserDetails vs UserDetailsService — what is the difference?</summary>
+      <div class="answer"><p><code>UserDetails</code> is the data object — username, encoded password, authorities, and the enabled/locked/expired flags. <code>UserDetailsService</code> is the service that fetches a <code>UserDetails</code> by username. One is the noun, the other is the loader.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you enable HTTP Basic and form login in Spring Security 6/7?</summary>
+      <div class="answer"><p>Inside a <code>SecurityFilterChain</code> bean, call <code>http.httpBasic(Customizer.withDefaults())</code> and <code>http.formLogin(Customizer.withDefaults())</code> on the injected <code>HttpSecurity</code>, then return <code>http.build()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through how DaoAuthenticationProvider authenticates a username and password.</summary>
+      <div class="answer"><p>It receives the <code>UsernamePasswordAuthenticationToken</code> from the ProviderManager, calls the <code>UserDetailsService</code> to load the <code>UserDetails</code>, uses the <code>PasswordEncoder</code> to match the submitted password against the stored encoded one, and on success returns a new authenticated token holding the UserDetails as principal and its authorities. Failure throws <code>BadCredentialsException</code> (or the account-status equivalent).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an AuthenticationProvider and when would you write a custom one?</summary>
+      <div class="answer"><p>It performs one specific style of authentication and declares which token types it <code>supports()</code>. You write a custom one when the credential is not plain username/password — API keys, one-time passwords, LDAP, or an external identity system — by implementing <code>authenticate()</code> and <code>supports()</code> and registering it as a bean or provider.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Form login vs HTTP Basic — how do they differ and when do you pick each?</summary>
+      <div class="answer"><p>Form login redirects to an HTML page, reads a posted username/password, and typically creates a session — good for browser apps. HTTP Basic sends a <code>WWW-Authenticate</code> challenge and reads credentials from the <code>Authorization</code> header on every request — stateless, good for scripts and simple APIs, but the credential travels each call so TLS is mandatory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you plug a custom UserDetailsService into the config in Spring Security 6/7?</summary>
+      <div class="answer"><p>Expose it as a <code>@Bean</code> alongside a <code>PasswordEncoder</code> bean. Spring Boot then auto-configures a <code>DaoAuthenticationProvider</code> that uses them. If you build the provider yourself, call <code>setUserDetailsService(...)</code> and register the provider — there is no <code>WebSecurityConfigurerAdapter.configure(AuthenticationManagerBuilder)</code> anymore.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does the Authentication object hold, and how does it change during authentication?</summary>
+      <div class="answer"><p>It holds the <code>principal</code>, <code>credentials</code>, and <code>authorities</code>, plus an <code>authenticated</code> flag. Before authentication it carries the raw username/password with <code>authenticated=false</code>; after success the principal becomes the <code>UserDetails</code>, authorities are populated, credentials are usually erased, and <code>authenticated=true</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does ProviderManager select a provider, and what are its parent and credential-erasure behaviours?</summary>
+      <div class="answer"><p>It iterates its providers, skipping any whose <code>supports()</code> rejects the token type, and uses the first that returns a non-null result; if none succeed it can delegate to an optional <em>parent</em> AuthenticationManager. On success it clears the credentials from the returned token (<code>eraseCredentialsAfterAuthentication</code>, on by default) so raw secrets do not linger in the SecurityContext.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> In Spring Security 6/7, how do you define an AuthenticationManager explicitly?</summary>
+      <div class="answer"><p>Either obtain the framework-built one — inject <code>AuthenticationConfiguration</code> and return <code>authenticationConfiguration.getAuthenticationManager()</code> as a bean — or construct your own <code>ProviderManager</code> from a list of providers (for example a configured <code>DaoAuthenticationProvider</code>) and expose that as the <code>AuthenticationManager</code> bean. You need an explicit one when a custom filter has to call <code>authenticate()</code> itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why must UserDetails never expose a raw password, and how does credential erasure help?</summary>
+      <div class="answer"><p>The stored password must be a hash (BCrypt/Argon2 etc.), never plaintext, so a leaked user table cannot be replayed; the PasswordEncoder matches the submitted secret against that hash. After authentication, credential erasure (via <code>ProviderManager</code>, and <code>UserDetails</code> implementing <code>CredentialsContainer.eraseCredentials()</code>) nulls the password so it is not held in memory on the authenticated principal.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.authn.manager</li>
+      <li>sec.authn.mechanisms</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

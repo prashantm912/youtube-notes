@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security advanced topics and migration: custom filters in the chain, ACL domain-object security, run-as, common pitfalls, and the headline interview topic — migrating Security 5 to 6/7 (lambda DSL, SecurityFilterChain bean, authorizeHttpRequests). Curated official resources and interview questions.">
+  <title>Advanced Topics and Migration — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Advanced Topics and Migration</h1>
+  <p class="standfirst">The chapter that turns a Security user into a Security maintainer: slot your own filters into the chain, reason about domain-object ACLs and run-as, and — the question every 2026 interview asks — carry a Security 5 config across to the lambda DSL of 6 and 7.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → Advanced Topics and Migration</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two threads meet here. The first is extending the framework: adding custom servlet filters at the right point in the chain, the awareness-level topics of ACL domain-object security and run-as replacement, and the pitfalls that bite real deployments. The second — and the one interviewers press hardest on right now — is the migration from Spring Security 5 to 6 and 7: the removal of <code>WebSecurityConfigurerAdapter</code>, the mandatory lambda DSL, and <code>authorizeRequests</code> giving way to <code>authorizeHttpRequests</code>.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Custom filters in the security filter chain</h3>
+    <p>Spring Security is itself a chain of servlet filters, so extending it usually means inserting your own <code>Filter</code> relative to a built-in one. <code>HttpSecurity</code> exposes three placement methods: <code>addFilterBefore</code>, <code>addFilterAfter</code>, and <code>addFilterAt</code> (which sits alongside, not replacing, a given filter). Extend <code>OncePerRequestFilter</code> rather than raw <code>Filter</code> so the logic runs exactly once even across forwards and async dispatches.</p>
+    <p>Why it matters: multi-tenant resolution, custom token headers, audit logging, and API-key schemes are all implemented as a filter placed just before or after authentication. Getting the position wrong — running before the <code>SecurityContext</code> is populated, or after the endpoint has already executed — is the usual bug.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+SecurityFilterChain chain(HttpSecurity http) throws Exception {
+    http.addFilterBefore(new TenantFilter(),
+            UsernamePasswordAuthenticationFilter.class);
+    return http.build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html" rel="noopener">Architecture — Spring Security Reference (the filter chain and "Adding Filters to the Filter Chain")</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-custom-filter" rel="noopener">Custom Filter in the Spring Security Filter Chain — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-delegating-filter-proxy" rel="noopener">The Need for DelegatingFilterProxy in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zYop3D8EXYU" rel="noopener">Finally. A Real Spring Security Course — Amigoscode</a></li>
+    </ul>
+
+    <h3>Domain object security: ACLs</h3>
+    <p>Request-URL and role checks answer "may this user reach this endpoint?" ACLs (Access Control Lists) answer the finer question "may this user act on <em>this specific object</em>?" — for example, only the owner of document 42 may edit it. Spring Security ships a full ACL module backed by four tables (<code>ACL_SID</code>, <code>ACL_CLASS</code>, <code>ACL_OBJECT_IDENTITY</code>, <code>ACL_ENTRY</code>) and wires into method security through <code>hasPermission(...)</code> in <code>@PreAuthorize</code>/<code>@PostFilter</code>.</p>
+    <p>Why it matters: it is the framework's answer to per-instance authorization, and interviewers ask about it to test whether a candidate can say where role-based checks stop and object-level checks begin. Most teams treat it as awareness-level — heavyweight to run — and reach for a simpler owner-check in service code, which is itself a defensible answer.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/acls.html" rel="noopener">Domain Object Security (ACLs) — Spring Security Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-acl" rel="noopener">An Introduction to Spring Security ACL — Baeldung</a></li>
+    </ul>
+
+    <h3>Run-as authentication replacement</h3>
+    <p>Run-as temporarily swaps the current <code>Authentication</code> for one with extra authorities during a secured method call, restoring the original afterwards. <code>RunAsManagerImpl</code> builds a <code>RunAsUserToken</code> whenever a security attribute starts with <code>RUN_AS_</code>, granting a matching <code>ROLE_RUN_AS_*</code> for the duration of the invocation. It exists so a lightly-privileged web caller can invoke a backend that demands stronger roles — classically, calling a remote service.</p>
+    <p>Why it matters: it is a niche, awareness-level feature, but naming it (and knowing the token is signed with a shared key so it cannot be forged) signals depth beyond the everyday configuration surface.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/runas.html" rel="noopener">Run-As Authentication Replacement — Spring Security Reference</a></li>
+    </ul>
+
+    <h3>Common pitfalls</h3>
+    <p>Recurring production mistakes: disabling CSRF because "it was in the way" on a browser session app; ordering rules in <code>authorizeHttpRequests</code> from general to specific so <code>anyRequest()</code> shadows later matchers; registering a filter as a Spring <code>@Bean</code> and then adding it to the chain too, so the servlet container also runs it and it fires twice; and forgetting that a filter placed before authentication has no <code>SecurityContext</code> to read yet. Knowing how to list the actual, resolved filter order is the fastest way to debug all of these.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-registered-filters" rel="noopener">Find the Registered Spring Security Filters — Baeldung (inspecting the resolved chain order)</a></li>
+    </ul>
+
+    <h3>Migrating Security 5 to 6 and 7: the SecurityFilterChain bean</h3>
+    <p>The single biggest change: <code>WebSecurityConfigurerAdapter</code> was deprecated in 5.7 and removed in 6. Configuration is now component-based — you publish a <code>SecurityFilterChain</code> bean (and, where needed, a <code>WebSecurityCustomizer</code> or <code>UserDetailsService</code> bean) instead of extending and overriding an adapter. The lambda DSL, optional in 5, is the required style from 7 onward: the old <code>.and()</code> chaining is gone.</p>
+    <p>Why it matters: nearly every legacy Spring app carries an adapter-based config, so "how would you migrate this?" is a top current interview prompt. Show the before-and-after and name the deprecation timeline (5.7 deprecated, 6 removed, 7 lambda-only).</p>
+    <pre class="code-block" data-label="Java (Security 5 — removed)"><code>@Configuration
+class SecurityConfig extends WebSecurityConfigurerAdapter {
+    @Override protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests().anyRequest().authenticated()
+            .and().formLogin();
+    }
+}</code></pre>
+    <pre class="code-block" data-label="Java (Security 6/7 — current)"><code>@Bean
+SecurityFilterChain chain(HttpSecurity http) throws Exception {
+    return http
+        .authorizeHttpRequests(auth -&gt; auth.anyRequest().authenticated())
+        .formLogin(Customizer.withDefaults())
+        .build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/blog/2022/02/21/spring-security-without-the-websecurityconfigureradapter" rel="noopener">Spring Security without the WebSecurityConfigurerAdapter — Spring Blog</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/migration/" rel="noopener">Migrating to 7.0 — Spring Security Reference (the current migration guide)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-deprecated-websecurityconfigureradapter" rel="noopener">Upgrading the Deprecated WebSecurityConfigurerAdapter — Baeldung</a></li>
+      <li>[Article] <a href="https://www.danvega.dev/blog/spring-security-6" rel="noopener">What's new in Spring Security 6 — Dan Vega (Spring Developer Advocate)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2tf0UY6gV3Y" rel="noopener">Spring Security 6 — Getting Started — Telusko</a></li>
+    </ul>
+
+    <h3>authorizeRequests to authorizeHttpRequests, and the matcher changes</h3>
+    <p>The authorization DSL moved from <code>authorizeRequests</code> (backed by <code>FilterSecurityInterceptor</code>) to <code>authorizeHttpRequests</code> (backed by the newer <code>AuthorizationFilter</code> and the <code>AuthorizationManager</code> API). Two behaviour shifts catch migrators: the new model authorizes servlet dispatcher types too, so an unauthenticated <code>/error</code> forward can suddenly return 401/403; and in 7 the request matchers consolidate onto <code>PathPatternRequestMatcher</code> as <code>antMatchers</code>/<code>mvcMatchers</code> retire in favour of the unified <code>requestMatchers</code>.</p>
+    <pre class="code-block" data-label="Java"><code>http.authorizeHttpRequests(auth -&gt; auth
+    .requestMatchers("/public/**").permitAll()
+    .requestMatchers("/admin/**").hasRole("ADMIN")
+    .anyRequest().authenticated());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html" rel="noopener">Authorize HttpServletRequests — Spring Security Reference (with "Migrating from authorizeRequests")</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/migration/servlet/index.html" rel="noopener">Servlet Migrations — Spring Security Reference</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-testing-exceptions.html">← Testing and Exception Handling</a>
+    <a href="index.html">All Spring Security modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The questions Indian interviews lean on for this module — migration dominates, because almost every enterprise codebase is mid-upgrade:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you add a custom filter to the Spring Security chain?</summary>
+      <div class="answer"><p>Register it with <code>HttpSecurity.addFilterBefore</code>, <code>addFilterAfter</code>, or <code>addFilterAt</code>, positioning it relative to a built-in filter such as <code>UsernamePasswordAuthenticationFilter</code>. Extend <code>OncePerRequestFilter</code> so it runs a single time per request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What replaced WebSecurityConfigurerAdapter in Spring Security 6?</summary>
+      <div class="answer"><p>A component-based model: you declare a <code>SecurityFilterChain</code> bean (returning <code>http.build()</code>) instead of extending and overriding the adapter. Web-level tweaks move to a <code>WebSecurityCustomizer</code> bean, and users to a <code>UserDetailsService</code> bean. The adapter was deprecated in 5.7 and removed in 6.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> authorizeRequests vs authorizeHttpRequests — what is the difference?</summary>
+      <div class="answer"><p>Same intent, different engine. <code>authorizeRequests</code> used <code>FilterSecurityInterceptor</code>; <code>authorizeHttpRequests</code> uses <code>AuthorizationFilter</code> and the <code>AuthorizationManager</code> API. The former is removed in 7, so the latter is the only supported request-authorization DSL.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the lambda DSL and why does it matter for migration?</summary>
+      <div class="answer"><p>Configuring each aspect through a lambda — <code>http.authorizeHttpRequests(auth -&gt; ...)</code> — rather than method chaining joined by <code>.and()</code>. It was optional in 5 and is required from 7; migrating means rewriting chained calls as nested lambdas and dropping <code>.and()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why extend OncePerRequestFilter instead of implementing Filter directly?</summary>
+      <div class="answer"><p><code>OncePerRequestFilter</code> guarantees a single execution per request even when the container re-dispatches (forward, include, async). A plain <code>Filter</code> or <code>GenericFilterBean</code> can run multiple times across dispatches, causing duplicated auth work or double-logging.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> After migrating to authorizeHttpRequests, requests to /error start returning 401 or 403. Why?</summary>
+      <div class="answer"><p>The new model authorizes dispatcher types, so <code>FORWARD</code> and <code>ERROR</code> dispatches (like the internal forward to <code>/error</code>) are now access-checked. Fix by permitting the error dispatch — for example allow the <code>ERROR</code> dispatcher type or the <code>/error</code> path — rather than disabling the new behaviour wholesale.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you run two SecurityFilterChain beans in one application?</summary>
+      <div class="answer"><p>Declare multiple <code>SecurityFilterChain</code> beans, give each a <code>securityMatcher(...)</code> scoping which requests it handles, and order them with <code>@Order</code> — the most specific matcher first. A common split is one chain for a stateless <code>/api</code> and another for the browser-facing UI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are ACLs in Spring Security, and when would you use them?</summary>
+      <div class="answer"><p>Access Control Lists provide per-instance authorization — permissions granted on an individual domain object rather than on a URL or a role. You use them when "who can edit which specific record" cannot be expressed as a role, wiring <code>hasPermission(...)</code> into method security. Many teams judge the ACL module heavyweight and use a simpler owner check instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is run-as authentication and give a use case?</summary>
+      <div class="answer"><p>It temporarily replaces the current <code>Authentication</code> with a <code>RunAsUserToken</code> carrying extra <code>ROLE_RUN_AS_*</code> authorities for the length of a secured call, then restores the original. Use case: a low-privilege web request must call a backend or remote service that demands stronger roles.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through migrating an adapter-based Security 5 config to 6/7.</summary>
+      <div class="answer"><p>Get onto the latest 5.8 patch first, then: replace <code>extends WebSecurityConfigurerAdapter</code> with a <code>@Bean SecurityFilterChain</code> returning <code>http.build()</code>; convert chained calls to the lambda DSL and remove <code>.and()</code>; swap <code>authorizeRequests</code> for <code>authorizeHttpRequests</code>; move <code>configure(WebSecurity)</code> ignores to a <code>WebSecurityCustomizer</code> bean and user setup to a <code>UserDetailsService</code>/<code>AuthenticationManager</code> bean; re-check that <code>/error</code> and other dispatches are still reachable; then move matchers to <code>requestMatchers</code>. Do it incrementally on the latest patch of each line.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why did request matchers change to PathPatternRequestMatcher in Security 7?</summary>
+      <div class="answer"><p>Historically you had to choose between <code>antMatchers</code>, <code>mvcMatchers</code>, and regex matchers, and the wrong choice caused subtle bypasses — for instance an ant matcher not matching the same paths Spring MVC did, letting a request slip past a rule. Consolidating onto <code>PathPatternRequestMatcher</code> (the same path-matching Spring MVC uses) removes that divergence and closes the mismatch as a security hole.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A custom filter registered as a bean fires twice per request. Diagnose it.</summary>
+      <div class="answer"><p>A <code>Filter</code> exposed as a Spring <code>@Bean</code> is auto-registered with the servlet container by Boot <em>and</em> added to the security chain, so it runs in both places. Fixes: don't make it a bean (construct it inline when adding to the chain), or if it must be a bean, register a <code>FilterRegistrationBean</code> with <code>setEnabled(false)</code> to suppress the container registration. Extending <code>OncePerRequestFilter</code> also collapses per-dispatch re-runs.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.adv.custom</li>
+      <li>sec.adv.migration</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security CSRF, CORS and security headers module: how the CSRF token works and when (not) to disable it, CORS integration and preflight ordering, and HSTS/CSP/X-Frame-Options defaults — with the official docs, OWASP and Baeldung resources for full study, plus the interview questions they power.">
+  <title>CSRF, CORS and Security Headers — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: CSRF, CORS and Security Headers</h1>
+  <p class="standfirst">Three defenses that live at the web layer: the CSRF token that blocks forged state-changing requests, the CORS handshake that decides who may call your API, and the response headers that harden every reply — plus the one trap that sinks careless candidates, knowing exactly when it is safe to turn CSRF off.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → CSRF, CORS and Security Headers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module is the browser-facing edge of Spring Security: Cross-Site Request Forgery (CSRF) protection and the synchronizer token behind it, CORS integration for cross-origin front ends, and the suite of secure HTTP response headers (HSTS, CSP, X-Frame-Options and friends) Spring writes for you. All three are configured on the same <code>SecurityFilterChain</code> and all three carry interview traps — above all, when disabling CSRF is correct versus a security hole.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>CSRF protection: how the token works, and when (not) to disable it</h3>
+    <p>A CSRF attack tricks a logged-in user's browser into submitting a state-changing request the user never intended — because the browser <em>automatically</em> attaches the session cookie to every request to your domain, the server sees a fully authenticated call. Spring Security's default defense is the <strong>synchronizer token pattern</strong>: a random, per-session token the server issues and a same-origin attacker cannot read or guess. The <code>CsrfFilter</code> requires it on every unsafe method (POST, PUT, PATCH, DELETE) and skips safe ones (GET, HEAD, OPTIONS), rejecting a missing or wrong token with 403. It is enabled by default, and the default handler adds BREACH protection by XOR-encoding fresh randomness into each emitted token.</p>
+    <p>Why it matters: "just disable CSRF to fix the 403" is the single most common wrong answer in interviews. Disabling is correct <em>only</em> when the app does not authenticate via cookies or sessions — a stateless API whose clients send a bearer token in the <code>Authorization</code> header, which the browser does not attach on its own, has nothing for an attacker to ride on. If you use form login, HTTP Basic, or any session cookie, CSRF must stay on. For JavaScript SPAs, keep it on but switch to <code>CookieCsrfTokenRepository</code> (an <code>XSRF-TOKEN</code> cookie the client echoes in an <code>X-XSRF-TOKEN</code> header).</p>
+    <pre class="code-block" data-label="Java"><code>http
+  .csrf(csrf -&gt; csrf
+    .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())); // XSRF-TOKEN cookie for SPAs
+
+// Disable ONLY for a stateless, token-authenticated (e.g. JWT) API:
+// http.csrf(csrf -&gt; csrf.disable());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html" rel="noopener">Cross Site Request Forgery (CSRF) — Spring Security reference (token repositories, BREACH protection, SPA and mobile patterns)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html" rel="noopener">CSRF Prevention Cheat Sheet — OWASP (synchronizer token, double-submit cookie, SameSite)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-csrf" rel="noopener">A Guide to CSRF Protection in Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/csrf-stateless-rest-api" rel="noopener">CSRF With Stateless REST API — Baeldung (exactly when to keep it or drop it)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MFlBnfsx3Ww" rel="noopener">Spring Boot 3 Tutorial — CSRF with Forms and JavaScript — Dan Vega (Spring Developer Advocate)</a></li>
+    </ul>
+
+    <h3>CORS integration</h3>
+    <p>The browser's same-origin policy stops a page on one origin from reading responses from another. Cross-Origin Resource Sharing (CORS) is the server's controlled opt-in: through <code>Access-Control-*</code> response headers it tells the browser which cross-origin callers are allowed to read the response. For anything beyond a "simple" request the browser first sends a <strong>preflight</strong> <code>OPTIONS</code> asking permission. In Spring you declare a <code>CorsConfigurationSource</code> (allowed origins, methods, headers) and switch it on inside the security filter chain with <code>http.cors(...)</code>.</p>
+    <p>Why it matters: the classic gotcha is <em>ordering</em>. Preflight <code>OPTIONS</code> requests carry no cookies or credentials, so if Spring Security's authentication runs before CORS it rejects them as unauthenticated — the browser then reports a misleading "CORS error" that hides the real 401. Enabling CORS <em>inside</em> Spring Security (not just <code>@CrossOrigin</code> on a controller) registers the <code>CorsFilter</code> early enough to answer preflights first. Remember too that CORS is enforced by the browser to protect the <em>user</em>; it is not server-side authorization and does nothing against non-browser clients, and a permissive config is an attack surface, not a fix.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+CorsConfigurationSource corsConfigurationSource() {
+  CorsConfiguration cfg = new CorsConfiguration();
+  cfg.setAllowedOrigins(List.of("https://app.example.com")); // explicit; never "*" with credentials
+  cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+  UrlBasedCorsConfigurationSource src = new UrlBasedCorsConfigurationSource();
+  src.registerCorsConfiguration("/**", cfg);
+  return src;
+}
+// Turn it on inside Spring Security so the CorsFilter runs before authentication:
+// http.cors(Customizer.withDefaults());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html" rel="noopener">CORS — Spring Security reference (CorsConfigurationSource, the cors() DSL, why order matters)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS" rel="noopener">Cross-Origin Resource Sharing (CORS) — MDN (simple vs preflighted vs credentialed requests)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cors" rel="noopener">CORS with Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-cors-preflight" rel="noopener">Fixing 401s with CORS Preflights and Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yOoiRMlu6u4" rel="noopener">Spring Boot 3 Tutorial — CORS &amp; Security — Dan Vega</a></li>
+    </ul>
+
+    <h3>Security headers (HSTS, CSP, X-Frame-Options and more)</h3>
+    <p>Spring Security writes a set of secure-by-default HTTP response headers on every reply: <code>Cache-Control</code> no-store for authenticated pages, <code>X-Content-Type-Options: nosniff</code> against MIME sniffing, <code>X-Frame-Options: DENY</code> against clickjacking, and <code>Strict-Transport-Security</code> when the request arrives over HTTPS. Two of the strongest — <code>Content-Security-Policy</code> and <code>Referrer-Policy</code> — are opt-in because they need policy decisions from you. All of them are configured under <code>http.headers(...)</code>.</p>
+    <p>Why it matters: these are cheap, defense-in-depth wins that security reviews expect to see. HSTS forces the browser to use HTTPS for a <code>max-age</code> window (with <code>includeSubDomains</code> and <code>preload</code> for the browser preload list), defeating SSL-strip downgrades. CSP is the strongest in-browser mitigation for XSS and, via <code>frame-ancestors</code>, clickjacking — an allowlist of where scripts, styles and frames may come from, though it only supplements (never replaces) proper output encoding. <code>X-Frame-Options</code> (<code>DENY</code>/<code>SAMEORIGIN</code>) is the older clickjacking control that CSP <code>frame-ancestors</code> now supersedes.</p>
+    <pre class="code-block" data-label="Java"><code>http.headers(headers -&gt; headers
+  .httpStrictTransportSecurity(hsts -&gt; hsts
+    .includeSubDomains(true).maxAgeInSeconds(31536000))            // HSTS: one year
+  .frameOptions(frame -&gt; frame.sameOrigin())                       // clickjacking (X-Frame-Options)
+  .contentSecurityPolicy(csp -&gt; csp
+    .policyDirectives("default-src 'self'; frame-ancestors 'none'")));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/headers.html" rel="noopener">Security HTTP Response Headers — Spring Security reference (defaults, HSTS, CSP, frame options, cache control)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Strict-Transport-Security" rel="noopener">Strict-Transport-Security (HSTS) — MDN reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy" rel="noopener">Content-Security-Policy — MDN reference (fetch, document, navigation directives)</a></li>
+      <li>[Reference] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Frame-Options" rel="noopener">X-Frame-Options — MDN reference (DENY, SAMEORIGIN, and its CSP replacement)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html" rel="noopener">Content Security Policy Cheat Sheet — OWASP (strict nonce/hash policies vs allowlists)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7MWXTXjtl8s" rel="noopener">HTTP Security Headers You Need To Have On Your Web Apps — Scott Sauber (NDC London)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-authorization.html">← Authorization</a>
+    <a href="index.html">All Spring Security modules</a>
+    <a href="06-session-management.html">Session Management →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked CSRF, CORS and headers questions in Indian interviews — a staple of product-company and services-company Spring Security rounds alike:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a CSRF attack?</summary>
+      <div class="answer"><p>An attacker gets a logged-in user's browser to send a state-changing request the user didn't intend — a hidden form auto-submit, an image tag hitting your endpoint. It works because the browser automatically attaches the session cookie to any request to your domain, so the server treats the forged request as authenticated. The attacker never sees the response; they only need the side effect (transfer money, change email).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is CSRF protection on by default in Spring Security, and which requests does it cover?</summary>
+      <div class="answer"><p>Yes, enabled by default. It applies to state-changing (unsafe) methods — POST, PUT, PATCH, DELETE — and deliberately exempts the safe, idempotent methods GET, HEAD, OPTIONS and TRACE, which should never change state. A missing or invalid token yields 403.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is CORS and what problem does it solve?</summary>
+      <div class="answer"><p>The browser's same-origin policy blocks a page from reading responses from a different origin. CORS is the server's opt-in mechanism: via <code>Access-Control-*</code> headers it tells the browser which cross-origin callers are allowed to read the response — for example letting <code>app.example.com</code> call <code>api.example.com</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a CORS preflight request?</summary>
+      <div class="answer"><p>For non-simple requests (custom headers, methods like PUT/DELETE, certain content types) the browser first sends an <code>OPTIONS</code> request carrying <code>Access-Control-Request-Method</code> and <code>Access-Control-Request-Headers</code>. The server must approve with matching <code>Access-Control-Allow-*</code> headers before the browser sends the real request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When is it safe to disable CSRF protection, and when is doing so a bug?</summary>
+      <div class="answer"><p>The classic trap. Safe only when the app does not authenticate via cookies or sessions — a stateless API whose clients pass a bearer token in the <code>Authorization</code> header, which the browser does not attach automatically, so there is nothing for a forged request to ride on. If you use form login, HTTP Basic, or any session cookie, disabling CSRF opens a real hole. "Disable it to make the 403 go away" is the wrong answer; send the token instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does the CSRF token actually work (the synchronizer token pattern)?</summary>
+      <div class="answer"><p>The server generates a random token tied to the session and hands it to the client (hidden form field, cookie, or meta tag). The client must echo it on every unsafe request as a parameter (<code>_csrf</code>) or header (<code>X-CSRF-TOKEN</code>/<code>X-XSRF-TOKEN</code>). The <code>CsrfFilter</code> compares submitted vs expected; a mismatch is 403. A cross-origin attacker cannot read or guess the token (same-origin policy), so they cannot forge a valid request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you make CSRF protection work with a JavaScript SPA or Angular front end?</summary>
+      <div class="answer"><p>Keep CSRF on but switch to <code>CookieCsrfTokenRepository.withHttpOnlyFalse()</code>, which writes an <code>XSRF-TOKEN</code> cookie the JavaScript can read and send back in the <code>X-XSRF-TOKEN</code> header. Angular's <code>HttpClient</code> does this automatically; for others you read the cookie and set the header yourself. From Spring Security 6 you also wire a <code>CsrfTokenRequestAttributeHandler</code> so the token is rendered correctly with the SPA/BREACH handling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must CORS be configured before Spring Security, and why do preflights otherwise fail?</summary>
+      <div class="answer"><p>Preflight <code>OPTIONS</code> requests carry no cookies or credentials. If Spring Security's authentication runs first it rejects them as unauthenticated (401), which the browser surfaces as a generic "CORS error" that masks the real cause. Enabling CORS inside the filter chain with <code>http.cors(...)</code> registers the <code>CorsFilter</code> early enough to answer the preflight before authentication. A bare <code>@CrossOrigin</code> on the controller runs too late once Security is present.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the difference between CSRF and CORS? They are often confused.</summary>
+      <div class="answer"><p>CSRF is an <em>attack</em>; CORS is a controlled <em>relaxation</em> of the same-origin policy. CSRF protection stops forged state-changing requests from other sites; CORS decides which origins are allowed to <em>read</em> your responses. CORS is not a CSRF defense — in fact a careless "allow all origins" CORS policy widens your exposure rather than protecting you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does HSTS do, and what are its directives?</summary>
+      <div class="answer"><p><code>Strict-Transport-Security</code> tells the browser to talk to your host over HTTPS only for <code>max-age</code> seconds, upgrading any <code>http://</code> attempt and refusing to let users click through certificate errors. <code>includeSubDomains</code> extends it to subdomains; <code>preload</code> (with <code>max-age ≥ 31536000</code> and <code>includeSubDomains</code>) qualifies for the browser preload list. It is only honored when delivered over HTTPS. Spring adds it by default on secure requests.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does X-Frame-Options prevent clickjacking, and what supersedes it?</summary>
+      <div class="answer"><p><code>DENY</code> stops your page being embedded in any frame/iframe; <code>SAMEORIGIN</code> allows only same-origin framing — blocking the invisible-overlay trick where a user thinks they click your button but hit an attacker's frame. Spring sets <code>X-Frame-Options: DENY</code> by default. The modern, more flexible replacement is the CSP <code>frame-ancestors</code> directive, which can list multiple allowed embedders.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is Content-Security-Policy, which attacks does it mitigate, and what is its main limitation?</summary>
+      <div class="answer"><p>CSP is an allowlist, delivered by header, of where scripts, styles, images and frames may load from. It is the strongest in-browser mitigation for XSS (block inline and third-party script) and, through <code>frame-ancestors</code>, clickjacking. Limitations: it is only enforced by the browser, it cannot be your sole XSS defense (proper output encoding still matters), strict nonce/hash policies are hard to retrofit onto existing apps, and a lazy <code>unsafe-inline</code> effectively neuters it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A team sets a permissive CORS policy (allow all origins) to make errors disappear. What's wrong with that?</summary>
+      <div class="answer"><p>Several things. You cannot combine <code>"*"</code> origins with <code>allowCredentials(true)</code> — the spec forbids it, so credentialed calls break or you end up reflecting arbitrary origins, letting any site make authenticated cross-origin reads of a logged-in user's data. Allowlist explicit origins and methods; treat the CORS config as an attack surface. And note CORS protects the browser user, not your server — non-browser clients ignore it entirely, so it is never an authorization mechanism.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A form POST starts returning 403 right after you enable Spring Security. How do you diagnose whether CSRF is the cause, and how do you fix it correctly?</summary>
+      <div class="answer"><p>Check whether the failing request is a state-changing method arriving without the CSRF token — no <code>_csrf</code> hidden field, no <code>X-XSRF-TOKEN</code> header — and confirm the client is reading the token from the right place (session-backed default vs <code>CookieCsrfTokenRepository</code>). The fix is to actually send the token (Thymeleaf adds it automatically; SPAs echo the cookie in the header), not to blanket-disable CSRF — disabling is only appropriate for a genuinely stateless, token-authenticated API.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.web.csrf</li>
+      <li>sec.web.headers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

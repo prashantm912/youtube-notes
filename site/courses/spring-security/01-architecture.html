@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security architecture module: how DelegatingFilterProxy, FilterChainProxy and the SecurityFilterChain wire security into the servlet filter chain, plus the SecurityContextHolder, Authentication and the servlet-vs-reactive split — with official docs first and the interview questions this top-tier topic powers.">
+  <title>Architecture and the Filter Chain</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Architecture and the Filter Chain</h1>
+  <p class="standfirst">Spring Security is, at heart, one servlet filter that fans out into an ordered chain of smaller ones — and being able to draw that chain on a whiteboard is the single most reliable way to pass a Spring Security interview.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → Architecture and the Filter Chain</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Before a single credential is checked, Spring Security establishes an architecture: it hooks into the standard servlet filter chain through a <code>DelegatingFilterProxy</code>, delegates to a <code>FilterChainProxy</code>, and runs an ordered list of security filters described by a <code>SecurityFilterChain</code> bean. Alongside sits the <code>SecurityContextHolder</code>, which holds the current <code>Authentication</code> for the duration of a request. This module maps that machinery on both the servlet and reactive (WebFlux) stacks — the mental model every later module builds on.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>DelegatingFilterProxy, FilterChainProxy, SecurityFilterChain and the servlet filter chain</h3>
+    <p>A Servlet container owns its own filter chain, but its filters are container-managed and cannot be Spring beans. Spring Security bridges that gap with <code>DelegatingFilterProxy</code>: a container filter (registered by Boot under the name <code>springSecurityFilterChain</code>) that simply forwards each request to a Spring-managed bean. That bean is <code>FilterChainProxy</code>, the true entry point. It inspects the request, selects the first matching <code>SecurityFilterChain</code>, and invokes that chain's ordered security filters — authentication, CSRF, header writing, authorization and the rest.</p>
+    <p>Why it matters: a <code>SecurityFilterChain</code> is just a <code>RequestMatcher</code> plus a list of filters, and you now declare it as a <code>@Bean</code> using the lambda DSL — the <code>WebSecurityConfigurerAdapter</code> base class was removed in Spring Security 6. An app can publish several ordered chains (public API vs admin console), and only the first one whose matcher accepts a request runs. Knowing that "declaring a bean replaces the default chain" and that matching is first-match-wins explains most real configuration behaviour.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -&gt; auth
+            .requestMatchers("/public/**").permitAll()
+            .anyRequest().authenticated())
+        .formLogin(withDefaults())
+        .httpBasic(withDefaults());
+    return http.build();   // returns a SecurityFilterChain
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html" rel="noopener">Architecture — Spring Security reference (DelegatingFilterProxy, FilterChainProxy, SecurityFilterChain, filter ordering)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-registered-filters" rel="noopener">Find the Registered Spring Security Filters — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=h-9vhFeM3MY" rel="noopener">Spring Security Architecture Explained — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EeXFwR21J1A" rel="noopener">Spring Security — The filter chain (Lesson 5) — Dan Vega</a></li>
+    </ul>
+
+    <h3>SecurityContext, SecurityContextHolder, Authentication and the servlet vs reactive stack</h3>
+    <p>Once a filter authenticates a request, the result lives in the <code>SecurityContext</code>, reachable through the <code>SecurityContextHolder</code>. The context wraps a single <code>Authentication</code>, whose three parts are the <code>principal</code> (who — often a <code>UserDetails</code>), the <code>credentials</code> (usually cleared after login), and the <code>authorities</code> (a collection of <code>GrantedAuthority</code> — roles and scopes). On the servlet stack the holder's default strategy is a <code>ThreadLocal</code>, so any code on the request thread can call <code>SecurityContextHolder.getContext().getAuthentication()</code> without passing anything around. In Spring Security 6 the context is loaded per request by <code>SecurityContextHolderFilter</code> and saved explicitly through a <code>SecurityContextRepository</code>, replacing the older auto-saving <code>SecurityContextPersistenceFilter</code>.</p>
+    <p>Why it matters: the reactive (WebFlux) stack cannot use a <code>ThreadLocal</code>, because one request hops across many threads. There the analog of <code>SecurityFilterChain</code> is <code>SecurityWebFilterChain</code> (built from <code>ServerHttpSecurity</code>, enabled by <code>@EnableWebFluxSecurity</code>), and the context is read from the Reactor subscriber context via <code>ReactiveSecurityContextHolder</code>. Interviewers love to probe whether you understand that the same concepts wear different types on the two stacks.</p>
+    <pre class="code-block" data-label="Java"><code>// Servlet stack: current user from the thread-bound context
+Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+String username = auth.getName();
+boolean isAdmin = auth.getAuthorities().stream()
+        .anyMatch(a -&gt; a.getAuthority().equals("ROLE_ADMIN"));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html" rel="noopener">Servlet Authentication Architecture — Spring Security reference (SecurityContextHolder, SecurityContext, Authentication, GrantedAuthority)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/reactive/configuration/webflux.html" rel="noopener">WebFlux Security — Spring Security reference (SecurityWebFilterChain, ServerHttpSecurity, the reactive stack)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/get-user-in-spring-security" rel="noopener">Retrieve User Information in Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-5-reactive" rel="noopener">Spring Security for Reactive Applications — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-async-principal-propagation" rel="noopener">Spring Security Context Propagation with @Async — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All Spring Security modules</a>
+    <a href="02-authentication.html">Authentication →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The filter chain is a favourite opener in Indian backend and product-company interviews — it separates people who configured Spring Security by copying snippets from those who understand it:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> At a high level, how does Spring Security plug into a web request?</summary>
+      <div class="answer"><p>It registers a single servlet filter that runs before your controllers. That filter delegates to an ordered chain of security filters, each with one job (CSRF, authentication, authorization, etc.). A request that survives the whole chain reaches your application code; one that fails is rejected or redirected inside the chain.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is DelegatingFilterProxy and why is it needed?</summary>
+      <div class="answer"><p>Servlet filters are managed by the container, not by Spring, so they cannot be injected with beans. <code>DelegatingFilterProxy</code> is a thin container filter that simply forwards each request to a Spring-managed filter bean (here, <code>FilterChainProxy</code>). It bridges the servlet lifecycle and the Spring application context.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the SecurityContextHolder hold, and how do you get the current user?</summary>
+      <div class="answer"><p>It holds the <code>SecurityContext</code>, which contains the current <code>Authentication</code>. Retrieve it with <code>SecurityContextHolder.getContext().getAuthentication()</code>; from there <code>getName()</code>, <code>getPrincipal()</code> and <code>getAuthorities()</code> give you the user, principal and roles. In a controller, <code>@AuthenticationPrincipal</code> or a <code>Principal</code> parameter is cleaner.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three key parts of an Authentication object?</summary>
+      <div class="answer"><p><code>principal</code> (the identity — often a <code>UserDetails</code>), <code>credentials</code> (the proof, such as a password, usually erased after successful login), and <code>authorities</code> (a collection of <code>GrantedAuthority</code> representing roles and scopes). An <code>isAuthenticated()</code> flag rounds it out.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do FilterChainProxy and SecurityFilterChain relate?</summary>
+      <div class="answer"><p><code>FilterChainProxy</code> is the one bean <code>DelegatingFilterProxy</code> delegates to. It owns a list of <code>SecurityFilterChain</code> instances; for each request it walks that list, picks the first chain whose <code>RequestMatcher</code> matches, and runs only that chain's filters. A <code>SecurityFilterChain</code> is therefore just "a matcher plus an ordered list of filters".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> With multiple SecurityFilterChain beans, how does Spring pick one for a request?</summary>
+      <div class="answer"><p>First match wins. <code>FilterChainProxy</code> tries the chains in order (control the order with <code>@Order</code> or bean ordering) and uses the first whose matcher accepts the request — the others are skipped entirely. So a specific chain such as <code>securityMatcher("/api/**")</code> must be ordered before a catch-all <code>anyRequest</code> chain, or it will never run.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through what happens to a request as it passes the security filters.</summary>
+      <div class="answer"><p>Roughly: the context filter loads any existing <code>SecurityContext</code>, header/CSRF filters run, an authentication filter (e.g. <code>UsernamePasswordAuthenticationFilter</code>) may authenticate and populate the context, then near the end <code>AuthorizationFilter</code> checks access. If authentication or authorization fails, <code>ExceptionTranslationFilter</code> catches the exception and triggers the entry point or access-denied handler. Order matters: authentication filters run before authorization.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the default SecurityContextHolder storage strategy, and when would you change it?</summary>
+      <div class="answer"><p>Default is <code>MODE_THREADLOCAL</code> — the context is bound to the current thread. Switch to <code>MODE_INHERITABLETHREADLOCAL</code> when child threads spawned from the request thread must see the same user, or <code>MODE_GLOBAL</code> for a single context shared across the whole app (rare, mostly desktop/standalone). The default is filled and cleared per request so contexts never leak between requests on a pooled thread.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In Spring Security 6, how is the SecurityContext loaded and saved per request?</summary>
+      <div class="answer"><p><code>SecurityContextHolderFilter</code> loads the context (from the <code>SecurityContextRepository</code>, e.g. the HTTP session) at the start and clears the holder at the end, but it does <em>not</em> auto-save. Saving is now explicit — filters call the repository when the context changes (the "require explicit save" model) — which replaced the older <code>SecurityContextPersistenceFilter</code> that saved on every request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does the architecture differ on the reactive (WebFlux) stack?</summary>
+      <div class="answer"><p>Same ideas, different types. <code>DelegatingFilterProxy</code>/<code>FilterChainProxy</code> become a <code>WebFilter</code>; <code>SecurityFilterChain</code> becomes <code>SecurityWebFilterChain</code>, built from <code>ServerHttpSecurity</code> and enabled by <code>@EnableWebFluxSecurity</code>. Crucially the context is not stored in a <code>ThreadLocal</code> (a reactive request crosses many threads) but in the Reactor subscriber context, read via <code>ReactiveSecurityContextHolder</code> and returning a <code>Mono</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can't you rely on SecurityContextHolder in an @Async method or reactive pipeline, and how do you fix it?</summary>
+      <div class="answer"><p>Because the default context lives in a <code>ThreadLocal</code> bound to the request thread; work handed to another thread (or a reactive operator) starts without it, so the user appears absent. On the servlet side propagate it with <code>DelegatingSecurityContextExecutor</code>/<code>...Runnable</code> or the inheritable-threadlocal strategy; on the reactive side use <code>ReactiveSecurityContextHolder</code>, which reads from the Reactor context that flows with the pipeline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you add a custom filter at the right place in the chain, and what goes wrong if you get it wrong?</summary>
+      <div class="answer"><p>Use <code>http.addFilterBefore(...)</code>, <code>addFilterAfter(...)</code> or <code>addFilterAt(...)</code> relative to a known filter (for example a JWT filter before <code>UsernamePasswordAuthenticationFilter</code>). Get the position wrong and you either run before the context/authentication is set (so no user is available) or after <code>AuthorizationFilter</code> (so your work happens too late). Also extend <code>OncePerRequestFilter</code> to avoid double execution on forwards/async dispatches.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.arch.filterchain</li>
+      <li>sec.arch.context</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

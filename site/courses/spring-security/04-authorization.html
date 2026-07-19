@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security Authorization module: authorizeHttpRequests and request matchers, roles vs authorities and the ROLE_ prefix, the AuthorizationManager model, and method security with @PreAuthorize/@PostAuthorize/@Secured — official docs first, plus the interview questions they power.">
+  <title>Spring Security Authorization — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Authorization</h1>
+  <p class="standfirst">Authentication asks who you are; authorization decides what you may do. The gap between <code>hasRole</code> and <code>hasAuthority</code>, or a <code>@PreAuthorize</code> silently skipped on a self-call, is exactly where Spring interviews probe hardest.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → Authorization</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Authorization runs after authentication has established the current <code>Authentication</code>: Spring then guards two surfaces — HTTP requests via <code>authorizeHttpRequests</code>, and Java methods via method security — both routed through a single <code>AuthorizationManager</code> since Spring Security 6. This module orients you on the request-authorization DSL and its matchers, the roles-versus-authorities distinction that trips up most candidates, the <code>AuthorizationManager</code> model that replaced the old voter chain, and the <code>@PreAuthorize</code>/<code>@PostAuthorize</code> family. All examples target current 6.x/7.x with the lambda DSL and <code>@EnableMethodSecurity</code>.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Request-level authorization: authorizeHttpRequests and request matchers</h3>
+    <p>The <code>authorizeHttpRequests</code> DSL attaches an authorization rule to each incoming request. You pair a <em>request matcher</em> (a URL pattern, optionally an HTTP method) with a <em>rule</em> such as <code>permitAll()</code>, <code>authenticated()</code>, <code>hasRole(...)</code>, <code>hasAuthority(...)</code> or <code>denyAll()</code>. Rules are evaluated top-to-bottom and the <strong>first match wins</strong>, so specific matchers go first and <code>anyRequest()</code> goes last as the catch-all.</p>
+    <p>Why it matters: this is the everyday surface of Spring Security and a guaranteed interview area. In Security 6 the old <code>authorizeRequests()</code>, <code>antMatchers()</code>/<code>mvcMatchers()</code> and <code>WebSecurityConfigurerAdapter</code> are gone — <code>requestMatchers()</code> replaces them and auto-selects MVC or Ant matching. Rule ordering bugs (a broad pattern shadowing a specific one) are a classic "why is this endpoint open?" incident.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+SecurityFilterChain security(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(auth -&gt; auth
+        .requestMatchers("/public/**").permitAll()
+        .requestMatchers(HttpMethod.POST, "/api/orders").hasRole("USER")
+        .requestMatchers("/admin/**").hasRole("ADMIN")
+        .anyRequest().authenticated());   // catch-all, must be last
+    return http.build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html" rel="noopener">Authorize HttpServletRequests — Spring Security Reference (the request DSL and every matcher type)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/index.html" rel="noopener">Authorization — Spring Security Reference (overview of where rules attach)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-url-http-authorization" rel="noopener">Authorize Request for Certain URL and HTTP Method — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mq5oUXcAXL4" rel="noopener">Spring Boot 3 &amp; Spring Security 6 — Roles and Permissions Based Authorization — Bouali Ali</a></li>
+    </ul>
+
+    <h3>The authorization architecture: AuthorizationManager</h3>
+    <p>Underneath both request and method authorization sits one strategy interface, <code>AuthorizationManager</code>, which takes a <code>Supplier&lt;Authentication&gt;</code> and the object being secured and returns a grant/deny decision. Every DSL rule (<code>hasRole</code>, <code>authenticated</code>, and so on) is really a pre-built <code>AuthorizationManager</code> — for example <code>AuthorityAuthorizationManager</code> and <code>AuthenticatedAuthorizationManager</code> — and <code>.access(...)</code> lets you plug in your own for logic the shortcut rules cannot express.</p>
+    <p>Why it matters: since Spring Security 6, <code>AuthorizationManager</code> <em>supersedes</em> the older <code>AccessDecisionManager</code> plus <code>AccessDecisionVoter</code> chain (which in Security 7 is moved out to a separate <code>spring-security-access</code> module). Interviewers who have upgraded a project love asking what changed and why the new model is simpler.</p>
+    <pre class="code-block" data-label="Java"><code>http.authorizeHttpRequests(auth -&gt; auth
+    .requestMatchers("/reports/**")
+        .access(AuthorityAuthorizationManager.hasRole("ANALYST"))
+    .anyRequest().authenticated());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/architecture.html" rel="noopener">Authorization Architecture — Spring Security Reference (AuthorizationManager, authorities, the delegating managers)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-authorizationmanager" rel="noopener">Spring Security AuthorizationManager — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-x8-s3QnhMQ" rel="noopener">Authorization in Spring Security: permissions, roles and beyond — Daniel Garnier-Moiroux (Spring I/O)</a></li>
+    </ul>
+
+    <h3>Roles vs authorities and the ROLE_ prefix</h3>
+    <p>A <code>GrantedAuthority</code> is a single string permission held by the principal. A <em>role</em> is nothing more than an authority conventionally prefixed with <code>ROLE_</code>. That convention is the whole trick: <code>hasRole("ADMIN")</code> is a shortcut that checks for the authority <code>ROLE_ADMIN</code>, while <code>hasAuthority("...")</code> matches the string exactly with no prefix added. So <code>hasRole("ADMIN")</code> and <code>hasAuthority("ROLE_ADMIN")</code> are equivalent — and mixing the two conventions is where access silently breaks.</p>
+    <p>Why it matters: this is the single most-asked authorization question in Indian interviews. The practical guidance — roles for coarse, business-facing buckets; authorities for fine-grained permissions, often with roles acting as containers of privileges — signals real design experience beyond reciting the API.</p>
+    <pre class="code-block" data-label="Java"><code>// hasRole("ADMIN") is a shortcut for hasAuthority("ROLE_ADMIN")
+.requestMatchers("/admin/**").hasRole("ADMIN")            // needs authority ROLE_ADMIN
+.requestMatchers("/reports/**").hasAuthority("REPORT_READ") // exact string, no prefix</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-granted-authority-vs-role" rel="noopener">Granted Authority Versus Role in Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/role-and-privilege-for-spring-security-registration" rel="noopener">Spring Security — Roles and Privileges — Baeldung (roles as containers of authorities)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-expressions" rel="noopener">Intro to Spring Security Expressions — Baeldung (hasRole, hasAuthority and friends)</a></li>
+    </ul>
+
+    <h3>Method security: @EnableMethodSecurity and @PreAuthorize / @PostAuthorize / @Secured</h3>
+    <p>Method security moves authorization off the URL and onto the service layer, so the same rule protects a method however it is reached. Annotate a <code>@Configuration</code> class with <code>@EnableMethodSecurity</code> and the <code>@PreAuthorize</code>/<code>@PostAuthorize</code>/<code>@PreFilter</code>/<code>@PostFilter</code> interceptors switch on by default. <code>@PreAuthorize</code> evaluates a SpEL expression before the call; <code>@PostAuthorize</code> evaluates after and can inspect <code>returnObject</code>; a failing check throws <code>AccessDeniedException</code>. The older <code>@Secured</code> (plain authority list, no SpEL) and JSR-250 <code>@RolesAllowed</code> are opt-in via <code>securedEnabled</code> and <code>jsr250Enabled</code>.</p>
+    <p>Why it matters: <code>@PreAuthorize</code> is a top interview topic, and the gotcha behind it — method security is Spring AOP proxy-based, so an internal self-invocation bypasses the check entirely — separates people who have shipped it from people who have only read about it. Note that <code>@EnableMethodSecurity</code> replaced the deprecated <code>@EnableGlobalMethodSecurity</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Configuration
+@EnableMethodSecurity          // @PreAuthorize/@PostAuthorize active by default
+class MethodSecurityConfig { }
+
+@PreAuthorize("hasRole('ADMIN')")
+void deleteUser(long id) { ... }
+
+@PostAuthorize("returnObject.owner == authentication.name")
+Document findDocument(long id) { ... }   // owner-only: checked on the result</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html" rel="noopener">Method Security — Spring Security Reference (the annotations, SpEL root object, filtering)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-method-security" rel="noopener">Introduction to Spring Method Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-enablemethodsecurity" rel="noopener">Spring @EnableMethodSecurity Annotation — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e5585jgfTU8" rel="noopener">Spring Security — Method Security Explained: @PreAuthorize, @PostAuthorize — Dan Vega</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-password-management.html">← Password Management</a>
+    <a href="index.html">All Spring Security modules</a>
+    <a href="05-csrf-cors-headers.html">CSRF, CORS and Security Headers →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The authorization questions Indian interviews return to again and again — roles vs authorities and <code>@PreAuthorize</code> are near-certain in any Spring Security round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between authentication and authorization?</summary>
+      <div class="answer"><p>Authentication establishes <em>who</em> the caller is (identity + credentials, producing an <code>Authentication</code>); authorization decides <em>what</em> that identity is allowed to do. Authorization always runs after authentication and reads the granted authorities to make its decision.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you secure URLs in Spring Security 6?</summary>
+      <div class="answer"><p>Define a <code>SecurityFilterChain</code> bean and configure <code>http.authorizeHttpRequests(auth -&gt; auth.requestMatchers(...)...)</code>. The old <code>authorizeRequests()</code>, <code>antMatchers()</code>/<code>mvcMatchers()</code> and <code>WebSecurityConfigurerAdapter</code> were removed in 6; <code>requestMatchers()</code> replaces the matcher methods and auto-picks MVC or Ant matching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does hasRole("ADMIN") actually check for?</summary>
+      <div class="answer"><p>The presence of the <code>GrantedAuthority</code> named <code>ROLE_ADMIN</code>. <code>hasRole</code> is a shortcut that prepends the default <code>ROLE_</code> prefix, so <code>hasRole("ADMIN")</code> equals <code>hasAuthority("ROLE_ADMIN")</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you turn on method-level security?</summary>
+      <div class="answer"><p>Annotate a <code>@Configuration</code> class with <code>@EnableMethodSecurity</code> (which replaced the deprecated <code>@EnableGlobalMethodSecurity</code>). That activates <code>@PreAuthorize</code>/<code>@PostAuthorize</code>/<code>@PreFilter</code>/<code>@PostFilter</code> by default; add <code>securedEnabled=true</code> or <code>jsr250Enabled=true</code> for <code>@Secured</code> or <code>@RolesAllowed</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens when an authorization check fails?</summary>
+      <div class="answer"><p>An <code>AccessDeniedException</code> is thrown. The <code>ExceptionTranslationFilter</code> catches it: an already-authenticated user gets the <code>AccessDeniedHandler</code> (HTTP 403); an anonymous user is sent to the <code>AuthenticationEntryPoint</code> (for example, redirected to the login page) so they can authenticate first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> hasRole vs hasAuthority — when do you use each?</summary>
+      <div class="answer"><p>Both check for a <code>GrantedAuthority</code>; <code>hasRole(x)</code> auto-adds the <code>ROLE_</code> prefix, <code>hasAuthority(x)</code> matches the exact string. Use roles for coarse, business-facing buckets (ADMIN, MANAGER) and authorities for fine-grained permissions (REPORT_READ). The framework treats them identically — the difference is convention. The bug to avoid is granting <code>ROLE_ADMIN</code> but guarding with <code>hasAuthority("ADMIN")</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In what order are request matchers evaluated, and what is the classic bug?</summary>
+      <div class="answer"><p>Top to bottom, and the first matcher that matches wins — later rules for the same request never run. The classic bug is placing a broad pattern (or <code>anyRequest()</code>) above a more specific one, so the specific rule is shadowed and its endpoint ends up more open or more closed than intended. Order specific-first, <code>anyRequest()</code> last.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @PreAuthorize vs @PostAuthorize — and when is @PostAuthorize the right choice?</summary>
+      <div class="answer"><p><code>@PreAuthorize</code> runs before the method, so it cannot see the return value; <code>@PostAuthorize</code> runs after and its SpEL can reference <code>returnObject</code>. Use <code>@PostAuthorize</code> for decisions that depend on the fetched object — the classic owner-only check <code>returnObject.owner == authentication.name</code>. Caveat: the method still executes, so don't use it on side-effecting operations.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @Secured vs @PreAuthorize vs @RolesAllowed?</summary>
+      <div class="answer"><p><code>@PreAuthorize</code> is SpEL-based and the most expressive (on by default with <code>@EnableMethodSecurity</code>). <code>@Secured</code> takes a plain list of authority strings, no SpEL, and is opt-in via <code>securedEnabled=true</code>. <code>@RolesAllowed</code> is the JSR-250 standard equivalent, opt-in via <code>jsr250Enabled=true</code>. New code generally standardises on <code>@PreAuthorize</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is AuthorizationManager and what did it replace?</summary>
+      <div class="answer"><p>A single strategy interface — <code>check</code>/<code>authorize(Supplier&lt;Authentication&gt;, T)</code> — used by request, method and message authorization since Security 6. It supersedes the older <code>AccessDecisionManager</code> + <code>AccessDecisionVoter</code> voting chain (which in Security 7 moves to the separate <code>spring-security-access</code> module). Every DSL rule is a pre-built <code>AuthorizationManager</code>, and <code>.access(...)</code> plugs in a custom one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A @PreAuthorize method called from another method in the same class is not enforced. Why, and how do you fix it?</summary>
+      <div class="answer"><p>Method security is applied by a Spring AOP proxy that wraps the bean; a self-invocation (<code>this.method()</code>) calls the target directly and never passes through the proxy, so the interceptor is skipped. Fixes: call through an injected reference to the proxied bean, move the secured method into a separate bean, or use AspectJ compile/load-time weaving instead of proxies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you implement owner-only or attribute-based access — a user may edit only their own record?</summary>
+      <div class="answer"><p>Several options: <code>@PostAuthorize("returnObject.owner == authentication.name")</code> on a read; <code>hasPermission(...)</code> in SpEL backed by a custom <code>PermissionEvaluator</code>; or a custom <code>AuthorizationManager</code> registered with <code>.access(...)</code> for request-level checks. For full domain-object security across many objects, Spring Security ACLs are the heavyweight option.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What do @PreFilter and @PostFilter do, and what is the performance trap?</summary>
+      <div class="answer"><p><code>@PreFilter</code> trims a collection/array <em>argument</em> before the method runs; <code>@PostFilter</code> trims the returned collection element by element, each tested against a SpEL predicate via <code>filterObject</code> — handy for returning only the entries a caller may see. The trap: post-filtering a large result set in memory wastes the work of fetching rows the user can't see; push the predicate into the query when the data volume is real.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist (module 04):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.authz.http</li>
+      <li>sec.authz.method</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

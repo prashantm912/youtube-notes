@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security JWT and Resource Server module: protecting APIs with OAuth2 bearer tokens, JwtDecoder and JWK validation, mapping scopes and claims to authorities, and stateless JWT authentication design — with official docs, standards and interview questions.">
+  <title>JWT and Resource Server</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: JWT and Resource Server</h1>
+  <p class="standfirst">A resource server trusts a signed token instead of a session — validate the JWT, turn its claims into authorities, and the API scales without server-side state. Designing that flow is one of the most-asked backend interview topics.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → JWT and Resource Server</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>An OAuth2 Resource Server is a backend that guards its endpoints with bearer tokens issued elsewhere. This module orients you on the whole stateless path: the resource-server role and the <code>Authorization: Bearer</code> flow, the anatomy of a JWT, how <code>JwtDecoder</code> verifies a token against a JWK set, how scopes and custom claims become Spring authorities, and why the session and CSRF machinery is switched off. Depth lives in the linked official docs and standards.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The resource server role and bearer tokens</h3>
+    <p>Split OAuth2 into two responsibilities: an <em>authorization server</em> authenticates the user and issues a token; a <em>resource server</em> only protects APIs by verifying that token — it never sees a password. In Spring Security, enabling <code>oauth2ResourceServer</code> installs a <code>BearerTokenAuthenticationFilter</code> that pulls the token out of the <code>Authorization: Bearer &lt;token&gt;</code> header; a missing or bad token yields a <code>401</code> with a <code>WWW-Authenticate</code> challenge, and a valid one populates the <code>SecurityContext</code>.</p>
+    <p>Why it matters: this is the standard shape of a modern microservice. Interviewers probe whether you understand that the resource server delegates identity to the issuer and does purely local checking on each call — no login form, no session.</p>
+    <pre class="code-block" data-label="Java"><code>http
+  .authorizeHttpRequests(a -&gt; a.anyRequest().authenticated())
+  .oauth2ResourceServer(oauth2 -&gt; oauth2.jwt(Customizer.withDefaults()));
+// request carries: Authorization: Bearer eyJhbGciOiJSUzI1NiI...</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html" rel="noopener">OAuth 2.0 Resource Server — Spring Security reference (bearer token flow, JWT vs opaque)</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc6750" rel="noopener">RFC 6750: OAuth 2.0 Bearer Token Usage — IETF (the header/error standard)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-oauth-resource-server" rel="noopener">OAuth 2.0 Resource Server With Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=j7SOIM_HL5g" rel="noopener">Spring Security Fundamentals — Lesson 14: The OAuth2 Resource Server — Laur Spilca</a></li>
+    </ul>
+
+    <h3>Anatomy of a JWT: header, payload, signature</h3>
+    <p>A JSON Web Token is three Base64URL segments joined by dots: a <strong>header</strong> naming the signing algorithm, a <strong>payload</strong> of claims (<code>iss</code>, <code>sub</code>, <code>aud</code>, <code>exp</code>, and app-specific claims like <code>scope</code>), and a <strong>signature</strong> over the first two. The payload is encoded, not encrypted — anyone can read it — so the security comes entirely from the signature. Because the issuer signs it with a private key, any party holding the matching public key can confirm the token is authentic and untampered without a callback.</p>
+    <p>Why it matters: candidates who think a JWT is "encrypted" get caught out. The right mental model is a signed, self-describing credential — never put secrets in the payload.</p>
+    <pre class="code-block" data-label="JWT"><code>header.payload.signature
+{ "alg": "RS256", "typ": "JWT" }                       header
+{ "sub": "u-1042", "scope": "orders.read", "exp": 1731000000 }  payload
+&lt;RSA signature over base64url(header) + "." + base64url(payload)&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jwt.io/introduction" rel="noopener">Introduction to JSON Web Tokens — jwt.io (structure, signing, verification vs validation)</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc7519" rel="noopener">RFC 7519: JSON Web Token (JWT) — IETF (the registered claims and format)</a></li>
+    </ul>
+
+    <h3>Decoding and validating: JwtDecoder, JWK set, validators</h3>
+    <p>The core component is <code>JwtDecoder</code> (Spring's default is <code>NimbusJwtDecoder</code>). It parses the token, then checks the signature against the issuer's public keys. Point it at the issuer with <code>issuer-uri</code> and Spring auto-discovers the JWK Set endpoint (a URL serving the public keys) via the provider's well-known metadata; or set <code>jwk-set-uri</code> directly. Beyond the signature, validation runs a chain of <code>OAuth2TokenValidator&lt;Jwt&gt;</code>: the timestamp validator rejects expired or not-yet-valid tokens (with a default 60 second clock skew), the issuer validator checks <code>iss</code>, and you should add an <em>audience</em> validator so a token minted for another service is refused.</p>
+    <p>Why it matters: "how does the API trust the token without asking the auth server every time?" is the crux question — the answer is cached public keys plus local claim validation. Audience checking is the detail seniors are expected to add.</p>
+    <pre class="code-block" data-label="Java"><code>NimbusJwtDecoder decoder =
+    NimbusJwtDecoder.withIssuerLocation("https://idp.example.com").build();
+decoder.setJwtValidator(new DelegatingOAuth2TokenValidator&lt;&gt;(
+    JwtValidators.createDefaultWithIssuer("https://idp.example.com"),
+    new AudienceValidator("orders-api")));   // reject tokens for other APIs</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html" rel="noopener">OAuth 2.0 Resource Server JWT — Spring Security reference (JwtDecoder, JWK set, validators)</a></li>
+      <li>[Article] <a href="https://www.freecodecamp.org/news/oauth2-resourceserver-with-spring-security/" rel="noopener">How to Implement an OAuth2 Resource Server with Spring Security — freeCodeCamp</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KYNR5js2cXE" rel="noopener">Spring Security JWT: securing your Spring Boot REST APIs — Dan Vega</a></li>
+    </ul>
+
+    <h3>Mapping scopes and claims to authorities, and stateless design</h3>
+    <p>Once the token is valid, its claims must become Spring <code>GrantedAuthority</code> objects. By default the <code>JwtGrantedAuthoritiesConverter</code> reads the <code>scope</code>/<code>scp</code> claim and prefixes each value with <code>SCOPE_</code>, so <code>orders.read</code> becomes the authority <code>SCOPE_orders.read</code> — check it with <code>hasAuthority("SCOPE_orders.read")</code>. To use a custom claim (say a <code>roles</code> array) or a <code>ROLE_</code> prefix, plug a custom converter into a <code>JwtAuthenticationConverter</code>. This is the whole point of <em>stateless</em> auth: because every request carries its own self-contained, signed identity, you set <code>SessionCreationPolicy.STATELESS</code> (no <code>HttpSession</code>) and disable CSRF (no session cookie to forge), letting any instance serve any request.</p>
+    <p>Why it matters: the trade-off is the interview payoff. Stateless scales horizontally but you cannot instantly revoke a live token — mitigate with short token lifetimes plus refresh tokens, a denylist, or opaque tokens with server-side introspection when immediate revocation is mandatory.</p>
+    <pre class="code-block" data-label="Java"><code>JwtGrantedAuthoritiesConverter scopes = new JwtGrantedAuthoritiesConverter();
+scopes.setAuthorityPrefix("SCOPE_");            // the default prefix
+JwtAuthenticationConverter conv = new JwtAuthenticationConverter();
+conv.setJwtGrantedAuthoritiesConverter(scopes);
+
+http.sessionManagement(s -&gt; s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+    .csrf(csrf -&gt; csrf.disable());              // safe: no session cookie</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-map-authorities-jwt" rel="noopener">Spring Security — Map Authorities from JWT — Baeldung</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/opaque-token.html" rel="noopener">OAuth 2.0 Resource Server Opaque Token — Spring Security reference (introspection, the revocable alternative)</a></li>
+      <li>[Article] <a href="https://thecodeforge.io/java/spring-security-oauth2/" rel="noopener">Spring Security OAuth2 Resource Server: JWT, Scopes &amp; Token Introspection — TheCodeForge</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-oauth2-oidc.html">← OAuth2 and OpenID Connect</a>
+    <a href="index.html">All Spring Security modules</a>
+    <a href="09-testing-exceptions.html">Testing and Exception Handling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Stateless JWT authentication is a top backend interview topic in Indian product and services companies — from screening rounds to system-design deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an OAuth2 Resource Server?</summary>
+      <div class="answer"><p>A backend application that protects its APIs using OAuth2 access tokens issued by an authorization server. It only <em>verifies</em> tokens on incoming requests — it never authenticates users or issues tokens itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three parts of a JWT?</summary>
+      <div class="answer"><p>Header (algorithm and type), payload (the claims), and signature — three Base64URL strings joined by dots. Header and payload are encoded, not encrypted; the signature is what makes the token trustworthy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does a client send a JWT to a resource server?</summary>
+      <div class="answer"><p>In the HTTP <code>Authorization</code> header using the Bearer scheme: <code>Authorization: Bearer &lt;token&gt;</code>, per RFC 6750. Spring's <code>BearerTokenAuthenticationFilter</code> extracts it automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between an authorization server and a resource server?</summary>
+      <div class="answer"><p>The authorization server authenticates the user and mints tokens (login, consent, token endpoint). The resource server holds the protected data/APIs and only validates the presented token. They are often separate applications, and one auth server can front many resource servers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a resource server validate a JWT without calling the auth server on every request?</summary>
+      <div class="answer"><p>It verifies the signature locally using the issuer's public keys, fetched once from the JWK Set endpoint and cached. Nothing else is needed for a signed JWT — validation is offline. This is exactly why JWTs scale, and why revocation is hard.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> issuer-uri vs jwk-set-uri — what's the difference?</summary>
+      <div class="answer"><p><code>issuer-uri</code> points at the provider; Spring reads its well-known metadata to discover the JWK Set URL <em>and</em> auto-configures an issuer validator. <code>jwk-set-uri</code> supplies the keys endpoint directly (no discovery). Prefer <code>issuer-uri</code> when the provider exposes metadata.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How are OAuth2 scopes mapped to Spring authorities by default?</summary>
+      <div class="answer"><p>The <code>JwtGrantedAuthoritiesConverter</code> reads the <code>scope</code> (or <code>scp</code>) claim, splits it, and prefixes each value with <code>SCOPE_</code>. So scope <code>orders.read</code> is checked as <code>hasAuthority("SCOPE_orders.read")</code>, not <code>hasRole</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you map a custom claim (like roles) to authorities?</summary>
+      <div class="answer"><p>Register a custom <code>Converter&lt;Jwt, Collection&lt;GrantedAuthority&gt;&gt;</code> inside a <code>JwtAuthenticationConverter</code> and expose it as a bean or wire it via <code>jwt().jwtAuthenticationConverter(...)</code>. You can change the claim name, the prefix (e.g. <code>ROLE_</code>), or combine scopes and roles.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Beyond the signature, what does Spring validate on a JWT?</summary>
+      <div class="answer"><p>A chain of <code>OAuth2TokenValidator</code>: timestamps (<code>exp</code>/<code>nbf</code> with a default 60 second clock skew), the issuer (<code>iss</code>), and — if you add it — the audience (<code>aud</code>). Audience validation stops a token issued for another service from being accepted.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does "stateless" mean here, and why disable sessions and CSRF?</summary>
+      <div class="answer"><p>Each request self-authenticates via its bearer token, so the server keeps no session — set <code>SessionCreationPolicy.STATELESS</code>. With no session cookie, the CSRF attack vector (the browser auto-attaching a cookie) disappears, so CSRF protection is turned off for a pure token API. Any instance can serve any request, enabling horizontal scaling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Biggest drawback of stateless JWTs, and how do you handle revocation?</summary>
+      <div class="answer"><p>A signed JWT stays valid until it expires — you cannot instantly revoke it because nothing is checked server-side. Mitigations: short-lived access tokens (a few minutes) plus longer refresh tokens, a token/JTI denylist checked on sensitive routes, key rotation, or switching to opaque tokens with introspection when immediate revocation is a hard requirement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> JWT vs opaque token on a resource server — the trade-offs?</summary>
+      <div class="answer"><p>A JWT is self-contained: validated locally, zero network calls, but larger, readable, and hard to revoke. An opaque token is a random string validated by calling the auth server's introspection endpoint every time (or with caching) — easy to revoke and reveals nothing, at the cost of a dependency and latency on each request. Choose JWT for scale, opaque for tight revocation control.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.jwt.resourceserver</li>
+      <li>sec.jwt.authorities</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

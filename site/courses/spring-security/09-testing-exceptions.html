@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Security Testing and Exception Handling module: spring-security-test, @WithMockUser/@WithUserDetails, MockMvc security post-processors, the ExceptionTranslationFilter, and AuthenticationEntryPoint vs AccessDeniedHandler (401 vs 403) — curated official docs, Baeldung guides and the interview questions they power.">
+  <title>Spring Security Testing and Exception Handling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Testing and Exception Handling</h1>
+  <p class="standfirst">Security config that no test exercises is a guess, and a REST endpoint that answers a missing token with an HTML login page is a bug. This module is about proving your rules hold — and controlling exactly what the framework says when they don't.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Security → Testing and Exception Handling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring Security ships a dedicated test module and a set of MockMvc helpers that let you assert who can reach what without standing up real logins. The other half is the <code>ExceptionTranslationFilter</code> — the piece that decides whether a blocked request becomes a 401 challenge or a 403 refusal — and the <code>AuthenticationEntryPoint</code> / <code>AccessDeniedHandler</code> you plug in to shape those responses. Both are interview staples, the 401-vs-403 distinction most of all.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The spring-security-test module and mock authentication</h3>
+    <p>The <code>spring-security-test</code> artifact adds the test-only support Spring Security needs: annotations that seed a <code>SecurityContext</code> before a test method runs, plus MockMvc and WebTestClient integration. <code>@WithMockUser</code> fabricates a user straight from its attributes (default username <code>user</code>, role <code>USER</code>); <code>@WithUserDetails</code> instead runs your real <code>UserDetailsService</code> so the loaded authorities and account flags match production; <code>@WithAnonymousUser</code> asserts the unauthenticated path; and <code>@WithSecurityContext</code> is the escape hatch for any custom <code>Authentication</code>.</p>
+    <p>Why it matters: these annotations let you test authorization — the hard, high-value part — without the ceremony of a real login flow. Choosing <code>@WithMockUser</code> versus <code>@WithUserDetails</code> is a judgement call interviewers probe: the first is fast and isolated, the second exercises your actual user-loading and authority mapping.</p>
+    <pre class="code-block" data-label="Java"><code>@Test
+@WithMockUser(username = "raj", roles = {"ADMIN"})
+void adminReachesDashboard() throws Exception {
+    mockMvc.perform(get("/admin/dashboard"))
+           .andExpect(status().isOk());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/index.html" rel="noopener">Testing — Spring Security Reference (the spring-security-test dependency and what it provides)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/method.html" rel="noopener">Testing Method Security — Spring Security Reference (@WithMockUser, @WithUserDetails, @WithAnonymousUser, @WithSecurityContext)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-integration-tests" rel="noopener">Spring Security for Spring Boot Integration Tests — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IZFqxy5PS0k" rel="noopener">Spring Security for Spring Boot Integration Tests — Java Techie</a></li>
+    </ul>
+
+    <h3>MockMvc security: request post-processors and result matchers</h3>
+    <p>For web-layer tests, <code>SecurityMockMvcRequestPostProcessors</code> attaches security state to a request through the fluent <code>.with(...)</code> API: <code>user()</code> and <code>authentication()</code> set the principal, <code>csrf()</code> supplies the token that stateful POST/PUT/DELETE requests require, <code>formLogin()</code> and <code>httpBasic()</code> drive those mechanisms, and <code>jwt()</code>, <code>oauth2Login()</code> and <code>opaqueToken()</code> stand in for a resource server's bearer tokens with no real authorization server. On the assertion side, <code>SecurityMockMvcResultMatchers.authenticated()</code> and <code>unauthenticated()</code> verify the outcome.</p>
+    <p>Why it matters: the single most common testing surprise is a POST that returns 403 even though the user is mocked — CSRF protection rejects the tokenless request, and adding <code>.with(csrf())</code> fixes it. For resource-server work, <code>jwt()</code> lets you assert scope-to-authority mapping in complete isolation.</p>
+    <pre class="code-block" data-label="Java"><code>mockMvc.perform(post("/orders")
+        .with(csrf())
+        .with(jwt().authorities(new SimpleGrantedAuthority("SCOPE_orders.write"))))
+       .andExpect(status().isCreated());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/mockmvc/request-post-processors.html" rel="noopener">SecurityMockMvcRequestPostProcessors — Spring Security Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/mockmvc/authentication.html" rel="noopener">Running a Test as a User in Spring MVC Test — Spring Security Reference (user(), authentication(), anonymous())</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/mockmvc/oauth2.html" rel="noopener">Testing OAuth 2.0 — Spring Security Reference (jwt(), oauth2Login(), opaqueToken())</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-oauth-testing-access-control" rel="noopener">Testing Spring OAuth2 Access-Control — Baeldung</a></li>
+    </ul>
+
+    <h3>How security exceptions become HTTP responses: ExceptionTranslationFilter</h3>
+    <p>Authorization and authentication failures raised deep in the filter chain surface as exceptions, not responses. The <code>ExceptionTranslationFilter</code> sits near the end of the chain and wraps everything after it in a try/catch: an <code>AuthenticationException</code> means the caller is not (properly) authenticated, so it invokes the <code>AuthenticationEntryPoint</code> to start authentication; an <code>AccessDeniedException</code> from an already-authenticated caller means they lack rights, so it invokes the <code>AccessDeniedHandler</code>. An <code>AccessDeniedException</code> from an anonymous caller is treated as "authenticate first" and also routed to the entry point.</p>
+    <p>Why it matters: the component that decides 401-versus-403 is a filter, not your controller — the decision happens before a request ever reaches a <code>@Controller</code>. This flow also explains why a plain <code>@ControllerAdvice</code> never sees these filter-thrown exceptions.</p>
+    <pre class="code-block" data-label="Java"><code>try {
+    filterChain.doFilter(request, response);   // run the rest of the chain
+} catch (AuthenticationException ex) {
+    authenticationEntryPoint.commence(...);     // no / invalid credentials
+} catch (AccessDeniedException ex) {
+    accessDeniedHandler.handle(...);            // authenticated but forbidden
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html" rel="noopener">Architecture: Handling Security Exceptions — Spring Security Reference (the ExceptionTranslationFilter flow)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-exceptions" rel="noopener">Handle Spring Security Exceptions — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-exceptionhandler" rel="noopener">Handle Spring Security Exceptions With @ExceptionHandler — Baeldung</a></li>
+    </ul>
+
+    <h3>AuthenticationEntryPoint vs AccessDeniedHandler (401 vs 403)</h3>
+    <p><code>AuthenticationEntryPoint.commence()</code> answers "we don't know who you are" — for a browser app it redirects to the login page, for an API it should return 401 Unauthorized (often with a <code>WWW-Authenticate</code> header). <code>AccessDeniedHandler.handle()</code> answers "we know who you are, and you may not do this" — a 403 Forbidden. Getting the pairing right is the crux of the most-asked exception question: 401 means not authenticated, 403 means authenticated but not authorized.</p>
+    <p>Why it matters: the default responses are HTML (the Whitelabel or login page), which is wrong for a JSON API. You register custom handlers via <code>http.exceptionHandling(...)</code>; both interfaces write directly to the <code>HttpServletResponse</code> — a JSON body or a <code>ProblemDetail</code>. A frequent production bug is an unauthenticated API call returning 403 instead of 401 because the configured entry point (or anonymous handling) sends the wrong status; for REST, set an entry point that returns 401.</p>
+    <pre class="code-block" data-label="Java"><code>http.exceptionHandling(ex -&gt; ex
+    .authenticationEntryPoint((req, res, e) -&gt;
+        res.sendError(SC_UNAUTHORIZED))   // 401 — not authenticated
+    .accessDeniedHandler((req, res, e) -&gt;
+        res.sendError(SC_FORBIDDEN)));      // 403 — authenticated, no rights</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/site/docs/current/api/org/springframework/security/web/AuthenticationEntryPoint.html" rel="noopener">AuthenticationEntryPoint — Spring Security API (Javadoc, the commence() contract)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/site/docs/current/api/org/springframework/security/web/access/AccessDeniedHandler.html" rel="noopener">AccessDeniedHandler — Spring Security API (Javadoc, the handle() contract)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-custom-access-denied-page" rel="noopener">Customize the 403 Forbidden / Access Denied Page — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-multiple-entry-points" rel="noopener">Multiple Entry Points in Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YiQYhXorMAI" rel="noopener">Spring Security Exception Handling (HandlerExceptionResolver, ProblemDetail) — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-jwt-resource-server.html">← JWT and Resource Server</a>
+    <a href="index.html">All Spring Security modules</a>
+    <a href="10-advanced-migration.html">Advanced Topics and Migration →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The questions Indian interviewers actually ask on this module — the 401-vs-403 pair is close to guaranteed for any backend or REST-API role:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Which dependency do you add to test Spring Security, and what does it give you?</summary>
+      <div class="answer"><p><code>spring-security-test</code> (test scope). It provides the <code>@WithMockUser</code> family of annotations that seed a SecurityContext before each test, the <code>SecurityMockMvcRequestPostProcessors</code>/<code>ResultMatchers</code> for MockMvc, and equivalent support for WebTestClient.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @WithMockUser do?</summary>
+      <div class="answer"><p>It populates the SecurityContext with a mock authenticated user built from its attributes before the test runs — default username <code>user</code>, password <code>password</code>, authority <code>ROLE_USER</code>. That lets you exercise secured endpoints or methods without performing a real login.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> @WithMockUser vs @WithUserDetails — when do you reach for each?</summary>
+      <div class="answer"><p><code>@WithMockUser</code> fabricates a principal from annotation values — fast and self-contained. <code>@WithUserDetails</code> loads a real user through your <code>UserDetailsService</code>, so it exercises your actual user lookup, password/account flags and authority mapping. Use the mock for pure authorization tests, the real load when the loading logic itself matters.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you make MockMvc apply the security filter chain?</summary>
+      <div class="answer"><p>Build it with <code>MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build()</code>. With <code>@WebMvcTest</code> the security setup is auto-applied, so you can use the post-processors and annotations directly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your POST test returns 403 even with @WithMockUser. What is wrong?</summary>
+      <div class="answer"><p>CSRF protection. State-changing requests (POST/PUT/DELETE) need a valid CSRF token, and MockMvc doesn't add one. Attach <code>.with(csrf())</code> from <code>SecurityMockMvcRequestPostProcessors</code>. This is the classic MockMvc security trap.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test a resource-server endpoint without a real token or JwtDecoder?</summary>
+      <div class="answer"><p>Use the <code>jwt()</code> post-processor: <code>.with(jwt().authorities(...).jwt(j -&gt; j.claim("scope", "orders.write")))</code>. It injects an already-authenticated JWT principal, so you test scope/claim-to-authority mapping in isolation. <code>opaqueToken()</code> does the same for introspection-based tokens.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the ExceptionTranslationFilter's responsibility?</summary>
+      <div class="answer"><p>It sits near the end of the filter chain and catches the two security exceptions thrown downstream. An <code>AuthenticationException</code> is routed to the <code>AuthenticationEntryPoint</code> to begin authentication; an <code>AccessDeniedException</code> from an authenticated user is routed to the <code>AccessDeniedHandler</code>. It is what turns those exceptions into HTTP responses.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> AuthenticationEntryPoint vs AccessDeniedHandler — 401 vs 403?</summary>
+      <div class="answer"><p>The entry point handles authentication failures — missing or invalid credentials — and typically yields 401 Unauthorized (or a redirect to login). The access-denied handler handles an authenticated user who lacks the required authority — 403 Forbidden. Shorthand: entry point = "who are you?", access-denied handler = "you can't do this."</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you assert the authenticated user or an unauthorized outcome in a MockMvc test?</summary>
+      <div class="answer"><p><code>SecurityMockMvcResultMatchers</code>: <code>authenticated().withUsername("raj").withRoles("ADMIN")</code> or <code>unauthenticated()</code>, combined with status matchers such as <code>status().isForbidden()</code> or <code>status().isUnauthorized()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An unauthenticated API call returns 403 instead of 401. Why, and how do you fix it?</summary>
+      <div class="answer"><p>When no credentials are present the request should reach the entry point and return 401, but a default form-login config redirects (302) and some setups answer 403. For a stateless REST/JWT API, configure a custom <code>AuthenticationEntryPoint</code> that sends 401 (for example a bearer-token entry point) via <code>http.exceptionHandling()</code>, and don't rely on anonymous access masking the distinction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you return a JSON error body instead of the default HTML page for auth failures?</summary>
+      <div class="answer"><p>Implement <code>AuthenticationEntryPoint.commence()</code> and/or <code>AccessDeniedHandler.handle()</code> to write JSON (or a <code>ProblemDetail</code>) directly to the response, then register them with <code>http.exceptionHandling(e -&gt; e.authenticationEntryPoint(...).accessDeniedHandler(...))</code>. The default is the Whitelabel/login HTML, which is wrong for an API.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why doesn't a @ControllerAdvice @ExceptionHandler catch access-denied errors from URL authorization?</summary>
+      <div class="answer"><p>URL-level authorization is enforced in the filter chain, so the <code>AccessDeniedException</code> is thrown and handled by the ExceptionTranslationFilter around the <code>DispatcherServlet</code> — never inside a controller dispatch, so <code>@ControllerAdvice</code> can't see it. In contrast, an <code>AccessDeniedException</code> from <code>@PreAuthorize</code> on a controller method is thrown within the dispatch and can be caught by <code>@ExceptionHandler</code>. Knowing which path throws where is the point.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you unit-test method security (@PreAuthorize) as opposed to URL rules?</summary>
+      <div class="answer"><p>With method security enabled in the test context, seed the context via <code>@WithMockUser</code>/<code>@WithUserDetails</code> and call the secured service method directly in a <code>@SpringBootTest</code>: assert success for an allowed role and that an <code>AccessDeniedException</code> is thrown for a disallowed one. This targets the security interceptor rather than the web layer, so no MockMvc is needed.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Security track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.test.support</li>
+      <li>sec.test.exceptions</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Security track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
