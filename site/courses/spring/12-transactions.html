@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Transactions module: @Transactional and its settings, all seven propagation behaviours, isolation levels, rollback rules and readOnly, and the self-invocation and programmatic-transaction pitfalls — with the best official and community resources plus the interview questions they power.">
+  <title>Transactions — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Transactions</h1>
+  <p class="standfirst">One annotation opens a database transaction, joins or suspends another, and decides whether your data survives an exception — and the reasons it silently does nothing are exactly what Indian interviewers probe. This module orients you on each setting and links the material that teaches it in full.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Transactions</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring's transaction abstraction lets you keep JDBC/JPA commit-and-rollback logic out of your code and declare it instead. This module walks the <code>@Transactional</code> settings that matter in production and in interviews: the seven propagation behaviours, the isolation levels and the concurrency anomalies they block, the rollback rules and the <code>readOnly</code> hint, and finally the pitfalls — self-invocation, private/final methods, checked exceptions that quietly commit — plus when to drop to programmatic transactions.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Declarative transactions: @Transactional and its settings</h3>
+    <p>Annotating a bean's method with <code>@Transactional</code> makes Spring wrap the call in a proxy that starts a transaction before the method and commits it after — or rolls back on failure. You never write <code>begin</code>/<code>commit</code>/<code>rollback</code>; you declare intent and the container binds a connection (or a JPA <code>EntityManager</code>) to the thread for the method's duration. Activation needs <code>@EnableTransactionManagement</code> (Spring Boot switches it on automatically) plus a <code>PlatformTransactionManager</code> bean.</p>
+    <p>Why it matters: the annotation carries six-plus tunables — <code>propagation</code>, <code>isolation</code>, <code>timeout</code>, <code>readOnly</code>, <code>rollbackFor</code>, <code>noRollbackFor</code> — and its defaults (REQUIRED, ISOLATION_DEFAULT, read-write, rollback on unchecked only) are the baseline every later topic tweaks. Knowing what a bare <code>@Transactional</code> actually means is the foundation of every transaction interview.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+public class OrderService {
+  @Transactional                     // propagation=REQUIRED, rollback on RuntimeException/Error
+  public void placeOrder(Order o) {
+    inventory.reserve(o);            // same physical transaction
+    payments.charge(o);             // either both commit or both roll back
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html" rel="noopener">Using @Transactional — Spring Framework reference (settings table + proxy notes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/transaction-configuration-with-jpa-and-spring" rel="noopener">Transactions with Spring and JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=REXALUYxDIs" rel="noopener">Spring Transaction Management: End-to-End Guide — Java Techie</a></li>
+    </ul>
+
+    <h3>Propagation — all seven behaviours</h3>
+    <p>Propagation answers "what happens when a transactional method is called while a transaction is already running?" Spring defines seven behaviours. <code>REQUIRED</code> (default) joins the current transaction or starts one. <code>REQUIRES_NEW</code> always suspends any running transaction and runs an independent physical one — it commits or rolls back on its own. <code>NESTED</code> runs inside a JDBC savepoint of the outer transaction, so the inner part can roll back without killing the outer. <code>SUPPORTS</code> joins if a transaction exists, else runs non-transactionally. <code>NOT_SUPPORTED</code> suspends any transaction and runs without one. <code>MANDATORY</code> demands an existing transaction (else throws). <code>NEVER</code> forbids one (else throws).</p>
+    <p>Why it matters: this is the single most-asked Spring transaction topic in Indian interviews, and the favourite trap is REQUIRES_NEW vs NESTED. REQUIRES_NEW is a separate transaction on a separate connection (survives an outer rollback); NESTED is a savepoint in the same transaction (an outer rollback still discards it). Naming all seven and placing REQUIRED/REQUIRES_NEW/NESTED confidently is what senior answers do.</p>
+    <pre class="code-block" data-label="Java"><code>@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void writeAuditLog(AuditEvent e) {
+  // suspends the caller's transaction; this log commits even if the
+  // outer business transaction later rolls back
+  auditRepo.save(e);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html" rel="noopener">Transaction Propagation — Spring Framework reference (REQUIRED / REQUIRES_NEW / NESTED, physical vs logical)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/annotation/Propagation.html" rel="noopener">Propagation enum — Spring Framework Javadoc (all seven constants)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NKuo8hyIwgQ" rel="noopener">Spring Boot Transaction Propagation Explained — Java Techie</a></li>
+    </ul>
+
+    <h3>Isolation levels and the read anomalies</h3>
+    <p>Isolation controls how much of one in-flight transaction another can see, trading consistency against concurrency. Spring's <code>Isolation</code> enum maps to standard JDBC levels: <code>DEFAULT</code> (the database's own default), <code>READ_UNCOMMITTED</code> (allows dirty reads), <code>READ_COMMITTED</code> (blocks dirty reads — the common default for PostgreSQL and SQL Server), <code>REPEATABLE_READ</code> (also blocks non-repeatable reads — MySQL/InnoDB's default), and <code>SERIALIZABLE</code> (blocks phantom reads too, at the highest locking cost). The three anomalies to name are dirty read (reading uncommitted data), non-repeatable read (a row changes between two reads), and phantom read (a range query gains/loses rows).</p>
+    <p>Why it matters: interviewers pair each level with the anomalies it prevents, and expect you to know that <code>isolation</code> on <code>@Transactional</code> is honoured only when a new physical transaction is created (REQUIRED starting fresh, or REQUIRES_NEW) — a level set on a method that merely joins an existing transaction is ignored.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/annotation/Isolation.html" rel="noopener">Isolation enum — Spring Framework Javadoc (levels and the anomalies each blocks)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactional-propagation-isolation" rel="noopener">Transaction Propagation and Isolation in Spring @Transactional — Baeldung</a></li>
+    </ul>
+
+    <h3>Rollback rules and readOnly</h3>
+    <p>By default Spring rolls back only on unchecked exceptions (<code>RuntimeException</code> and <code>Error</code>) and <em>commits</em> on checked exceptions — the behaviour that surprises most developers the first time a checked exception leaves half-written data committed. Override it with <code>rollbackFor</code> (e.g. <code>rollbackFor = Exception.class</code> to roll back on checked exceptions too) and <code>noRollbackFor</code> to exempt specific types; the strongest matching rule wins. The <code>readOnly = true</code> flag is a hint — it lets JPA skip dirty-checking/flush and lets the driver or a routing DataSource send the work to a read replica, but it does not by itself forbid writes.</p>
+    <p>Why it matters: "which exceptions roll back by default, and how do you change it?" is a screening staple, and readOnly is a favourite performance follow-up. A related trap is <code>UnexpectedRollbackException</code> — see the pitfalls topic — thrown when a transaction you expected to commit was already marked rollback-only by an inner participant.</p>
+    <pre class="code-block" data-label="Java"><code>@Transactional(rollbackFor = Exception.class)      // roll back on checked exceptions too
+public void importFile(Path p) throws IOException { ... }
+
+@Transactional(readOnly = true)                     // skips JPA flush; can route to a replica
+public List&lt;Order&gt; recentOrders() { return repo.findRecent(); }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html" rel="noopener">Rolling Back a Declarative Transaction — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactions-read-only" rel="noopener">Using Transactions for Read-Only Operations — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-unexpected-rollback-exception" rel="noopener">Handling UnexpectedRollbackException in Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Self-invocation, programmatic transactions and other pitfalls</h3>
+    <p>Because declarative transactions are proxy-based, they only apply to calls that enter the bean <em>through</em> the proxy. The classic bug — self-invocation — is a method calling another <code>@Transactional</code> method of the same class via <code>this</code>: the second annotation is silently ignored because no proxy sits on that internal call. The same proxy limit means <code>@Transactional</code> does nothing on <code>private</code> methods (the CGLIB proxy cannot override them) and on <code>final</code> methods/classes. Fixes: move the inner method to a separate bean, self-inject the proxy, or switch to AspectJ weaving mode. When declarative control is not enough — conditional commits, fine-grained boundaries inside a loop — drop to programmatic transactions with <code>TransactionTemplate</code> or a <code>PlatformTransactionManager</code>.</p>
+    <p>Why it matters: self-invocation is, alongside propagation, the most-asked Spring transaction question in India, precisely because the code compiles, runs, and quietly does the wrong thing. Being able to explain <em>why</em> the proxy is bypassed and list the three fixes marks a candidate who has debugged it for real.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+public class ReportService {
+  public void run() {
+    generate();          // internal call via 'this' -> proxy bypassed, NO transaction
+  }
+  @Transactional
+  public void generate() { ... }   // annotation ignored when reached from run()
+}
+
+// Programmatic alternative when you need explicit control:
+transactionTemplate.execute(status -&gt; {
+  repo.save(entity);
+  if (shouldAbort) status.setRollbackOnly();
+  return null;
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/programmatic.html" rel="noopener">Programmatic Transaction Management — Spring Framework reference (TransactionTemplate, PlatformTransactionManager)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactional-annotation-private-method" rel="noopener">Does @Transactional Work on a Private Method? — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-programmatic-transaction-management" rel="noopener">Programmatic Transaction Management in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.marcobehler.com/guides/spring-transaction-management-transactional-in-depth" rel="noopener">Spring Transaction Management: @Transactional In-Depth — Marco Behler</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eWl8G7NDKqo" rel="noopener">How Spring @Transactional Works Internally (AOP, Proxies) — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-exception-handling.html">← Exception Handling</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="13-logging-cache-schedule.html">Logging, Caching and Scheduling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked Spring transaction questions in Indian interviews — propagation and self-invocation dominate, so both carry extra weight here:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Transactional do, and how does Spring implement it?</summary>
+      <div class="answer"><p>It makes a bean method run inside a database transaction: Spring wraps the bean in a proxy that starts a transaction before the method, commits after it returns, and rolls back on failure. You declare intent instead of writing begin/commit/rollback. It needs <code>@EnableTransactionManagement</code> (automatic in Spring Boot) and a <code>PlatformTransactionManager</code> bean.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the default propagation and isolation of @Transactional?</summary>
+      <div class="answer"><p>Propagation <code>REQUIRED</code> (join the current transaction or start a new one) and isolation <code>DEFAULT</code> (whatever the underlying database uses). It is also read-write and rolls back only on unchecked exceptions by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which exceptions trigger a rollback by default, and how do you change it?</summary>
+      <div class="answer"><p>By default only unchecked exceptions — <code>RuntimeException</code> and <code>Error</code> — roll back; checked exceptions commit. To roll back on a checked exception use <code>@Transactional(rollbackFor = Exception.class)</code>; to keep a runtime exception from rolling back use <code>noRollbackFor</code>. When rules overlap, the most specific matching rule wins.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does readOnly = true do?</summary>
+      <div class="answer"><p>It is an optimisation hint. It lets JPA/Hibernate skip dirty-checking and the flush at commit, and lets a driver or routing DataSource send the work to a read replica. It does not by itself forbid writes — it signals "no changes expected", it is not a hard guard.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain all seven propagation behaviours.</summary>
+      <div class="answer"><p><code>REQUIRED</code> — join current or create one (default). <code>REQUIRES_NEW</code> — suspend any current transaction and run an independent one. <code>NESTED</code> — run in a savepoint of the current transaction (inner can roll back alone). <code>SUPPORTS</code> — join if one exists, else run non-transactionally. <code>NOT_SUPPORTED</code> — suspend any current transaction and run without one. <code>MANDATORY</code> — must have a current transaction, else throw. <code>NEVER</code> — must not have one, else throw.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> REQUIRED vs REQUIRES_NEW — difference and a use case?</summary>
+      <div class="answer"><p>REQUIRED reuses the caller's transaction, so everything commits or rolls back together. REQUIRES_NEW suspends the caller's transaction and runs a separate physical one on its own connection, committing independently. Use REQUIRES_NEW for work that must persist regardless of the outer outcome — audit logs, failure records. Caveat: it holds a second connection, so size the pool accordingly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> NESTED vs REQUIRES_NEW — what is the real difference?</summary>
+      <div class="answer"><p>NESTED is a savepoint inside the same physical transaction: the inner part can roll back to the savepoint without aborting the outer, but if the outer rolls back the inner is discarded too, and they commit together. REQUIRES_NEW is a genuinely separate transaction that commits on its own and survives an outer rollback. NESTED needs JDBC savepoint support (e.g. <code>DataSourceTransactionManager</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the isolation levels and the anomalies each prevents.</summary>
+      <div class="answer"><p><code>READ_UNCOMMITTED</code> prevents nothing (dirty reads possible). <code>READ_COMMITTED</code> prevents dirty reads. <code>REPEATABLE_READ</code> also prevents non-repeatable reads. <code>SERIALIZABLE</code> also prevents phantom reads. The three anomalies: dirty read (reading uncommitted data), non-repeatable read (a row changes between two reads), phantom read (a range query gains or loses rows).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does @Transactional silently do nothing when a method is called from within the same class?</summary>
+      <div class="answer"><p>Self-invocation. Declarative transactions work through a proxy, and only calls that enter the bean through the proxy are intercepted. An internal call via <code>this</code> goes straight to the target method, bypassing the proxy, so the transaction advice never runs. The code compiles and executes — it just has no transaction, which is why it is such a common production bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does @Transactional work on private methods? Why or why not?</summary>
+      <div class="answer"><p>No. Spring's CGLIB proxy works by subclassing and overriding methods, and <code>private</code> methods cannot be overridden — the same reason <code>final</code> methods and classes are not advised. Only public (and, since Spring 6, protected/package-visible with class-based proxies) methods reached through the proxy get a transaction. Annotating a private method is silently ignored.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you use programmatic transactions instead of @Transactional?</summary>
+      <div class="answer"><p>When you need finer control than a method boundary: committing part of a loop, deciding at runtime whether to roll back, or multiple short transactions inside one method. Use <code>TransactionTemplate</code> (call <code>status.setRollbackOnly()</code> to abort) or a <code>PlatformTransactionManager</code> directly. Declarative stays the default; programmatic is the escape hatch.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you fix a self-invocation problem — list the options?</summary>
+      <div class="answer"><p>Three practical fixes: (1) move the transactional method into a separate bean and inject it, so the call crosses a proxy boundary; (2) self-inject the bean's own proxy (via <code>@Autowired</code> or <code>@Lazy</code>) and call through that reference; (3) switch to AspectJ weaving mode (<code>@EnableTransactionManagement(mode = AdviceMode.ASPECTJ)</code>), which weaves the advice into the bytecode so self-calls and even private methods are covered. Refactoring to a separate bean is usually the cleanest.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What causes UnexpectedRollbackException?</summary>
+      <div class="answer"><p>An inner REQUIRED method threw, marking the shared transaction rollback-only, but the caller caught the exception and tried to commit anyway. At commit time Spring sees the rollback-only flag, refuses to commit, and throws <code>UnexpectedRollbackException</code>. The lesson: with REQUIRED propagation, a failure anywhere in the logical transaction dooms the whole physical transaction — catching the inner exception does not undo the rollback marker. REQUIRES_NEW or NESTED isolates the failure if you truly need the outer to survive.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is the isolation level on a joining @Transactional method always applied?</summary>
+      <div class="answer"><p>No. Isolation (and timeout) apply only when that method actually starts a physical transaction. If it uses REQUIRED and simply joins an existing transaction, its declared isolation is silently ignored — the outer transaction's level stands. To guarantee a level, the method must create the transaction, e.g. REQUIRES_NEW, or be the outermost REQUIRED boundary. Spring can be configured to fail loudly on such conflicting declarations, but by default it ignores them.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.tx.transactional</li>
+      <li>spring.tx.pitfalls</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring AOP module: cross-cutting concerns, aspects, the five advice types, pointcut expressions, JDK vs CGLIB proxy mechanics and the self-invocation trap — with the best official Spring docs, Baeldung guides and videos, plus the interview questions they power.">
+  <title>Aspect-Oriented Programming — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Aspect-Oriented Programming</h1>
+  <p class="standfirst">Spring adds transactions, security, caching and logging to your beans by wrapping them in a proxy — and that same proxy is why a method calling its own annotated method silently skips the advice.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Aspect-Oriented Programming</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>AOP is how Spring modularizes cross-cutting concerns — the vocabulary (aspect, join point, advice, pointcut, weaving), the five advice types, and the AspectJ-style pointcut language. Underneath it all sits a runtime proxy, and understanding that proxy explains both how declarative features like <code>@Transactional</code> work and why they sometimes silently don't. The proxy mechanics (JDK vs CGLIB) and the self-invocation trap are the two most-tested AOP topics in Indian interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>What AOP is: cross-cutting concerns and the vocabulary</h3>
+    <p>Some concerns — logging, security checks, transactions, caching, metrics — cut across many unrelated classes. Scattering that code everywhere (tangling) and repeating it (scattering) is exactly what AOP removes: you write the behaviour once as an <em>aspect</em> and declare <em>where</em> it applies, leaving business methods clean. The core terms: an <strong>aspect</strong> modularizes the concern; a <strong>join point</strong> is a point in execution where behaviour can be inserted (in Spring AOP, always a method execution); <strong>advice</strong> is the code that runs there; a <strong>pointcut</strong> is the expression selecting which join points match; and <strong>weaving</strong> links aspects into the target — Spring does it at runtime via a proxy.</p>
+    <p>Why it matters: nearly every declarative feature you already use — <code>@Transactional</code>, <code>@Cacheable</code>, <code>@Async</code>, method security — is AOP under the hood. Knowing the vocabulary is what lets you reason about them instead of treating them as magic.</p>
+    <pre class="code-block" data-label="Java"><code>@Aspect                 // the aspect: a module of cross-cutting behaviour
+@Component              // register it as a Spring bean so it gets applied
+public class AuditAspect {
+  @Before("execution(* com.shop..*Service.*(..))")  // pointcut: which join points
+  public void audit() { /* advice: what runs at each matched join point */ }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop.html" rel="noopener">Aspect Oriented Programming with Spring — Spring Framework Reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop/introduction-defn.html" rel="noopener">AOP Concepts — Spring Framework Reference (the canonical definitions)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-aop" rel="noopener">Introduction to Spring AOP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QdyLsX0nG30" rel="noopener">Spring Tutorial 24 — Introduction to AOP — Java Brains</a></li>
+    </ul>
+
+    <h3>Advice: the five kinds and @Around</h3>
+    <p>Advice is where the behaviour lives, and its type decides <em>when</em> relative to the method it runs. <code>@Before</code> runs first; <code>@AfterReturning</code> only on a normal return (and can read the returned value); <code>@AfterThrowing</code> only when the method throws (and can bind the exception); <code>@After</code> always runs, like a <code>finally</code> block. <code>@Around</code> is the most powerful — it wraps the call, receives a <code>ProceedingJoinPoint</code>, and decides whether, when and with what arguments to invoke <code>proceed()</code>, plus it can transform the return value or the exception.</p>
+    <p>Why it matters: choosing the wrong advice type produces subtle bugs — timing/retry logic belongs in <code>@Around</code>, cleanup in <code>@After</code>, audit-on-success in <code>@AfterReturning</code>. Forgetting to call <code>proceed()</code> in <code>@Around</code> silently swallows the real method.</p>
+    <pre class="code-block" data-label="Java"><code>@Aspect
+@Component
+public class TimingAspect {
+  @Around("execution(* com.shop.service..*(..))")
+  public Object time(ProceedingJoinPoint pjp) throws Throwable {
+    long start = System.nanoTime();
+    try { return pjp.proceed(); }                 // run the real method
+    finally { log.info("{} ns for {}", System.nanoTime() - start, pjp.getSignature()); }
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html" rel="noopener">Declaring Advice — Spring Framework Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-aop-advice-tutorial" rel="noopener">Introduction to Advice Types in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RVvKPP5HyaA" rel="noopener">Logging with Spring AOP &amp; @Around Advice — Java Techie</a></li>
+    </ul>
+
+    <h3>Pointcut expressions and designators</h3>
+    <p>A pointcut is a predicate written in the AspectJ pointcut language. It starts with a <em>designator</em> (PCD): <code>execution(...)</code> matches method executions and is by far the most common; <code>within(...)</code> limits to a type or package; <code>@annotation(...)</code> matches methods carrying a given annotation; <code>args</code>, <code>this</code>, <code>target</code> and the Spring-specific <code>bean(...)</code> add more. Wildcards make them flexible — <code>*</code> for a single element, <code>..</code> for "any number of" packages or parameters. Named pointcuts (<code>@Pointcut</code>) let you define an expression once and combine them with <code>&amp;&amp;</code>, <code>||</code> and <code>!</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Pointcut("execution(* com.shop.service.*.*(..))")   // any method in a service class
+public void serviceLayer() {}
+
+@Before("serviceLayer() &amp;&amp; @annotation(org.springframework.transaction.annotation.Transactional)")
+public void check(JoinPoint jp) { /* runs before transactional service methods */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/pointcuts.html" rel="noopener">Declaring a Pointcut — Spring Framework Reference (all supported designators)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-aop-pointcut-tutorial" rel="noopener">Introduction to Pointcut Expressions in Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Proxy mechanics: JDK dynamic proxy vs CGLIB</h3>
+    <p>Spring AOP is proxy-based: when a bean needs advice, the container hands out a proxy that wraps the real object and applies the advice around each call. Two proxy strategies exist. If the target implements at least one interface, Spring creates a <strong>JDK dynamic proxy</strong> of those interfaces. If it implements none, Spring generates a <strong>CGLIB</strong> proxy — a runtime-generated subclass of the target. You can force CGLIB everywhere with <code>proxyTargetClass=true</code> (which Spring Boot enables by default). The trade-off: a JDK proxy is only assignable to the interface, so injecting the concrete class fails; CGLIB avoids that but cannot subclass <code>final</code> classes or override <code>final</code>/<code>private</code>/<code>static</code> methods.</p>
+    <p>Why it matters: this is the single most-asked AOP question. The "why do I get a proxy class, not my class?" confusion, the interface-vs-concrete injection failure, and the reason Spring Boot switched to CGLIB by default all trace back to these two mechanisms.</p>
+    <pre class="code-block" data-label="Java"><code>public interface PaymentService { void pay(); }   // implements interface -> JDK dynamic proxy
+public class ReportJob { public void run() {} }    // no interface        -> CGLIB subclass
+
+@Configuration
+@EnableAspectJAutoProxy(proxyTargetClass = true)   // force CGLIB even for interface-backed beans
+class AopConfig {}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop/proxying.html" rel="noopener">Proxying Mechanisms — Spring Framework Reference (JDK vs CGLIB selection rules)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-aop-vs-aspectj" rel="noopener">Comparing Spring AOP and AspectJ — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-dynamic-proxies" rel="noopener">Dynamic Proxies in Java — Baeldung (the JDK mechanism Spring builds on)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cglib" rel="noopener">Introduction to cglib — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yiinKulgm4U" rel="noopener">Spring Tutorial 35 — Understanding AOP Proxies — Java Brains</a></li>
+    </ul>
+
+    <h3>The self-invocation trap</h3>
+    <p>Because advice lives on the proxy and not on the target object, a bean method that calls another method of the <em>same</em> bean directly (<code>this.other()</code>) bypasses the proxy entirely — the second call never crosses the proxy boundary, so its <code>@Transactional</code>, <code>@Cacheable</code>, <code>@Async</code> or custom advice is simply ignored. No error is raised; the behaviour just doesn't happen. This is the classic "my transaction/cache isn't working and I can't see why" bug.</p>
+    <p>Why it matters: it is the second-most-asked AOP topic and a real production hazard. The fixes: move the inner method into a separate bean and inject it (cleanest); self-inject the bean into itself and call through that reference; use <code>AopContext.currentProxy()</code> with <code>exposeProxy=true</code>; or switch to AspectJ load-time/compile-time weaving, which weaves the class itself and has no proxy boundary.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+public class OrderService {
+  @Transactional
+  public void placeOrder() { audit(); }   // internal call -> goes to the raw target, NOT the proxy
+
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public void audit() { /* the REQUIRES_NEW transaction is never started */ }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop/introduction-proxies.html" rel="noopener">Understanding AOP Proxies — Spring Framework Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-aop-method-call-within-same-class" rel="noopener">Spring AOP and a Method Call Within the Same Class — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eWl8G7NDKqo" rel="noopener">How Spring @Transactional Works Internally (AOP, Proxies &amp; Debug) — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-bean-lifecycle.html">← Bean Lifecycle and Scopes</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="06-spel-events-profiles.html">SpEL, Events and Profiles →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The AOP questions asked most in Indian interviews — proxy mechanics and the self-invocation trap dominate the senior rounds:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is AOP and which problem does it solve?</summary>
+      <div class="answer"><p>A paradigm for modularizing cross-cutting concerns — logging, security, transactions, caching, metrics — that would otherwise be duplicated and scattered across many classes. You write the behaviour once as an aspect and declare where it applies, keeping business code focused on business logic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain aspect, join point, advice and pointcut.</summary>
+      <div class="answer"><p>Aspect: the module of cross-cutting behaviour. Join point: a point in execution where advice can run (in Spring AOP, always a method execution). Advice: the code that runs at a join point. Pointcut: the expression selecting which join points match.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What join points does Spring AOP support?</summary>
+      <div class="answer"><p>Only method execution on Spring-managed beans. Unlike full AspectJ it cannot advise field access, constructors, or static/final/private methods. For those you need AspectJ weaving instead of proxies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the five advice types.</summary>
+      <div class="answer"><p><code>@Before</code>, <code>@AfterReturning</code> (normal return only, can bind the value), <code>@AfterThrowing</code> (on exception, can bind it), <code>@After</code> (finally — always runs), and <code>@Around</code> (wraps the call and controls whether it proceeds).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between @After and @AfterReturning?</summary>
+      <div class="answer"><p><code>@After</code> runs whether the method returns normally or throws, like a <code>finally</code> block. <code>@AfterReturning</code> runs only on normal completion and can read the returned value; if the method throws it is skipped and <code>@AfterThrowing</code> fires instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is @Around advice and why does ProceedingJoinPoint matter?</summary>
+      <div class="answer"><p><code>@Around</code> wraps the target: code runs before and after, and you decide whether to call <code>pjp.proceed()</code>, alter its arguments, transform its return value, or translate exceptions. It is the only advice that receives <code>ProceedingJoinPoint</code> and must return a value — forgetting <code>proceed()</code> silently skips the real method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Break down the pointcut execution(* com.shop.service.*.*(..)).</summary>
+      <div class="answer"><p><code>execution</code> is the designator for method-execution join points; the first <code>*</code> matches any return type; <code>com.shop.service.*</code> any class in that package; <code>.*</code> any method name; <code>(..)</code> any number and type of parameters. Other common designators: <code>within</code>, <code>@annotation</code>, <code>args</code>, <code>bean</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Spring choose between a JDK dynamic proxy and a CGLIB proxy?</summary>
+      <div class="answer"><p>If the target implements at least one interface, Spring creates a JDK dynamic proxy of those interfaces; if it implements none, it generates a CGLIB subclass. You can force CGLIB with <code>proxyTargetClass=true</code>. Spring Boot sets that to true by default, so Boot apps use CGLIB even for interface-backed beans.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the consequences of a JDK proxy being interface-based?</summary>
+      <div class="answer"><p>The proxy is only assignable to the interface, not the concrete class, so injecting or casting to the concrete type fails. Methods not declared on the interface are not advised. Program to the interface, or use CGLIB — which in turn cannot proxy <code>final</code> classes or methods.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the self-invocation trap and why does it happen?</summary>
+      <div class="answer"><p>Advice lives on the proxy, not the target. When one method of a bean calls another method of the same bean directly (<code>this.other()</code>), the call goes to the raw target and never crosses the proxy — so <code>@Transactional</code>, <code>@Cacheable</code>, <code>@Async</code> on the inner method are ignored, with no error. It is the most common "why isn't my transaction/cache working?" bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you work around self-invocation?</summary>
+      <div class="answer"><p>Move the inner method into a separate bean and inject it (cleanest); self-inject the bean into itself and call through that reference; use <code>AopContext.currentProxy()</code> with <code>exposeProxy=true</code>; or switch to AspectJ load-time/compile-time weaving, which weaves the class itself so there is no proxy boundary.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Spring AOP vs AspectJ — the real differences?</summary>
+      <div class="answer"><p>Spring AOP: runtime, proxy-based, method-execution join points only, Spring beans only, no build step, subject to the self-invocation limitation. AspectJ: true bytecode weaving (compile-time or load-time), any join point including fields and constructors, any object, faster at runtime, but needs the weaver/agent. Spring AOP covers the large majority of enterprise needs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can CGLIB not proxy final or private methods, and how does that bite you?</summary>
+      <div class="answer"><p>CGLIB proxies by generating a runtime subclass and overriding methods; <code>final</code> classes can't be subclassed and <code>final</code>/<code>private</code>/<code>static</code> methods can't be overridden, so they can't be advised. A <code>@Transactional</code> on a final or private method is silently ignored — no error, just no advice. Keep advised methods public and non-final.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.aop.proxy</li>
+      <li>spring.aop.aspects</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

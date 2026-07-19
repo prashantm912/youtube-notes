@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring SpEL, Events and Profiles module: the expression language behind @Value, the Environment and property sources, the in-process application event bus (publish/@EventListener/async), and @Profile — with the best official and community resources plus the interview questions they power.">
+  <title>SpEL, Events and Profiles — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: SpEL, Events and Profiles</h1>
+  <p class="standfirst">Three quieter corners of the core container that senior interviews love: the expression language wired into your annotations, the in-process event bus that decouples beans, and the switch that swaps whole sets of beans per environment.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → SpEL, Events and Profiles</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>These are the container features you meet through annotations rather than APIs. The Spring Expression Language (SpEL) evaluates the <code>#{…}</code> inside <code>@Value</code> and <code>@EventListener(condition=…)</code>; the Environment abstraction resolves the <code>${…}</code> placeholders that inject configuration; the application event mechanism lets beans publish and listen without referencing each other; and <code>@Profile</code> registers different beans in dev, test and prod. Small features individually — but together they are where "I use Spring" becomes "I understand Spring".</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The Spring Expression Language (SpEL)</h3>
+    <p>SpEL is a runtime expression language for querying and manipulating an object graph — method calls, property access, collection selection/projection, ternary and Elvis operators, bean references (<code>@beanName</code>) and type references (<code>T(java.lang.Math)</code>). You rarely call the parser yourself; you meet SpEL as the <code>#{…}</code> syntax inside annotations such as <code>@Value</code>, <code>@Cacheable(key=…)</code>, Spring Security expressions and <code>@EventListener</code> conditions.</p>
+    <p>Why it matters: the distinction between <code>#{…}</code> (a SpEL expression, evaluated by an <code>ExpressionParser</code>) and <code>${…}</code> (a property placeholder, resolved from the Environment) is a classic interview trap — and knowing that a <code>StandardEvaluationContext</code> can invoke arbitrary methods is the difference between a convenient feature and an injection vulnerability.</p>
+    <pre class="code-block" data-label="Java"><code>@Value("#{ T(java.lang.Math).random() * 100.0 }")  // SpEL: evaluated at runtime
+private double seed;
+
+@Value("${app.retries:3}")                          // placeholder + default, from Environment
+private int retries;
+
+// Programmatic use is the same engine:
+Expression exp = new SpelExpressionParser().parseExpression("'hello'.toUpperCase()");
+String out = (String) exp.getValue();               // "HELLO"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/expressions.html" rel="noopener">Spring Expression Language (SpEL) — Spring Framework reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/expressions/evaluation.html" rel="noopener">SpEL evaluation — EvaluationContext, SimpleEvaluationContext vs StandardEvaluationContext, compilation — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-expression-language" rel="noopener">Spring Expression Language Guide — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0uvQQuxyAv4" rel="noopener">Spring Tips: the Spring Expression Language — SpringDeveloper (Josh Long)</a></li>
+    </ul>
+
+    <h3>The Environment: property sources and @Value</h3>
+    <p>The <code>Environment</code> abstraction unifies two things: the set of active profiles and a hierarchy of <em>property sources</em> (command-line args, system properties, environment variables, <code>application.properties</code>/<code>.yaml</code>, <code>@PropertySource</code> files). When Spring sees <code>${db.url}</code> it walks that ordered hierarchy — first source that has the key wins — which is exactly the precedence you must reason about when an environment variable mysteriously overrides your properties file.</p>
+    <p>Why it matters: <code>@Value("${key}")</code> injects a single resolved value into a field or constructor parameter; for a group of related keys, type-safe <code>@ConfigurationProperties</code> is preferred. Interviewers probe whether you can trace where a value came from, the resolution order, and how to supply a default (<code>${key:fallback}</code>).</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+class Mailer {
+  @Value("${mail.host}") String host;               // resolved from a PropertySource
+  private final Environment env;                     // or read programmatically
+  Mailer(Environment env) { this.env = env; }
+  void send() { int port = env.getProperty("mail.port", Integer.class, 25); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/external-config.html" rel="noopener">Externalized Configuration — property-source precedence, @Value, @ConfigurationProperties — Spring Boot reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/properties-with-spring" rel="noopener">Properties with Spring and Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-value-annotation" rel="noopener">A Quick Guide to Spring @Value — Baeldung</a></li>
+    </ul>
+
+    <h3>Application events: publish, @EventListener, async</h3>
+    <p>Spring's <code>ApplicationContext</code> is an event bus. A bean injects <code>ApplicationEventPublisher</code> and calls <code>publishEvent(...)</code>; any bean method annotated <code>@EventListener</code> receives it — no direct reference between publisher and listener. Since Spring 4.2 the event need not extend <code>ApplicationEvent</code> (any object works), a listener can filter with a SpEL <code>condition</code>, and the framework also fires built-in lifecycle events (<code>ContextRefreshedEvent</code>, <code>ContextClosedEvent</code>, and others).</p>
+    <p>Why it matters: events are <em>synchronous</em> by default — the publisher's thread runs every listener in turn, inside the same transaction. Add <code>@Async</code> (with <code>@EnableAsync</code>) to run a listener off-thread, or <code>@TransactionalEventListener</code> to fire only after the transaction commits. These trade-offs — ordering, exception propagation, transaction boundaries — are the heart of the interview follow-ups.</p>
+    <pre class="code-block" data-label="Java"><code>record OrderPlaced(String id) { }                    // plain event (Spring 4.2+)
+
+@Component class OrderService {
+  private final ApplicationEventPublisher pub;
+  OrderService(ApplicationEventPublisher pub) { this.pub = pub; }
+  void place(String id) { pub.publishEvent(new OrderPlaced(id)); }
+}
+
+@EventListener void onOrder(OrderPlaced e) { /* sync by default; add @Async to detach */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html" rel="noopener">Standard and Custom Events — Additional Capabilities of the ApplicationContext — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-events" rel="noopener">Spring Events — custom events, @EventListener, @TransactionalEventListener, async — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-context-events" rel="noopener">Spring Application Context Events — the built-in lifecycle events — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4oBqCtdRIYo" rel="noopener">A Deep Dive into Spring Application Events — Oliver Drotbohm (conference talk)</a></li>
+    </ul>
+
+    <h3>Profiles (@Profile)</h3>
+    <p>A profile is a named grouping of beans. Mark any <code>@Component</code>, <code>@Configuration</code> or <code>@Bean</code> method with <code>@Profile("dev")</code> and it is registered only when that profile is active — the mechanism behind swapping an embedded H2 datasource in development for a pooled production one. Profile strings support expressions: <code>!prod</code> (not prod), <code>dev | qa</code> (or), <code>prod &amp; cloud</code> (and).</p>
+    <p>Why it matters: profiles are activated declaratively via <code>spring.profiles.active</code> (a property, the <code>SPRING_PROFILES_ACTIVE</code> environment variable, or a <code>--spring.profiles.active=</code> command-line flag), or programmatically. The classic bug — a bean silently missing because its profile was never activated, giving a <code>NoSuchBeanDefinitionException</code> — is a favourite "what went wrong here" question.</p>
+    <pre class="code-block" data-label="Java"><code>@Configuration
+@Profile("!prod")                       // everything except prod; also "dev | qa", "prod &amp; cloud"
+class EmbeddedDbConfig {
+  @Bean DataSource dataSource() { return new EmbeddedDatabaseBuilder().build(); }
+}
+// activate: spring.profiles.active=prod   (property, env var, or --flag)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/environment.html" rel="noopener">Bean Definition Profiles and the Environment Abstraction — Spring Framework reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/profiles.html" rel="noopener">Profiles — activation, spring.profiles.active, groups and defaults — Spring Boot reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-profiles" rel="noopener">Spring Profiles — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-aop.html">← Aspect-Oriented Programming</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="07-mvc-fundamentals.html">Spring MVC Fundamentals →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Frequently asked in Indian Spring interviews — these three features separate rote annotation use from real container understanding, hardest last:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is SpEL and where do you actually use it?</summary>
+      <div class="answer"><p>The Spring Expression Language: a runtime expression language for querying/manipulating objects. You rarely call the parser directly — you meet it as <code>#{…}</code> inside annotations: <code>@Value</code>, <code>@Cacheable(key=…)</code>, Spring Security <code>@PreAuthorize</code>, and <code>@EventListener(condition=…)</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between #{...} and ${...}?</summary>
+      <div class="answer"><p><code>${…}</code> is a <em>property placeholder</em> resolved from the Environment's property sources (with an optional <code>${key:default}</code>). <code>#{…}</code> is a <em>SpEL expression</em> evaluated at runtime. They can nest: <code>@Value("#{'${csv.list}'.split(',')}")</code> resolves the property, then runs SpEL on it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are Spring profiles and why use them?</summary>
+      <div class="answer"><p>Named groupings of beans. <code>@Profile("dev")</code> registers a bean only when that profile is active, so you bootstrap environment-specific beans — an embedded DB for local, a pooled DataSource for prod — from the same codebase without conditionals.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you activate a profile?</summary>
+      <div class="answer"><p>Declaratively via the <code>spring.profiles.active</code> property — in <code>application.properties</code>, the <code>SPRING_PROFILES_ACTIVE</code> environment variable, or a <code>--spring.profiles.active=prod</code> command-line argument. Also programmatically with <code>SpringApplication.setAdditionalProfiles(...)</code> or the <code>Environment</code>. Multiple profiles are comma-separated.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Value do, and how do you give it a default?</summary>
+      <div class="answer"><p>Injects a resolved value (from a property source or a SpEL expression) into a field or constructor/method parameter. Default syntax: <code>@Value("${timeout.ms:2000}")</code> — if the key is absent the value after the colon is used, avoiding a startup failure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you publish and consume a custom application event?</summary>
+      <div class="answer"><p>Inject <code>ApplicationEventPublisher</code> and call <code>publishEvent(new MyEvent(...))</code>. Consume it with any bean method annotated <code>@EventListener</code> taking the event type as its parameter. Since Spring 4.2 the event need not extend <code>ApplicationEvent</code> — a plain object (or record) works.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Are application events synchronous or asynchronous? How do you change that?</summary>
+      <div class="answer"><p>Synchronous by default: the publisher's thread invokes every listener in sequence, within the same transaction, and blocks until they finish. To detach one listener, annotate it <code>@Async</code> (with <code>@EnableAsync</code> and a configured executor); to make all events async, register an <code>ApplicationEventMulticaster</code> backed by a task executor.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @EventListener vs implementing ApplicationListener?</summary>
+      <div class="answer"><p><code>@EventListener</code> is annotation-based: any public method, multiple event types, SpEL <code>condition</code>, ordering via <code>@Order</code>, no interface needed. <code>ApplicationListener&lt;E&gt;</code> is the typed interface and can be registered very early — it is the way to catch pre-refresh events like <code>ApplicationContextInitializedEvent</code> before annotated listeners exist.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is @TransactionalEventListener and when is it needed?</summary>
+      <div class="answer"><p>An <code>@EventListener</code> variant bound to a transaction phase — by default <code>AFTER_COMMIT</code>. It fires only if the publish happened inside a transaction, so side effects (send email, enqueue message) run only when the data actually committed, not on rollback. Set <code>fallbackExecution=true</code> to also run without a transaction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do @Profile expressions work?</summary>
+      <div class="answer"><p>The string is a profile expression: <code>!prod</code> (active when prod is not), <code>dev | qa</code> (either), <code>prod &amp; cloud</code> (both). This lets one annotation cover several environments — e.g. <code>@Profile("!prod")</code> on all non-production configuration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A bean is null / missing at runtime and you suspect profiles. What happened?</summary>
+      <div class="answer"><p>Its <code>@Profile</code> was never activated, so the definition was never registered — injecting it throws <code>NoSuchBeanDefinitionException</code> (or leaves an <code>@Autowired(required=false)</code> field null). Check the active profiles logged at startup, the <code>spring.profiles.active</code> value in each environment, and whether a "default" profile bean should cover the unconfigured case.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> If an @Async event listener throws, who sees the exception — and how does that differ from a sync listener?</summary>
+      <div class="answer"><p>A synchronous listener's exception propagates back to <code>publishEvent</code>, aborting the publish and any remaining listeners — and rolling back the caller's transaction. An <code>@Async</code> listener runs on another thread, so the exception never reaches the publisher; a void method routes it to the <code>AsyncUncaughtExceptionHandler</code>, and a returned <code>Future</code> would carry it. This is why async listeners need their own error handling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is a StandardEvaluationContext dangerous with untrusted input, and what do you use instead?</summary>
+      <div class="answer"><p><code>StandardEvaluationContext</code> exposes the full language — method and constructor invocation, <code>T(...)</code> type references — so a SpEL string built from user input can execute arbitrary code (the root of several Spring RCE CVEs). For data-binding or user-influenced expressions use <code>SimpleEvaluationContext</code>, which restricts to property access and a curated feature set. Never concatenate untrusted data into a SpEL expression.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist (module 06 — SpEL, Events and Profiles):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.core.spel</li>
+      <li>spring.core.spel.syntax-operators</li>
+      <li>spring.core.spel.evaluation-context</li>
+      <li>spring.core.spel.environment-propertysources</li>
+      <li>spring.core.spel.value-injection</li>
+      <li>spring.core.events</li>
+      <li>spring.core.events.publisher</li>
+      <li>spring.core.events.event-listener</li>
+      <li>spring.core.events.builtin-lifecycle</li>
+      <li>spring.core.events.async</li>
+      <li>spring.core.events.transactional</li>
+      <li>spring.core.profiles</li>
+      <li>spring.core.profiles.profile-annotation</li>
+      <li>spring.core.profiles.expressions</li>
+      <li>spring.core.profiles.activation</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

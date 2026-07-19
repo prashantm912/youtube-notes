@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Bean Lifecycle and Scopes module: the six bean scopes and their injection traps, init/destroy callbacks and their fixed order, and the container extension points (BeanPostProcessor, BeanFactoryPostProcessor, FactoryBean) — with official docs, Baeldung and video resources, plus the interview questions they power.">
+  <title>Bean Lifecycle and Scopes — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Bean Lifecycle and Scopes</h1>
+  <p class="standfirst">The container decides how many of each bean exist and when they are born and destroyed — and the mismatches between those decisions (a request bean inside a singleton, a prototype that never runs its destroy method) are among the most reliable filters in an Indian Spring interview.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Bean Lifecycle and Scopes</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Once the container knows a bean's definition, two questions remain: how many instances should exist and how long each should live (scope), and what code should run as each instance is initialized and torn down (lifecycle callbacks). This module orients you on both, plus the extension points — <code>BeanPostProcessor</code>, <code>BeanFactoryPostProcessor</code> and <code>FactoryBean</code> — through which Spring itself, and you, hook into that machinery. Depth lives in the linked official docs; the interview section shows why this is such heavily tested ground.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Bean scopes: singleton, prototype, request, session, application, websocket</h3>
+    <p>A scope governs how many instances the container creates and how long each lives. Spring ships six. <code>singleton</code> (the default) caches one shared instance per container; <code>prototype</code> returns a brand-new instance on every lookup. The remaining four are web-aware: <code>request</code>, <code>session</code>, <code>application</code> and <code>websocket</code> bind an instance to an HTTP request, an HTTP session, the ServletContext, or a WebSocket session respectively.</p>
+    <p>Why it matters: the questions that trip candidates are scope <em>mismatches</em>. A singleton is wired exactly once at startup, so if you inject a shorter-lived bean (a request/session bean, or a prototype) straight into it, the singleton captures one instance forever. The fix is to interpose a scoped proxy (<code>proxyMode</code>) or a provider (<code>ObjectProvider</code>, JSR-330 <code>Provider</code>) that resolves the correct instance per call. Note too that Spring's singleton is one-per-container, not the GoF one-per-JVM, and that the container never runs destroy callbacks on a prototype.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+@Scope("prototype")                    // new instance on every lookup
+class Engine { }
+
+@Component
+@Scope(value = "request",
+       proxyMode = ScopedProxyMode.TARGET_CLASS)  // proxy lets a singleton hold it safely
+class RequestContext { }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html" rel="noopener">Bean Scopes — Spring Framework Reference (all six scopes, scoped proxies, custom scopes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-bean-scopes" rel="noopener">Quick Guide to Spring Bean Scopes — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-inject-prototype-bean-into-singleton" rel="noopener">Injecting Prototype Beans into a Singleton Instance — Baeldung (the classic scoped-proxy problem)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NnNvDknQJt0" rel="noopener">Understanding Bean Scopes — Java Brains</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xpKbs8FHUi4" rel="noopener">Decoding Spring Bean Scopes (hands-on, interview-focused) — Selenium Express</a></li>
+    </ul>
+
+    <h3>Lifecycle callbacks: @PostConstruct/@PreDestroy, InitializingBean/DisposableBean</h3>
+    <p>Every managed bean travels create → inject dependencies → initialize → (in use) → destroy. You attach code to the two ends three ways: the JSR-250 annotations <code>@PostConstruct</code> and <code>@PreDestroy</code> (recommended — framework-agnostic), the Spring interfaces <code>InitializingBean.afterPropertiesSet()</code> and <code>DisposableBean.destroy()</code> (which couple your class to Spring), and the <code>initMethod</code>/<code>destroyMethod</code> attributes on <code>@Bean</code> (or <code>init-method</code>/<code>destroy-method</code> in XML). Alongside these, the <code>Aware</code> interfaces (<code>BeanNameAware</code>, <code>ApplicationContextAware</code>, and others) let a bean receive container infrastructure during the same initialization phase.</p>
+    <p>Why it matters: when a bean uses several of these at once, the order is fixed and gets asked directly — constructor, then <code>@PostConstruct</code>, then <code>afterPropertiesSet()</code>, then the custom init method; destruction mirrors it in reverse intent. Destroy callbacks fire only for beans the container manages to the end: singletons on context close (in a non-web app you must call <code>registerShutdownHook()</code>), and never prototypes. A neat detail that links this module together: <code>@PostConstruct</code> is itself invoked by a <code>BeanPostProcessor</code> (<code>CommonAnnotationBeanPostProcessor</code>).</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+class DataCache implements InitializingBean {
+    @PostConstruct
+    void warmUp() { }                 // 1. runs first
+    public void afterPropertiesSet() { } // 2. then this
+
+    @PreDestroy
+    void flush() { }                  // on singleton shutdown
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html" rel="noopener">Customizing the Nature of a Bean — Spring Framework Reference (InitializingBean/DisposableBean, Aware, Lifecycle)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/postconstruct-and-predestroy-annotations.html" rel="noopener">Using @PostConstruct and @PreDestroy — Spring Framework Reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-postconstruct-predestroy" rel="noopener">Spring @PostConstruct and @PreDestroy Annotations — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-shutdown-callbacks" rel="noopener">Spring Shutdown Callbacks — Baeldung (graceful destruction, shutdown hooks)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=g3bl7HJtBIw" rel="noopener">Bean Life Cycle: Initialization &amp; Destroy Callbacks — Selenium Express</a></li>
+    </ul>
+
+    <h3>Container extension points: BeanPostProcessor, BeanFactoryPostProcessor, FactoryBean</h3>
+    <p>Three interfaces let you extend the container itself. <code>BeanFactoryPostProcessor</code> runs after all bean definitions are loaded but before any bean is instantiated, so it edits the <em>blueprint</em> — the canonical example is <code>PropertySourcesPlaceholderConfigurer</code> resolving <code>${...}</code> placeholders. <code>BeanPostProcessor</code> runs on each already-instantiated bean, wrapping <code>postProcessBeforeInitialization</code>/<code>postProcessAfterInitialization</code> around the init callbacks; this is the hook through which <code>@Autowired</code>, <code>@PostConstruct</code> and AOP proxies are actually applied.</p>
+    <p>Why it matters: <code>FactoryBean</code> is a different idea — a bean that is itself a factory for some other object. Callers of <code>getBean("name")</code> receive its <code>getObject()</code> result, and you reach the factory instance itself with the <code>&amp;</code> prefix (<code>getBean("&amp;name")</code>). Because post-processors must exist before the beans they touch, a <code>@Bean</code> method that returns one should be declared <code>static</code>, so the container can build it without prematurely instantiating the rest of its <code>@Configuration</code> class — a favourite senior-round follow-up.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+class TimingBeanPostProcessor implements BeanPostProcessor {
+    public Object postProcessAfterInitialization(Object bean, String name) {
+        // inspect, wrap, or proxy every bean here, after its init callbacks
+        return bean;
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html" rel="noopener">Container Extension Points — Spring Framework Reference (BeanPostProcessor, BeanFactoryPostProcessor, FactoryBean)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-beanpostprocessor" rel="noopener">Spring BeanPostProcessor — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-factorybean" rel="noopener">How to Use the Spring FactoryBean — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-ycOZTpMkow" rel="noopener">Writing a BeanPostProcessor — Java Brains</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uVBg1vwUcdM" rel="noopener">BeanFactoryPostProcessor vs BeanPostProcessor (interview prep) — Selenium Express</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-di-mechanics.html">← Dependency Injection Mechanics</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="05-aop.html">Aspect-Oriented Programming →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Bean scopes and lifecycle are top-tier Indian interview territory — asked from screening rounds up to senior product-company panels:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a bean scope, and which scope is the default?</summary>
+      <div class="answer"><p>A scope defines how many instances of a bean the container creates and how long each lives. The default is <code>singleton</code> — one shared instance per Spring container, created eagerly at startup and cached for every injection point.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Singleton vs prototype scope?</summary>
+      <div class="answer"><p>Singleton: one instance per container, reused everywhere. Prototype: a fresh instance every time the bean is requested from the container. Singleton is managed through its whole lifecycle including destruction; for prototype the container creates and configures it, then hands it off and forgets it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Is Spring's singleton the same as the Gang of Four singleton pattern?</summary>
+      <div class="answer"><p>No. The GoF singleton enforces one instance per class loader / JVM via a private constructor. Spring's singleton is one instance per <em>container</em> keyed by bean name — the same class can have multiple beans, and two containers each get their own instance.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What do @PostConstruct and @PreDestroy do?</summary>
+      <div class="answer"><p>They mark methods to run at the ends of a bean's life: <code>@PostConstruct</code> after construction and dependency injection are complete (initialization work — open a connection, warm a cache), <code>@PreDestroy</code> just before the container removes the bean (cleanup). They are JSR-250 annotations from <code>jakarta.annotation</code>, preferred over Spring's own interfaces because they do not couple your code to the framework.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Name the web-aware scopes and what each is tied to.</summary>
+      <div class="answer"><p><code>request</code> — one instance per HTTP request; <code>session</code> — one per HTTP session; <code>application</code> — one per ServletContext (the whole web app); <code>websocket</code> — one per WebSocket session. They need a web-aware ApplicationContext and something like <code>RequestContextListener</code>/<code>RequestContextFilter</code> to bind the context.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> You inject a prototype bean into a singleton and expect a new instance each time — what actually happens, and how do you fix it?</summary>
+      <div class="answer"><p>Injection happens once, when the singleton is created, so it captures a single prototype instance forever. To get a fresh one per use, don't inject the bean directly — inject an <code>ObjectProvider</code>/JSR-330 <code>Provider</code> and call it each time, use method injection (<code>@Lookup</code>), or apply a scoped proxy. Same trap and fix for request/session beans in a singleton.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A bean has @PostConstruct, implements InitializingBean, and declares an init-method. What is the execution order?</summary>
+      <div class="answer"><p>Constructor → <code>@PostConstruct</code> method → <code>InitializingBean.afterPropertiesSet()</code> → the custom <code>init-method</code>. Destruction runs the mirror sequence: <code>@PreDestroy</code> → <code>DisposableBean.destroy()</code> → custom <code>destroy-method</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Three ways to hook init/destroy exist — which do you prefer and why?</summary>
+      <div class="answer"><p><code>@PostConstruct</code>/<code>@PreDestroy</code> are preferred: concise and framework-agnostic, so the bean stays a plain object. <code>InitializingBean</code>/<code>DisposableBean</code> couple the class to Spring interfaces. <code>init-method</code>/<code>destroy-method</code> keep the bean clean and are useful for third-party classes you cannot annotate. Avoid mixing all three on one bean.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Does Spring call destroy callbacks on prototype beans?</summary>
+      <div class="answer"><p>No. The container instantiates, populates and initializes a prototype (so <code>@PostConstruct</code> runs), then stops tracking it — it never calls <code>@PreDestroy</code>/<code>destroy()</code>. The client owns cleanup. If you must run destruction logic, do it yourself or use a custom <code>BeanPostProcessor</code>/destruction-aware mechanism.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a scoped proxy let a request/session bean live inside a singleton?</summary>
+      <div class="answer"><p>With <code>proxyMode = TARGET_CLASS</code> (or INTERFACES), Spring injects a CGLIB/JDK proxy instead of the real bean. The singleton holds the proxy permanently; on each method call the proxy looks up the actual instance for the current request/session from the scope and delegates to it. One stable reference, correct per-scope target.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a BeanPostProcessor, and name real ones Spring uses.</summary>
+      <div class="answer"><p>An interface with <code>postProcessBeforeInitialization</code> and <code>postProcessAfterInitialization</code> callbacks that fire around every bean's init phase, letting you modify or wrap instances. Spring's own: <code>AutowiredAnnotationBeanPostProcessor</code> (@Autowired), <code>CommonAnnotationBeanPostProcessor</code> (@PostConstruct/@PreDestroy/@Resource), and the AOP <code>AnnotationAwareAspectJAutoProxyCreator</code> that builds proxies.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> BeanPostProcessor vs BeanFactoryPostProcessor — difference and ordering?</summary>
+      <div class="answer"><p><code>BeanFactoryPostProcessor</code> operates on bean <em>definitions</em> (metadata) after they are loaded but before any bean is instantiated — e.g. resolving property placeholders. <code>BeanPostProcessor</code> operates on instantiated bean <em>instances</em> around initialization. BeanFactoryPostProcessors run first (they shape the definitions), then beans are created and BeanPostProcessors act on them. Multiple of each order via <code>Ordered</code>/<code>PriorityOrdered</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is a FactoryBean, and how do you get the factory itself instead of its product?</summary>
+      <div class="answer"><p>A <code>FactoryBean&lt;T&gt;</code> is a bean that produces another object; its <code>getObject()</code> result (not the FactoryBean) is what normal lookups and injection receive — useful for complex construction. To get the FactoryBean instance itself, prefix the name with an ampersand: <code>getBean("&amp;myBean")</code>. It exposes <code>getObject()</code>, <code>getObjectType()</code> and <code>isSingleton()</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Are Spring singleton beans thread-safe?</summary>
+      <div class="answer"><p>Not automatically — a singleton is shared across all threads, and Spring adds no synchronization. If it holds mutable instance state, concurrent requests race. Keep singletons stateless (the usual service/controller/repository style), push per-request state into locals, method parameters or a request-scoped bean, or synchronize explicitly. A very common India interview gotcha.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why should a @Bean method returning a BeanPostProcessor or BeanFactoryPostProcessor be declared static?</summary>
+      <div class="answer"><p>Post-processors must be instantiated very early, before the beans they act on. A non-static <code>@Bean</code> method forces Spring to instantiate its enclosing <code>@Configuration</code> class first — which can trigger premature creation of other beans before all post-processors are registered, so some beans skip processing (you often see a container log warning). Declaring the method <code>static</code> lets Spring create the processor without fully initializing the configuration class.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.life.scopes</li>
+      <li>spring.life.callbacks</li>
+      <li>spring.life.processors</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

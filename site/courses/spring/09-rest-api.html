@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring REST API module: @RestController and request mappings, ResponseEntity and HTTP status codes, content negotiation and message converters, HATEOAS awareness, and OpenAPI documentation with springdoc — the best official Spring docs and community resources, plus the interview questions they power.">
+  <title>REST API Development — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: REST API Development</h1>
+  <p class="standfirst">A REST controller is where Spring MVC stops rendering views and starts serializing objects — and the difference between a working endpoint and a well-designed API lives in the status codes, the media types, and the docs you ship alongside it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → REST API Development</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Building HTTP APIs on top of the DispatcherServlet you met earlier: <code>@RestController</code> and the mapping annotations, <code>ResponseEntity</code> for full control of status and headers, content negotiation and the <code>HttpMessageConverter</code> layer that turns your objects into JSON, plus two topics interviewers use to separate levels — HATEOAS awareness and documenting the API with OpenAPI via springdoc. Validation and exception design get their own modules next; here the focus is the response itself.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>@RestController and request mappings</h3>
+    <p><code>@RestController</code> is a meta-annotation: <code>@Controller</code> plus <code>@ResponseBody</code>, so every handler's return value is written straight to the response body instead of being resolved as a view name. The mapping annotations — <code>@GetMapping</code>, <code>@PostMapping</code>, <code>@PutMapping</code>, <code>@DeleteMapping</code>, <code>@PatchMapping</code> — are composed shortcuts for <code>@RequestMapping</code> with the HTTP method pre-set, and <code>@PathVariable</code>, <code>@RequestParam</code> and <code>@RequestBody</code> bind the URL and payload into method arguments.</p>
+    <p>Why it matters: this is the surface every Spring API is built on, and the first thing screened. Knowing that <code>@RestController</code> is just two older annotations fused together lets you explain why a plain <code>@Controller</code> returns a view name string while a REST one serializes the same string as a JSON body.</p>
+    <pre class="code-block" data-label="Java"><code>@RestController
+@RequestMapping("/api/users")
+class UserController {
+
+  @GetMapping("/{id}")                 // GET /api/users/42
+  User byId(@PathVariable Long id) {
+    return service.find(id);           // serialized to JSON automatically
+  }
+
+  @PostMapping                         // body deserialized by Jackson
+  User create(@RequestBody NewUser body) {
+    return service.save(body);
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/responsebody.html" rel="noopener">@ResponseBody — Spring Framework reference (why @RestController serializes returns)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-requestmapping.html" rel="noopener">Mapping Requests — Spring Framework reference (@GetMapping/@PostMapping, path variables, consumes/produces)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-controller-vs-restcontroller" rel="noopener">The Spring @Controller and @RestController Annotations — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zjhWPRXfGJ0" rel="noopener">RESTful Web Services — Spring REST, Spring Boot example — Telusko</a></li>
+    </ul>
+
+    <h3>ResponseEntity and HTTP status codes</h3>
+    <p>Returning a bare object always answers <code>200 OK</code>. <code>ResponseEntity&lt;T&gt;</code> is the escape hatch when you need to control the status line and headers too: <code>ResponseEntity.created(location)</code> for <code>201</code> with a <code>Location</code> header, <code>noContent()</code> for <code>204</code> on a delete, <code>notFound()</code> for <code>404</code>. Two alternatives round it out — <code>@ResponseStatus</code> on a method or exception (declarative, fixed code) and <code>ResponseStatusException</code> (programmatic, when the code varies at runtime).</p>
+    <p>Why it matters: correct status codes are the grammar of REST. Interviewers routinely ask which code a create, an update, a delete, or a missing resource should return, and whether you would hand a client an empty <code>200</code> or an honest <code>404</code> for something that does not exist.</p>
+    <pre class="code-block" data-label="Java"><code>@PostMapping
+ResponseEntity&lt;User&gt; create(@RequestBody NewUser body) {
+  User saved = service.save(body);
+  URI location = URI.create("/api/users/" + saved.id());
+  return ResponseEntity.created(location).body(saved);   // 201 + Location
+}
+
+// absence becomes 404, not an empty 200 body
+return service.find(id)
+    .map(ResponseEntity::ok)
+    .orElseGet(() -&gt; ResponseEntity.notFound().build());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/responseentity.html" rel="noopener">ResponseEntity — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-response-entity" rel="noopener">Using Spring ResponseEntity to Manipulate the HTTP Response — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-controller-custom-http-status-code" rel="noopener">Custom Status Codes from Spring Controllers — Baeldung (ResponseEntity vs @ResponseStatus vs ResponseStatusException)</a></li>
+    </ul>
+
+    <h3>Content negotiation and message converters</h3>
+    <p>How does a returned <code>User</code> become JSON? The <code>HttpMessageConverter</code> chain does it — Jackson's converter is registered by default when jackson-databind is on the classpath, so JSON is the out-of-the-box format; adding jackson-dataformat-xml enables XML. Which one a request gets is content negotiation: by default Spring reads the client's <code>Accept</code> header, and you can further constrain a handler with the <code>produces</code> and <code>consumes</code> attributes (<code>produces</code> matches <code>Accept</code>, <code>consumes</code> matches <code>Content-Type</code>).</p>
+    <p>Why it matters: candidates often know "Spring returns JSON" without knowing the mechanism. Naming the converter layer, explaining that path-extension negotiation is now discouraged in favour of the <code>Accept</code> header, and distinguishing <code>produces</code> from <code>consumes</code> is a clear intermediate signal.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-config/content-negotiation.html" rel="noopener">Content Types (content negotiation config) — Spring Framework reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/message-converters.html" rel="noopener">HTTP Message Conversion (HttpMessageConverter) — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-content-negotiation-json-xml" rel="noopener">Spring MVC Content Negotiation — Baeldung</a></li>
+    </ul>
+
+    <h3>HATEOAS awareness</h3>
+    <p>HATEOAS (Hypermedia as the Engine of Application State) is the top rung of the Richardson Maturity Model: responses carry links telling the client what it can do next, so navigation is not hard-coded into the caller. Spring HATEOAS supplies the building blocks — <code>RepresentationModel</code>, <code>EntityModel&lt;T&gt;</code>, <code>CollectionModel&lt;T&gt;</code>, the <code>Link</code> type, and <code>WebMvcLinkBuilder</code> (<code>linkTo</code>/<code>methodOn</code>) which derives URIs from your controller methods instead of string concatenation — and serializes to the HAL media type by default.</p>
+    <p>Why it matters: most production Spring APIs stop at level 2 (proper verbs and status codes) and never adopt hypermedia, so this is usually asked at awareness level — what HATEOAS is, where it sits in the maturity model, and the trade-off of added payload and client complexity for discoverability.</p>
+    <pre class="code-block" data-label="Java"><code>EntityModel&lt;User&gt; model = EntityModel.of(user,
+    linkTo(methodOn(UserController.class).byId(user.id())).withSelfRel(),
+    linkTo(methodOn(UserController.class).all()).withRel("users"));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-hateoas/docs/current/reference/html/" rel="noopener">Spring HATEOAS — Reference Documentation (RepresentationModel, links, HAL)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-hateoas-tutorial" rel="noopener">An Intro to Spring HATEOAS — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vvcANMpfr5I" rel="noopener">What is HATEOAS in REST? Spring MVC / Spring Boot example — Tech Primers</a></li>
+    </ul>
+
+    <h3>API documentation with OpenAPI (springdoc)</h3>
+    <p>An API nobody can read is half-built. OpenAPI 3 is the standard machine-readable description of a REST API, and springdoc-openapi generates it for Spring by inspecting your controllers at runtime — add the <code>springdoc-openapi-starter-webmvc-ui</code> dependency and the JSON spec appears at <code>/v3/api-docs</code> with an interactive Swagger UI at <code>/swagger-ui.html</code>. Annotations such as <code>@Operation</code>, <code>@ApiResponse</code>, <code>@Schema</code> and <code>@Tag</code> enrich the generated document.</p>
+    <p>Why it matters: springdoc is the current, actively maintained choice for Spring Boot 3, having replaced the now-dormant SpringFox. Knowing the modern library, the two default endpoints it exposes, and that documentation is derived from annotations rather than hand-written is a common practical question.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://springdoc.org/" rel="noopener">springdoc-openapi — official documentation (OpenAPI 3 and Swagger UI for Spring Boot)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-rest-openapi-documentation" rel="noopener">Documenting a Spring REST API Using OpenAPI 3.0 — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2o_3hjUPAfQ" rel="noopener">Spring Boot 3 — OpenAPI Documentation and Swagger UI — Ali Bouali</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-mvc-web.html">← Spring MVC: Interceptors and Web</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="10-validation.html">Validation →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked REST-in-Spring questions in Indian interviews — a near-guaranteed section once your resume says Spring Boot, from service-company screens to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is @RestController and how does it differ from @Controller?</summary>
+      <div class="answer"><p><code>@RestController</code> = <code>@Controller</code> + <code>@ResponseBody</code>. With <code>@Controller</code>, a returned String is treated as a view name; with <code>@RestController</code> every return value is serialized to the response body (JSON by default). Introduced in Spring 4.0 to remove the need to put <code>@ResponseBody</code> on every REST handler.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do @GetMapping, @PostMapping and friends actually do?</summary>
+      <div class="answer"><p>They are composed annotations — shortcuts for <code>@RequestMapping</code> with the HTTP method fixed (<code>@GetMapping</code> = <code>@RequestMapping(method = GET)</code>). They also accept <code>path</code>, <code>produces</code> and <code>consumes</code>, so you rarely write raw <code>@RequestMapping</code> on a handler method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you read the path, query parameters, and request body?</summary>
+      <div class="answer"><p><code>@PathVariable</code> binds a URI template segment (<code>/users/{id}</code>), <code>@RequestParam</code> binds a query string or form parameter (<code>?page=2</code>), and <code>@RequestBody</code> deserializes the request payload (JSON) into an object via the message converters. Headers bind with <code>@RequestHeader</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is ResponseEntity and when do you use it instead of returning the object?</summary>
+      <div class="answer"><p><code>ResponseEntity&lt;T&gt;</code> represents the whole response — status, headers and body — so you use it when you need to set a status other than 200 or add headers (like <code>Location</code>). For the common 200-with-body case, returning the object directly is cleaner; don't overuse ResponseEntity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which status codes fit create, update, delete and not-found?</summary>
+      <div class="answer"><p>Create: <code>201 Created</code> with a <code>Location</code> header. Successful update: <code>200</code> (body) or <code>204 No Content</code>. Delete: <code>204</code>. Missing resource: <code>404</code>. Bad input: <code>400</code>. Conflict (e.g. duplicate): <code>409</code>. Unhandled server error: <code>500</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Spring turn your returned object into JSON?</summary>
+      <div class="answer"><p>Through an <code>HttpMessageConverter</code> — specifically the Jackson converter, auto-registered when jackson-databind is on the classpath. The converter chain is chosen by content negotiation; the same mechanism deserializes <code>@RequestBody</code> on the way in. No jackson-databind means no automatic JSON.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is content negotiation and how does Spring decide JSON versus XML?</summary>
+      <div class="answer"><p>Spring picks the response media type from the request — by default the <code>Accept</code> header — and selects the matching converter. JSON is default; XML requires jackson-dataformat-xml (or JAXB). Path-extension negotiation exists but is discouraged for security reasons; the <code>Accept</code> header (or an explicit query parameter) is preferred.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between the produces and consumes attributes?</summary>
+      <div class="answer"><p><code>consumes</code> narrows a handler by the request's <code>Content-Type</code> (what the endpoint accepts, e.g. <code>application/json</code> on a POST). <code>produces</code> narrows by the request's <code>Accept</code> (what the endpoint can return). They let two handlers on the same URL serve different media types.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Three ways to set the HTTP status from a controller?</summary>
+      <div class="answer"><p><code>ResponseEntity</code> (programmatic, per-response), <code>@ResponseStatus</code> on a method or exception class (declarative, fixed code), and <code>ResponseStatusException</code> (programmatic, thrown at runtime when the code depends on logic). ResponseStatusException avoids creating an exception class per status.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> PUT versus PATCH, and which HTTP methods are idempotent?</summary>
+      <div class="answer"><p>PUT replaces the whole resource; PATCH applies a partial update. GET, PUT and DELETE are idempotent (repeating the call leaves the same server state); POST is not. Idempotency matters for safe client retries — a repeated PUT is harmless, a repeated POST may create duplicates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is HATEOAS and where does it sit in the Richardson Maturity Model?</summary>
+      <div class="answer"><p>HATEOAS is maturity level 3: responses embed hypermedia links describing available next actions, so clients follow links instead of hard-coding URIs. Spring HATEOAS provides <code>EntityModel</code>/<code>CollectionModel</code>, <code>Link</code> and <code>WebMvcLinkBuilder</code>, serializing to HAL. Most APIs stay at level 2 — the trade-off is discoverability and decoupling against heavier payloads and client complexity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you document a Spring REST API, and springdoc versus SpringFox?</summary>
+      <div class="answer"><p>Use springdoc-openapi: add <code>springdoc-openapi-starter-webmvc-ui</code> and it inspects controllers to emit an OpenAPI 3 spec at <code>/v3/api-docs</code> with Swagger UI at <code>/swagger-ui.html</code>; <code>@Operation</code>, <code>@ApiResponse</code> and <code>@Schema</code> refine it. springdoc is the maintained choice for Spring Boot 3 — SpringFox is effectively abandoned and does not support the modern stack.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.rest.controllers</li>
+      <li>spring.rest.docs</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

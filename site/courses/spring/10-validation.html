@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Validation module: Jakarta Bean Validation constraints, @Valid vs @Validated, error binding with BindingResult and MethodArgumentNotValidException, cascading, custom validators and validation groups — with the best official and community resources plus the interview questions they power.">
+  <title>Validation — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Validation</h1>
+  <p class="standfirst">A DTO's constraint annotations do nothing until something triggers them — and knowing exactly what <code>@Valid</code>, <code>@Validated</code> and <code>BindingResult</code> do at the controller boundary is what separates a passing Spring interview from a failing one.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Validation</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Validation in Spring is Jakarta Bean Validation (formerly JSR-380) driven by a provider — Hibernate Validator — that Spring wires up and runs for you. This module orients you on declaring constraints, the two annotations that trigger validation (<code>@Valid</code> vs <code>@Validated</code> — the single most-asked topic here), turning failures into clean HTTP responses, and the advanced tools: cascading into nested graphs, custom constraints, and validation groups.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Bean Validation and the standard constraint annotations</h3>
+    <p>Jakarta Bean Validation is a specification for declaring rules on object fields with annotations — <code>@NotNull</code>, <code>@Size</code>, <code>@Min</code>/<code>@Max</code>, <code>@Email</code>, <code>@Pattern</code>, <code>@Positive</code>, <code>@Past</code> and more. Spring does not implement the spec; it integrates a provider (Hibernate Validator, the reference implementation) and reads those annotations at runtime to produce a set of constraint violations. The constraints live on your DTO or entity, in one place, instead of being scattered across <code>if</code> checks.</p>
+    <p>Why it matters: declarative validation moves "is this input acceptable?" into the type itself. Interviewers probe the annotation vocabulary and especially the trio <code>@NotNull</code> / <code>@NotEmpty</code> / <code>@NotBlank</code> — null vs empty vs whitespace-only. One setup gotcha: since Spring Boot 2.3 you must add <code>spring-boot-starter-validation</code> explicitly to pull Hibernate Validator onto the classpath.</p>
+    <pre class="code-block" data-label="Java"><code>public record RegisterRequest(
+    @NotBlank String name,          // not null, not blank after trim
+    @Email    String email,
+    @Min(18)  int age,
+    @Size(min = 8, max = 64) String password) {}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html" rel="noopener">Java Bean Validation — Spring Framework reference (LocalValidatorFactoryBean, provider setup)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/bean-validation/3.1/" rel="noopener">Jakarta Validation 3.1 — the specification (Eclipse Foundation)</a></li>
+      <li>[Official] <a href="https://docs.hibernate.org/validator/8.0/reference/en-US/html_single/" rel="noopener">Hibernate Validator 8.0 Reference Guide — the full list of built-in constraints</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-validation" rel="noopener">Java Bean Validation Basics — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-bean-validation-not-null-empty-blank" rel="noopener">@NotNull vs @NotEmpty vs @NotBlank — Baeldung</a></li>
+    </ul>
+
+    <h3>Triggering validation: @Valid vs @Validated</h3>
+    <p>Constraints are inert until something asks the validator to run. In an MVC controller, annotate a <code>@RequestBody</code>, <code>@ModelAttribute</code> or <code>@RequestPart</code> parameter with <code>@Valid</code> (Jakarta) or <code>@Validated</code> (Spring) and Spring validates it before the handler body executes. To validate the parameters or return value of an ordinary Spring bean's methods (a <code>@Service</code>, say), you put <code>@Validated</code> on the class so a <code>MethodValidationPostProcessor</code> proxies it.</p>
+    <p>The distinction interviewers want: <code>@Valid</code> is standard Jakarta and drives <em>cascading</em> into nested objects; <code>@Validated</code> is Spring-only and adds <em>validation groups</em> (choose which constraints apply per use case), but it does not itself cascade — nested fields still need <code>@Valid</code>. Rule of thumb: reach for <code>@Valid</code> for ordinary and nested validation, and <code>@Validated</code> when you need groups or method-level validation on a bean.</p>
+    <pre class="code-block" data-label="Java"><code>@RestController
+@Validated                       // enables method-level &amp; group validation on this bean
+class UserController {
+  @PostMapping("/users")
+  ResponseEntity&lt;Void&gt; create(@Valid @RequestBody RegisterRequest req) { ... }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html" rel="noopener">Validation in annotated controllers — Spring MVC reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-valid-vs-validated" rel="noopener">Differences in @Valid and @Validated — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-service-layer-validation" rel="noopener">Validation in the service layer — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1jVzJCpTQI4" rel="noopener">@Valid vs @Validated explained — Spring Boot interview FAQ (YouTube)</a></li>
+    </ul>
+
+    <h3>Error binding: BindingResult and the error response</h3>
+    <p>When <code>@Valid</code> fails on a <code>@RequestBody</code>, Spring throws <code>MethodArgumentNotValidException</code>; its <code>BindingResult</code> carries the <code>FieldError</code> list (field name, rejected value, message). Alternatively, if you declare a <code>BindingResult</code> parameter <em>immediately after</em> the validated object, Spring hands control back to you instead of throwing — the classic pattern for server-rendered form pages where you re-display the form with errors.</p>
+    <p>For REST APIs, centralize the mapping in a <code>@RestControllerAdvice</code> with an <code>@ExceptionHandler</code> that turns <code>MethodArgumentNotValidException</code> into a 400 response with a field-to-message map (or a <code>ProblemDetail</code>, covered in the Exception Handling module). Note that constraints placed directly on method parameters fail with a different type — <code>ConstraintViolationException</code> (or <code>HandlerMethodValidationException</code> in current Spring) — a frequent source of "why isn't my handler catching it?" bugs.</p>
+    <pre class="code-block" data-label="Java"><code>@ExceptionHandler(MethodArgumentNotValidException.class)
+ResponseEntity&lt;Map&lt;String,String&gt;&gt; onInvalid(MethodArgumentNotValidException ex) {
+  Map&lt;String,String&gt; errors = new HashMap&lt;&gt;();
+  ex.getBindingResult().getFieldErrors()
+    .forEach(fe -&gt; errors.put(fe.getField(), fe.getDefaultMessage()));
+  return ResponseEntity.badRequest().body(errors);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/guides/gs/validating-form-input/" rel="noopener">Validating Form Input — official Spring guide (@Valid + BindingResult end to end)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-bean-validation" rel="noopener">Validation in Spring Boot — Baeldung (handling MethodArgumentNotValidException)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/springboot/spring-boot-validation-using-hibernate-validator/" rel="noopener">Spring Boot Validation using Hibernate Validator — GeeksforGeeks</a></li>
+    </ul>
+
+    <h3>Cascading and container-element validation</h3>
+    <p>Validation is not recursive by default. To validate a nested object graph you mark the nested field — or a collection's elements — with <code>@Valid</code>, which tells the provider to descend into it. Leave <code>@Valid</code> off, and an <code>@NotBlank</code> declared inside the nested type is never checked, even though the outer object validates cleanly.</p>
+    <p>Since Bean Validation 2.0 you can also constrain container elements directly: <code>List&lt;@Email String&gt;</code>, <code>Map&lt;@NotNull K, @Valid V&gt;</code>, <code>Optional&lt;@Positive Integer&gt;</code>. Validating a controller method that accepts a raw <code>List</code> of DTOs is a real-world snag — the list needs to be a wrapped/annotated container or a validated bean property for the elements to be checked.</p>
+    <pre class="code-block" data-label="Java"><code>class Order {
+  @NotNull Long id;
+  @Valid   Customer customer;               // descend into the nested object
+  @NotEmpty List&lt;@Valid OrderLine&gt; lines;   // validate every element
+}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/java-valid-annotation-child-objects" rel="noopener">@Valid annotation on child objects — Baeldung (cascaded/nested validation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-validate-list-controller" rel="noopener">Validating lists in a Spring controller — Baeldung</a></li>
+    </ul>
+
+    <h3>Custom constraint validators</h3>
+    <p>When the built-in constraints do not express your rule, define your own: an annotation meta-annotated with <code>@Constraint(validatedBy = ...)</code> plus a class implementing <code>ConstraintValidator</code> and its <code>isValid()</code> method. Because Spring instantiates the validator as a bean, you can inject other beans into it — for example a repository, to check that an email is not already registered.</p>
+    <p>Custom constraints can be field-level or class-level. A class-level validator sees the whole object, which is how cross-field rules like "password equals confirmPassword" are expressed. Prefer composing existing constraints where the logic allows; reach for a hand-written validator only when the rule is genuinely bespoke.</p>
+    <pre class="code-block" data-label="Java"><code>@Constraint(validatedBy = UniqueEmailValidator.class)
+@Target(FIELD) @Retention(RUNTIME)
+public @interface UniqueEmail {
+  String message() default "email already registered";
+  Class&lt;?&gt;[] groups()  default {};
+  Class&lt;? extends Payload&gt;[] payload() default {};
+}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-custom-validator" rel="noopener">Spring MVC custom validation — Baeldung (annotation + ConstraintValidator)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-custom-stateful-bean-validation" rel="noopener">Stateful custom bean validation with Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=P5sAaFY3O2w" rel="noopener">Creating a custom annotation for validation — Java Techie</a></li>
+    </ul>
+
+    <h3>Validation groups and group sequences</h3>
+    <p>A group is a marker interface used to tag constraints so you can validate a subset at a time. <code>@NotNull(groups = OnUpdate.class)</code> means "only enforce this when the OnUpdate group is active." You activate a group with <code>@Validated(OnUpdate.class)</code> — and because plain <code>@Valid</code> cannot select groups, this is the main reason to prefer <code>@Validated</code>. The unclassified default group is <code>jakarta.validation.groups.Default</code>.</p>
+    <p><code>@GroupSequence</code> orders groups so that cheap checks run before expensive ones, and later groups are skipped entirely once an earlier group produces a violation — for instance, skipping a database-uniqueness check when the field is already blank. This keeps a create form and an update form validating the same class under different rules without duplicating the DTO.</p>
+    <pre class="code-block" data-label="Java"><code>interface OnCreate {}
+class Account {
+  @Null(groups = OnCreate.class)   Long id;       // must be absent on create
+  @NotNull(groups = OnUpdate.class) Long version;  // required on update
+}
+// controller:  create(@Validated(OnCreate.class) @RequestBody Account a)</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/javax-validation-groups" rel="noopener">Grouping Jakarta validation constraints — Baeldung (groups + @GroupSequence)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/javax-validation-method-constraints" rel="noopener">Method constraints with Bean Validation — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-rest-api.html">← REST API Development</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="11-exception-handling.html">Exception Handling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The questions Indian interviewers actually ask about validation — <code>@Valid</code> vs <code>@Validated</code> leads almost every Spring screening round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Bean Validation and how does Spring use it?</summary>
+      <div class="answer"><p>Jakarta Bean Validation (formerly JSR-380) is a specification for declaring constraints on fields via annotations. Spring does not implement it — it integrates a provider (Hibernate Validator, the reference implementation), auto-configures a validator, and runs it when you ask (for example on an <code>@Valid</code> controller argument).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which dependency enables validation in Spring Boot, and why is it separate?</summary>
+      <div class="answer"><p><code>spring-boot-starter-validation</code>, which brings in Hibernate Validator. Since Spring Boot 2.3 it is no longer transitively included by the web starter, so a missing dependency is the usual reason <code>@Valid</code> silently does nothing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between @NotNull, @NotEmpty and @NotBlank?</summary>
+      <div class="answer"><p><code>@NotNull</code>: value must not be null (empty string passes). <code>@NotEmpty</code>: not null and size/length &gt; 0 (works on String, Collection, Map, array; a single space passes). <code>@NotBlank</code>: String only — not null and must contain at least one non-whitespace character.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you validate a JSON request body in a REST controller?</summary>
+      <div class="answer"><p>Put constraints on the DTO and annotate the parameter <code>@Valid @RequestBody Dto dto</code>. Spring runs the validator before the handler body; on failure it throws <code>MethodArgumentNotValidException</code>, which you translate to a 400 response.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @Valid vs @Validated — the key differences?</summary>
+      <div class="answer"><p><code>@Valid</code> is standard Jakarta: it triggers validation and cascades into nested objects, but cannot select groups. <code>@Validated</code> is Spring-specific: it supports validation groups and, placed on a class, enables method-level validation via a proxy — but it does not cascade by itself. Use <code>@Valid</code> for ordinary/nested validation, <code>@Validated</code> when you need groups or method validation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What exception is thrown when @Valid on a @RequestBody fails, and how do you return a clean 400?</summary>
+      <div class="answer"><p><code>MethodArgumentNotValidException</code>. Handle it in a <code>@RestControllerAdvice</code> / <code>@ExceptionHandler</code>, read <code>ex.getBindingResult().getFieldErrors()</code>, and build a field-to-message map (or a <code>ProblemDetail</code>) returned with status 400.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you validate nested objects and the elements of a collection?</summary>
+      <div class="answer"><p>Validation is not recursive: mark the nested field with <code>@Valid</code> to descend into it, and use container-element syntax such as <code>List&lt;@Valid OrderLine&gt;</code> or <code>List&lt;@Email String&gt;</code> (Bean Validation 2.0+) to validate each element. Without <code>@Valid</code> on the field, inner constraints are skipped.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do validation groups work and when do you need them?</summary>
+      <div class="answer"><p>Groups are marker interfaces that tag constraints, e.g. <code>@NotNull(groups = OnUpdate.class)</code>. Activate a group with <code>@Validated(OnUpdate.class)</code> so only that group's constraints fire. They let one DTO carry different rules for create vs update flows without duplicating the class. Plain <code>@Valid</code> cannot select groups.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you write a custom constraint that also checks the database?</summary>
+      <div class="answer"><p>Define an annotation meta-annotated with <code>@Constraint(validatedBy = ...)</code> and a <code>ConstraintValidator</code> implementing <code>isValid()</code>. Since Spring creates the validator as a bean, you can <code>@Autowired</code> a repository into it to check, say, email uniqueness. Class-level validators handle cross-field rules like matching passwords.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is BindingResult and when would you inject it instead of letting Spring throw?</summary>
+      <div class="answer"><p><code>BindingResult</code> holds the outcome of binding and validation — field errors, global errors, rejected values. Declared as the parameter <em>immediately after</em> the validated object, it suppresses the thrown exception and lets the handler inspect errors itself — the standard approach for re-rendering a server-side form rather than returning JSON.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does @NotNull on a @Service method parameter not fire unless the class is @Validated, and which exception differs?</summary>
+      <div class="answer"><p>Method-level (parameter/return) validation is applied by a <code>MethodValidationPostProcessor</code> that only proxies beans annotated <code>@Validated</code> at class level. Without it, parameter constraints are ignored. When it does fire, a violation surfaces as <code>ConstraintViolationException</code> (or <code>HandlerMethodValidationException</code> for controller method parameters in current Spring) — not <code>MethodArgumentNotValidException</code> — so your <code>@RequestBody</code> handler won't catch it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can @Validated cascade into nested objects, and how do groups plus cascading interact?</summary>
+      <div class="answer"><p>No — <code>@Validated</code> selects groups but does not cascade; nested fields still need <code>@Valid</code>. Note that <code>@Valid</code> on a nested field cascades using the currently active group(s); if the nested constraints are tagged to a specific group, they only fire when that group is active. Mixing the two on the same graph is a common source of "my nested validation didn't run" tickets.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you internationalize or customize validation messages?</summary>
+      <div class="answer"><p>Give each constraint a <code>message</code> that is a resource key in braces, e.g. <code>@Size(message = "{user.name.size}")</code>, and provide values in <code>ValidationMessages.properties</code> (per-locale). Wire a <code>LocalValidatorFactoryBean</code> to Spring's <code>MessageSource</code> so messages resolve through your i18n bundles, and use EL placeholders like <code>{min}</code>/<code>{max}</code> and <code>${validatedValue}</code> for interpolation.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.valid.constraints</li>
+      <li>spring.valid.usage</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring MVC web-layer module: HandlerInterceptors and their lifecycle, filters vs interceptors, serving static resources, view resolution and multipart file uploads — with official docs, Baeldung guides and the interview questions they power.">
+  <title>Spring MVC: Interceptors and Web — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Spring MVC — Interceptors and Web</h1>
+  <p class="standfirst">Once the DispatcherServlet has routed a request, the web layer still has real work left: cross-cutting interceptors, the servlet filters running beneath them, static assets, view rendering and file uploads — and telling a filter from an interceptor is one of Spring MVC's most-asked interview questions.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Spring MVC: Interceptors and Web</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module rounds out Spring MVC beyond routing and controllers. It covers the <code>HandlerInterceptor</code> and its three-phase lifecycle, how interceptors differ from plain servlet <code>Filter</code>s (the single most common web-layer interview question), how the framework serves and fingerprints static resources, how view names become rendered pages through the <code>ViewResolver</code> chain, and how multipart requests turn into <code>MultipartFile</code> uploads. Everything here sits inside — or just outside — the DispatcherServlet you met in the previous module.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>HandlerInterceptor and its lifecycle</h3>
+    <p>A <code>HandlerInterceptor</code> wraps controller execution with three callbacks: <code>preHandle</code> runs before the handler and returns a boolean (return <code>false</code> to short-circuit the request), <code>postHandle</code> runs after the handler but before the view renders and can still tweak the <code>ModelAndView</code>, and <code>afterCompletion</code> runs after rendering finishes — even when an exception was thrown — which makes it the right place for cleanup and timing. Interceptors are Spring-managed, so they see the resolved handler and can be scoped to URL patterns.</p>
+    <p>Why it matters: interceptors are where you put cross-cutting concerns that are specific to your application and need handler context — request timing, auditing, populating a per-request locale or tenant, or logging with an MDC. You register them declaratively through <code>WebMvcConfigurer.addInterceptors</code>, with include/exclude path patterns, rather than wiring them into every controller.</p>
+    <pre class="code-block" data-label="Java"><code>@Configuration
+class WebConfig implements WebMvcConfigurer {
+  @Override
+  public void addInterceptors(InterceptorRegistry registry) {
+    registry.addInterceptor(new TimingInterceptor())
+            .addPathPatterns("/api/**")        // only these
+            .excludePathPatterns("/api/health"); // but not this
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-config/interceptors.html" rel="noopener">Interceptors — Spring Framework Reference (MVC Config: addInterceptors, InterceptorRegistry)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/HandlerInterceptor.html" rel="noopener">HandlerInterceptor — Spring Framework Javadoc (preHandle / postHandle / afterCompletion contract)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-handlerinterceptor" rel="noopener">Introduction to Spring MVC HandlerInterceptor — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SBDZS-WXtW4" rel="noopener">Spring Boot Interceptor — Handler Interceptor with Web MVC config — Almighty Java</a></li>
+    </ul>
+
+    <h3>Filters vs interceptors</h3>
+    <p>Both intercept requests, but they live in different worlds. A servlet <code>Filter</code> belongs to the Servlet container: it runs on the raw <code>HttpServletRequest</code>/<code>Response</code> before the DispatcherServlet even sees the request, knows nothing about which controller will handle it, and can wrap or replace the request/response. A <code>HandlerInterceptor</code> lives inside the DispatcherServlet: it runs after handler mapping, so it knows the target handler, participates in the model/view phase, and is scoped by Spring MVC path patterns. Filters can do things interceptors cannot — modify the response body via wrapping, apply to <em>every</em> servlet request including static resources — while interceptors get handler context filters lack.</p>
+    <p>Why it matters: this comparison is a staple of Indian backend interviews, and the practical rule follows from the architecture. Use a filter for concerns that are truly container-level and handler-agnostic (security, CORS, request-ID/MDC setup, compression, ETag); this is exactly why Spring Security is built on the filter chain and works even outside Spring MVC. Use an interceptor when you need the resolved handler or the <code>ModelAndView</code>. Extend <code>OncePerRequestFilter</code> so a filter is not re-invoked across async dispatches and forwards.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+class RequestIdFilter extends OncePerRequestFilter {
+  @Override
+  protected void doFilterInternal(HttpServletRequest req,
+      HttpServletResponse res, FilterChain chain)
+      throws ServletException, IOException {
+    MDC.put("requestId", UUID.randomUUID().toString());
+    chain.doFilter(req, res);   // hand control down the chain
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/filters.html" rel="noopener">Filters — Spring Framework Reference (FormContentFilter, ForwardedHeaderFilter, ShallowEtagHeaderFilter, CorsFilter, OncePerRequestFilter)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-handlerinterceptor-vs-filter" rel="noopener">HandlerInterceptors vs. Filters in Spring MVC — Baeldung (the definitive side-by-side)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-onceperrequestfilter" rel="noopener">What Is OncePerRequestFilter? — Baeldung</a></li>
+    </ul>
+
+    <h3>Serving static resources</h3>
+    <p>Spring MVC serves CSS, JavaScript, images and other static files through a dedicated <code>ResourceHttpRequestHandler</code>, configured with <code>addResourceHandlers</code>: you map a URL pattern such as <code>/assets/**</code> to one or more locations (a classpath folder, the web root, or WebJars) and set cache headers. On top of that, a resource chain of <code>ResourceResolver</code>s and <code>ResourceTransformer</code>s adds production features — most importantly content-based versioning (fingerprinting) via <code>VersionResourceResolver</code>, so <code>app.js</code> is served as <code>app-8e0f...js</code> and can be cached for a year without stale-asset problems.</p>
+    <p>Why it matters: static handling is where caching, cache-busting and CDN-friendly URLs are decided. In Spring Boot the defaults already serve <code>classpath:/static</code>, <code>/public</code>, <code>/resources</code> and <code>/META-INF/resources</code>, but interviewers expect you to know how to override locations, set <code>CacheControl</code>, and enable fingerprinting for the frontend build output.</p>
+    <pre class="code-block" data-label="Java"><code>@Override
+public void addResourceHandlers(ResourceHandlerRegistry registry) {
+  registry.addResourceHandler("/assets/**")
+          .addResourceLocations("classpath:/static/")
+          .setCacheControl(CacheControl.maxAge(Duration.ofDays(365)))
+          .resourceChain(true)
+          .addResolver(new VersionResourceResolver()
+              .addContentVersionStrategy("/**")); // fingerprinting
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-config/static-resources.html" rel="noopener">Static Resources — Spring Framework Reference (ResourceHandlerRegistry, resource chain, VersionResourceResolver, WebJars)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-static-resources" rel="noopener">Serve Static Resources with Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cachable-static-assets-with-spring-mvc" rel="noopener">Cachable Static Assets with Spring MVC — Baeldung (fingerprinting in depth)</a></li>
+    </ul>
+
+    <h3>View resolution</h3>
+    <p>When a controller returns a logical view name like <code>"orders"</code>, a <code>ViewResolver</code> turns that string into an actual <code>View</code> that renders the response. <code>InternalResourceViewResolver</code> maps names to JSPs with a prefix/suffix (<code>/WEB-INF/views/</code> + <code>.jsp</code>); dedicated resolvers exist for Thymeleaf, FreeMarker and others; and <code>ContentNegotiatingViewResolver</code> picks a view by the requested media type. Two prefixes bypass the mapping entirely: <code>redirect:</code> issues an HTTP redirect and <code>forward:</code> forwards the request server-side. Multiple resolvers can be chained by <code>order</code>, with the JSP resolver placed last because it cannot report that a view is missing.</p>
+    <p>Why it matters: view resolution is the server-rendered half of Spring MVC — still common for admin panels, emails and classic web apps even in an API-first world. Knowing prefix/suffix mapping, the <code>redirect:</code>/<code>forward:</code> prefixes, and why resolver ordering matters heads off the classic "circular view path" error and explains how the same controller can serve HTML or a downloadable view by content negotiation.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+InternalResourceViewResolver viewResolver() {
+  var r = new InternalResourceViewResolver();
+  r.setPrefix("/WEB-INF/views/");
+  r.setSuffix(".jsp");
+  return r;                       // "orders" -&gt; /WEB-INF/views/orders.jsp
+}
+// return "redirect:/orders/42"  -&gt; 302 to the client
+// return "forward:/legacy"      -&gt; server-side forward, URL unchanged</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/viewresolver.html" rel="noopener">View Resolution — Spring Framework Reference (ViewResolver implementations, redirect:/forward:, chaining)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc-view.html" rel="noopener">View Technologies — Spring Framework Reference (Thymeleaf, FreeMarker, JSP/JSTL and more)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-view-resolver-tutorial" rel="noopener">A Guide to the ViewResolver in Spring MVC — Baeldung</a></li>
+    </ul>
+
+    <h3>Multipart and file uploads</h3>
+    <p>Multipart requests (<code>multipart/form-data</code>) carry file uploads. Spring MVC resolves them through a <code>MultipartResolver</code> strategy — the modern default, <code>StandardServletMultipartResolver</code>, delegates to the Servlet container's own parsing configured by <code>MultipartConfigElement</code> (temp location, max file size, max request size). Once resolved, each uploaded part is exposed to your controller as a <code>MultipartFile</code>: bind a simple field with <code>@RequestParam("file") MultipartFile</code>, accept several with <code>List&lt;MultipartFile&gt;</code>, and use <code>@RequestPart</code> when a part is itself structured data (for example JSON metadata alongside the binary file). <code>MultipartFile</code> gives you the original filename, content type, size, bytes/stream and a convenient <code>transferTo</code>.</p>
+    <p>Why it matters: upload endpoints are everywhere — avatars, documents, bulk imports — and the interview follow-ups are predictable: how size limits are enforced, the difference between <code>@RequestParam</code> and <code>@RequestPart</code>, and where the temp file lives. Getting the resolver and container limits right is also a security and reliability concern, not just a convenience.</p>
+    <pre class="code-block" data-label="Java"><code>@PostMapping("/upload")
+public String upload(@RequestParam("file") MultipartFile file)
+    throws IOException {
+  if (!file.isEmpty()) {
+    file.transferTo(Path.of("/data", file.getOriginalFilename()));
+  }
+  return "redirect:/files";
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/multipart.html" rel="noopener">Multipart Resolver — Spring Framework Reference (MultipartResolver, StandardServletMultipartResolver, MultipartConfigElement)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/multipart-forms.html" rel="noopener">Multipart Handler Methods — Spring Framework Reference (@RequestParam / @RequestPart with MultipartFile)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-file-upload" rel="noopener">File Upload with Spring MVC — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XUL60-Ke-L8" rel="noopener">Spring Boot File Upload and Download REST API — JavaTechie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-mvc-fundamentals.html">← Spring MVC Fundamentals</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="09-rest-api.html">REST API Development →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The web-layer questions that recur across Indian Spring/Java interviews — from screening rounds to product-company deep dives; filters vs interceptors is almost guaranteed:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a HandlerInterceptor and where does it sit in the request flow?</summary>
+      <div class="answer"><p>A Spring MVC component that wraps controller execution. It runs inside the DispatcherServlet, after handler mapping has chosen the controller, so it has access to the resolved handler and to the model/view. It is the place for application-specific cross-cutting logic like timing, auditing or per-request logging.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three HandlerInterceptor methods and when does each run?</summary>
+      <div class="answer"><p><code>preHandle</code> — before the controller; returns a boolean, and <code>false</code> stops the request. <code>postHandle</code> — after the controller but before the view renders; can modify the <code>ModelAndView</code>. <code>afterCompletion</code> — after the view has rendered (or an exception occurred); used for cleanup. All three are default methods, so you override only what you need.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you register an interceptor and limit it to certain URLs?</summary>
+      <div class="answer"><p>Implement <code>WebMvcConfigurer</code> and override <code>addInterceptors(InterceptorRegistry)</code>, calling <code>registry.addInterceptor(...)</code> and chaining <code>addPathPatterns</code> / <code>excludePathPatterns</code>. This is declarative — you never wire interceptors into individual controllers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Filter vs interceptor — what are the real differences and when do you use each?</summary>
+      <div class="answer"><p>A servlet <code>Filter</code> is container-level: it runs before the DispatcherServlet, on the raw request/response, knows nothing about the target handler, and applies to every servlet request (including static resources). A <code>HandlerInterceptor</code> is Spring MVC-level: it runs after handler mapping, knows the handler, can touch the <code>ModelAndView</code>, and is scoped by MVC path patterns. Use a filter for handler-agnostic, container-wide concerns (security, CORS, request-ID/MDC, compression, ETag); use an interceptor when you need the handler or view context. Only a filter can wrap/replace the request or response.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> If preHandle returns false, what happens to the rest of the chain?</summary>
+      <div class="answer"><p>The request is short-circuited: the controller and the remaining interceptors' <code>preHandle</code> methods are not invoked, and the view is not rendered. You are expected to have written the response yourself (for example a 401). <code>afterCompletion</code> is called only for interceptors whose <code>preHandle</code> already returned <code>true</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> postHandle vs afterCompletion for cleanup — which and why?</summary>
+      <div class="answer"><p><code>afterCompletion</code>. It always runs once processing is done — including when the handler or view threw — and it receives the exception, so resources are released reliably. <code>postHandle</code> runs only on the success path before rendering and is skipped when an exception occurs, so it is unsafe for cleanup. Note both fire in reverse registration order.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Spring serve static resources, and how do you add a custom location?</summary>
+      <div class="answer"><p>Through <code>ResourceHttpRequestHandler</code>, configured via <code>addResourceHandlers</code>: map a pattern like <code>/assets/**</code> to locations such as <code>classpath:/static/</code> and set <code>CacheControl</code>. Spring Boot serves <code>/static</code>, <code>/public</code>, <code>/resources</code> and <code>/META-INF/resources</code> by default; you override the pattern with <code>spring.mvc.static-path-pattern</code> and locations with <code>spring.web.resources.static-locations</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a ViewResolver, and how does InternalResourceViewResolver map a name to a page?</summary>
+      <div class="answer"><p>A <code>ViewResolver</code> converts a logical view name returned by a controller into a <code>View</code> that renders the response. <code>InternalResourceViewResolver</code> applies a prefix and suffix, so <code>"orders"</code> becomes <code>/WEB-INF/views/orders.jsp</code>. The <code>redirect:</code> and <code>forward:</code> prefixes bypass this to trigger a client redirect or a server-side forward.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does file upload work in Spring MVC, and what does MultipartFile give you?</summary>
+      <div class="answer"><p>A <code>MultipartResolver</code> (the default <code>StandardServletMultipartResolver</code> delegates to the Servlet container) parses <code>multipart/form-data</code> and exposes each part. In the controller you receive a <code>MultipartFile</code> via <code>@RequestParam("file")</code>, giving you the original filename, content type, size, byte/stream access and <code>transferTo</code> to persist it. Size limits are set through <code>MultipartConfigElement</code> / properties.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @RequestParam vs @RequestPart for multipart uploads?</summary>
+      <div class="answer"><p><code>@RequestParam</code> treats the part as a simple value — ideal for a <code>MultipartFile</code> or a plain form field. <code>@RequestPart</code> is for a structured part: it runs the matching <code>HttpMessageConverter</code> (for example Jackson) so you can bind a JSON metadata part to an object while a separate part carries the binary file, and it supports <code>@Valid</code> on that object.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is Spring Security implemented as a servlet filter chain rather than as interceptors?</summary>
+      <div class="answer"><p>Because authentication and authorization must apply to every request before it reaches Spring MVC — including static resources, error dispatches and non-MVC servlets — and may need to wrap or halt the request/response entirely. Filters run at the container boundary and are independent of handler mapping, so security is enforced even when no controller would match. Interceptors run too late (after mapping) and are scoped to MVC paths, so they cannot provide the same guarantee.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why extend OncePerRequestFilter, and how do interceptors behave across async and forward dispatches?</summary>
+      <div class="answer"><p>A filter can be invoked multiple times for one logical request — on async re-dispatch, error dispatch or internal forwards. <code>OncePerRequestFilter</code> guarantees the logic runs exactly once per request, avoiding duplicated MDC entries, double logging or repeated header writes. For interceptors, an async handler returns from <code>preHandle</code> and MVC pauses; when the async result is ready the interceptor chain resumes for <code>postHandle</code>/<code>afterCompletion</code>. Use <code>AsyncHandlerInterceptor.afterConcurrentHandlingStarted</code> if you need a hook at the point processing goes async.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does static-resource fingerprinting work, and why chain resolvers for it?</summary>
+      <div class="answer"><p>Enable <code>resourceChain(true)</code> and add a <code>VersionResourceResolver</code> with a content version strategy: each file is served at a URL containing a hash of its content (<code>app-8e0f...js</code>), so the URL changes only when the file changes. That lets you set a one-year <code>CacheControl</code> without ever serving stale assets — the new deploy produces new URLs. Templates resolve the versioned URL through <code>ResourceUrlProvider</code> / <code>ResourceUrlEncodingFilter</code>, so you still reference the logical path. The chain also caches lookups so this costs little per request.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.mvc.interceptors</li>
+      <li>spring.mvc.resources</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

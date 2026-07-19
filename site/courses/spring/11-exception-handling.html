@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring exception handling module: @ExceptionHandler and @ControllerAdvice for centralized error handling, ProblemDetail and RFC 9457 error responses, ResponseStatusException and status-code design — with the best official Spring docs, Baeldung guides, and the interview questions they power.">
+  <title>Exception Handling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Exception Handling</h1>
+  <p class="standfirst">An unhandled exception is the difference between a clean 404 carrying a JSON body and a raw stack trace leaking to your caller — this module maps Spring's handlers, the @ControllerAdvice that centralizes them, and the RFC 9457 error body they should return.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Exception Handling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring gives you a layered toolkit for turning thrown exceptions into well-formed HTTP responses: <code>@ExceptionHandler</code> methods for controller-local rules, <code>@ControllerAdvice</code> to hoist them across every controller, and — since Spring 6 — <code>ProblemDetail</code>, the built-in RFC 9457 error body. The topics below orient you on each piece and the design decisions (status codes, error shape) that separate a leaky stack trace from a clean, machine-readable error contract.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>@ExceptionHandler: catching exceptions inside a controller</h3>
+    <p><code>@ExceptionHandler</code> marks a method that handles specific exception types thrown by the request-mapping methods around it. Declared inside a <code>@Controller</code> it handles only that controller's exceptions; the type it matches comes from the annotation value or the method's own parameter, and the method can return a view name, a <code>ResponseEntity</code>, or a <code>ProblemDetail</code>.</p>
+    <p>Why it matters: this is the atom of Spring exception handling — everything "global" is the same annotation hoisted into a <code>@ControllerAdvice</code>. Knowing that Spring dispatches to the <em>most specific</em> matching handler (the nearest supertype wins, not declaration order) is a routine interview probe.</p>
+    <pre class="code-block" data-label="Java"><code>@ExceptionHandler(OrderNotFoundException.class)
+public ResponseEntity&lt;String&gt; handle(OrderNotFoundException ex) {
+    return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ex.getMessage());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-exceptionhandler.html" rel="noopener">Exceptions — Spring Framework Web MVC reference (@ExceptionHandler mapping, arguments, return values)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/exception-handling-for-rest-with-spring" rel="noopener">Error Handling for REST with Spring — Baeldung (the community-standard walkthrough of every approach)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xfUspC01iDM" rel="noopener">Spring Boot Exception Handling — @ControllerAdvice, @ResponseStatus, @ExceptionHandler — Java Techie</a></li>
+    </ul>
+
+    <h3>@ControllerAdvice and @RestControllerAdvice: global handling</h3>
+    <p>A <code>@ControllerAdvice</code> class collects <code>@ExceptionHandler</code> (plus <code>@InitBinder</code> and <code>@ModelAttribute</code>) methods and applies them across all controllers, so one place defines how the whole API reports errors. <code>@RestControllerAdvice</code> is that annotation meta-annotated with <code>@ResponseBody</code> — the variant you want for REST, since handler return values are serialized straight to the response body instead of resolved as view names.</p>
+    <p>Why it matters: this is the single most-asked exception-handling topic in Spring interviews. It deletes duplicated per-controller <code>try/catch</code>, and you can scope one advice (by annotation, package, or type) to run different error contracts for different slices of the API — public versus admin, say.</p>
+    <pre class="code-block" data-label="Java"><code>@RestControllerAdvice
+public class ApiExceptionHandler {
+    @ExceptionHandler(OrderNotFoundException.class)
+    public ProblemDetail handle(OrderNotFoundException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-advice.html" rel="noopener">Controller Advice — Spring Framework Web MVC reference (@ControllerAdvice / @RestControllerAdvice, scoping selectors)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/global-error-handler-in-a-spring-rest-api" rel="noopener">Custom Error Message Handling for REST API — Baeldung (a full global handler with a shared error model)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-error-handling-best-practices" rel="noopener">Best Practices for REST API Error Handling — Baeldung (status codes, error shape, what not to leak)</a></li>
+    </ul>
+
+    <h3>ProblemDetail and RFC 9457: a standard error body</h3>
+    <p>Before Spring 6, every team invented its own error JSON. <code>ProblemDetail</code> (in <code>org.springframework.http</code>) is Spring's built-in container for an RFC 9457 problem-details response: the spec fields <code>type</code>, <code>title</code>, <code>status</code>, <code>detail</code> and <code>instance</code>, plus a <code>properties</code> map for anything extra. It serializes as <code>application/problem+json</code>, giving clients one predictable, machine-readable error shape across services.</p>
+    <p>Why it matters: RFC 9457 obsoletes RFC 7807 — the media type and core fields are unchanged, so Spring's <code>ProblemDetail</code> (introduced against 7807 in Spring 6.0) already conforms; 9457 mainly adds an extension registry and clarifications. Quote 9457 in interviews, and know that <code>ResponseEntityExceptionHandler</code> already renders the framework's own exceptions in this shape.</p>
+    <pre class="code-block" data-label="Java"><code>ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+        HttpStatus.NOT_FOUND, "Order 42 not found");
+pd.setType(URI.create("https://api.shop.com/errors/order-not-found"));
+pd.setProperty("orderId", 42);   // non-standard extension field</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html" rel="noopener">Error Responses — Spring Framework Web MVC reference (ProblemDetail, ErrorResponse, ResponseEntityExceptionHandler)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/http/ProblemDetail.html" rel="noopener">ProblemDetail — Spring Framework API (Javadoc; factory methods and the properties map)</a></li>
+      <li>[Spec] <a href="https://www.rfc-editor.org/rfc/rfc9457.html" rel="noopener">RFC 9457: Problem Details for HTTP APIs — IETF (obsoletes RFC 7807)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-return-errors-problemdetail" rel="noopener">Returning Errors Using ProblemDetail in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4YyJUS_7rQE" rel="noopener">Spring 6 and Problem Details — Dan Vega (Spring Developer Advocate)</a></li>
+    </ul>
+
+    <h3>Status codes and error-response design</h3>
+    <p>Getting the status right is half of error handling. <code>@ResponseStatus</code> stamps a fixed status on an exception class or handler; <code>ResponseEntity</code> lets you set status, headers and body programmatically; and <code>ResponseStatusException</code> throws a status-plus-reason inline without a dedicated exception class — handy for one-offs. <code>ResponseEntityExceptionHandler</code> is the base <code>@ControllerAdvice</code> that already maps Spring MVC's built-in exceptions to sensible statuses and <code>ProblemDetail</code> bodies.</p>
+    <p>Why it matters: the design questions behind these — never leak a stack trace, map each domain failure to the correct 4xx or 5xx, keep one consistent error shape, and thread a correlation id for support — are exactly what senior interviews push on.</p>
+    <pre class="code-block" data-label="Java"><code>@ResponseStatus(HttpStatus.NOT_FOUND)             // fixed status on the exception
+class OrderNotFoundException extends RuntimeException { }
+
+throw new ResponseStatusException(                // or inline, no custom class
+        HttpStatus.NOT_FOUND, "Order not found");</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-response-status-exception" rel="noopener">Spring ResponseStatusException — Baeldung (throwing status codes programmatically)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-response-status" rel="noopener">Using @ResponseStatus to Set HTTP Status Code — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-validation.html">← Validation</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="12-transactions.html">Transactions →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Exception handling is a Spring MVC staple in Indian product and services interviews — @ControllerAdvice especially. Ordered easiest to hardest:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is @ExceptionHandler and where can it be used?</summary>
+      <div class="answer"><p>A method-level annotation marking a method that handles specific exception types thrown by request-mapping methods. Inside a <code>@Controller</code> it handles that controller's exceptions; inside a <code>@ControllerAdvice</code> it handles them globally. The exception type comes from the annotation value or the method's parameter.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @ControllerAdvice do?</summary>
+      <div class="answer"><p>It marks a class whose <code>@ExceptionHandler</code> (also <code>@InitBinder</code> and <code>@ModelAttribute</code>) methods apply across all controllers — centralized, cross-cutting error handling instead of duplicating handlers in each controller. It is the single most-asked exception-handling question in Spring interviews.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> @ControllerAdvice vs @RestControllerAdvice?</summary>
+      <div class="answer"><p><code>@RestControllerAdvice</code> = <code>@ControllerAdvice</code> + <code>@ResponseBody</code>. With plain <code>@ControllerAdvice</code> a returned String is treated as a view name; <code>@RestControllerAdvice</code> serializes handler return values straight to the response body (JSON) — the right choice for REST APIs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set the HTTP status code of an error response?</summary>
+      <div class="answer"><p>Several ways: annotate the handler or exception class with <code>@ResponseStatus(HttpStatus.NOT_FOUND)</code>; return a <code>ResponseEntity</code> with an explicit status; throw <code>ResponseStatusException(status, reason)</code>; or return a <code>ProblemDetail</code>/<code>ErrorResponse</code> carrying the status.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> If two @ExceptionHandler methods could handle a thrown exception, which one wins?</summary>
+      <div class="answer"><p>Spring picks the handler whose declared exception type is closest in the class hierarchy to the thrown exception — the most specific match, not declaration order. A handler for the exact type beats one declared for a superclass.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is ProblemDetail and what fields does it carry?</summary>
+      <div class="answer"><p>Spring's container (since 6.0) for an RFC 9457 problem-details response: standard fields <code>type</code>, <code>title</code>, <code>status</code>, <code>detail</code>, <code>instance</code>, plus a <code>properties</code> map for extensions. It renders as <code>application/problem+json</code>, giving APIs a uniform, machine-readable error shape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> RFC 7807 vs RFC 9457 — which does Spring use?</summary>
+      <div class="answer"><p>9457 is the current standard and obsoletes 7807; the media type and core fields are unchanged, so Spring's <code>ProblemDetail</code> (introduced against 7807 in Spring 6.0) already conforms. 9457 adds an extension registry and clarifications. Say "9457" in interviews — 7807 is superseded.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> ResponseStatusException vs @ExceptionHandler — when each?</summary>
+      <div class="answer"><p><code>ResponseStatusException</code> is thrown programmatically to map a status and reason to a response without a custom exception class or advice — fast and local. <code>@ControllerAdvice</code>/<code>@ExceptionHandler</code> centralizes handling and enforces app-wide conventions. Common pattern: ResponseStatusException for one-offs, advice for the global contract.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is ResponseEntityExceptionHandler and why extend it?</summary>
+      <div class="answer"><p>A convenient base class for a <code>@ControllerAdvice</code> that already handles all the standard Spring MVC exceptions (validation, unreadable body, missing params, and more) and renders them as <code>ProblemDetail</code>. You extend it and override protected <code>handle*</code> methods to customize, getting consistent responses for framework exceptions for free.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you add custom fields to a ProblemDetail?</summary>
+      <div class="answer"><p>Two ways: call <code>setProperty("field", value)</code> to put extras in the properties map (Jackson flattens them to top-level JSON), or subclass <code>ProblemDetail</code> / <code>ErrorResponseException</code> with your own getters. Useful for a trace/correlation id, an internal error code, or a timestamp.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you limit a @ControllerAdvice to a subset of controllers?</summary>
+      <div class="answer"><p>Use its selectors: <code>annotations = RestController.class</code> (by annotation), <code>basePackages = "com.app.api"</code> (by package), or <code>assignableTypes = {FooController.class}</code> (by type). With no selector it applies to every controller — this lets you run different error contracts for, say, public versus admin APIs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Will @ControllerAdvice catch an exception thrown in a Servlet Filter?</summary>
+      <div class="answer"><p>No. <code>@ExceptionHandler</code>/<code>@ControllerAdvice</code> only handle exceptions that surface through the <code>DispatcherServlet</code> (controllers and the handler pipeline). Filters run before and outside the DispatcherServlet, so their exceptions bypass it — handle those with the servlet error page, an <code>ErrorController</code> in Boot, or a filter-level try/catch. A classic senior gotcha, especially with Spring Security filter-chain errors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you turn Spring's built-in MVC exceptions into ProblemDetail responses automatically?</summary>
+      <div class="answer"><p>Two levers. In Spring Boot set <code>spring.mvc.problemdetails.enabled=true</code> so framework exceptions render as <code>application/problem+json</code> out of the box. For full control, register a <code>@ControllerAdvice</code> extending <code>ResponseEntityExceptionHandler</code> and override the relevant <code>handle*</code> methods. Plain Spring MVC (no Boot) uses the ResponseEntityExceptionHandler route.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.exc.handlers</li>
+      <li>spring.exc.problemdetail</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

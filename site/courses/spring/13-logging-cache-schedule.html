@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring's auxiliary concerns module: SLF4J/Logback logging and MDC, the @Cacheable caching abstraction, @Scheduled/cron scheduling and @Async execution — the best official and community resources for each, plus the interview questions they power.">
+  <title>Logging, Caching and Scheduling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Logging, Caching and Scheduling</h1>
+  <p class="standfirst">Three cross-cutting concerns Spring collapses into a single annotation each — a logger call, <code>@Cacheable</code>, <code>@Scheduled</code> — and each hides a proxy, a thread pool, or a self-invocation trap that interviewers reliably probe.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Spring Framework → Logging, Caching and Scheduling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module groups the framework's "auxiliary" features — the ones almost every service turns on but few study in depth. Logging through the SLF4J facade with Logback and MDC; the declarative caching abstraction (<code>@Cacheable</code>, <code>@CachePut</code>, <code>@CacheEvict</code>); and background execution via <code>@Scheduled</code> and <code>@Async</code>. Caching, scheduling and async all run through Spring AOP proxies, so the self-invocation trap you met in transactions returns here — which is exactly why interviewers pair them.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Logging: SLF4J, Logback and MDC</h3>
+    <p>SLF4J is a facade — your code compiles against one API (<code>LoggerFactory.getLogger</code>, <code>log.info("...{}...", arg)</code>) while the actual engine is chosen at deploy time; Spring Boot wires Logback as the default binding. Prefer the parameterized <code>{}</code> form over string concatenation: it skips building the message string when the level is disabled. Levels (TRACE/DEBUG/INFO/WARN/ERROR) are set per logger, in Boot usually via <code>logging.level.*</code> properties, and the layout, file rotation and appenders live in <code>logback-spring.xml</code>.</p>
+    <p>Why it matters: MDC (Mapped Diagnostic Context) is the feature that separates a screening answer from a production one. It is a per-thread key/value map — stamp a <code>traceId</code> or <code>userId</code> once and every log line on that thread carries it, making one request traceable across a noisy multi-threaded log. Always clear it in a <code>finally</code> block so a pooled thread does not leak context into the next request.</p>
+    <pre class="code-block" data-label="Java"><code>private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+
+MDC.put("traceId", traceId);            // stamps every log line on this thread
+try {
+    log.info("Placed order {} for customer {}", orderId, customerId);
+} finally {
+    MDC.clear();                        // pooled thread must not leak context
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/logging.html" rel="noopener">Logging — Spring Boot reference (levels, patterns, file output, log groups)</a></li>
+      <li>[Official] <a href="https://www.slf4j.org/manual.html" rel="noopener">SLF4J user manual (the facade, parameterized logging, MDC)</a></li>
+      <li>[Official] <a href="https://logback.qos.ch/manual/mdc.html" rel="noopener">Mapped Diagnostic Context — Logback Manual, Chapter 8</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-logging" rel="noopener">Logging in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vHoHUo6gRQE" rel="noopener">Spring Boot Logging with SLF4J and Logback — Java Techie</a></li>
+    </ul>
+
+    <h3>The caching abstraction: @Cacheable and friends</h3>
+    <p>Turn caching on with <code>@EnableCaching</code>, then annotate methods. <code>@Cacheable</code> checks the store first and returns the cached value without running the method on a hit; <code>@CachePut</code> always runs the method and refreshes the entry; <code>@CacheEvict</code> removes entries (one key, or <code>allEntries = true</code>) to prevent staleness. The abstraction is storage-agnostic: the same annotations sit over an in-memory <code>ConcurrentMapCache</code>, Caffeine, or Redis — you swap the <code>CacheManager</code> bean, not the code.</p>
+    <p>Why it matters: the interview lives in the edges. Keys default to the method arguments but are customizable with SpEL (<code>key = "#isbn"</code>); because caching is proxy-based, a cached method called from within the same bean bypasses the cache entirely (self-invocation); and the default map cache has no TTL or size bound, so production almost always means Caffeine or Redis with an eviction policy.</p>
+    <pre class="code-block" data-label="Java"><code>@Cacheable(value = "books", key = "#isbn")
+public Book findByIsbn(String isbn) {
+    return slowRepositoryLookup(isbn);   // skipped on a cache hit
+}
+
+@CacheEvict(value = "books", key = "#book.isbn")
+public void update(Book book) { repo.save(book); }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/cache.html" rel="noopener">Cache Abstraction — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cache-tutorial" rel="noopener">A Guide To Caching in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-setting-ttl-value-cache" rel="noopener">Setting a Time-To-Live Value for Caching — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vpe4aDu5ixI" rel="noopener">Spring Data Redis as Cache — @Cacheable, @CacheEvict, @CachePut — Java Techie</a></li>
+    </ul>
+
+    <h3>Scheduling: @Scheduled and cron</h3>
+    <p>Enable it with <code>@EnableScheduling</code>, then mark a no-argument, void method <code>@Scheduled</code>. Three timing modes: <code>fixedRate</code> starts runs at a constant period regardless of how long each takes; <code>fixedDelay</code> waits a gap after each run <em>finishes</em>; and <code>cron</code> pins runs to wall-clock times. Spring's cron has <strong>six</strong> fields — second, minute, hour, day-of-month, month, day-of-week — one more than classic Unix cron, and accepts a <code>zone</code> so a nightly job fires in the right timezone.</p>
+    <p>Why it matters: by default all scheduled methods share a <em>single</em> thread, so one slow task delays every other — configuring a <code>ThreadPoolTaskScheduler</code> is the standard fix. And in a multi-instance deployment every node fires the same job, causing duplicate work; the accepted answers are a distributed lock (ShedLock) or a leader-only design.</p>
+    <pre class="code-block" data-label="Java"><code>@Scheduled(fixedDelay = 5000)                        // 5s gap after each finish
+public void pollQueue() { drain(); }
+
+@Scheduled(cron = "0 0 2 * * *", zone = "Asia/Kolkata")   // 2 AM IST, daily
+public void nightlyReport() { buildAndEmail(); }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-scheduled-tasks" rel="noopener">The @Scheduled Annotation in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cron-expressions" rel="noopener">A Guide To Cron Expressions — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ySedvg4a9r8" rel="noopener">Scheduling in Spring Boot: @Scheduled, Thread Pools, Cron — Tech with Monir</a></li>
+    </ul>
+
+    <h3>Asynchronous execution: @Async and executors</h3>
+    <p>Switch on <code>@EnableAsync</code> and any <code>@Async</code> method call returns immediately, running on a background thread from a <code>TaskExecutor</code>. A <code>void</code> method fires and forgets; return <code>CompletableFuture&lt;T&gt;</code> when the caller needs the result or must join later. The catch is the default executor: Spring falls back to <code>SimpleAsyncTaskExecutor</code>, which spawns a new thread per task and pools nothing — for production you define a <code>ThreadPoolTaskExecutor</code> bean (core size, max size, queue capacity) and name it in <code>@Async("taskExecutor")</code>.</p>
+    <p>Why it matters: like caching and scheduling, <code>@Async</code> is proxy-based, so self-invocation runs synchronously and only <code>public</code> methods are advised. Exceptions from a <code>void</code> async method vanish unless you register an <code>AsyncUncaughtExceptionHandler</code>; with a <code>CompletableFuture</code> they surface when you resolve it. Combining <code>@Async</code> with <code>@Transactional</code> is a classic trap — the new thread starts a fresh transaction, it does not inherit the caller's.</p>
+    <pre class="code-block" data-label="Java"><code>@Async("taskExecutor")
+public CompletableFuture&lt;Report&gt; build(Long id) {
+    Report r = generate(id);                 // runs off the request thread
+    return CompletableFuture.completedFuture(r);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/guides/gs/async-method/" rel="noopener">Creating Asynchronous Methods — Spring.io Getting Started guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-async" rel="noopener">How To Do @Async in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactional-async-annotation" rel="noopener">Can @Transactional and @Async Work Together? — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1qf5yqfInzY" rel="noopener">Spring Boot @Async Annotation with ThreadPoolExecutor — Concept &amp;&amp; Coding (Shrayansh)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-transactions.html">← Transactions</a>
+    <a href="index.html">All Spring Framework modules</a>
+    <a href="14-testing.html">Testing in Spring →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>These auxiliary features are staple Indian-interview territory — asked to check whether you have run Spring in production, not just built a demo:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is SLF4J and why log through it instead of Logback directly?</summary>
+      <div class="answer"><p>SLF4J is a facade — a common logging API your code compiles against, with the real implementation (Logback, Log4j2, java.util.logging) bound at deploy time. It keeps application code independent of the logging engine, so you can switch backends without touching business code. Spring Boot ships SLF4J over Logback by default.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why prefer log.info("id={}", id) over log.info("id=" + id)?</summary>
+      <div class="answer"><p>The parameterized <code>{}</code> form defers building the message string until SLF4J confirms the level is enabled. With string concatenation the string is built every time, even when DEBUG is off — wasted work on a hot path. It also avoids manual <code>isDebugEnabled()</code> guards.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you enable caching and mark a method's result as cached?</summary>
+      <div class="answer"><p>Put <code>@EnableCaching</code> on a configuration class, then annotate the method with <code>@Cacheable("cacheName")</code>. On the first call the method runs and its return value is stored under a key derived from the arguments; later calls with the same key return the cached value without executing the method.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between fixedRate and fixedDelay in @Scheduled?</summary>
+      <div class="answer"><p><code>fixedRate</code> triggers runs at a constant interval measured from each start, regardless of how long the task takes (runs can overlap or queue). <code>fixedDelay</code> measures the gap <em>after</em> the previous run finishes, so executions never overlap. Use fixedDelay when a run must fully complete before the next begins.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is MDC and why is it essential in a web service?</summary>
+      <div class="answer"><p>Mapped Diagnostic Context is a per-thread key/value map the logging framework merges into each log line. Stamp a request/trace id (often in a servlet filter or interceptor) and every log statement while handling that request carries it, so you can grep one request out of interleaved multi-threaded logs. Clear it in a <code>finally</code> block because thread-pool threads are reused.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> @Cacheable vs @CachePut vs @CacheEvict?</summary>
+      <div class="answer"><p><code>@Cacheable</code> may skip the method — returns the cached value on a hit. <code>@CachePut</code> always executes the method and stores the fresh result (use it for updates that must run). <code>@CacheEvict</code> removes entries — one key, or <code>allEntries = true</code> — to invalidate stale data. A common pattern: <code>@Cacheable</code> on reads, <code>@CacheEvict</code>/<code>@CachePut</code> on writes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How is a cache key computed, and how do you customize it?</summary>
+      <div class="answer"><p>By default a <code>KeyGenerator</code> builds the key from the method arguments (a single arg becomes the key directly; multiple args combine). Customize with SpEL: <code>key = "#isbn"</code> or <code>key = "#user.id"</code>. For no-arg or overloaded methods, an explicit key avoids collisions. You can also gate caching with <code>condition</code> and <code>unless</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you run an @Async method on a custom thread pool?</summary>
+      <div class="answer"><p>Define a <code>ThreadPoolTaskExecutor</code> bean with core size, max size and queue capacity, then reference it by name: <code>@Async("taskExecutor")</code>. Without a defined executor Spring uses <code>SimpleAsyncTaskExecutor</code>, which creates a new thread per task and does not pool — unbounded thread creation under load. Configuring a bounded pool is the production requirement.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does @Cacheable / @Async / @Scheduled sometimes "not work" when the method is called from the same class?</summary>
+      <div class="answer"><p>All three are implemented with Spring AOP proxies. A self-invocation — one method of a bean calling another method of the same bean — goes through <code>this</code>, not the proxy, so the caching/async/scheduling advice never fires. Fixes: move the annotated method to a separate bean, inject a proxy reference to self, or restructure the call so it crosses the proxy boundary. This is the same trap as <code>@Transactional</code> self-invocation.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Describe the Spring cron format. How many fields, and what does "0 0 2 * * *" mean?</summary>
+      <div class="answer"><p>Spring's cron has six fields: second, minute, hour, day-of-month, month, day-of-week — one more (seconds) than standard Unix cron. <code>0 0 2 * * *</code> means second 0, minute 0, hour 2, every day of month, every month, every day of week — i.e. daily at 2 AM. Add <code>zone = "Asia/Kolkata"</code> to pin it to IST rather than the server default.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A @Scheduled job runs on every instance in a 3-node cluster and does duplicate work. How do you fix it?</summary>
+      <div class="answer"><p><code>@Scheduled</code> is node-local — each JVM fires independently, so a horizontally scaled deployment runs the job N times. Solutions: a distributed lock so only one node executes per tick (ShedLock is the common library), a leader-election / single-designated-runner design, or externalizing the schedule to a cluster-aware scheduler (Quartz with a shared JDBC store). Naive fixes like a DB flag race unless the check-and-set is atomic.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What happens to exceptions and return values from an @Async method?</summary>
+      <div class="answer"><p>A <code>void</code> async method that throws sends the exception nowhere by default — register an <code>AsyncUncaughtExceptionHandler</code> (via <code>AsyncConfigurer</code>) to observe it. A method returning <code>CompletableFuture</code> (or <code>Future</code>) captures the exception; it surfaces when the caller resolves the future (<code>get()</code>/<code>join()</code> or completion callbacks). Rule of thumb: return a future whenever the result or failure matters.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Can @Transactional and @Async be combined, and what breaks if you assume they compose?</summary>
+      <div class="answer"><p>They can, but the transaction does not cross the thread boundary. When a caller invokes an <code>@Async</code> method, the work runs on a new thread that opens its <em>own</em> transaction (transactional state is thread-bound) — it does not join the caller's. So an async method cannot roll back the caller's transaction, and lazy-loaded entities from the caller's persistence context are detached on the new thread. Design each async unit to own its transaction, and never expect atomicity across the async call.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Spring Framework track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>spring.aux.logging</li>
+      <li>spring.aux.cache</li>
+      <li>spring.aux.async</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Spring Framework track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
