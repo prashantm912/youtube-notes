@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Jakarta EE transactions and enterprise beans module: JTA and its two demarcation styles, container-managed vs bean-managed transactions, the six transaction attributes, stateless/stateful/singleton session beans, and how it all contrasts with Spring beans and @Transactional — with the best official and community resources plus interview questions.">
+  <title>Transactions (JTA) and Enterprise Beans — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Transactions (JTA) and Enterprise Beans</h1>
+  <p class="standfirst">A transaction is the enterprise "all or nothing" guarantee; enterprise beans are where the container wires that guarantee in for you, so a business method commits or rolls back cleanly without a line of begin/commit plumbing of its own.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → Transactions (JTA) and Enterprise Beans</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Jakarta Transactions (JTA) is the standard for demarcating and coordinating transactions across the Jakarta EE stack — a single unit of work that either fully commits or fully rolls back, even when it spans two databases or a database and a message queue. Enterprise Beans are the server-side components where the container applies that transaction management (plus concurrency, security and pooling) declaratively, in three flavours: stateless, stateful and singleton. Because most Indian teams work in Spring, the module sets each idea against its Spring equivalent — the two <code>@Transactional</code> annotations, EJB beans versus Spring beans — since that contrast is exactly what interviews probe.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Jakarta Transactions (JTA): the transaction model</h3>
+    <p>JTA is an API, not an engine: it defines the interfaces a transaction manager exposes so an application can mark transaction boundaries and so multiple XA-aware resources can be coordinated under one global transaction using two-phase commit. The actual manager is supplied by the runtime (WildFly, Payara, Open Liberty) or a standalone library such as Narayana or Atomikos. Its guarantees are the classic ACID properties — atomicity, consistency, isolation, durability — the reason a money transfer that debits one account and credits another can never leave the system half-done.</p>
+    <p>Why it matters: JTA underpins both enterprise beans and JPA — the persistence context flushes and commits on the JTA transaction boundary. Knowing that JTA is the specification while the manager is the implementation, and that a global (XA) transaction differs from a plain local resource transaction, is foundational for every question in this module.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/transactions/" rel="noopener">Jakarta Transactions — specification landing (Eclipse Foundation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jee-jta" rel="noopener">Guide to Jakarta EE JTA — Baeldung (declarative and programmatic demarcation, multi-resource example)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-transactions" rel="noopener">Introduction to Transactions in Java and Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Container-managed vs bean-managed transactions</h3>
+    <p>With container-managed transactions (CMT — the default), the container opens a transaction as a business method is entered and commits or rolls back as it returns. You tune the scope with <code>@TransactionAttribute</code>, whose six values decide what happens relative to any transaction already in progress: <code>REQUIRED</code>, <code>REQUIRES_NEW</code>, <code>MANDATORY</code>, <code>SUPPORTS</code>, <code>NOT_SUPPORTED</code>, <code>NEVER</code>. To abort without throwing, call <code>setRollbackOnly()</code>. The same declarative style reaches CDI-managed beans through <code>jakarta.transaction.Transactional</code> and its matching <code>TxType</code> values, with <code>rollbackOn</code> / <code>dontRollbackOn</code> to override defaults.</p>
+    <p>With bean-managed transactions (BMT), you opt out of the container's demarcation via <code>@TransactionManagement(BEAN)</code> and drive <code>UserTransaction</code> yourself — <code>begin</code>, <code>commit</code>, <code>rollback</code>. It buys fine-grained control at the cost of more code and the risk of leaking an open transaction. The single most bug-prone default to remember: a container transaction rolls back automatically on unchecked (system) exceptions, but <em>not</em> on checked (application) exceptions unless you mark them with <code>@ApplicationException(rollback = true)</code> or list them in <code>rollbackOn</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Stateless
+public class OrderService {
+  @TransactionAttribute(TransactionAttributeType.REQUIRES_NEW)
+  public void audit(Event e) { /* its own transaction, always */ }
+}
+
+@TransactionManagement(TransactionManagementType.BEAN)   // opt into BMT
+public class BatchJob {
+  @Resource UserTransaction utx;
+  public void run() throws Exception {
+    utx.begin();
+    try { doWork(); utx.commit(); }
+    catch (Exception ex) { utx.rollback(); throw ex; }
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/supporttechs/transactions/transactions.html" rel="noopener">Jakarta Transactions — Jakarta EE Tutorial (CMT attributes, BMT, setRollbackOnly, timeouts)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/transactions/2.0/jakarta-transactions-spec-2.0.html" rel="noopener">Jakarta Transactions 2.0 — UserTransaction and the @Transactional annotation (spec)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/enterprise-beans/4.0/apidocs/jakarta/ejb/transactionattributetype" rel="noopener">TransactionAttributeType — Jakarta Enterprise Beans 4.0 API (all six attributes defined)</a></li>
+    </ul>
+
+    <h3>Enterprise Beans and the three session bean types</h3>
+    <p>An enterprise bean is a server-side component that holds business logic and runs inside the EJB container, which supplies transactions, security, concurrency, instance pooling and remoting as declarative, cross-cutting services — you annotate, the container implements. Session beans come in three types: stateless, stateful and singleton. (Message-driven beans, the fourth kind, consume JMS and belong to the Messaging module.) A plain annotation such as <code>@Stateless</code> is enough to turn a class into a managed, transactional component.</p>
+    <p>Why it matters: the container's declarative services are the entire value proposition of enterprise beans, and choosing the right session-bean type for a given job — a request-scoped calculation, a per-user conversation, an application-wide cache — is a classic screening question that quickly separates people who have shipped Jakarta EE from those who have only read about it.</p>
+    <pre class="code-block" data-label="Java"><code>@Stateless           public class TaxCalculator { }  // pooled; no client state kept
+@Stateful            public class ShoppingCart { }   // one instance bound to one client
+@Singleton @Startup  public class ConfigCache { }    // exactly one per application</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/enterprise-beans/" rel="noopener">Jakarta Enterprise Beans — specification landing (Eclipse Foundation)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/entbeans/ejb-intro/ejb-intro.html" rel="noopener">Enterprise Beans — Jakarta EE Tutorial (what a bean is, bean types, when to use them)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ejb-session-beans" rel="noopener">Java EE Session Beans — Baeldung (stateless vs stateful worked examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2dvINi9KzHA" rel="noopener">EJB 3 Tutorial — Stateful, Stateless, Singleton Session Beans and MDB</a></li>
+    </ul>
+
+    <h3>Stateless vs stateful vs singleton — choosing and concurrency</h3>
+    <p>A stateless bean keeps no conversational state between calls, so the container pools instances and any instance can serve any client — the highest-throughput choice, and the right default for service facades and JAX-RS endpoints. A stateful bean holds conversational state tied to one specific client across several calls (a shopping cart, a multi-step wizard); the container may passivate and later activate it, and it is removed on an <code>@Remove</code> method or session timeout. A singleton has exactly one instance for the whole application, ideal for caches, configuration and shared read-mostly state, with <code>@Startup</code> for eager initialisation.</p>
+    <p>Concurrency is where the singleton earns its own question: by default it uses container-managed concurrency, where <code>@Lock(WRITE)</code> takes an exclusive lock and <code>@Lock(READ)</code> allows shared access, and switching to <code>@ConcurrencyManagement(BEAN)</code> hands you responsibility for thread safety. Stateless and stateful beans never see concurrent calls on a single instance, so they need no such locking.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/enterprise-beans/4.0/jakarta-enterprise-beans-spec-core-4.0.html" rel="noopener">Jakarta Enterprise Beans 4.0, Core Features — session bean lifecycles and concurrency (spec)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-ee-singleton-session-bean" rel="noopener">Singleton Session Bean in Jakarta EE — Baeldung (@Startup, @Lock, lifecycle callbacks)</a></li>
+      <li>[Article] <a href="https://www.theserverside.com/tutorial/Which-EJB-to-use-Stateful-stateless-and-singleton-session-beans-compared" rel="noopener">Stateful, stateless and singleton session beans compared — TheServerSide</a></li>
+    </ul>
+
+    <h3>Enterprise Beans vs Spring beans and @Transactional</h3>
+    <p>Both stacks offer declarative transactions, but the mechanism differs. EJB container-managed transactions are bound to JTA and an application-server environment; Spring's <code>@Transactional</code> works on any Spring bean through AOP proxies backed by a <code>PlatformTransactionManager</code> that can be a local JPA or DataSource manager or a JTA one. Spring exposes more knobs at the annotation itself — isolation, read-only, timeout, a <code>NESTED</code> propagation mode and <code>rollbackFor</code> — whereas the EJB model keeps those concerns closer to the container and the resource.</p>
+    <p>The naming trap worth internalising: there are two <code>@Transactional</code> annotations — <code>jakarta.transaction.Transactional</code> (Jakarta EE, on CDI and EJB beans) and <code>org.springframework.transaction.annotation.Transactional</code>. Spring understands both, but neither works outside its own container. Because both mechanisms rely on proxying, a plain self-invocation — one method in a bean calling another annotated method on <code>this</code> — bypasses the interceptor and silently runs without the expected new transaction. That gotcha, and the EJB-versus-Spring comparison generally, are heavily favoured in Indian interviews where migration between the two is common.</p>
+    <pre class="code-block" data-label="Java"><code>// Jakarta EE — on a CDI or EJB bean
+@jakarta.transaction.Transactional(Transactional.TxType.REQUIRED)
+public void placeOrder(Order o) { }
+
+// Spring — on a Spring bean, richer tuning
+@org.springframework.transaction.annotation.Transactional(
+    readOnly = true, timeout = 30, rollbackFor = Exception.class)
+public Report build() { return report; }</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/spring-vs-jta-transactional" rel="noopener">Transactional Annotations: Spring vs. JTA — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactional-propagation-isolation" rel="noopener">Transaction Propagation and Isolation in Spring @Transactional — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eWl8G7NDKqo" rel="noopener">How Spring @Transactional Works Internally (AOP, proxies, debug walkthrough) — Javatechie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-persistence.html">← Jakarta Persistence in Jakarta EE</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="09-bean-validation.html">Jakarta Bean Validation →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The questions most likely to come up in Indian interviews — session-bean choice and the Jakarta-versus-Spring transaction contrast dominate, so the hardest of those sit last:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is JTA and what problem does it solve?</summary>
+      <div class="answer"><p>Jakarta Transactions is the standard API for demarcating and coordinating transactions so a unit of work is atomic — it fully commits or fully rolls back. Its real strength is coordinating multiple XA resources (two databases, or a database and a message queue) under one global transaction via two-phase commit. JTA is the specification; the transaction manager (in the app server, or Narayana/Atomikos) is the implementation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the two ways to demarcate a transaction in Jakarta EE?</summary>
+      <div class="answer"><p>Declarative — annotate with <code>@Transactional</code> or <code>@TransactionAttribute</code> and let the container start and end the transaction (container-managed). Or programmatic — inject <code>UserTransaction</code> and call <code>begin</code>/<code>commit</code>/<code>rollback</code> yourself (bean-managed). Declarative is the default and the norm; programmatic is for fine-grained control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three types of session bean?</summary>
+      <div class="answer"><p>Stateless (no client state, pooled), stateful (conversational state tied to one client), and singleton (one instance per application). Message-driven beans are a separate kind used for JMS, not a session bean.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Container-managed vs bean-managed transactions — the difference?</summary>
+      <div class="answer"><p>In CMT the container sets the boundaries around each business method and you only tune scope with <code>@TransactionAttribute</code>. In BMT you take over via <code>@TransactionManagement(BEAN)</code> and drive <code>UserTransaction</code> explicitly. CMT is less code and the default; BMT gives precise control at the cost of managing commit/rollback yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @TransactionAttribute(REQUIRES_NEW) do?</summary>
+      <div class="answer"><p>It always runs the method in a brand-new transaction. If the caller already has one, the container suspends it, runs the method in a fresh transaction that commits or rolls back independently, then resumes the caller's transaction. The canonical use is an audit or log write that must persist even if the surrounding business transaction later rolls back.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Stateless vs stateful session bean — when do you use each?</summary>
+      <div class="answer"><p>Stateless keeps no state between calls, so the container pools instances and any instance serves any client — best throughput, ideal for service facades and REST endpoints. Stateful keeps conversational state tied to one client across calls (a cart, a wizard) and may be passivated/activated. Rule of thumb: default to stateless; reach for stateful only when you genuinely need per-client memory across method calls.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a singleton session bean and how is its concurrency handled?</summary>
+      <div class="answer"><p>One instance for the entire application — good for caches, configuration and shared state, with <code>@Startup</code> for eager creation. By default it uses container-managed concurrency: <code>@Lock(WRITE)</code> gives exclusive access, <code>@Lock(READ)</code> allows shared reads. Switch to <code>@ConcurrencyManagement(BEAN)</code> to take responsibility for thread safety yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does a container-managed transaction roll back on a checked exception by default?</summary>
+      <div class="answer"><p>No. The container rolls back automatically on unchecked (system/runtime) exceptions, but a checked (application) exception commits by default. To force rollback on a checked exception, annotate it with <code>@ApplicationException(rollback = true)</code>, list it in <code>@Transactional(rollbackOn = ...)</code>, or call <code>setRollbackOnly()</code>. This default trips up almost everyone at least once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the six transaction attributes.</summary>
+      <div class="answer"><p><code>REQUIRED</code> joins the caller's transaction or starts one; <code>REQUIRES_NEW</code> always starts its own, suspending any caller transaction; <code>MANDATORY</code> demands the caller already has one (else exception); <code>SUPPORTS</code> joins one if present, runs without otherwise; <code>NOT_SUPPORTED</code> suspends any transaction and runs with none; <code>NEVER</code> requires no transaction and throws if one exists.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> jakarta.transaction.Transactional vs Spring's @Transactional?</summary>
+      <div class="answer"><p>Same declarative idea, different packages and reach. <code>jakarta.transaction.Transactional</code> applies to CDI/EJB beans in a Jakarta EE container; <code>org.springframework.transaction.annotation.Transactional</code> applies to Spring beans and adds isolation, read-only, timeout, a NESTED propagation and <code>rollbackFor</code>. Spring can honour both annotations, but neither functions outside its own container. Naming them apart is a frequent trick question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does declarative transaction management actually work, and why does self-invocation break it?</summary>
+      <div class="answer"><p>Both EJB and Spring wrap the bean in a proxy/interceptor that opens a transaction before the call and commits or rolls back after. A call from outside goes through the proxy, so the advice runs. But when one method calls another annotated method on <code>this</code>, the call never leaves the object, bypasses the proxy, and the second method runs in the caller's context with no new transaction — the fix is to call through an injected reference or split the methods across beans.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An audit record must persist even when the business transaction rolls back. How?</summary>
+      <div class="answer"><p>Put the audit write in its own method annotated <code>REQUIRES_NEW</code> (or on a separate bean it calls through). That suspends the caller's transaction, commits the audit independently, then resumes the caller — so a later rollback of the business work leaves the audit row intact. Watch for the self-invocation trap: the audit method must be reached through the proxy, not a direct <code>this</code> call.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Contrast EJB container-managed transactions with Spring for distributed transactions and testability.</summary>
+      <div class="answer"><p>EJB CMT is tied to JTA and a full application server, which makes genuine XA distributed transactions native but couples your code to that runtime and complicates lightweight unit testing. Spring abstracts behind a <code>PlatformTransactionManager</code>: a local JPA/DataSource manager for the common single-resource case, or a JTA manager (app-server or standalone like Atomikos/Narayana) when you truly need XA — and it runs in a plain container, so beans are easy to test in isolation. The practical guidance: use JTA when you must span multiple transactional resources; prefer a local manager for the far more common single-database case.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.tx.jta</li>
+      <li>jee.tx.ejb</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CDI advanced module: producer methods and disposers, alternatives, synchronous and asynchronous events, interceptors and decorators, and the @PostConstruct/@PreDestroy lifecycle — the best official Jakarta, Weld and community resources, the Spring AOP contrast, and the interview questions they power.">
+  <title>CDI: Producers, Events and Interceptors — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: CDI: Producers, Events and Interceptors</h1>
+  <p class="standfirst">The loose-coupling half of CDI: how <code>@Produces</code> supplies objects the container cannot build itself, how beans talk through fired events instead of direct calls, and how interceptors and decorators layer behaviour without editing the business code — with the Spring AOP contrast interviewers reach for.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → CDI: Producers, Events and Interceptors</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 02 covered beans, injection and scopes; this one covers everything CDI adds on top to keep components decoupled. Producers and disposers hand the container objects it could not instantiate on its own; alternatives swap implementations per deployment; the event model lets beans notify each other with no compile-time link; and interceptors and decorators bolt cross-cutting and business behaviour onto beans from the outside. The <code>@PostConstruct</code> and <code>@PreDestroy</code> callbacks round out the container-managed lifecycle. Where each mechanism has a Spring equivalent — events vs <code>ApplicationEvent</code>, interceptors vs AOP — the contrast is called out, because Indian enterprise and product interviews lean on it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Producer methods, fields and disposers</h3>
+    <p>Not everything you inject is a class CDI can construct: third-party types with no bean-defining annotation, objects that need runtime configuration, or JDK resources like an <code>EntityManager</code>. A method annotated <code>@Produces</code> becomes a factory whose return value is injectable, with its own scope and qualifiers; a producer field is the one-line form when the value is a plain constant or resource. When the produced object owns a resource that must be released, a matching <code>@Disposes</code> parameter defines the cleanup, which the container calls when the producing context ends.</p>
+    <p>Why it matters: producers are how CDI bridges to the non-CDI world, and the producer plus disposer pair is the standard pattern for connection- and manager-style resources. Interviewers use it to check that you understand who owns an object's lifecycle.</p>
+    <pre class="code-block" data-label="Java"><code>@Produces @RequestScoped
+EntityManager em(EntityManagerFactory emf) {   // factory for a non-bean type
+    return emf.createEntityManager();
+}
+void close(@Disposes EntityManager em) {        // matched by type + qualifiers
+    em.close();                                 // called when the context ends
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/cdi/cdi-adv/cdi-adv.html" rel="noopener">Jakarta CDI: Advanced Topics — Jakarta EE Tutorial (producers, disposers, alternatives, events)</a></li>
+      <li>[Docs] <a href="https://docs.jboss.org/weld/reference/latest/en-US/html/producermethods.html" rel="noopener">Producer methods — Weld (CDI reference implementation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-ee-cdi" rel="noopener">An Introduction to CDI in Java — Baeldung (qualifiers and producers with code)</a></li>
+    </ul>
+
+    <h3>Alternatives: selecting an implementation</h3>
+    <p>When two beans implement the same type, <code>@Alternative</code> marks one as a swappable substitute that is disabled by default. You turn it on for a particular deployment either by listing it in that archive's <code>beans.xml</code>, or — the modern, portable way — by adding <code>@Priority</code>, which enables it application-wide and, when several alternatives match, lets the highest priority win. This is how you drop in a mock or a stub for testing, or a region-specific implementation, without touching any injection point. The related <code>@Specializes</code> goes further: it fully replaces and inherits another bean's types and qualifiers.</p>
+    <p>Why it matters: alternatives are CDI's answer to "how do I change wiring per environment without changing code" — the same problem Spring solves with profiles and conditional beans.</p>
+    <ul class="resources">
+      <li>[Spec] <a href="https://jakarta.ee/specifications/cdi/4.1/jakarta-cdi-spec-4.1" rel="noopener">Jakarta Contexts and Dependency Injection 4.1 — specification (alternatives, priority, selection)</a></li>
+      <li>[Docs] <a href="https://docs.jboss.org/weld/reference/latest/en-US/html/specialization.html" rel="noopener">Specialization, inheritance and alternatives — Weld</a></li>
+    </ul>
+
+    <h3>CDI events: fire and observe</h3>
+    <p>Events are CDI's built-in publish/subscribe: one bean injects <code>Event&lt;T&gt;</code> and calls <code>fire()</code>, and any bean with an <code>@Observes T</code> method is notified — with no compile-time dependency between them. Qualifiers narrow which observers respond. Firing is synchronous by default (observers run in the caller's thread and can take part in the current transaction); <code>fireAsync()</code> with <code>@ObservesAsync</code> runs observers on another thread and returns a <code>CompletionStage</code> collecting any failures. Transactional observers add a phase — for example <code>@Observes(during = AFTER_SUCCESS)</code> defers the callback until the JTA transaction commits, so a confirmation email never goes out on a rollback.</p>
+    <p>Why it matters: events are the standard way to decouple side effects (auditing, notifications) from core logic, and the sync-vs-async and transaction-phase distinctions are common follow-up questions. The Spring analogue is <code>ApplicationEventPublisher</code> plus <code>@EventListener</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Inject Event&lt;OrderPlaced&gt; events;        // producer side
+events.fire(new OrderPlaced(order));       // synchronous, same thread
+events.fireAsync(new OrderPlaced(order));  // handled on another thread
+
+void onOrder(@Observes OrderPlaced e) { /* ... */ }        // synchronous observer
+void email(@ObservesAsync OrderPlaced e) { /* ... */ }     // async observer</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/specification-guides/contexts-dependency-injection-explained/" rel="noopener">Jakarta Contexts and Dependency Injection Explained — Jakarta specification guide</a></li>
+      <li>[Docs] <a href="https://docs.jboss.org/weld/reference/latest/en-US/html/events.html" rel="noopener">Events — Weld (conditional, transactional and async observers)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cdi-event-notification" rel="noopener">The Event Notification Model in CDI 2.0 — Baeldung</a></li>
+      <li>[Article] <a href="https://foojay.io/today/getting-started-with-jakarta-ee-9-context-and-dependency-injection-cdi/" rel="noopener">Getting Started with Jakarta EE 9: CDI — foojay (events and interceptors walkthrough)</a></li>
+    </ul>
+
+    <h3>Interceptors and the Spring AOP contrast</h3>
+    <p>An interceptor factors out a technical, cross-cutting concern — logging, timing, security, transactions — so it lives in one place instead of every method. You define an <code>@InterceptorBinding</code> annotation, write an <code>@Interceptor</code> class with an <code>@AroundInvoke</code> method that receives an <code>InvocationContext</code> and calls <code>ctx.proceed()</code> to continue the chain, then put the binding annotation on the beans or methods to advise. Interceptors are off until enabled, ordered by <code>@Priority</code> (lower runs first, outermost) or listed in <code>beans.xml</code>. Beyond business methods, interceptors can also target lifecycle callbacks with <code>@AroundConstruct</code>, <code>@PostConstruct</code> and <code>@PreDestroy</code>.</p>
+    <p>Why it matters: this is CDI's AOP, and the comparison to Spring is a favourite interview line. Spring AOP is proxy-based and selects join points with expressive pointcut expressions in a decoupled aspect; CDI uses typesafe binding annotations applied directly on the target — more discoverable and compile-checked, but with less flexible selection.</p>
+    <pre class="code-block" data-label="Java"><code>@InterceptorBinding
+@Retention(RUNTIME) @Target({TYPE, METHOD})
+public @interface Logged {}
+
+@Logged @Interceptor @Priority(Interceptor.Priority.APPLICATION)
+public class LoggingInterceptor {
+    @AroundInvoke
+    Object log(InvocationContext ctx) throws Exception {
+        // pre-processing here
+        return ctx.proceed();              // invoke the next interceptor / target
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/supporttechs/interceptors/interceptors.html" rel="noopener">Using Jakarta EE Interceptors — Jakarta EE Tutorial</a></li>
+      <li>[Spec] <a href="https://jakarta.ee/specifications/interceptors/2.1/jakarta-interceptors-spec-2.1" rel="noopener">Jakarta Interceptors 2.1 — specification (@AroundInvoke, @AroundConstruct, bindings)</a></li>
+      <li>[Docs] <a href="https://docs.jboss.org/weld/reference/latest/en-US/html/interceptors.html" rel="noopener">Interceptors — Weld (bindings, ordering, @Priority vs beans.xml)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cdi-interceptor-vs-spring-aspectj" rel="noopener">CDI Interceptor vs Spring AspectJ — Baeldung (the AOP contrast)</a></li>
+      <li>[Article] <a href="https://rieckpil.de/howto-intercept-method-calls-using-cdi-interceptors/" rel="noopener">Intercept method calls using CDI interceptors — rieckpil</a></li>
+    </ul>
+
+    <h3>Decorators</h3>
+    <p>A decorator is the object-oriented twin of an interceptor: instead of a generic technical concern, it adds or modifies business logic for one specific interface. It implements the bean's interface and holds a <code>@Delegate</code> injection point of that same type, so it can call the original and wrap its result — a discount layer over a price calculator, say. Decorators are disabled by default and enabled with <code>@Priority</code> or in <code>beans.xml</code>. In the invocation order, interceptors always run before decorators.</p>
+    <p>Why it matters: interviewers ask "interceptor or decorator?" to see whether you separate technical concerns (broad, binding-driven) from business concerns (interface-specific, delegate-driven). Knowing that <code>@Delegate</code> is what makes a decorator, and that interceptors fire first, is the crisp answer.</p>
+    <pre class="code-block" data-label="Java"><code>@Decorator @Priority(Interceptor.Priority.APPLICATION)
+abstract class DiscountDecorator implements PriceCalculator {
+    @Inject @Delegate @Any PriceCalculator delegate;   // the decorated bean
+    public BigDecimal total(Cart c) {
+        return delegate.total(c).multiply(new BigDecimal("0.9"));
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Docs] <a href="https://docs.jboss.org/weld/reference/latest/en-US/html/decorators.html" rel="noopener">Decorators — Weld (the @Delegate injection point, enabling and ordering)</a></li>
+      <li>[Docs] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/cdi/cdi-adv-examples/cdi-adv-examples.html" rel="noopener">CDI Advanced Examples — Jakarta EE Tutorial (worked interceptor and decorator examples)</a></li>
+    </ul>
+
+    <h3>Lifecycle callbacks: @PostConstruct and @PreDestroy</h3>
+    <p>These two annotations mark methods the container runs around a bean's managed lifetime. <code>@PostConstruct</code> runs once after injection has completed but before the bean is put into service — the right place for initialization that depends on injected collaborators, which a constructor cannot see yet. <code>@PreDestroy</code> runs before the bean is removed from its context, to release resources it holds. Both methods take no arguments (except on interceptor classes) and cannot be static. They are defined by the Jakarta Annotations spec and honoured across CDI beans, session beans and other container-managed objects.</p>
+    <p>Why it matters: candidates routinely put startup logic in constructors and find their injected fields still null. Naming <code>@PostConstruct</code> as the fix — and knowing why the constructor runs too early — is the expected answer.</p>
+    <ul class="resources">
+      <li>[Spec] <a href="https://jakarta.ee/specifications/annotations/2.0/annotations-spec-2.0.html" rel="noopener">Jakarta Annotations 2.0 — specification (@PostConstruct, @PreDestroy contracts)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-postconstruct-predestroy" rel="noopener">The @PostConstruct and @PreDestroy Annotations — Baeldung (incl. the javax to jakarta move)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-cdi-beans.html">← CDI: Beans, Injection and Scopes</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="04-servlet.html">Jakarta Servlet →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>CDI's advanced features are a staple of Jakarta EE and enterprise-Java rounds in India, especially where teams run WildFly, Payara or Open Liberty and interviewers probe the Spring contrast:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a producer method and when do you need one?</summary>
+      <div class="answer"><p>A method annotated <code>@Produces</code> whose return value becomes injectable. You need it when CDI cannot instantiate the type itself — a third-party class with no bean-defining annotation, an object requiring runtime configuration, or a JDK resource such as an <code>EntityManager</code>. The producer can declare its own scope and qualifiers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Producer field vs producer method?</summary>
+      <div class="answer"><p>Both use <code>@Produces</code>. A producer field is the shorthand when the injectable value is a simple field or resource with no logic; a producer method is used when construction needs parameters or code. The field form is common for declaring resources.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a disposer method and how is it matched to a producer?</summary>
+      <div class="answer"><p>A method with a <code>@Disposes</code> parameter whose type and qualifiers match a producer; CDI calls it to clean up the produced object when the producing context ends — for example closing an <code>EntityManager</code> or a JDBC connection. It pairs cleanup with the producer that created the resource.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Alternative do and how do you enable it?</summary>
+      <div class="answer"><p>It marks a bean as a substitute implementation that is disabled by default. Enable it per bean-archive by listing it in that archive's <code>beans.xml</code>, or application-wide with <code>@Priority</code>. It is the standard mechanism for test doubles and environment-specific implementations, swapped without editing injection points.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do CDI events decouple beans?</summary>
+      <div class="answer"><p>The producer injects <code>Event&lt;T&gt;</code> and calls <code>fire()</code>; observers declare a method with an <code>@Observes T</code> parameter. Neither references the other at compile time — the container routes the event, and qualifiers narrow which observers are notified. It is CDI's built-in publish/subscribe.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Synchronous vs asynchronous events?</summary>
+      <div class="answer"><p><code>fire()</code> with <code>@Observes</code> runs observers synchronously in the caller's thread and can participate in the caller's transaction. <code>fireAsync()</code> with <code>@ObservesAsync</code> runs them on another thread, does not block the producer, and returns a <code>CompletionStage</code> that collects any observer exceptions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a transactional observer and why use one?</summary>
+      <div class="answer"><p>An observer that specifies a JTA phase, e.g. <code>@Observes(during = AFTER_SUCCESS)</code>. The container defers notification to that phase of the current transaction, so a side effect like sending a confirmation email fires only after commit and is skipped on rollback. Other phases include <code>BEFORE_COMPLETION</code> and <code>AFTER_FAILURE</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you write and enable an interceptor?</summary>
+      <div class="answer"><p>Define an <code>@InterceptorBinding</code> annotation, write an <code>@Interceptor</code> class with an <code>@AroundInvoke</code> method that takes an <code>InvocationContext</code> and calls <code>ctx.proceed()</code>, then place the binding on the target beans or methods. Enable it with <code>@Priority</code> (application-wide, ordered) or in <code>beans.xml</code> — interceptors are disabled by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Interceptor vs decorator — when do you use each?</summary>
+      <div class="answer"><p>Interceptors handle technical cross-cutting concerns (logging, security, transactions) applied broadly through binding annotations. Decorators add business logic for one specific interface through a <code>@Delegate</code> injection point that wraps the original bean. When both apply, interceptors run before decorators.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What do @PostConstruct and @PreDestroy do, and why not use the constructor?</summary>
+      <div class="answer"><p><code>@PostConstruct</code> runs once after injection completes and before the bean serves requests — so injected fields are available, which they are not in the constructor. <code>@PreDestroy</code> runs before the bean leaves its context, to release resources. Both are no-arg, non-static methods defined by Jakarta Annotations.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Compare CDI interceptors with Spring AOP.</summary>
+      <div class="answer"><p>Both implement aspect-oriented cross-cutting behaviour. CDI uses typesafe interceptor binding annotations placed on the target, which is discoverable and compile-checked but offers no expression language for selecting methods. Spring AOP is proxy-based, keeps the aspect decoupled from targets, and selects join points with flexible pointcut expressions (for example <code>execution(...)</code>), optionally weaving via AspectJ. CDI trades selection flexibility for typesafety and being part of the standard.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How is invocation order controlled across interceptors and decorators?</summary>
+      <div class="answer"><p><code>@Priority</code> sets ordering: a lower value runs earlier and therefore outermost in the chain. Interceptors as a group always execute before decorators. Enabling with <code>@Priority</code> is application-wide and ordered, whereas listing in <code>beans.xml</code> is scoped to that bean-archive with no global ordering guarantee against other archives.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> @Alternative via @Priority vs via beans.xml — what is the difference?</summary>
+      <div class="answer"><p><code>beans.xml</code> enables an alternative only within its own bean-archive, so different modules can select different implementations, with no cross-archive ordering. <code>@Priority</code> enables it for the whole application and, when several alternatives are eligible, the one with the highest priority is selected. <code>@Priority</code> is the modern, portable choice; <code>@Specializes</code> is the stronger option when you want to inherit and fully replace another bean.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist — both module 03 ids, spanning producers/disposers, alternatives and events (first id) and interceptors, decorators and lifecycle callbacks (second id):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.cdi.producers</li>
+      <li>jee.cdi.interceptors</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Jakarta Servlet module: what a servlet and its container are, the init/service/destroy lifecycle, filters and listeners, session management, and how Spring's DispatcherServlet is itself a servlet — with the best official and community resources plus the interview questions it powers.">
+  <title>Jakarta Servlet — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Jakarta Servlet</h1>
+  <p class="standfirst">The servlet is the request-handling primitive every Java web framework is built on — Spring MVC's DispatcherServlet, JAX-RS, and JSF all run inside a servlet container. Learn the raw API and you can read the frameworks that hide it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → Jakarta Servlet</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Jakarta Servlet is the low-level HTTP contract of the Java enterprise platform: a servlet is a container-managed object that turns an <code>HttpServletRequest</code> into an <code>HttpServletResponse</code>. This module orients you on the servlet and its container, the init/service/destroy lifecycle, the filter and listener extension points, session state over stateless HTTP, and — the interview favourite — how Spring's <code>DispatcherServlet</code> is nothing more than one clever servlet sitting on top of this same API.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Servlets, the container, and the request/response cycle</h3>
+    <p>A servlet extends <code>HttpServlet</code> and overrides <code>doGet</code>, <code>doPost</code> and friends; the <em>servlet container</em> (Tomcat, Jetty, or the web layer of WildFly / Payara / Open Liberty) does everything else — it listens on the socket, parses HTTP, builds the request and response objects, routes the request to the right servlet by URL pattern, and manages that servlet's whole life. You write request-handling logic; the container owns the plumbing, concurrency and networking.</p>
+    <p>Why it matters: this is the foundation the rest of Jakarta EE and Spring stand on. Understanding that your code is a callback invoked by a container — not a program with a <code>main</code> — explains threading, scopes, and why frameworks configure so much through the container.</p>
+    <pre class="code-block" data-label="Java"><code>@WebServlet("/hello")
+public class HelloServlet extends HttpServlet {
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+            throws IOException {
+        resp.setContentType("text/plain");
+        resp.getWriter().write("Hello, " + req.getParameter("name"));
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/web/servlets/servlets.html" rel="noopener">Jakarta Servlet — Jakarta EE Tutorial (the canonical chapter: requests, responses, filters, sessions)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/web/webapp/webapp.html" rel="noopener">Getting Started with Web Applications — Jakarta EE Tutorial (WAR structure, web.xml, deployment)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-servlets-containers-intro" rel="noopener">Introduction to Servlets and Servlet Containers — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7TOmdDJc14s" rel="noopener">Introduction to Servlets — Telusko</a></li>
+    </ul>
+
+    <h3>The servlet lifecycle: init, service, destroy</h3>
+    <p>The container creates <em>one</em> instance of each servlet and reuses it for every request. On first use it calls <code>init()</code> once (initialise resources — DB pools, config); for each incoming request it calls <code>service()</code>, which dispatches to <code>doGet</code>/<code>doPost</code>; on shutdown or undeploy it calls <code>destroy()</code> once. Because a single instance serves many requests on many container threads at once, servlets must be stateless — mutable instance fields are shared across threads and are a classic bug.</p>
+    <p>Why it matters: "explain the servlet lifecycle" is one of the most-asked Jakarta/Java-web interview questions in India, and the follow-up — "is a servlet thread-safe?" — separates candidates who memorised three method names from those who understand the single-instance, multi-threaded model.</p>
+    <pre class="code-block" data-label="Java"><code>public void init() throws ServletException { /* once, before the first request */ }
+public void service(ServletRequest req, ServletResponse res) { /* once per request, on a container thread */ }
+public void destroy() { /* once, when the servlet is unloaded */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/servlet/6.1/" rel="noopener">Jakarta Servlet 6.1 specification — jakarta.ee (the normative lifecycle definition, spec HTML + PDF)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/intro-to-servlets" rel="noopener">Introduction to Java Servlets — Baeldung (lifecycle and object lifespans)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/java/life-cycle-of-a-servlet/" rel="noopener">Life Cycle of a Servlet — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://jenkov.com/tutorials/java-servlets/servlet-life-cycle.html" rel="noopener">Servlet Life Cycle — Jakob Jenkov</a></li>
+    </ul>
+
+    <h3>Filters and listeners</h3>
+    <p>A <code>Filter</code> intercepts requests and responses <em>around</em> a servlet — the container builds a chain, and each filter calls <code>chain.doFilter(...)</code> to pass control down and get it back on the way out. Filters are how you do cross-cutting concerns without touching servlet code: logging, authentication, compression, CORS, request timing. <em>Listeners</em> react to container events rather than requests — <code>ServletContextListener</code> fires on application startup/shutdown, <code>HttpSessionListener</code> on session create/destroy — the hooks you use to initialise and tear down application-scoped resources.</p>
+    <p>Why it matters: filters are the servlet-level ancestor of Spring's filter chain (Spring Security is filters) and of Jakarta's interceptors. Knowing where the chain runs — before any servlet, controller or handler — is essential for reasoning about security and request processing order.</p>
+    <pre class="code-block" data-label="Java"><code>@WebFilter("/*")
+public class TimingFilter implements Filter {
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+            throws IOException, ServletException {
+        long start = System.nanoTime();
+        chain.doFilter(req, res);              // hand off down the chain
+        log(System.nanoTime() - start);        // control returns here afterwards
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/servlet/6.1/apidocs/" rel="noopener">Jakarta Servlet 6.1 API (Javadoc) — Filter, FilterChain, ServletContextListener, HttpSessionListener</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/javaee-web-annotations" rel="noopener">A Guide to Jakarta EE Web-Related Annotations — Baeldung (@WebServlet, @WebFilter, @WebListener)</a></li>
+      <li>[Article] <a href="https://www.digitalocean.com/community/tutorials/java-servlet-filter-example-tutorial" rel="noopener">Java Servlet Filter Example — DigitalOcean</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-servlet-context" rel="noopener">Different Ways to Get Servlet Context — Baeldung (the app-scoped object listeners hook into)</a></li>
+    </ul>
+
+    <h3>Sessions and state management</h3>
+    <p>HTTP is stateless — each request stands alone — so servlets track a user across requests with <code>HttpSession</code>. On the first <code>request.getSession()</code> the container creates a session, stores it server-side, and sends the client a <code>JSESSIONID</code> cookie; subsequent requests carrying that cookie resolve to the same session (URL rewriting is the cookie-less fallback). You bind objects with <code>setAttribute</code>/<code>getAttribute</code>, and sessions expire on a configurable timeout or explicit <code>invalidate()</code>.</p>
+    <p>Why it matters: sessions are the original answer to "how do I keep a user logged in?" and understanding them clarifies the three servlet scopes — request, session, application — that CDI and Spring later mirror with <code>@RequestScoped</code>, <code>@SessionScoped</code> and singletons.</p>
+    <pre class="code-block" data-label="Java"><code>HttpSession session = req.getSession();          // created if absent
+session.setAttribute("cart", cart);              // lives across requests, server-side
+Object saved = session.getAttribute("cart");     // next request, same JSESSIONID</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/starter-guides/how-to-start-with-servlets/" rel="noopener">How to Start With Servlets — Jakarta EE starter guide (a worked app that stores preferences in the session)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-servlet-cookies-session" rel="noopener">Handling Cookies and a Session in a Java Servlet — Baeldung</a></li>
+    </ul>
+
+    <h3>Servlet vs Spring MVC DispatcherServlet</h3>
+    <p>Spring MVC does not replace the Servlet API — it sits on top of it. <code>DispatcherServlet</code> <em>is</em> an <code>HttpServlet</code>, registered (usually at <code>/</code>) as the single front controller that receives every request, then delegates to handler mappings, controllers, argument resolvers and view resolvers. Where a plain servlet couples URL, parsing and business logic in one <code>doGet</code>, the DispatcherServlet centralises the boilerplate and lets you write annotated <code>@Controller</code> methods instead.</p>
+    <p>Why it matters: "how is DispatcherServlet related to a servlet?" and "servlet vs Spring MVC" are staple Indian-interview questions precisely because the honest answer — <em>it is a servlet</em> — proves you understand what the framework abstracts. It also explains why Spring apps still deploy to a servlet container and why servlet filters run before any Spring controller.</p>
+    <pre class="code-block" data-label="Java"><code>// Spring registers DispatcherServlet — itself an HttpServlet — as the front controller
+ServletRegistration.Dynamic reg =
+    servletContext.addServlet("dispatcher", new DispatcherServlet(appContext));
+reg.addMapping("/");                             // every request enters through it
+reg.setLoadOnStartup(1);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet.html" rel="noopener">DispatcherServlet — Spring Framework reference (the front-controller pattern on the Servlet API)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-dispatcherservlet" rel="noopener">An Intro to the Spring DispatcherServlet — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-handlerinterceptor-vs-filter" rel="noopener">HandlerInterceptors vs. Filters in Spring MVC — Baeldung (where the servlet filter chain ends and Spring begins)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-cdi-advanced.html">← CDI: Producers, Events and Interceptors</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="05-jaxrs.html">RESTful Web Services (JAX-RS) →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked servlet questions in Indian interviews — Jakarta/Java-web rounds lean hard on the lifecycle and on the DispatcherServlet connection:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a servlet, and what does the servlet container do?</summary>
+      <div class="answer"><p>A servlet is a Java class (usually extending <code>HttpServlet</code>) that handles HTTP requests and produces responses. The container (Tomcat, Jetty, WildFly's web layer) manages everything around it: opening sockets, parsing HTTP, creating request/response objects, mapping URLs to servlets, managing threads, and running the servlet's lifecycle. Your servlet is a callback the container invokes — not a standalone program.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between GenericServlet and HttpServlet? doGet vs doPost?</summary>
+      <div class="answer"><p><code>GenericServlet</code> is protocol-independent; <code>HttpServlet</code> extends it for HTTP and provides <code>doGet</code>, <code>doPost</code>, <code>doPut</code>, <code>doDelete</code> etc. <code>doGet</code> handles GET (idempotent, params in the URL); <code>doPost</code> handles POST (body payload, non-idempotent, form submits). You override the ones you need; <code>service()</code> dispatches by HTTP method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the three servlet lifecycle methods and when each runs.</summary>
+      <div class="answer"><p><code>init()</code> — once, before the first request, to set up resources. <code>service()</code> — once per request, dispatching to <code>doGet</code>/<code>doPost</code>. <code>destroy()</code> — once, when the container unloads the servlet, to release resources. init/service/destroy is the servlet lifecycle.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you map a servlet to a URL?</summary>
+      <div class="answer"><p>Two ways: the <code>@WebServlet("/path")</code> annotation on the class (Servlet 3.0+, no XML), or a <code>&lt;servlet&gt;</code> + <code>&lt;servlet-mapping&gt;</code> pair in the <code>web.xml</code> deployment descriptor. Annotation is the modern default; web.xml still wins for externalised or overriding configuration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do HttpServletRequest and HttpServletResponse give you?</summary>
+      <div class="answer"><p>The request exposes parameters, headers, cookies, the session, the input stream and path info; the response lets you set status, headers, content type and write the body via <code>getWriter()</code> or <code>getOutputStream()</code>. Both are created per request by the container and are valid only for that request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How many instances of a servlet does the container create, and how does it serve concurrent requests?</summary>
+      <div class="answer"><p>One instance per servlet (unless it implements the deprecated <code>SingleThreadModel</code>). The container serves concurrent requests by running <code>service()</code> on multiple threads against that single shared instance — a thread from its pool per request. This single-instance, multi-threaded model is the crux of most lifecycle follow-up questions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Are servlets thread-safe? What is the risk with instance fields?</summary>
+      <div class="answer"><p>No — because one instance is shared across request threads, mutable instance fields are shared mutable state and cause race conditions. Keep servlets stateless: use local variables (per-thread) and request/session attributes for state. Never store per-request data in a field.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a Filter and how does the filter chain work?</summary>
+      <div class="answer"><p>A <code>Filter</code> intercepts a request before it reaches the servlet and the response on the way back. The container assembles matching filters into a chain; each calls <code>chain.doFilter(req, res)</code> to pass control onward, and code after that call runs on the return trip. Used for logging, auth, compression, CORS — cross-cutting concerns kept out of servlet code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are listeners? Give two examples.</summary>
+      <div class="answer"><p>Listeners react to container lifecycle events, not requests. <code>ServletContextListener</code> fires on web-app startup/shutdown (initialise/close app-wide resources); <code>HttpSessionListener</code> fires on session creation/destruction (e.g. counting active users). Registered with <code>@WebListener</code> or in web.xml.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> HTTP is stateless — how does HttpSession maintain state across requests?</summary>
+      <div class="answer"><p>On first <code>getSession()</code> the container creates a server-side session and sends a <code>JSESSIONID</code> cookie; later requests carrying that cookie resolve to the same session. If cookies are disabled, URL rewriting (<code>;jsessionid=...</code>) is the fallback. Attributes bound to the session persist until timeout or <code>invalidate()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> ServletContext vs ServletConfig, and what are the servlet scopes?</summary>
+      <div class="answer"><p><code>ServletConfig</code> is per-servlet init configuration; <code>ServletContext</code> is one shared object per web application — the app scope, used for application-wide attributes and shared by all servlets, filters and listeners. The three scopes are request (one request), session (one user), application (whole app) — mirrored later by CDI/Spring scopes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> forward() vs sendRedirect()?</summary>
+      <div class="answer"><p><code>RequestDispatcher.forward()</code> is server-side: the same request/response are handed to another resource, the URL in the browser doesn't change, and request attributes survive. <code>response.sendRedirect()</code> tells the browser to make a new request to a new URL (302) — URL changes, request attributes are lost, but it works across contexts and avoids double-submit on refresh.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What changed between javax.servlet (Java EE) and jakarta.servlet (Jakarta EE)?</summary>
+      <div class="answer"><p>Only the package namespace: Oracle transferred Java EE to the Eclipse Foundation, which could not use the <code>javax</code> namespace, so from Jakarta EE 9 every API moved <code>javax.servlet.*</code> → <code>jakarta.servlet.*</code>. It's a mechanical rename with no behavioural change, but it's a hard, all-or-nothing migration — servers/frameworks target one namespace, which is why Servlet 5.0+ (jakarta) and Servlet 4.0 (javax) don't mix.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Filter vs Spring MVC HandlerInterceptor — which runs where?</summary>
+      <div class="answer"><p>A servlet <code>Filter</code> is part of the container and wraps the whole request, running before it even reaches the DispatcherServlet and around every servlet. A Spring <code>HandlerInterceptor</code> runs inside the DispatcherServlet, only for Spring-mapped handlers, with access to the resolved handler and ModelAndView. Rule of thumb: container-wide, framework-agnostic concerns → filter; Spring-aware, handler-level concerns → interceptor.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is Spring's DispatcherServlet a servlet? How does it relate to the Servlet API?</summary>
+      <div class="answer"><p>Yes — <code>DispatcherServlet extends FrameworkServlet extends HttpServletBean extends HttpServlet</code>. It is registered as a normal servlet (typically mapped to <code>/</code>) and acts as the front controller: every request enters its <code>service()</code>, and it delegates to handler mappings, controllers, argument resolvers and view resolvers. Spring MVC is therefore a sophisticated single servlet, not a replacement for the Servlet API — which is why Spring apps still need a servlet container.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Contrast building a web app with raw servlets versus Spring MVC's DispatcherServlet — what does the framework actually add?</summary>
+      <div class="answer"><p>With raw servlets you write one servlet per URL family and hand-code parsing, dispatch, validation, content negotiation and view selection inside <code>doGet</code>/<code>doPost</code> — total control, heavy boilerplate, no thread-safety help. The DispatcherServlet centralises all of that: URL-to-method routing via handler mappings, automatic binding of params/body to method arguments, pluggable view/JSON rendering, exception handling, and interceptors — so you write small stateless <code>@Controller</code> methods. It's the same Servlet API underneath; Spring trades a little indirection for a lot less repetition and a consistent request-processing pipeline.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist (module 04):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.servlet.core</li>
+      <li>jee.servlet.web</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

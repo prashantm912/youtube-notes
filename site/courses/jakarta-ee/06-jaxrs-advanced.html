@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JAX-RS Advanced module: entity providers (MessageBodyReader/Writer), ExceptionMapper, filters and interceptors, the JAX-RS Client API, asynchronous and reactive invocation, and Server-Sent Events — with verified official Jakarta specs, the Jakarta EE Tutorial, Jersey/RESTEasy docs and the interview questions they power.">
+  <title>JAX-RS Advanced — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: JAX-RS Advanced</h1>
+  <p class="standfirst">Once the resource classes answer requests, the interesting problems begin: custom serializers, one place to turn exceptions into clean responses, cross-cutting filters, a client for calling other services, and streaming with SSE — the layer that turns a REST endpoint into production-grade plumbing.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → JAX-RS Advanced</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>JAX-RS Advanced is the extension layer of the specification: <em>providers</em> that plug into serialization and error handling, <em>filters and interceptors</em> for cross-cutting concerns, and the <em>client side</em> — the Client API, asynchronous and reactive invocation, and Server-Sent Events. This is where a working REST resource becomes a real service that serializes custom media types, returns consistent errors, calls other services and streams updates. Because most Indian teams run Spring alongside Jakarta EE, the filter and client topics note the Spring equivalents an interviewer will ask you to compare.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Entity providers: MessageBodyReader and MessageBodyWriter</h3>
+    <p>JAX-RS turns Java objects into bytes and back through <em>entity providers</em>. A <code>MessageBodyWriter&lt;T&gt;</code> serializes a return value into the response stream for a given media type; a <code>MessageBodyReader&lt;T&gt;</code> deserializes a request body into a method parameter. Built-in providers already handle <code>String</code>, <code>byte[]</code>, and JSON-B/JAXB types; you register your own <code>@Provider</code> when you need a custom media type or wire format. Its <code>isWriteable</code>/<code>isReadable</code> and <code>getSize</code> methods let it opt in only for the types and media types it understands.</p>
+    <p>Why it matters: this is the extension point behind <code>@Produces</code>/<code>@Consumes</code>. Interviewers probe whether you understand that JSON binding is "just a provider" and that the provider participates in content negotiation rather than being hard-wired.</p>
+    <pre class="code-block" data-label="Java"><code>@Provider
+@Produces("application/vnd.acme.book+json")
+public class BookWriter implements MessageBodyWriter&lt;Book&gt; {
+    public boolean isWriteable(Class&lt;?&gt; t, Type g, Annotation[] a, MediaType m) {
+        return Book.class.isAssignableFrom(t);
+    }
+    public void writeTo(Book b, /* ... */ OutputStream out) throws IOException {
+        out.write(toJson(b).getBytes(UTF_8));   // custom media-type serialization
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/websvcs/rest-advanced/rest-advanced.html" rel="noopener">Jakarta REST: Advanced Topics and an Example (entity binding, subresources, integration) — The Jakarta EE Tutorial</a></li>
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/jersey.github.io/documentation/latest/message-body-workers.html" rel="noopener">Entity Providers / Message Body Workers (MessageBodyReader &amp; MessageBodyWriter) — Jersey User Guide, Ch. 8</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jersey-jackson-objectmapper" rel="noopener">Customizing the JSON provider — a custom ObjectMapper with Jersey and Jackson — Baeldung</a></li>
+    </ul>
+
+    <h3>Mapping exceptions: ExceptionMapper</h3>
+    <p>An <code>ExceptionMapper&lt;E extends Throwable&gt;</code> catches an exception thrown anywhere in the request pipeline — resource method, provider or filter — and converts it into a <code>Response</code>. It is the clean alternative to a <code>try</code>/<code>catch</code> in every method or throwing a raw <code>WebApplicationException</code>. Register it as a <code>@Provider</code>; the runtime selects the mapper whose exception type is the nearest supertype of what was thrown, so specific mappers win over general ones.</p>
+    <p>Why it matters: a consistent error payload — a JSON body with the right HTTP status — is a design decision, not an accident. Knowing that a mapper centralizes error-to-HTTP translation, and that <code>WebApplicationException</code> already carries its own <code>Response</code>, is standard interview ground.</p>
+    <pre class="code-block" data-label="Java"><code>@Provider
+public class NotFoundMapper implements ExceptionMapper&lt;EntityNotFoundException&gt; {
+    public Response toResponse(EntityNotFoundException ex) {
+        return Response.status(Response.Status.NOT_FOUND)
+                       .entity(new ApiError("NOT_FOUND", ex.getMessage()))
+                       .type(MediaType.APPLICATION_JSON)
+                       .build();
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/restful-ws/4.0/jakarta-restful-ws-spec-4.0.html" rel="noopener">Providers &amp; Exception Mapping Providers (Ch. 4, incl. ExceptionMapper) — Jakarta RESTful Web Services 4.0 specification</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-exception-handling-jersey" rel="noopener">Exception Handling With Jersey (ExceptionMapper and WebApplicationException) — Baeldung</a></li>
+    </ul>
+
+    <h3>Filters and interceptors</h3>
+    <p>Filters run around the request/response and can read or mutate headers, the URI or the status, or abort early: <code>ContainerRequestFilter</code>/<code>ContainerResponseFilter</code> on the server, <code>ClientRequestFilter</code>/<code>ClientResponseFilter</code> on the client. Interceptors — <code>ReaderInterceptor</code> and <code>WriterInterceptor</code> — wrap the entity marshalling step, sitting around the <code>MessageBodyReader</code>/<code>Writer</code> to transform the stream itself (gzip, encryption). Bind them globally, or scope them to specific methods with a custom <code>@NameBinding</code> annotation, and order them with <code>@Priority</code>.</p>
+    <p>Why it matters: cross-cutting concerns — authentication, logging, CORS, compression — belong here instead of polluting every resource. The filter-versus-interceptor distinction and the request/response execution order are among the most-asked advanced JAX-RS questions, and map onto Spring's <code>HandlerInterceptor</code>/servlet filters in the contrast rounds.</p>
+    <pre class="code-block" data-label="Java"><code>@Provider
+@Priority(Priorities.AUTHENTICATION)   // ordering within the request phase
+public class AuthFilter implements ContainerRequestFilter {
+    public void filter(ContainerRequestContext ctx) {
+        if (ctx.getHeaderString("Authorization") == null)
+            ctx.abortWith(Response.status(Response.Status.UNAUTHORIZED).build());
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/jersey.github.io/documentation/latest/filters-and-interceptors.html" rel="noopener">Filters and Interceptors (name binding, priorities, dynamic binding) — Jersey User Guide, Ch. 10</a></li>
+      <li>[Official] <a href="https://docs.jboss.org/resteasy/docs/6.2.6.Final/userguide/html/index.html" rel="noopener">RESTEasy 6.2 User Guide (Filters and Interceptors, Client API) — the WildFly/JBoss implementation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jersey-filters-interceptors" rel="noopener">Jersey Filters and Interceptors (server- and client-side, with the execution order) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WjzMZoBEvRY" rel="noopener">Advanced JAX-RS 25 — Filters and Interceptors — Java Brains (Koushik Kothagal)</a></li>
+    </ul>
+
+    <h3>The JAX-RS Client API</h3>
+    <p>The Client API is the fluent, portable counterpart to the server annotations: build a <code>Client</code>, target a URI with <code>WebTarget</code>, set path and query templates and headers, then invoke <code>request().get(...)</code>/<code>post(...)</code>. It reuses the same providers, so your JSON binding, filters and interceptors work on the client side too. A <code>Client</code> is expensive to create — build it once, reuse it, and close it when done.</p>
+    <p>Why it matters: microservices call each other, and this is how one JAX-RS service consumes another. Interviewers compare it with Spring's <code>RestTemplate</code> (legacy) and <code>WebClient</code> (reactive), and check that you reuse and close clients rather than creating one per call.</p>
+    <pre class="code-block" data-label="Java"><code>Client client = ClientBuilder.newClient();
+try {
+    Book book = client.target("https://api.example.com")
+        .path("books/{id}").resolveTemplate("id", 42)
+        .request(MediaType.APPLICATION_JSON)
+        .get(Book.class);               // deserialized by a MessageBodyReader
+} finally {
+    client.close();                     // Client is heavyweight — reuse and close
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/jersey.github.io/documentation/latest/client.html" rel="noopener">Client API (ClientBuilder, WebTarget, Invocation) — Jersey User Guide, Ch. 5</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jersey-jax-rs-client" rel="noopener">JAX-RS Client with Jersey (targets, requests, reading responses) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zPH-ujUDx1s" rel="noopener">Advanced JAX-RS 13 — JAX-RS Client — Java Brains (Koushik Kothagal)</a></li>
+    </ul>
+
+    <h3>Asynchronous and reactive JAX-RS</h3>
+    <p>By default a resource method holds its request thread until it returns. Suspending with <code>@Suspended AsyncResponse</code> hands control back to the container and resumes later from another thread — raising throughput for slow, I/O-bound work without pinning the limited request pool. On the client, <code>async()</code> returns a <code>Future</code> (or takes an <code>InvocationCallback</code>) and the reactive <code>rx()</code> returns a <code>CompletionStage</code>, so calls compose without blocking the caller.</p>
+    <p>Why it matters: thread-per-request scaling is a real ceiling, and async is the JAX-RS answer before you reach for a fully reactive stack. The key insight interviewers want: <code>@Suspended</code> does not make the work faster — it frees the thread while the work runs elsewhere.</p>
+    <pre class="code-block" data-label="Java"><code>@GET @Path("report")
+public void report(@Suspended AsyncResponse ar) {   // frees the request thread
+    executor.submit(() -&gt; ar.resume(buildReport()));
+}
+// client side, non-blocking:
+CompletionStage&lt;Book&gt; cs = target.request().rx().get(Book.class);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/jersey.github.io/documentation/latest/async.html" rel="noopener">Asynchronous Services and Clients (@Suspended AsyncResponse, async invocations) — Jersey User Guide, Ch. 12</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jax-rs-reactive-client" rel="noopener">Reactive JAX-RS Client API (rx() and CompletionStage) — Baeldung</a></li>
+    </ul>
+
+    <h3>Server-Sent Events (SSE)</h3>
+    <p>SSE, standardized in JAX-RS 2.1, is a one-way, long-lived HTTP stream from server to client over <code>text/event-stream</code> — lighter than WebSocket when you only need to push (notifications, live metrics, progress bars). A resource produces <code>SERVER_SENT_EVENTS</code> and writes to an injected <code>SseEventSink</code>; an <code>SseBroadcaster</code> fans a single event out to many subscribers; clients consume with <code>SseEventSource</code>, which reconnects automatically and can resume from the last event id.</p>
+    <p>Why it matters: SSE answers "how do I push updates without polling or a full WebSocket?" Knowing that it is unidirectional and self-reconnecting — versus WebSocket's bidirectional, protocol-upgraded channel — is the usual discriminator in the streaming question.</p>
+    <pre class="code-block" data-label="Java"><code>@GET @Path("events")
+@Produces(MediaType.SERVER_SENT_EVENTS)
+public void subscribe(@Context SseEventSink sink, @Context Sse sse) {
+    broadcaster.register(sink);                 // fan-out to many clients
+    sink.send(sse.newEvent("connected"));
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/jersey.github.io/documentation/latest/sse.html" rel="noopener">Server-Sent Events (SSE) Support (SseEventSink, SseBroadcaster, SseEventSource) — Jersey User Guide, Ch. 17</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-ee-jax-rs-sse" rel="noopener">Server-Sent Events (SSE) in JAX-RS (publishing and consuming events) — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-jaxrs.html">← RESTful Web Services (JAX-RS)</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="07-persistence.html">Jakarta Persistence in Jakarta EE →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked advanced JAX-RS questions in Indian enterprise and product interviews — providers, the filter/interceptor chain, the client, async and SSE, with the Spring contrast that follows almost every time:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a JAX-RS "provider", and name the main kinds.</summary>
+      <div class="answer"><p>A provider is an extension component, annotated <code>@Provider</code>, that the runtime discovers and plugs into the request pipeline. The main kinds: <em>entity providers</em> (<code>MessageBodyReader</code>/<code>MessageBodyWriter</code>), <code>ExceptionMapper</code>, <code>ContextResolver</code>, and the <em>filters and interceptors</em>. They customize serialization, error handling and cross-cutting behavior without touching the resource classes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do MessageBodyReader and MessageBodyWriter do?</summary>
+      <div class="answer"><p>They convert between Java objects and the wire. A <code>MessageBodyWriter</code> serializes a return value into the response entity stream for a media type; a <code>MessageBodyReader</code> deserializes a request body into a method parameter. Built-ins cover <code>String</code>, <code>byte[]</code> and JSON; a custom one, registered as a <code>@Provider</code>, handles your own formats. <code>@Produces</code>/<code>@Consumes</code> select which provider runs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an ExceptionMapper and why use one?</summary>
+      <div class="answer"><p>An <code>ExceptionMapper&lt;E&gt;</code> converts a thrown exception into a <code>Response</code>, centralizing error-to-HTTP mapping instead of a <code>try</code>/<code>catch</code> in every method. Register it as a <code>@Provider</code>; the runtime picks the mapper whose type is the closest supertype of the exception. The payoff is consistent status codes and a uniform error body across the API.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you call a remote REST endpoint with the JAX-RS Client API?</summary>
+      <div class="answer"><p><code>ClientBuilder.newClient()</code> &rarr; <code>target(uri)</code> &rarr; <code>path</code>/<code>queryParam</code>/<code>resolveTemplate</code> &rarr; <code>request(mediaType)</code> &rarr; <code>get</code>/<code>post(...)</code>. The response is read into a type by the same providers used server-side. Because a <code>Client</code> is heavyweight, create it once, reuse it, and <code>close()</code> it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Filters vs interceptors — what is the difference?</summary>
+      <div class="answer"><p>Filters (<code>ContainerRequestFilter</code>/<code>ContainerResponseFilter</code>, and the client variants) act on the message metadata — headers, URI, status — and can abort the request. Interceptors (<code>ReaderInterceptor</code>/<code>WriterInterceptor</code>) wrap the entity marshalling, so they transform the body stream itself (gzip, encryption). In short: filters wrap the message, interceptors wrap the entity I/O.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is name binding, and how does it differ from a global filter?</summary>
+      <div class="answer"><p>A global filter or interceptor runs for every resource method. Name binding attaches one only to methods or classes marked with a custom annotation that is itself meta-annotated <code>@NameBinding</code> — for example a <code>@Logged</code> filter applied wherever you put <code>@Logged</code>. Use it to scope cross-cutting logic instead of running it everywhere. Dynamic binding via <code>DynamicFeature</code> is the programmatic alternative.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you control the execution order of filters and interceptors?</summary>
+      <div class="answer"><p>Annotate them with <code>@Priority</code> using the <code>Priorities</code> constants (<code>AUTHENTICATION</code> = 1000, <code>AUTHORIZATION</code> = 2000, <code>HEADER_DECORATOR</code>, <code>ENTITY_CODER</code>, <code>USER</code>). Request-side filters run in ascending priority order, response-side in descending; a lower number means earlier on the request path. Assigning explicit priorities beats relying on registration order.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a @PreMatching filter and when would you use it?</summary>
+      <div class="answer"><p>A <code>@PreMatching</code> <code>ContainerRequestFilter</code> runs <em>before</em> the runtime matches the request to a resource method, so it can change the HTTP method, URI or headers and thereby influence which resource is selected — think method override or URI rewriting. Ordinary (post-matching) filters run after matching, when the target resource is already known.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you make a JAX-RS resource method asynchronous, and what does it buy you?</summary>
+      <div class="answer"><p>Inject <code>@Suspended AsyncResponse</code>, return <code>void</code>, and call <code>resume()</code> from another thread (often a <code>CompletableFuture</code> or executor). The container thread is released immediately, so slow I/O-bound requests do not tie up the limited request pool, raising throughput. It does not make the work itself faster — it only frees the thread while the work runs elsewhere.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> JAX-RS Client vs Spring — how do you contrast them?</summary>
+      <div class="answer"><p>JAX-RS is a portable spec (Jersey/RESTEasy implement it); Spring MVC/WebFlux is Spring's own stack. Server-side: <code>@Path</code>/<code>@GET</code> versus <code>@RequestMapping</code>/<code>@GetMapping</code>. Client-side: the JAX-RS <code>Client</code>/<code>WebTarget</code> versus Spring's <code>RestTemplate</code> (legacy) and <code>WebClient</code> (reactive), plus declarative HTTP interfaces. Same REST concepts, different APIs, and JAX-RS resources default to per-request instances while Spring beans are singletons.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through the server pipeline order, including where an ExceptionMapper fits.</summary>
+      <div class="answer"><p>Pre-matching filters &rarr; resource matching &rarr; post-matching request filters &rarr; <code>ReaderInterceptor</code> &rarr; <code>MessageBodyReader</code> &rarr; the resource method &rarr; response filters &rarr; <code>WriterInterceptor</code> &rarr; <code>MessageBodyWriter</code>. If anything throws, control jumps to the matching <code>ExceptionMapper</code>; the response filters and writer interceptor then still run over the mapped <code>Response</code>. Priorities order the filters and interceptors within each phase.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> async() vs reactive rx() on the client — what is the difference?</summary>
+      <div class="answer"><p><code>async()</code> returns a <code>Future&lt;T&gt;</code> (or takes an <code>InvocationCallback</code>): you still poll, block, or handle callbacks. <code>rx()</code> returns a <code>CompletionStage&lt;T&gt;</code>, so responses compose with <code>thenApply</code>/<code>thenCompose</code> and combine without blocking. Both avoid blocking the caller, but the reactive extension (<code>rx()</code>, JAX-RS 2.1) composes cleanly, which is why it is preferred for chaining calls.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> SSE vs WebSocket — when do you choose SSE in JAX-RS?</summary>
+      <div class="answer"><p>SSE is one-way (server &rarr; client), rides plain HTTP <code>text/event-stream</code>, and auto-reconnects with event ids — ideal for notifications, live feeds and progress where only the server pushes. WebSocket is bidirectional and a separate protocol upgrade. In JAX-RS you produce <code>SERVER_SENT_EVENTS</code>, write to an <code>SseEventSink</code>, fan out with <code>SseBroadcaster</code>, and consume via <code>SseEventSource</code>. Choose SSE when you do not need client-to-server streaming and want to stay on ordinary HTTP.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist (module 06):</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.rest.providers</li>
+      <li>jee.rest.client</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Jakarta Messaging (JMS) module: point-to-point queues vs publish/subscribe topics, ConnectionFactory and producers/consumers, the JMS 3.0 simplified API (JMSContext), message-driven beans, and how Spring's @JmsListener compares — with official specs, tutorials and the interview questions they power.">
+  <title>Jakarta Messaging (JMS) — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Jakarta Messaging (JMS)</h1>
+  <p class="standfirst">Messaging is how enterprise systems stay decoupled: one component drops a message and moves on, another picks it up when it is ready. JMS is the vendor-neutral API for that conversation — this module maps its two delivery models, its modern simplified API, and where message-driven beans hand off to Spring's <code>@JmsListener</code>.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → Jakarta Messaging (JMS)</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Jakarta Messaging (JMS) is the standard API for asynchronous, loosely coupled communication between Jakarta EE components and message brokers. This module covers the two delivery models — point-to-point queues and publish/subscribe topics — the connection factory and producer/consumer objects, the JMS 2.0/3.0 simplified API built around <code>JMSContext</code>, and message-driven beans. It closes with a side-by-side against Spring JMS and <code>@JmsListener</code>, the framework most enterprise teams actually ship.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Point-to-point queues vs publish/subscribe topics</h3>
+    <p>JMS defines two messaging domains. <em>Point-to-point</em> uses a <strong>queue</strong>: each message has exactly one consumer, the broker retains it until it is consumed or expires, and delivery is load-balanced across competing consumers — ideal for distributing work so each task runs once. <em>Publish/subscribe</em> uses a <strong>topic</strong>: a published message is broadcast to every active subscriber (zero to many), like a bulletin board — ideal for fanning an event out to many interested parties.</p>
+    <p>Why it matters: picking the wrong domain is a classic design error. Queues give you a durable work backlog with competing consumers; topics give you broadcast but, by default, only reach subscribers connected at publish time — durable subscriptions close that gap. Both destinations are <em>administered objects</em> (<code>Queue</code>/<code>Topic</code>) looked up or injected, so application code barely changes between them. Interviewers almost always open a JMS round with "queue vs topic".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/messaging/jms-concepts/jms-concepts.html" rel="noopener">Jakarta Messaging Concepts — Jakarta EE Tutorial</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/messaging/" rel="noopener">Jakarta Messaging specification — jakarta.ee (Eclipse Foundation)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/java/differences-between-pointtopoint-and-publish-subscribe-model-in-jms/" rel="noopener">Point-to-Point vs Publish/Subscribe in JMS — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://activemq.apache.org/components/classic/documentation/how-does-a-queue-compare-to-a-topic" rel="noopener">How does a Queue compare to a Topic — Apache ActiveMQ docs</a></li>
+    </ul>
+
+    <h3>ConnectionFactory, producers and consumers</h3>
+    <p>Every JMS client starts from a <code>ConnectionFactory</code> — an administered object (configured on the server, injected with <code>@Resource</code>) that hands out connections to the broker. In the classic (JMS 1.1) API you then open a <code>Session</code>, and from it a <code>MessageProducer</code> to send and a <code>MessageConsumer</code> to receive; the session is single-threaded and owns transaction and acknowledgment behaviour. Messages come in five body types — <code>TextMessage</code>, <code>BytesMessage</code>, <code>MapMessage</code>, <code>ObjectMessage</code>, <code>StreamMessage</code> — plus headers and application properties used for routing and selectors.</p>
+    <p>Why it matters: the <code>ConnectionFactory</code> and <code>Destination</code> pair are the only two things your code needs to stay portable across WildFly, Payara or Open Liberty — the broker wiring lives in server config, not in source. Understanding the classic Connection → Session → Producer/Consumer chain is what makes the simplified API (next topic) click. Receiving can be synchronous (<code>receive()</code> blocks) or asynchronous (a <code>MessageListener</code> callback).</p>
+    <pre class="code-block" data-label="Java"><code>@Resource(lookup = "jms/ConnectionFactory") ConnectionFactory cf;
+@Resource(lookup = "jms/OrderQueue")        Queue queue;
+// classic API path: Connection -&gt; Session -&gt; MessageProducer / MessageConsumer</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/messaging/3.1/apidocs/jakarta.messaging/jakarta/jms/package-summary" rel="noopener">jakarta.jms package summary — Jakarta Messaging 3.1 API</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/messaging/jms-examples/jms-examples.html" rel="noopener">Jakarta Messaging Examples — Jakarta EE Tutorial</a></li>
+      <li>[Article] <a href="https://dzone.com/articles/getting-started-with-jms-activemq-explained-in-simple-way" rel="noopener">Getting Started with JMS-ActiveMQ, Explained Simply — DZone</a></li>
+    </ul>
+
+    <h3>The simplified API: JMSContext (JMS 2.0 / 3.0)</h3>
+    <p>JMS 2.0 — carried into Jakarta Messaging 3.x — added a simplified API that collapses <code>Connection</code> and <code>Session</code> into one object, <code>JMSContext</code>, and replaces the verbose producer/consumer with <code>JMSProducer</code> (method-chaining / builder style) and <code>JMSConsumer</code>. It throws unchecked <code>JMSRuntimeException</code> instead of checked <code>JMSException</code>, and <code>JMSContext</code> is <code>AutoCloseable</code>, so try-with-resources closes the connection and session together.</p>
+    <p>Why it matters: the result is dramatically less boilerplate — "create context, send, done" is a few lines instead of a four-object dance. Inside a Jakarta EE container an injected <code>JMSContext</code> is even managed for you and scoped to the active transaction. This is the API interviewers expect you to reach for today; being able to contrast it with the classic API signals you have used JMS in its modern form.</p>
+    <pre class="code-block" data-label="Java"><code>try (JMSContext ctx = connectionFactory.createContext()) {
+    ctx.createProducer().send(orderQueue, "PLACED:42");        // no checked exceptions
+    String body = ctx.createConsumer(orderQueue).receiveBody(String.class);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/messaging/3.1/apidocs/jakarta.messaging/jakarta/jms/jmscontext" rel="noopener">JMSContext — Jakarta Messaging 3.1 API (the simplified-API entry point)</a></li>
+      <li>[Official] <a href="https://eclipse-ee4j.github.io/openmq/guides/mq-dev-guide-java/using-the-simplifed-java-api.html" rel="noopener">Using the Simplified API — Eclipse OpenMQ Developer's Guide</a></li>
+      <li>[Article] <a href="https://www.oracle.com/technical-resources/articles/java/jms20.html" rel="noopener">What's New in JMS 2.0, Part One: Ease of Use — Oracle</a></li>
+    </ul>
+
+    <h3>Message-driven beans (MDBs)</h3>
+    <p>A message-driven bean is an enterprise bean that consumes messages asynchronously: the container listens on a destination, and when a message arrives it invokes the bean's <code>onMessage(Message)</code> method. Unlike session beans, an MDB has no business interface and no client-visible identity — clients never call it directly; the message is the trigger. It implements <code>MessageListener</code> and is configured with <code>@MessageDriven</code> plus activation-config properties (destination lookup, destination type, acknowledge mode).</p>
+    <p>Why it matters: MDBs give you container-managed concurrency, transactions and pooling for message consumption for free — the container runs many bean instances in parallel and can roll back and redeliver a message if <code>onMessage</code> throws (watch for poison messages and redelivery limits). They are the Jakarta EE-native answer to "how do I process a queue," and the direct conceptual ancestor of Spring's <code>@JmsListener</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@MessageDriven(activationConfig = {
+    @ActivationConfigProperty(propertyName = "destinationLookup", propertyValue = "jms/OrderQueue"),
+    @ActivationConfigProperty(propertyName = "destinationType",   propertyValue = "jakarta.jms.Queue")
+})
+public class OrderProcessor implements MessageListener {
+    public void onMessage(Message message) { /* business logic, transactional */ }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/entbeans/ejb-intro/ejb-intro.html" rel="noopener">What Is a Message-Driven Bean? — Enterprise Beans, Jakarta EE Tutorial</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ejb-message-driven-beans" rel="noopener">A Guide to Message Driven Beans in EJB — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=k3dhvcETsyY" rel="noopener">Message-Driven Bean &amp; JMS theory — Telusko</a></li>
+    </ul>
+
+    <h3>Contrast: Spring JMS and @JmsListener</h3>
+    <p>Spring provides the same capabilities without a full Jakarta EE application server. <code>JmsTemplate</code> wraps the send/receive boilerplate (much like <code>JMSContext</code>), and <code>@JmsListener</code> turns any Spring bean method into a listener endpoint — the Spring-managed equivalent of an MDB's <code>onMessage</code> — activated by <code>@EnableJms</code> and a <code>DefaultJmsListenerContainerFactory</code>. It supports concurrency, message selectors, durable and shared subscriptions, and typed payload binding through message converters.</p>
+    <p>Why it matters: for most teams the choice is architectural, not technical. MDBs need a Jakarta EE container (WildFly, Payara, Open Liberty); <code>@JmsListener</code> runs in a plain Spring Boot app against any broker (ActiveMQ, Artemis, IBM MQ). The programming models mirror each other — <code>onMessage</code> vs an annotated method, activation config vs container-factory plus annotation attributes — so knowing one transfers to the other. Expect interviewers to ask you to compare them directly.</p>
+    <pre class="code-block" data-label="Java"><code>@JmsListener(destination = "OrderQueue")
+public void handle(String body) {
+    // Spring-managed equivalent of an MDB's onMessage
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/guides/gs/messaging-jms/" rel="noopener">Messaging with JMS — Spring Getting Started guide</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/jms/annotation/JmsListener.html" rel="noopener">@JmsListener — Spring Framework API</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-jms" rel="noopener">Getting Started with Spring JMS — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-faces.html">← Jakarta Faces (JSF) Overview</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="12-security-json.html">Jakarta Security and JSON →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The JMS questions Indian interviewers lean on — from the queue-vs-topic opener through acknowledgment and MDBs to the inevitable "JMS vs Kafka":</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Jakarta Messaging (JMS) and what problem does it solve?</summary>
+      <div class="answer"><p>A standard API for asynchronous, loosely coupled communication between components through a message broker. Sender and receiver are decoupled in time and location — the producer sends and moves on, the consumer processes when ready — which improves resilience, absorbs load spikes, and lets components scale independently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Queue vs Topic — the core difference?</summary>
+      <div class="answer"><p>A <em>queue</em> is point-to-point: each message is delivered to exactly one consumer and retained until consumed or expired, with delivery load-balanced across competing consumers. A <em>topic</em> is publish/subscribe: each message is broadcast to every active subscriber. Queue = distribute work once; topic = fan an event out to many.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a ConnectionFactory and why is it an administered object?</summary>
+      <div class="answer"><p>It is the object a client uses to create connections (or a <code>JMSContext</code>) to the broker. It is <em>administered</em> — configured on the server and injected with <code>@Resource</code> — so broker addresses and credentials stay out of application code, keeping the app portable across servers and brokers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the JMS message body types.</summary>
+      <div class="answer"><p><code>TextMessage</code> (string, often JSON/XML), <code>BytesMessage</code> (raw bytes), <code>MapMessage</code> (key/value pairs), <code>ObjectMessage</code> (a serialized Java object), and <code>StreamMessage</code> (a stream of primitives). All carry standard headers plus custom application properties used for routing and message selectors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Classic API vs the simplified API (JMSContext)?</summary>
+      <div class="answer"><p>Classic (JMS 1.1): separate <code>Connection</code>, <code>Session</code>, and <code>MessageProducer</code>/<code>MessageConsumer</code>, with checked <code>JMSException</code>. Simplified (JMS 2.0+): <code>JMSContext</code> combines connection and session, <code>JMSProducer</code>/<code>JMSConsumer</code> replace the classic pair, exceptions become unchecked <code>JMSRuntimeException</code>, and <code>JMSContext</code> is <code>AutoCloseable</code> — far less boilerplate for the same functionality.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a message-driven bean and how does it receive messages?</summary>
+      <div class="answer"><p>An enterprise bean with no client interface that the container invokes via <code>onMessage(Message)</code> whenever a message arrives on its configured destination. It implements <code>MessageListener</code>, is declared with <code>@MessageDriven</code> and activation-config properties, and gets container-managed threading and transactions — the EE-native way to consume a queue or topic asynchronously.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Durable, non-durable and shared subscriptions on a topic?</summary>
+      <div class="answer"><p>Non-durable: the subscriber receives only messages published while it is connected. Durable: the broker retains messages for a named subscriber while it is offline and delivers them on reconnect. Shared (JMS 2.0): multiple consumers share one subscription so topic messages are load-balanced among them — combining broadcast semantics with horizontal scaling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Synchronous vs asynchronous message receipt?</summary>
+      <div class="answer"><p>Synchronous: the consumer calls <code>receive()</code> or <code>receiveBody()</code>, which blocks (optionally with a timeout) until a message is available. Asynchronous: you register a <code>MessageListener</code> — or use an MDB / <code>@JmsListener</code> — and the container invokes <code>onMessage</code> when a message arrives, freeing the thread in between.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Spring's @JmsListener compare to a message-driven bean?</summary>
+      <div class="answer"><p>Both are asynchronous listener endpoints invoked once per message, with mirror-image programming models (an annotated method vs <code>onMessage</code>; container-factory attributes vs activation config). The difference is the runtime: <code>@JmsListener</code> needs only Spring and a broker and runs in a plain Spring Boot app, while an MDB needs a Jakarta EE container. Skills transfer directly between them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are acknowledgment modes, and how do transactions change them?</summary>
+      <div class="answer"><p><code>AUTO_ACKNOWLEDGE</code>, <code>CLIENT_ACKNOWLEDGE</code> and <code>DUPS_OK_ACKNOWLEDGE</code> control when the broker considers a consumed message removed. In a transacted session or a JTA transaction, acknowledgment is bound to commit — a rollback returns the message for redelivery. MDBs typically use container-managed transactions, so an exception in <code>onMessage</code> rolls back and the message is redelivered.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a poison message and how do you handle redelivery?</summary>
+      <div class="answer"><p>A message that fails processing and, because each failure rolls back the transaction, is redelivered endlessly. Guard against it with a redelivery limit and the <code>JMSXDeliveryCount</code> header, routing exhausted messages to a dead-letter queue so the broker sidelines them after N attempts. Also make <code>onMessage</code> idempotent, since at-least-once delivery means duplicates are possible.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you choose JMS over Apache Kafka?</summary>
+      <div class="answer"><p>JMS is a broker-neutral API for classic enterprise messaging: transactional queues, request/reply, per-message acknowledgment, and tight JTA integration at moderate throughput. Kafka is a distributed, partitioned, replayable log built for high-throughput event streaming with consumer-group offsets and long retention. Reach for JMS for reliable task queues and transactional workflows; reach for Kafka for event sourcing, stream processing and very high volume.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.jms.core</li>
+      <li>jee.jms.mdb</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

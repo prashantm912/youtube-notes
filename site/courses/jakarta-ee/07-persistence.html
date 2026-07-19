@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Jakarta Persistence in Jakarta EE: the container-managed EntityManager, @PersistenceContext, persistence units and persistence.xml, the persistence context and entity lifecycle, with mapping depth deferred to the Hibernate/JPA track and a contrast against Spring Data JPA — plus the interview questions it powers.">
+  <title>Jakarta Persistence in Jakarta EE</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Jakarta Persistence in Jakarta EE</h1>
+  <p class="standfirst">In Jakarta EE the application server owns your EntityManager — it creates it, injects it, binds it to the transaction, and closes it for you. This module is about that container-managed model, and how it differs from the Spring Data JPA most people meet first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Jakarta EE → Jakarta Persistence in Jakarta EE</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Jakarta Persistence (JPA) is the standard for object/relational mapping in Java, and Hibernate and EclipseLink are the providers that implement it. This page focuses on how JPA works <em>inside a Jakarta EE server</em>: the persistence unit declared in <code>persistence.xml</code>, the <strong>container-managed</strong> <code>EntityManager</code> injected with <code>@PersistenceContext</code>, and the persistence context that tracks your entities. Entity mapping itself is kept deliberately brief — the Hibernate and JPA track covers it in full — and the module closes by contrasting this model with Spring Data JPA.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The persistence unit and persistence.xml</h3>
+    <p>A <strong>persistence unit</strong> is a named group of entity classes that map to one database, together with the configuration to reach it. You declare it in <code>META-INF/persistence.xml</code>: a unit name, a <code>transaction-type</code> (<code>JTA</code> under a server, <code>RESOURCE_LOCAL</code> in plain Java SE), a data source, and optional provider properties. The provider — Hibernate, EclipseLink — is usually inferred from what is on the classpath, so a Jakarta EE <code>persistence.xml</code> is often just a few lines.</p>
+    <p>Why it matters: the persistence unit is the bootstrap contract. Its name is what <code>@PersistenceContext(unitName=...)</code> refers to, and getting <code>transaction-type</code> and the data source right is the difference between the container managing your transactions and you doing it by hand.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;persistence xmlns="https://jakarta.ee/xml/ns/persistence" version="3.1"&gt;
+  &lt;persistence-unit name="orders" transaction-type="JTA"&gt;
+    &lt;jta-data-source&gt;java:app/jdbc/OrdersDS&lt;/jta-data-source&gt;
+    &lt;properties&gt;
+      &lt;property name="jakarta.persistence.schema-generation.database.action" value="none"/&gt;
+    &lt;/properties&gt;
+  &lt;/persistence-unit&gt;
+&lt;/persistence&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/" rel="noopener">Jakarta Persistence — specification index (all versions) — jakarta.ee</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/persist/persistence-intro/persistence-intro.html" rel="noopener">Introduction to Jakarta Persistence — Jakarta EE Tutorial</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/jpa-persistence-xml/" rel="noopener">A Beginner's Guide to JPA's persistence.xml — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-persistence-xml/" rel="noopener">A beginner's guide to the JPA persistence.xml file — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wp0pBUjfRfc" rel="noopener">Introduction to JPA — Spring Framework Guru</a></li>
+    </ul>
+
+    <h3>The container-managed EntityManager and @PersistenceContext</h3>
+    <p>The <code>EntityManager</code> is the working interface to persistence: <code>persist</code>, <code>find</code>, <code>merge</code>, <code>remove</code>, and <code>createQuery</code>. In Jakarta EE you never call <code>EntityManagerFactory.createEntityManager()</code> yourself — that is the <em>application-managed</em> style. Instead you write <code>@PersistenceContext EntityManager em;</code> and the container injects a <strong>container-managed</strong> one, already enrolled in the active JTA transaction. You do not open it, you do not close it, and you do not manage its transaction directly.</p>
+    <p>Why it matters: this is the single defining feature of persistence in a Jakarta EE server. Note the two annotations that look alike: <code>@PersistenceContext</code> injects an <code>EntityManager</code> (what you almost always want), while <code>@PersistenceUnit</code> injects the <code>EntityManagerFactory</code> for the rare application-managed case where you need full lifecycle control.</p>
+    <pre class="code-block" data-label="Java"><code>@Stateless
+public class OrderService {
+    @PersistenceContext(unitName = "orders")   // container injects & scopes it
+    private EntityManager em;
+
+    public Order find(long id)   { return em.find(Order.class, id); }
+    public void create(Order o)  { em.persist(o); }   // INSERT flushed at commit
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/platform/9/apidocs/jakarta/persistence/persistencecontext" rel="noopener">@PersistenceContext — annotation Javadoc (Jakarta EE Platform API)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/entitymanager" rel="noopener">EntityManager — Jakarta Persistence 3.2 API (persist/find/merge/remove/createQuery)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-entitymanager" rel="noopener">Guide to the Hibernate EntityManager — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-persistenceunit-persistencecontext-difference" rel="noopener">@PersistenceUnit vs @PersistenceContext — Baeldung</a></li>
+    </ul>
+
+    <h3>The persistence context: first-level cache, entity states, transaction-scoped vs extended</h3>
+    <p>Behind every <code>EntityManager</code> sits a <strong>persistence context</strong> — the set of entity instances it currently manages, and the first-level cache guaranteeing one object per row within its scope. Managed entities are dirty-checked: change a field on a managed <code>Order</code> and the provider issues an UPDATE at flush time, no explicit save call needed. Every entity is in one of four states — <em>new/transient</em>, <em>managed</em>, <em>detached</em>, <em>removed</em> — and the EntityManager methods move entities between them.</p>
+    <p>Why it matters: the context's <em>lifetime</em> is an interview favourite. The default is <strong>transaction-scoped</strong> — created when a JTA transaction begins, flushed and cleared when it commits, so managed entities become detached the moment the method returns. An <strong>extended</strong> persistence context (<code>PersistenceContextType.EXTENDED</code>) survives across several transactions and may only be injected into a stateful session bean — useful for multi-step conversations, and a classic source of bugs when misused.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/specification-guides/persistence-explained/" rel="noopener">Jakarta Persistence Explained — specification guide (jakarta.ee)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html" rel="noopener">Jakarta Persistence 3.2 — spec, Ch.7 "Entity Managers and Persistence Contexts"</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-hibernate-persistence-context" rel="noopener">JPA/Hibernate Persistence Context — Baeldung</a></li>
+    </ul>
+
+    <h3>Entities, mapping and queries — the short tour</h3>
+    <p>An <strong>entity</strong> is a plain class marked <code>@Entity</code> with an <code>@Id</code>; it maps to a table, each instance to a row. You reach data three ways: <code>em.find()</code> by primary key, JPQL through <code>createQuery()</code> (object-oriented SQL over entities, not tables), and the type-safe Criteria API for dynamic queries. Named queries let you predefine JPQL and reference it by name.</p>
+    <p>This module keeps mapping deliberately shallow — relationships, inheritance, fetch strategies, the N+1 problem and JPQL/Criteria in depth all live in the <a href="../jpa/index.html" rel="noopener">Hibernate and JPA track</a>. Here it is enough to recognise the annotations and know how the container-managed EntityManager runs the queries.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Table(name = "orders")
+public class Order {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    private String status;
+    // no-arg constructor + accessors
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/learn/starter-guides/how-to-store-and-retrieve-data-using-jakarta-persistence/" rel="noopener">How to Store and Retrieve Data Using Jakarta Persistence — jakarta.ee starter guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-entities" rel="noopener">Defining JPA Entities — Baeldung</a></li>
+    </ul>
+
+    <h3>Contrast: container-managed JPA vs Spring Data JPA</h3>
+    <p>Spring Data JPA is not a competitor to JPA — it sits <em>on top</em> of it. The same entities, the same provider (usually Hibernate), the same persistence context. What differs is the boundary you code against: instead of injecting an <code>EntityManager</code> and writing <code>find</code>/<code>persist</code>, you declare a <code>JpaRepository</code> interface and Spring generates the implementation, deriving queries from method names. Transactions come from Spring's <code>@Transactional</code> rather than the server's JTA, and the EntityManager is a Spring-managed shared proxy rather than one bound by the Jakarta EE container.</p>
+    <p>Why it matters: most Indian teams reach Spring Boot first and meet the standard only later. Interviews probe whether a candidate grasps that <code>repository.findById()</code> is ultimately <code>em.find()</code>, that both share JPA's mapping and lifecycle, and that the choice is really Jakarta EE server + JTA versus Spring container + <code>@Transactional</code> — not two different persistence technologies.</p>
+    <pre class="code-block" data-label="Java"><code>// Jakarta EE — container-managed EntityManager
+@PersistenceContext EntityManager em;
+Order o = em.find(Order.class, id);
+
+// Spring Data JPA — no EntityManager in the code you write
+interface OrderRepository extends JpaRepository&lt;Order, Long&gt; { }
+Order o = repository.findById(id).orElseThrow();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa.html" rel="noopener">Spring Data JPA — reference documentation (spring.io)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/the-persistence-layer-with-spring-data-jpa" rel="noopener">Introduction to Spring Data JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8SGI_XS5OPw" rel="noopener">Spring Boot Tutorial — Spring Data JPA — Amigoscode</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-jaxrs-advanced.html">← JAX-RS Advanced</a>
+    <a href="index.html">All Jakarta EE modules</a>
+    <a href="08-transactions-ejb.html">Transactions (JTA) and Enterprise Beans →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The persistence questions Indian interviews lean on — from screening-round definitions to the container-managed details that separate Spring-only candidates from ones who know the standard:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Jakarta Persistence (JPA), and how does it relate to Hibernate?</summary>
+      <div class="answer"><p>JPA is a <em>specification</em> — a standard set of interfaces and annotations for object/relational mapping in Java. Hibernate and EclipseLink are <em>providers</em> that implement it. You code to the JPA API (<code>EntityManager</code>, <code>@Entity</code>) and a provider does the actual SQL, so swapping providers ideally needs no code change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a persistence unit, and where is it configured?</summary>
+      <div class="answer"><p>A named set of entity classes mapped to a single database, plus the config to connect. It is declared in <code>META-INF/persistence.xml</code> with a unit name, transaction type, data source and provider properties. Its name is what <code>@PersistenceContext(unitName=...)</code> and <code>createEntityManagerFactory(name)</code> reference.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @PersistenceContext do?</summary>
+      <div class="answer"><p>It injects a container-managed <code>EntityManager</code> into your component. The Jakarta EE server creates the EntityManager, binds it to the current transaction, and closes it for you — you just use it. It is the standard way to obtain an EntityManager inside a server.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the core EntityManager methods and what they do.</summary>
+      <div class="answer"><p><code>persist</code> makes a new entity managed (INSERT at flush); <code>find</code> loads by primary key; <code>merge</code> copies a detached entity's state into a managed one; <code>remove</code> marks a managed entity for DELETE; <code>createQuery</code> runs JPQL or Criteria queries.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Container-managed vs application-managed EntityManager?</summary>
+      <div class="answer"><p>Container-managed: injected with <code>@PersistenceContext</code>, lifecycle and transaction handled by the Jakarta EE server — the norm inside a server. Application-managed: you obtain an <code>EntityManagerFactory</code> (via <code>@PersistenceUnit</code> or <code>Persistence.createEntityManagerFactory</code>), call <code>createEntityManager()</code>, and must close it and manage transactions yourself — used in Java SE or when you need explicit control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @PersistenceContext vs @PersistenceUnit?</summary>
+      <div class="answer"><p><code>@PersistenceContext</code> injects an <code>EntityManager</code> (container-managed, transaction-bound) — the everyday choice. <code>@PersistenceUnit</code> injects an <code>EntityManagerFactory</code>, from which you create application-managed EntityManagers yourself. Rule of thumb: inject the context unless you specifically need factory-level control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Transaction-scoped vs extended persistence context?</summary>
+      <div class="answer"><p>Transaction-scoped (the default) lives for one JTA transaction — created at begin, flushed and cleared at commit, so entities detach when the method returns. Extended (<code>PersistenceContextType.EXTENDED</code>) spans multiple transactions and may only be injected into a <em>stateful</em> session bean, keeping entities managed across calls for multi-step conversations.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the persistence context, and what are the entity states?</summary>
+      <div class="answer"><p>The persistence context is the set of entities an EntityManager currently manages, and its first-level cache — one instance per database row within scope. Four states: <em>new/transient</em> (not yet associated), <em>managed</em> (tracked, dirty-checked, auto-flushed), <em>detached</em> (was managed, context closed), <em>removed</em> (scheduled for DELETE).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> transaction-type JTA vs RESOURCE_LOCAL in persistence.xml?</summary>
+      <div class="answer"><p>JTA (default in Jakarta EE) hands transaction control to the container's JTA transaction manager and uses a <code>jta-data-source</code> — you rely on <code>@Transactional</code>/container demarcation. RESOURCE_LOCAL (typical in Java SE) means the EntityManager manages its own resource-local transactions via <code>em.getTransaction().begin()/commit()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> If you change a managed entity's field, do you need to call save?</summary>
+      <div class="answer"><p>No. A managed entity is dirty-checked: at flush (usually transaction commit) the provider compares its state and issues an UPDATE automatically. There is no <code>save()</code> in JPA. This only applies while the entity is <em>managed</em> — a detached entity's changes are ignored until you <code>merge</code> it back.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> persist() vs merge() — semantics and return value?</summary>
+      <div class="answer"><p><code>persist</code> makes a <em>new</em> entity managed, returns void, and throws if it already exists. <code>merge</code> takes a detached (or new) entity, copies its state onto a managed instance, and <strong>returns that managed instance</strong> — the argument you passed stays detached. Continuing to use the argument after merge instead of the return value is a common bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does container-managed JPA differ from Spring Data JPA, and where does @Transactional fit?</summary>
+      <div class="answer"><p>Spring Data JPA layers on JPA — same entities, provider and persistence context. You write <code>JpaRepository</code> interfaces and Spring derives implementations, instead of injecting an <code>EntityManager</code>. Transactions come from Spring's <code>@Transactional</code> (an AOP proxy) rather than the Jakarta EE container's JTA. So it is Spring container + <code>@Transactional</code> versus Jakarta EE server + JTA — the same underlying JPA, wrapped differently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> EntityManager is not thread-safe — why is injecting it into a field of a shared bean still safe?</summary>
+      <div class="answer"><p>Because <code>@PersistenceContext</code> injects a <em>proxy</em>, not a raw EntityManager. On each invocation the proxy delegates to the correct transaction-scoped persistence context for the current thread/transaction, so concurrent calls never share one context. That is why a stateless session bean (or a Spring shared EntityManager) can safely keep the injected reference in a field.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Jakarta EE track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jee.jpa.container</li>
+      <li>jee.jpa.contrast</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Jakarta EE track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
