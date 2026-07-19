@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular Lifecycle and Change Detection module: the lifecycle hook sequence, cleanup and render-phase hooks, how change detection works with Zone.js, the OnPush strategy, and zoneless/signal-based detection — with the best official and community resources plus the interview questions they power.">
+  <title>Lifecycle and Change Detection — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Lifecycle and Change Detection</h1>
+  <p class="standfirst">Change detection is the single most-asked Angular interview topic — Zone.js versus zoneless, and OnPush. Pair it with the lifecycle hooks that fire around each check, and you can explain not just <em>what</em> a component does but <em>when</em> Angular runs it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Basics → Lifecycle and Change Detection</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two intertwined subjects. First, the <strong>lifecycle</strong>: the ordered hooks Angular calls from a component's construction to its destruction (<code>ngOnChanges</code>, <code>ngOnInit</code>, <code>ngAfterViewInit</code>, <code>ngOnDestroy</code> and friends), plus modern cleanup and render-phase APIs. Second, <strong>change detection</strong>: how Angular decides when to re-read your template expressions and repaint the DOM — the classic Zone.js model, the <code>OnPush</code> optimization, and the current zoneless/signal-based direction. The two meet because most hooks fire <em>during</em> a change-detection pass.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Lifecycle hooks and their order</h3>
+    <p>A component moves through a fixed sequence: the <code>constructor</code> runs first (dependencies injected, but inputs not yet set), then during change detection Angular calls <code>ngOnChanges</code> (whenever a data-bound input changes, with a <code>SimpleChanges</code> map), <code>ngOnInit</code> (once, after the first inputs are set — the right place for initialization and data fetching), <code>ngDoCheck</code>, the content hooks <code>ngAfterContentInit</code>/<code>ngAfterContentChecked</code>, and the view hooks <code>ngAfterViewInit</code>/<code>ngAfterViewChecked</code>. The reason "put it in <code>ngOnInit</code>, not the constructor" is a stock interview line: at constructor time the <code>@Input</code> bindings have not been resolved yet.</p>
+    <p>Why it matters: knowing the order explains real bugs — a <code>@ViewChild</code> reference is <code>undefined</code> in <code>ngOnInit</code> because the view is not built until <code>ngAfterViewInit</code>. With signal-based components, an <code>effect()</code> or <code>computed()</code> increasingly replaces the old <code>ngOnChanges</code> plumbing, but the hooks remain examinable and still power template-facing components.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export class UserCard implements OnInit, OnChanges {
+  @Input() userId!: string;
+  ngOnChanges(changes: SimpleChanges) { /* input changed */ }
+  ngOnInit() { /* run once: fetch, subscribe, set up */ }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/components/lifecycle" rel="noopener">Component Lifecycle — Angular (angular.dev, the authoritative hook reference and execution order)</a></li>
+      <li>[Article] <a href="https://angular.love/complete-guide-angular-lifecycle-hooks" rel="noopener">Complete Guide: Angular lifecycle hooks — angular.love (all eight hooks with output diagrams)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-viewchild/" rel="noopener">Angular @ViewChild: In-Depth Explanation — Angular University (why refs are ready only in ngAfterViewInit)</a></li>
+    </ul>
+
+    <h3>Cleanup and render-phase hooks</h3>
+    <p><code>ngOnDestroy</code> runs just before Angular tears a component down — the place to unsubscribe from RxJS streams, clear timers and detach listeners so you do not leak memory. Modern Angular offers two cleaner alternatives: inject <code>DestroyRef</code> and register an <code>onDestroy</code> callback anywhere in the injection context, or pipe a stream through <code>takeUntilDestroyed()</code> so it completes automatically when the component dies. For work that must touch the real DOM after Angular has rendered, <code>afterNextRender</code> (once) and <code>afterEveryRender</code> (on every render) run outside change detection, replacing the old habit of a <code>setTimeout</code> in <code>ngAfterViewInit</code>.</p>
+    <p>Why it matters: "how do you avoid subscription memory leaks?" is a near-guaranteed question, and the expected senior answer is now <code>takeUntilDestroyed</code> or the <code>async</code> pipe rather than a manual <code>Subject</code> + <code>takeUntil</code> boilerplate.</p>
+    <pre class="code-block" data-label="TypeScript"><code>constructor() {
+  // completes when this component is destroyed — no ngOnDestroy needed
+  this.data$.pipe(takeUntilDestroyed()).subscribe(v =&gt; this.value = v);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/DestroyRef" rel="noopener">DestroyRef — Angular API (register cleanup callbacks tied to destruction)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/rxjs-interop/takeUntilDestroyed" rel="noopener">takeUntilDestroyed — Angular RxJS interop (auto-unsubscribe operator)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/afterNextRender" rel="noopener">afterNextRender — Angular API (post-render DOM work, outside change detection)</a></li>
+    </ul>
+
+    <h3>How change detection works: Zone.js and the component tree</h3>
+    <p>Angular keeps the DOM in sync with your data by re-evaluating every template expression and updating the bindings that changed. Each component owns a change detector, and a check walks the component tree from the root downward. In the traditional model, <strong>Zone.js</strong> monkey-patches async browser APIs (<code>addEventListener</code>, <code>setTimeout</code>, <code>Promise</code>, XHR) so that whenever any of them fires, Angular is notified that "something might have changed" and runs a full check pass. That is convenient but does more work than necessary. In development mode Angular runs a second verification pass and throws <code>ExpressionChangedAfterItHasBeenCheckedError</code> if a value mutated mid-check — a guard against templates whose values depend on their own detection.</p>
+    <p>Why it matters: interviewers probe whether you understand that the default strategy checks the <em>whole</em> tree on every event, why that can hurt performance in large apps, and what Zone.js actually is under the hood.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/best-practices/runtime-performance" rel="noopener">Runtime performance optimization — Angular (change detection and how to control it)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/how-does-angular-2-change-detection-really-work/" rel="noopener">Angular Change Detection — How Does It Really Work? — Angular University</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-debugging/" rel="noopener">Debugging "Expression has changed after it was checked" — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DbUS6h1tANQ" rel="noopener">Demystifying Angular Change Detection in Depth — MonsterLessons Academy</a></li>
+    </ul>
+
+    <h3>The OnPush change-detection strategy</h3>
+    <p>Setting <code>changeDetection: ChangeDetectionStrategy.OnPush</code> tells Angular to skip a component's subtree unless one of a few things happens: an <code>@Input</code> changes <em>by reference</em>, an event fires inside the component, an <code>async</code>-piped Observable emits, or a bound signal updates. The reference-equality rule is the whole point — mutating an object in place (<code>user.name = 'x'</code>) will <em>not</em> trigger an OnPush check, so OnPush pushes you toward immutable updates (spread into a new object/array). When you genuinely need to force a check, inject <code>ChangeDetectorRef</code> and call <code>markForCheck()</code>.</p>
+    <p>Why it matters: OnPush is the classic performance-tuning answer and a favourite "explain the trade-off" question. The trap they set: "you set OnPush and the view stopped updating — why?" (Answer: you mutated instead of replacing.)</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Component({ changeDetection: ChangeDetectionStrategy.OnPush, /* ... */ })
+export class TodoList {
+  @Input() todos: Todo[] = [];
+  add(t: Todo) { this.todos = [...this.todos, t]; } // new reference -&gt; checked
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/best-practices/skipping-subtrees" rel="noopener">Skipping component subtrees (OnPush) — Angular (tree diagrams of what gets checked)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/onpush-change-detection-how-it-works/" rel="noopener">Angular OnPush Change Detection — Avoid Common Pitfalls — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WAu7omIoerM" rel="noopener">OnPush Change Detection Strategy — Decoded Frontend (Dmytro Mezhenskyi)</a></li>
+    </ul>
+
+    <h3>Zoneless and signal-based change detection</h3>
+    <p>The current direction removes Zone.js entirely. With <code>provideZonelessChangeDetection()</code>, Angular no longer relies on patched browser APIs to guess that state changed; instead it schedules a check only when it gets an explicit notification — a signal being set, an <code>async</code> pipe emitting, an OnPush input changing, or a direct <code>markForCheck()</code>. Signals are the ideal partner: because Angular knows exactly which components read a signal, it can do targeted, local checks instead of walking the whole tree. Zoneless has matured from experimental through developer preview to stable in recent versions (v20+), you can drop the <code>zone.js</code> dependency, and new projects are increasingly scaffolded this way. Practically, "zoneless-ready" code means OnPush plus signals or the async pipe — the same discipline OnPush already teaches.</p>
+    <p>Why it matters: this is the hottest 2025–2026 Angular topic. Being able to contrast "Zone.js tells Angular something <em>might</em> have changed" with "signals tell Angular exactly <em>what</em> changed" is what separates a current answer from a dated one.</p>
+    <pre class="code-block" data-label="TypeScript"><code>bootstrapApplication(App, {
+  providers: [provideZonelessChangeDetection()],
+});
+// a signal write is itself the change-detection notification
+count = signal(0);
+inc() { this.count.update(n =&gt; n + 1); }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/zoneless" rel="noopener">Angular without ZoneJS (Zoneless) — Angular (provideZonelessChangeDetection, setup, status)</a></li>
+      <li>[Article] <a href="https://justangular.com/blog/a-change-detection-zone-js-zoneless-local-change-detection-and-signals-story/" rel="noopener">A change detection, zone.js, zoneless, and signals story — Enea Jahollari (justangular)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ar-xd_dsaVE" rel="noopener">Zoneless Angular — Joshua Morony (Angular GDE)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-signals.html">← Signals and Reactivity</a>
+    <a href="index.html">All Angular Basics modules</a>
+    <a href="09-forms.html">Forms →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked lifecycle and change-detection questions in Indian Angular interviews — change detection is a top screening and product-company topic, so expect the OnPush and zoneless questions to go several layers deep:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are Angular lifecycle hooks, and can you name the main ones in order?</summary>
+      <div class="answer"><p>Methods Angular calls at defined moments of a component's life. Order: constructor → <code>ngOnChanges</code> → <code>ngOnInit</code> → <code>ngDoCheck</code> → <code>ngAfterContentInit</code> → <code>ngAfterContentChecked</code> → <code>ngAfterViewInit</code> → <code>ngAfterViewChecked</code>, and <code>ngOnDestroy</code> at teardown.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between the constructor and ngOnInit? Why put init logic in ngOnInit?</summary>
+      <div class="answer"><p>The constructor runs at instantiation for dependency injection only; at that point <code>@Input</code> bindings are not set. <code>ngOnInit</code> runs once after the first inputs are resolved, so data fetching, subscriptions and setup that depend on inputs belong there.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is ngOnDestroy used for?</summary>
+      <div class="answer"><p>It runs just before the component is destroyed — the hook to unsubscribe from Observables, clear intervals/timeouts, and remove manual event listeners so the component does not leak memory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> In one line, what is change detection in Angular?</summary>
+      <div class="answer"><p>The process by which Angular checks whether component state (template expressions) changed and updates the DOM to match. It walks the component tree from root to leaves.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When does ngOnChanges fire, and what does SimpleChanges give you?</summary>
+      <div class="answer"><p>It fires whenever a data-bound <code>@Input</code> changes, before <code>ngOnInit</code> on the first pass. <code>SimpleChanges</code> maps each changed input to its <code>previousValue</code>, <code>currentValue</code> and <code>firstChange</code> flag. With signal inputs, an <code>effect()</code> or <code>computed()</code> often replaces it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is a @ViewChild reference undefined in ngOnInit? Which hook should you use?</summary>
+      <div class="answer"><p>The component's view (and its child views) is not constructed until after <code>ngOnInit</code>, so view queries are not populated yet. Access them in <code>ngAfterViewInit</code>. (Signal-based <code>viewChild()</code> queries are read reactively instead.)</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What triggers change detection in a default (Zone.js) Angular app?</summary>
+      <div class="answer"><p>Zone.js patches async APIs — DOM events, <code>setTimeout</code>/<code>setInterval</code>, <code>Promise</code> resolution, XHR/fetch. When any completes, Zone notifies Angular, which runs a full check pass over the tree. You can also trigger it manually via <code>ApplicationRef.tick()</code> or <code>ChangeDetectorRef.detectChanges()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the OnPush strategy and what makes Angular check an OnPush component?</summary>
+      <div class="answer"><p>OnPush skips the component unless: an <code>@Input</code> changes by reference, an event fires inside it, an <code>async</code>-piped Observable emits, a bound signal updates, or <code>markForCheck()</code> is called. It cuts unnecessary checks but demands immutable input updates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you prevent RxJS subscription memory leaks in a component?</summary>
+      <div class="answer"><p>Prefer the <code>async</code> pipe (Angular unsubscribes for you), or pipe streams through <code>takeUntilDestroyed()</code>, or register cleanup via injected <code>DestroyRef</code>. The older pattern is a <code>Subject</code> + <code>takeUntil</code> completed in <code>ngOnDestroy</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What causes ExpressionChangedAfterItHasBeenCheckedError, and how do you fix it?</summary>
+      <div class="answer"><p>A value bound in the template changed <em>after</em> Angular checked it but before the dev-mode verification pass — usually mutating state inside a hook like <code>ngAfterViewInit</code>. Fixes: move the change to <code>ngOnInit</code>, defer with <code>setTimeout</code>/a microtask, or restructure so the value is stable during the check. It only throws in development mode.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You switched a component to OnPush and its view stopped updating. Why, and how do you fix it?</summary>
+      <div class="answer"><p>You almost certainly mutated an input object/array in place, so its reference did not change and OnPush skipped the check. Fix by replacing the reference immutably (spread into a new object/array), driving updates through signals or the <code>async</code> pipe, or calling <code>markForCheck()</code> when a manual nudge is unavoidable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do signals change the change-detection story, and how do they relate to OnPush and zoneless?</summary>
+      <div class="answer"><p>A signal knows exactly which views read it, so writing one lets Angular mark just those views dirty — targeted, local change detection instead of a whole-tree walk. Signals notify OnPush components directly (no <code>markForCheck</code> needed), and in a zoneless app the signal write <em>is</em> the notification that schedules detection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is zoneless change detection, how do you enable it, and what's the trade-off versus Zone.js?</summary>
+      <div class="answer"><p>Zoneless drops Zone.js and runs change detection only on explicit notifications — signal writes, async-pipe emissions, OnPush input changes, <code>markForCheck()</code>. Enable it with <code>provideZonelessChangeDetection()</code> and remove the <code>zone.js</code> polyfill. Trade-off: smaller bundle, fewer needless checks and simpler reasoning, but code that relied on Zone auto-detecting arbitrary async mutations must now notify Angular itself (signals/async pipe). It is stable in recent versions (v20+) and the recommended direction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Beyond OnPush, what techniques reduce change-detection cost in a large Angular app?</summary>
+      <div class="answer"><p>Adopt signals for fine-grained local updates; move heavy non-UI async work out with <code>NgZone.runOutsideAngular</code> (Zone apps); detach a subtree via <code>ChangeDetectorRef.detach()</code> and re-check on demand; keep <code>ngDoCheck</code> cheap (it runs every cycle); use <code>@for</code> with <code>track</code> (or <code>trackBy</code>) and pure pipes to avoid re-rendering unchanged rows; and ultimately go zoneless.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Basics track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ng.cd.lifecycle</li>
+      <li>ng.cd.strategy</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Basics track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -362,7 +362,7 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E3:** S1 Spring (DONE 2026-07-19, 15 modules, 34/34, 241 links) → S2 Boot (DONE 2026-07-19, 12 modules, 24/24, 187 links) → H1 JPA (DONE 2026-07-19, 14 modules, 28/28, 256 links) → S3 Security (DONE 2026-07-19, 10 modules, 20/20, 140 links). **Phase E3 COMPLETE.**
 - **Phase E3b:** J3 Jakarta EE (DONE 2026-07-19, 14 modules, 28/28, 232 links; taught with constant Spring contrast). **Phase E3b COMPLETE.**
 - **Phase E4:** T2 Backend Testing (DONE 2026-07-19, 10 modules, 20/20, 172 links). **Phase E4 COMPLETE.**
-- **Phase E5:** A1 → A2 → A3 Angular + T1 Frontend Testing
+- **Phase E5:** A1 Angular Basics (DONE 2026-07-19, 10 modules, 20/20, 141 links) → A2 → A3 Angular + T1 Frontend Testing
 - **Phase E6:** M1 Microservices → M2 Messaging
 - **Phase E7:** O1 DevOps → C1 AWS → O2 Observability
 - **Phase E8:** Y1 System Design → Y2 Secure Coding
