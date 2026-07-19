@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JPA and Hibernate performance module: JDBC statement batching, DTO projections over entities, the open-session-in-view anti-pattern, connection and statement tuning, and monitoring SQL — the best official and community resources, plus the interview questions they power.">
+  <title>Performance and Best Practices — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Performance and Best Practices</h1>
+  <p class="standfirst">The gap between code that passes a test and code that survives production is right here: batch your writes, project your reads, and switch off open-session-in-view before it quietly throttles throughput.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Performance and Best Practices</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Performance in JPA is mostly about doing less work per statement and per request: grouping writes into JDBC batches, fetching read-only data as flat DTO projections instead of managed entities, and removing the open-session-in-view default that hides N+1 queries and holds database connections open. It closes with the tuning knobs and the SQL monitoring you need to prove a change actually helped — because guessing is the real anti-pattern.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>JDBC statement batching (batch inserts and updates)</h3>
+    <p>By default every INSERT, UPDATE and DELETE is sent to the database in its own network round-trip. Batching tells the JDBC driver to ship one packet carrying many parameter sets, so a thousand-row insert stops being a thousand conversations. You enable it with <code>hibernate.jdbc.batch_size</code> (10–50 is the usual range) and pair it with <code>order_inserts</code> and <code>order_updates</code> so Hibernate sorts statements by entity type — consecutive identical statements are what actually batch.</p>
+    <p>Why it matters: for write-heavy jobs the speedup is dramatic, and it is a standard senior-level question. The classic trap: an entity using <code>GenerationType.IDENTITY</code> cannot batch inserts at all, because Hibernate must execute each insert to learn the generated key — switch to <code>SEQUENCE</code>. During large loads also <code>flush()</code> and <code>clear()</code> periodically to keep the first-level cache from ballooning.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.jpa.properties.hibernate.jdbc.batch_size=30
+spring.jpa.properties.hibernate.order_inserts=true
+spring.jpa.properties.hibernate.order_updates=true
+spring.jpa.properties.hibernate.batch_versioned_data=true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#batch" rel="noopener">Batching — Hibernate ORM User Guide (jdbc.batch_size, order_inserts/updates, StatelessSession)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-to-batch-insert-and-update-statements-with-hibernate/" rel="noopener">How to batch INSERT and UPDATE statements with Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-hibernate-batch-insert-update" rel="noopener">Batch Insert/Update with Hibernate/JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YaQ13y_UNNw" rel="noopener">The best way to batch insert, update and delete statements — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>DTO projections over entities</h3>
+    <p>A DTO projection selects only the columns a read actually needs and maps them straight into a flat, unmanaged object — skipping the whole managed-entity machinery: first-level cache, dirty checking, lazy proxies. You build one with a JPQL constructor expression (<code>select new ...</code>, records work well as the target), a Spring Data interface or class projection, or an <code>@SqlResultSetMapping</code> for native SQL.</p>
+    <p>Why it matters: entities are the right tool for writes, but read-only screens should project. Projections avoid loading columns and associations you will never render and — because you name exactly what you fetch — they sidestep <code>LazyInitializationException</code> entirely, which makes them the honest replacement for open-session-in-view. One caveat: a DTO that joins a to-many association multiplies rows (a Cartesian product), so aggregate or fetch the collection in a second query.</p>
+    <pre class="code-block" data-label="JPQL"><code>select new com.acme.orders.OrderSummary(o.id, o.status, o.total)
+from Order o
+where o.customer.id = :customerId</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html" rel="noopener">Projections — Spring Data JPA Reference (interface and class/DTO projections, records)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-a-projection-query-to-a-dto-with-jpa-and-hibernate/" rel="noopener">The best way to map a projection query to a DTO — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/dto-projections/" rel="noopener">Why, When and How to Use DTO Projections with JPA and Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-projections" rel="noopener">Spring Data JPA Projections — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_WjUiYQdbm0" rel="noopener">JPA &amp; Hibernate — Why, When &amp; How to use DTO Projections — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>The open-session-in-view anti-pattern</h3>
+    <p>Open Session in View (OSIV) keeps the persistence context open for the entire HTTP request, so lazy associations can still initialize while the view or serializer runs. Spring Boot turns it <em>on by default</em> (<code>spring.jpa.open-in-view=true</code>) and even logs a warning about it at startup, which is why it is one of the most-asked JPA interview topics.</p>
+    <p>Why it is an anti-pattern: it papers over N+1 by firing queries silently during view rendering — outside any explicit transaction, on a connection the request holds far longer than it should — which both hurts throughput under load and moves database errors to the worst possible place. The disciplined fix is to fetch exactly what the use case needs inside the service layer (fetch joins, <code>@EntityGraph</code>, or DTO projections) and set OSIV to false. The trade-off is real: once it is off, any association you forgot to fetch throws <code>LazyInitializationException</code> — which is the framework telling you the truth instead of hiding it.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.jpa.open-in-view=false</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/the-open-session-in-view-anti-pattern/" rel="noopener">The Open Session in View Anti-Pattern — Vlad Mihalcea (the definitive treatment)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-open-session-in-view" rel="noopener">A Guide to Spring's Open Session In View — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/lazyinitializationexception/" rel="noopener">LazyInitializationException — what it is and the best way to fix it — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Common pitfalls, connection and statement tuning, monitoring SQL</h3>
+    <p>You cannot tune what you cannot see. Log the real SQL <em>with</em> bind parameter values (the Hibernate SQL logger plus the parameter binder at TRACE, or better, a datasource-proxy that also counts statements), and switch on <code>hibernate.generate_statistics</code> to confirm batches are forming and to catch a page that quietly runs hundreds of queries. The recurring pitfalls are the same handful: N+1 selects, unbounded queries with no pagination, EAGER fetching everywhere, and OSIV masking all three.</p>
+    <p>On tuning: size the connection pool (HikariCP) to what the database can genuinely serve — a pool far larger than that just moves the queue — and keep transactions short so connections return quickly, because long transactions combined with OSIV starve the pool. Then batch your writes, project your reads, index for the queries you actually run, and verify every change against statistics and slow-query logs rather than intuition.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.jpa.properties.hibernate.generate_statistics=true
+logging.level.org.hibernate.SQL=DEBUG
+logging.level.org.hibernate.orm.jdbc.bind=TRACE</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#best-practices" rel="noopener">Best Practices — Hibernate ORM User Guide (fetching, batching, logging, statistics)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-log-jdbc-statements/" rel="noopener">The best way to log SQL statements with JDBC, JPA or Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql-logging-spring-boot" rel="noopener">Show Hibernate/JPA SQL Statements in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zwF5ADW6eKs" rel="noopener">Hibernate N+1 Problem &amp; Fix — Interview Q&amp;A — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="13-caching.html">← Caching</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The performance questions that dominate Indian JPA and Spring Boot interviews — batching, projections and open-session-in-view are asked in almost every product-company round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the N+1 select problem?</summary>
+      <div class="answer"><p>One query loads N parent rows, then a lazy association triggers one more query per parent — N+1 queries where a single join would do. It is the most common JPA performance bug. Fixes: a fetch join (JPQL <code>join fetch</code>), <code>@EntityGraph</code>, batch fetching (<code>@BatchSize</code>), or a DTO projection that selects everything up front.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is JDBC statement batching and how do you turn it on?</summary>
+      <div class="answer"><p>It groups consecutive INSERT/UPDATE/DELETE statements so the driver sends one network round-trip with many parameter sets instead of one per row. Enable it with <code>hibernate.jdbc.batch_size</code> (10–50), and add <code>order_inserts</code> and <code>order_updates</code> so statements of the same type sit together and actually batch.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a DTO projection and why use it instead of an entity?</summary>
+      <div class="answer"><p>A DTO projection selects only the columns you need and maps them into a plain, unmanaged object. For read-only data it skips the first-level cache, dirty checking and lazy proxies that entities carry, so it is faster and lighter. Rule of thumb: read with DTOs, write with entities.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is open-session-in-view enabled by default in Spring Boot?</summary>
+      <div class="answer"><p>Yes. <code>spring.jpa.open-in-view</code> defaults to <code>true</code>, and Spring Boot logs a warning about it at startup. It keeps the persistence context open for the whole request so lazy associations initialize during view rendering — convenient, but the source of hidden performance problems.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't Hibernate batch inserts for entities using IDENTITY generation?</summary>
+      <div class="answer"><p>IDENTITY assigns the key only when the row is physically inserted, so Hibernate must execute each insert immediately to obtain the generated id — it cannot defer and group them. Use <code>GenerationType.SEQUENCE</code> (with a pooled optimizer) so ids are allocated ahead of time and inserts can batch.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is open-session-in-view considered an anti-pattern?</summary>
+      <div class="answer"><p>It hides N+1 by firing queries silently during view rendering, outside any explicit transaction, and it holds the database connection for the entire request — which starves the connection pool under load. It also defers errors to the rendering phase. The fix is to fetch what you need in the service layer (join fetch, entity graph, or DTO) and disable it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What do order_inserts and order_updates actually do?</summary>
+      <div class="answer"><p>They sort pending statements so all inserts (or updates) for the same entity type are contiguous. JDBC batching only groups consecutive statements against the same table, so without ordering, interleaved statements from different entities break the batch into many small ones. Ordering is what lets a mixed unit of work form large batches.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you choose between an entity, an interface projection and a class/DTO projection?</summary>
+      <div class="answer"><p>Entity when you intend to modify and persist the row. Interface projection for a quick read-only view mapped by getter names, handy in Spring Data derived queries. Class/DTO projection (constructor expression or record) when you want a concrete typed object, custom shaping, or a native/JPQL query — the most explicit and portable read-only option.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you see the actual SQL Hibernate runs, including bind parameters?</summary>
+      <div class="answer"><p>Set <code>org.hibernate.SQL</code> to DEBUG for statements and the parameter binder logger to TRACE for the bound values; <code>show_sql</code> alone dumps unformatted SQL without parameters. Better still, use a datasource-proxy, which logs every statement with values and can count queries per request to expose N+1. Turn on <code>hibernate.generate_statistics</code> to confirm batching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You disabled open-session-in-view and now get LazyInitializationException in the controller. How do you fix it properly?</summary>
+      <div class="answer"><p>Do not re-enable OSIV — that just hides it again. Fetch the needed associations inside the transactional service method: a JPQL <code>join fetch</code>, an <code>@EntityGraph</code> on the repository method, or return a DTO projection that already contains everything the response needs. The exception is a signal that the query, not the view, is where fetching belongs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A DTO projection over a one-to-many join returns duplicated parent data. Why, and what do you do?</summary>
+      <div class="answer"><p>Joining a to-many association produces a Cartesian product — one row per child, so parent fields repeat and simple constructor mapping duplicates them. Options: fetch the parents as a DTO first and load children in a second query (the two-query pattern), aggregate in SQL, or use a result transformer / structured mapping that groups children under each parent. Never paginate in memory across such a join.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does connection-pool sizing interact with transaction length and OSIV?</summary>
+      <div class="answer"><p>A connection is held for the life of its transaction — and with OSIV, for the life of the whole request. Long transactions or OSIV keep connections checked out, so throughput is bounded by pool size, not CPU. Oversizing the pool beyond what the database can serve only moves the contention; the real levers are short transactions, OSIV off, and doing read work (projections, fetch joins) that returns the connection quickly. Measure acquisition time and active connections rather than guessing the pool size.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.perf.batching</li>
+      <li>jpa.perf.antipatterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

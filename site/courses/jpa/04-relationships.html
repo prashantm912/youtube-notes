@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JPA Entity Relationships module: the four cardinality annotations (@ManyToOne, @OneToMany, @OneToOne, @ManyToMany), the join table, owning vs inverse side, mappedBy and bidirectional synchronization — with the best official and community resources for full study, plus the interview questions they power.">
+  <title>Entity Relationships — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Entity Relationships</h1>
+  <p class="standfirst">Relationships are where JPA stops being CRUD and becomes an object graph — and the owning side, mappedBy and keeping both ends in sync are where most of the bugs, and most of the interview questions, actually live.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Entity Relationships</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>An entity rarely stands alone: orders have items, users have a profile, posts have tags. This module maps those links with the four association annotations, then focuses on the concept that separates a working mapping from a broken one — which side <em>owns</em> the foreign key. Owning versus inverse, <code>mappedBy</code>, and the helper methods that keep a bidirectional graph consistent are the core, because they are simultaneously the commonest production bug and the commonest interview question in this space.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The four cardinalities: @ManyToOne, @OneToMany, @OneToOne, @ManyToMany</h3>
+    <p>JPA models associations with four annotations that mirror relational multiplicities. <code>@ManyToOne</code> maps the side that carries the foreign key — many rows referencing one parent — and is the single most important of the four. <code>@OneToMany</code> is its collection-valued inverse. <code>@OneToOne</code> links two rows one for one, and <code>@ManyToMany</code> maps a pair of entities through a join table. Cardinality follows the data model, not coding convenience.</p>
+    <p>Why it matters: the workhorse pairing is <code>@ManyToOne</code> with <code>@OneToMany</code>. The established best practice is to always map the <code>@ManyToOne</code> child (it owns the foreign-key column) and, if you need the collection, add a bidirectional <code>@OneToMany(mappedBy = ...)</code>. A <em>unidirectional</em> <code>@OneToMany</code> is discouraged because Hibernate then manages the link through an extra join table or a batch of redundant UPDATE statements. Knowing which side holds the foreign key is a standard screening question.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity class OrderItem {
+    @ManyToOne(fetch = FetchType.LAZY)   // owns the FK column
+    @JoinColumn(name = "order_id")
+    private Order order;
+}
+@Entity class Order {
+    @OneToMany(mappedBy = "order")       // inverse side, no FK here
+    private List&lt;OrderItem&gt; items = new ArrayList&lt;&gt;();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#associations" rel="noopener">Associations — Hibernate ORM User Guide (the definitive reference for all four annotations)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-a-onetomany-relationship-with-jpa-and-hibernate/" rel="noopener">The best way to map a @OneToMany relationship — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/best-practices-many-one-one-many-associations-mappings/" rel="noopener">Best Practices for Many-To-One and One-To-Many Association Mappings — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-one-to-many" rel="noopener">Hibernate One to Many Annotation Tutorial — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CvDS6DltIno" rel="noopener">Spring Data JPA Relationships — ManyToMany, ManyToOne &amp; OneToMany — Bouali Ali</a></li>
+    </ul>
+
+    <h3>@OneToOne: foreign key vs shared primary key</h3>
+    <p>A <code>@OneToOne</code> can be mapped two ways. The naive way adds a foreign-key column with <code>@JoinColumn</code> (usually marked unique). The better way shares the primary key: the child reuses the parent's identifier via <code>@MapsId</code>, so there is no separate foreign-key column, the child is fetchable directly by the parent id, and the one-to-one guarantee is enforced by the primary key itself.</p>
+    <p>Why it matters: the shared-primary-key mapping is the interview-preferred answer, and it comes with a famous gotcha. The parent side of a <em>bidirectional</em> <code>@OneToOne</code> cannot be truly lazy-loaded by default — even with <code>fetch = LAZY</code> — because Hibernate must issue a query to know whether to store a proxy or null; bytecode enhancement is what fixes it. Expect the "why is my LAZY one-to-one still eager?" follow-up.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity class PostDetails {
+    @Id private Long id;                 // same id as the Post
+    @OneToOne(fetch = FetchType.LAZY)
+    @MapsId                              // share the parent's primary key
+    @JoinColumn(name = "id")
+    private Post post;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#associations-one-to-one" rel="noopener">@OneToOne — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-a-onetoone-relationship-with-jpa-and-hibernate/" rel="noopener">The best way to map a @OneToOne relationship (with @MapsId) — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-one-to-one" rel="noopener">One-to-One Relationship in JPA — Baeldung</a></li>
+    </ul>
+
+    <h3>@ManyToMany and the join table</h3>
+    <p>A <code>@ManyToMany</code> links two entities through a join table holding two foreign-key columns, configured with <code>@JoinTable</code>, <code>joinColumns</code> and <code>inverseJoinColumns</code>. One side owns the mapping; the other declares <code>mappedBy</code> and only mirrors it.</p>
+    <p>Why it matters: the defaults bite. Use <code>Set</code>, not <code>List</code> — with a <code>List</code>, removing one element makes Hibernate delete every join-table row and reinsert the survivors, while a <code>Set</code> deletes just the one row. Never use <code>CascadeType.REMOVE</code> on a many-to-many, since a chain delete can wipe both sides of shared data. And the moment the association needs its own attributes — a quantity, a price, an added-on date — drop <code>@ManyToMany</code> entirely and model the join table as an explicit entity with two <code>@ManyToOne</code> sides. The "add an extra column" follow-up is a favourite.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity class Post {
+    @ManyToMany(cascade = { CascadeType.PERSIST, CascadeType.MERGE })
+    @JoinTable(name = "post_tag",
+        joinColumns = @JoinColumn(name = "post_id"),
+        inverseJoinColumns = @JoinColumn(name = "tag_id"))
+    private Set&lt;Tag&gt; tags = new HashSet&lt;&gt;();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#associations-many-to-many" rel="noopener">@ManyToMany — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-use-the-manytomany-annotation-with-jpa-and-hibernate/" rel="noopener">Best way to map the @ManyToMany relationship (Set vs List, cascade) — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-many-to-many" rel="noopener">Many-To-Many Relationship in JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bVLsHPfYerk" rel="noopener">The best way to map the JPA and Hibernate ManyToMany relationship — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Owning side vs inverse side, @JoinColumn and mappedBy</h3>
+    <p>Every bidirectional association has exactly one <em>owning side</em> and one <em>inverse (non-owning) side</em>. The owning side is the one Hibernate reads to decide the foreign-key or join-table state, and it declares <code>@JoinColumn</code> or <code>@JoinTable</code>. The inverse side declares <code>mappedBy</code>, naming the owning field, and is purely a read-through view of the same link. The rule is fixed for the common case: in a <code>@ManyToOne</code>/<code>@OneToMany</code> pair the many side (<code>@ManyToOne</code>) is always the owner; only in a <code>@ManyToMany</code> do you get to choose.</p>
+    <p>Why it matters: this is the single most-tested relationship concept, because getting it wrong fails quietly. If you set only the inverse side, Hibernate generates no SQL for the link and the foreign key stays null — the update simply vanishes. Put <code>@JoinColumn</code> and <code>mappedBy</code> on the wrong sides and you get a duplicate foreign key or a phantom column. Reason about it as: the side <em>without</em> <code>mappedBy</code> is the source of truth.</p>
+    <pre class="code-block" data-label="Java"><code>// Owning side — declares the FK, drives the SQL
+@ManyToOne @JoinColumn(name = "author_id") private Author author;
+
+// Inverse side — mirrors it, generates no SQL of its own
+@OneToMany(mappedBy = "author") private List&lt;Book&gt; books;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1.html" rel="noopener">Jakarta Persistence 3.1 Specification — relationships, owning/inverse and mappedBy (§2.9–2.11)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-joincolumn-vs-mappedby" rel="noopener">Difference Between @JoinColumn and mappedBy — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-join-column" rel="noopener">@JoinColumn Annotation Explained — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/ultimate-guide-association-mappings-jpa-hibernate/" rel="noopener">Map Associations with JPA and Hibernate — The Ultimate Guide — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Keeping both sides in sync: bidirectional helper methods</h3>
+    <p>Because only the owning side drives SQL, the in-memory object graph can silently drift from the database when you touch just one end. Add a value to the child's reference but forget the parent's collection and, until the persistence context is cleared, code that reads the collection sees stale data. The fix is a pair of helper methods on the parent — <code>addChild</code> / <code>removeChild</code> — that update <em>both</em> ends together, so the object graph always matches what Hibernate will persist.</p>
+    <p>Why it matters: consistent bidirectional state is what makes <code>orphanRemoval</code>, cascading and dirty checking behave predictably; without helpers, "my child does not get saved" and "my collection is stale" are recurring, hard-to-explain bugs. Interviewers ask you to write these methods on the spot.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity class Post {
+    @OneToMany(mappedBy = "post", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List&lt;Comment&gt; comments = new ArrayList&lt;&gt;();
+
+    public void addComment(Comment c) { comments.add(c); c.setPost(this); }
+    public void removeComment(Comment c) { comments.remove(c); c.setPost(null); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-hibernate-synchronize-bidirectional-entity-associations/" rel="noopener">How to synchronize bidirectional entity associations — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-hibernate-associations" rel="noopener">Understanding JPA/Hibernate Associations — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-identifiers.html">← Primary Keys and Identifiers</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="05-value-types.html">Value Types, Embeddables and Converters →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Relationship mapping is the deepest-tested JPA area in Indian interviews — owning side, <code>mappedBy</code> and bidirectional sync recur from screening rounds to senior product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the four relationship annotations in JPA and what does each represent?</summary>
+      <div class="answer"><p><code>@ManyToOne</code> (many rows point to one parent — carries the foreign key), <code>@OneToMany</code> (its collection-valued inverse), <code>@OneToOne</code> (one row to one row), and <code>@ManyToMany</code> (two entities linked through a join table). They map directly to relational multiplicities.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> In a @ManyToOne/@OneToMany relationship, which side holds the foreign key?</summary>
+      <div class="answer"><p>The many side — the <code>@ManyToOne</code> — holds the foreign-key column in its table. The one side (<code>@OneToMany</code>) has no foreign key of its own; it is the inverse view mapped with <code>mappedBy</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the mappedBy attribute do?</summary>
+      <div class="answer"><p>It marks a side as the <em>inverse</em> (non-owning) side and names the field on the owning side that maps the association. It tells Hibernate "the other side manages this link — do not generate a second foreign key or join table for it."</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a join table and which annotation configures it?</summary>
+      <div class="answer"><p>An intermediate table holding two foreign-key columns that connect a many-to-many association. <code>@JoinTable</code> configures it, with <code>joinColumns</code> for the owning side and <code>inverseJoinColumns</code> for the other side.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the difference between the owning side and the inverse side of a bidirectional association?</summary>
+      <div class="answer"><p>The owning side is the one Hibernate reads to generate the SQL for the foreign key or join table; it declares <code>@JoinColumn</code>/<code>@JoinTable</code>. The inverse side declares <code>mappedBy</code> and is a read-only mirror — changes to it alone produce no SQL. The side without <code>mappedBy</code> is the source of truth. This is the most-asked relationship question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You set only the inverse side of a bidirectional relationship, but the foreign key is null in the database. Why?</summary>
+      <div class="answer"><p>Hibernate generates the foreign-key SQL only from the owning side. Adding a child to the parent's <code>mappedBy</code> collection without also setting the child's <code>@ManyToOne</code> back-reference leaves the owning side unset, so nothing is written. Set the owning side (or use a helper method that sets both).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why are unidirectional @OneToMany associations discouraged?</summary>
+      <div class="answer"><p>Without a <code>@ManyToOne</code> owning side, Hibernate manages the link either through an unnecessary join table or, with <code>@JoinColumn</code>, through extra UPDATE statements after the inserts. Mapping the <code>@ManyToOne</code> side (optionally bidirectional with <code>mappedBy</code>) produces clean, minimal SQL.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do bidirectional associations need add/remove helper methods?</summary>
+      <div class="answer"><p>Only the owning side drives persistence, but application code reads both sides. Helpers like <code>addComment</code>/<code>removeComment</code> set both ends at once, keeping the in-memory graph consistent with what gets persisted — which is what makes <code>orphanRemoval</code>, cascading and dirty checking behave correctly and avoids stale-collection bugs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When do you use @JoinColumn versus mappedBy?</summary>
+      <div class="answer"><p><code>@JoinColumn</code> goes on the owning side to name the foreign-key column; <code>mappedBy</code> goes on the inverse side to point back at the owning field. They are mutually exclusive per side — putting both on the same field, or <code>@JoinColumn</code> on both sides, creates a duplicate foreign key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you map a @OneToOne with a shared primary key, and why prefer it?</summary>
+      <div class="answer"><p>Use <code>@MapsId</code> so the child entity reuses the parent's identifier as its own primary key and foreign key. It removes a separate unique foreign-key column, guarantees the one-to-one at the primary-key level, and lets you fetch the child directly by the parent id.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> For @ManyToMany, why prefer Set over List, and why avoid CascadeType.REMOVE?</summary>
+      <div class="answer"><p>With a <code>List</code>, removing one element makes Hibernate delete all join-table rows and reinsert the survivors; a <code>Set</code> deletes only the single affected row. <code>CascadeType.REMOVE</code> is dangerous because deleting one entity can chain-delete shared associated rows, wiping data the other side still needs. Keep cascade to <code>PERSIST</code> and <code>MERGE</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your many-to-many needs an extra column, such as a quantity. How do you model it?</summary>
+      <div class="answer"><p>Replace <code>@ManyToMany</code> with an explicit join entity (for example <code>OrderProduct</code>) that has its own key and two <code>@ManyToOne</code> associations to the endpoints, plus the extra columns. This turns the many-to-many into two one-to-many relationships and gives the link its own identity and attributes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can't the parent side of a bidirectional @OneToOne be lazy-loaded by default, and what fixes it?</summary>
+      <div class="answer"><p>The parent has no foreign key, so Hibernate must run a query to know whether the child exists — it cannot decide between a proxy and null without hitting the database, so it loads eagerly even with <code>fetch = LAZY</code>. Bytecode enhancement (lazy loading with a field-level interceptor), or restructuring to a shared primary key / <code>@MapsId</code>, is what makes it genuinely lazy.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.rel.cardinality</li>
+      <li>jpa.rel.owning</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

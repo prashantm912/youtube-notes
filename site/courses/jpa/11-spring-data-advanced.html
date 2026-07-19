@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Data JPA Advanced module: Specifications over the Criteria API, custom repository fragments, @Modifying bulk queries, auditing with @CreatedDate/@LastModifiedDate, @EntityGraph fetch plans and Querydsl awareness — the best official and community resources, plus the interview questions they power.">
+  <title>Spring Data JPA Advanced</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Spring Data JPA Advanced</h1>
+  <p class="standfirst">The senior half of Spring Data JPA: Criteria-backed dynamic Specifications, repositories you extend by hand, bulk writes that skip the persistence context, and auditing that fills who-and-when for free — the features that separate a CRUD developer from someone who owns the data layer.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Spring Data JPA Advanced</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The previous module covered the repositories you get for free; this one covers what you reach for when derived queries run out. Specifications and Querydsl build type-checked dynamic queries over the JPA Criteria API, custom fragments let you drop to a raw <code>EntityManager</code> without leaving the repository abstraction, <code>@Modifying</code> runs bulk updates and deletes, <code>@EntityGraph</code> defeats N+1 declaratively, and Spring Data auditing stamps creation and modification metadata automatically. All of it is heavily interviewed at the mid-and-senior level in Indian product and services companies.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Specifications: dynamic queries over the Criteria API</h3>
+    <p>A <code>Specification&lt;T&gt;</code> wraps a single JPA Criteria predicate through <code>toPredicate(root, query, criteriaBuilder)</code>, and specifications compose with <code>and()</code>, <code>or()</code>, <code>not()</code> and <code>where(...)</code>. A repository gains them by extending <code>JpaSpecificationExecutor&lt;T&gt;</code>, which adds <code>findAll(Specification)</code>, <code>findOne</code>, <code>count</code> and <code>exists</code> — all overloaded to accept <code>Pageable</code> and <code>Sort</code>.</p>
+    <p>Why it matters: the moment a screen has several optional filters, deriving <code>findByAAndBAndC</code> permutations explodes. Specifications let you assemble exactly the predicates a request supplied, at runtime, from small reusable pieces — the standard answer to "how do you build a dynamic query in Spring Data?".</p>
+    <pre class="code-block" data-label="Java"><code>static Specification&lt;Book&gt; byAuthor(String a) {
+    return (root, query, cb) -&gt; cb.equal(root.get("author"), a);
+}
+// compose at runtime, then page:
+repo.findAll(byAuthor("Vlad").and(inStock()), pageable);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/specifications.html" rel="noopener">Specifications — Spring Data JPA Reference (the JpaSpecificationExecutor contract and composition)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/spring-data-jpa-specification/" rel="noopener">The best way to use the Spring Data JPA Specification — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-search-language-spring-data-specifications" rel="noopener">REST Query Language with Spring Data JPA Specifications — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-jpa-joining-tables" rel="noopener">Joining Tables With Spring Data JPA Specifications — Baeldung</a></li>
+    </ul>
+
+    <h3>Custom repository fragments</h3>
+    <p>When derived methods and <code>@Query</code> are not enough — you need the raw <code>EntityManager</code>, hand-built Criteria, or another library — you write a <em>fragment</em>: a custom interface plus an implementation class whose name is the interface name with the <code>Impl</code> postfix. The repository interface extends both the base repository and the fragment, and Spring Data composes the two into one proxy. Multiple fragments can be layered, and declaration order resolves any method-name ambiguity.</p>
+    <p>Beyond per-repository fragments you can also swap the base class — extend <code>SimpleJpaRepository</code> and register it via <code>repositoryBaseClass</code> to give <em>every</em> repository a shared behaviour (a <code>findByIdOrThrow</code>, soft-delete support, and so on). The point is to keep bespoke JPQL or Criteria code out of the interface while keeping Spring Data's wiring.</p>
+    <pre class="code-block" data-label="Java"><code>interface BookRepositoryCustom { List&lt;Book&gt; search(Filter f); }
+
+class BookRepositoryCustomImpl implements BookRepositoryCustom {
+    @PersistenceContext EntityManager em;
+    public List&lt;Book&gt; search(Filter f) { /* Criteria here */ }
+}
+
+interface BookRepository extends JpaRepository&lt;Book, Long&gt;, BookRepositoryCustom { }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/custom-implementations.html" rel="noopener">Custom Repository Implementations — Spring Data JPA Reference (fragments, postfix, base class)</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/composite-repositories-spring-data-jpa/" rel="noopener">Composite Repositories — extend your Spring Data JPA repository — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/custom-spring-data-repository/" rel="noopener">The best way to write a custom Spring Data Repository — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-composable-repositories" rel="noopener">Spring Data Composable Repositories — Baeldung</a></li>
+    </ul>
+
+    <h3>@Modifying queries: bulk updates and deletes</h3>
+    <p>Derived and <code>@Query</code> methods are <code>SELECT</code> by default. Adding <code>@Modifying</code> turns a <code>@Query</code> into an <code>UPDATE</code>, <code>DELETE</code> or bulk <code>INSERT</code>, returning the affected-row count (<code>int</code>) or <code>void</code>. It must run inside a transaction. Crucially, a bulk statement goes straight to the database — it bypasses the persistence context, so dirty checking, cascading and the first-level cache are all skipped, and already-loaded managed entities can now hold stale values.</p>
+    <p>That staleness is the trap. <code>@Modifying(clearAutomatically = true)</code> clears the persistence context after the statement, and <code>flushAutomatically = true</code> flushes pending changes before it, keeping things consistent. It is also worth contrasting a bulk <code>@Query</code> delete (one JPQL statement, no lifecycle callbacks or cascade or orphan removal) with a derived <code>deleteByStatus(...)</code>, which loads entities then removes them one by one so callbacks fire.</p>
+    <pre class="code-block" data-label="Java"><code>@Modifying(clearAutomatically = true)
+@Query("update Book b set b.price = b.price * :f where b.genre = :g")
+int repriceGenre(@Param("g") String g, @Param("f") BigDecimal f);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.modifying-queries" rel="noopener">Modifying Queries — Spring Data JPA Reference (@Modifying, clearAutomatically, derived delete)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-modifying-annotation" rel="noopener">Spring Data JPA @Modifying Annotation — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/implementing-bulk-updates-with-spring-data-jpa/" rel="noopener">Implementing Bulk Updates with Spring Data JPA — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/bulk-update-delete-jpa-hibernate/" rel="noopener">Bulk Update and Delete with JPA and Hibernate — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Auditing: @CreatedDate, @LastModifiedDate and who changed it</h3>
+    <p>Spring Data auditing populates who-and-when metadata automatically: <code>@CreatedDate</code> and <code>@LastModifiedDate</code> for timestamps, <code>@CreatedBy</code> and <code>@LastModifiedBy</code> for the acting principal. You switch it on with <code>@EnableJpaAuditing</code> on a configuration class, annotate the entity — usually a shared <code>@MappedSuperclass</code> base — with <code>@EntityListeners(AuditingEntityListener.class)</code>, and the listener fills the fields on persist and update.</p>
+    <p>The <code>@CreatedBy</code>/<code>@LastModifiedBy</code> fields need an <code>AuditorAware&lt;T&gt;</code> bean that returns the current user, typically from the Spring Security context; timestamps work without it. Keep this distinct from Hibernate's provider-level <code>@CreationTimestamp</code>/<code>@UpdateTimestamp</code> and from a full change-history trail like Hibernate Envers — a common follow-up in interviews.</p>
+    <pre class="code-block" data-label="Java"><code>@MappedSuperclass
+@EntityListeners(AuditingEntityListener.class)
+abstract class Auditable {
+    @CreatedDate       Instant createdDate;
+    @LastModifiedDate  Instant lastModifiedDate;
+    @CreatedBy         String  createdBy;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/auditing.html" rel="noopener">Auditing — Spring Data JPA Reference (annotations, AuditingEntityListener, AuditorAware)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-auditing-jpa" rel="noopener">Auditing with JPA, Hibernate, and Spring Data JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/persist-creation-update-timestamps-hibernate/" rel="noopener">How to persist creation and update timestamps with Hibernate — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Pc7Une_5rMs" rel="noopener">Auditing with Spring Data JPA — Java Techie</a></li>
+    </ul>
+
+    <h3>@EntityGraph in repositories</h3>
+    <p><code>@EntityGraph</code> on a repository method declares which associations to fetch in the same query — the Spring Data way to kill an N+1 pattern or a <code>LazyInitializationException</code> without hand-writing a fetch-join JPQL. It takes two forms: reference a <code>@NamedEntityGraph</code> declared on the entity by its <code>value</code>, or define one inline with <code>attributePaths = {"author", "reviews"}</code>. Because the graph is attached to the method, the same derived or <code>@Query</code> finder can be reused with or without it.</p>
+    <p>The <code>type</code> attribute matters: <code>FETCH</code> treats the listed attributes as eager and forces everything else lazy, while <code>LOAD</code> treats the listed attributes as eager and leaves unlisted ones at their mapped default. Keep a graph to one or two associations — pulling several collections in one query produces cartesian-product rows and can be slower than the problem you set out to fix.</p>
+    <pre class="code-block" data-label="Java"><code>@EntityGraph(attributePaths = {"author", "reviews"})
+List&lt;Book&gt; findByGenre(String genre);   // author + reviews in one query</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.entity-graph" rel="noopener">Configuring Fetch- and LoadGraphs — Spring Data JPA Reference (@EntityGraph, FETCH vs LOAD)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-named-entity-graphs" rel="noopener">Spring Data JPA and Named Entity Graphs — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/jpa-21-entity-graph-part-1-named-entity/" rel="noopener">JPA Entity Graphs: define and use a @NamedEntityGraph — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-entity-graph/" rel="noopener">JPA Entity Graph — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Querydsl awareness</h3>
+    <p>Querydsl is a third-party type-safe query API. An annotation processor generates a query type (<code>QBook</code>) from each entity at build time, and you assemble predicates fluently — <code>QBook.book.title.startsWithIgnoreCase("a")</code>. Spring Data integrates it through <code>QuerydslPredicateExecutor&lt;T&gt;</code>, which you extend exactly like <code>JpaSpecificationExecutor</code> to get <code>findAll(Predicate)</code>, <code>findOne</code>, <code>count</code> and <code>exists</code>.</p>
+    <p>Awareness is usually enough for interviews: know it as the fourth dynamic-query option after derived methods, <code>@Query</code>, and Criteria/Specifications; know that its generated Q-classes make queries refactor-safe and far less verbose than the raw Criteria API; and know the cost is the build-time code generation step. The frequent question is simply "Specifications vs Querydsl vs Criteria — when would you pick each?".</p>
+    <pre class="code-block" data-label="Java"><code>interface BookRepository extends JpaRepository&lt;Book, Long&gt;,
+                                 QuerydslPredicateExecutor&lt;Book&gt; { }
+
+repo.findAll(QBook.book.price.lt(500).and(QBook.book.inStock.isTrue()));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/core-extensions.html#core.extensions.querydsl" rel="noopener">Querydsl Extension — Spring Data Reference (QuerydslPredicateExecutor)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/intro-to-querydsl" rel="noopener">Intro to Querydsl — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-criteria-querydsl-differences" rel="noopener">Querydsl vs. JPA Criteria — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MHxoUbyfblo" rel="noopener">Spring Data JPA + QueryDSL Example — type-safe persistence layer — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-spring-data-repositories.html">← Spring Data JPA Repositories</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="12-transactions-concurrency.html">Transactions and Concurrency →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The advanced Spring Data JPA questions that recur in Indian interviews, from screening rounds to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Spring Data JPA Specification, and what must the repository extend to use it?</summary>
+      <div class="answer"><p>A <code>Specification&lt;T&gt;</code> encapsulates a single JPA Criteria predicate via <code>toPredicate(root, query, cb)</code>. The repository extends <code>JpaSpecificationExecutor&lt;T&gt;</code>, which adds <code>findAll(Specification)</code>, <code>findOne</code>, <code>count</code> and <code>exists</code> — with paged and sorted overloads.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When would you use Specifications instead of derived query methods?</summary>
+      <div class="answer"><p>For dynamic queries with several optional filters — search/report screens — where deriving one method per filter combination would explode into dozens of <code>findByXAndY</code> variants. Specifications compose the predicates a request actually supplied, at runtime.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you add a fully custom method (raw EntityManager or Criteria) to a repository?</summary>
+      <div class="answer"><p>Write a custom fragment: a custom interface plus an implementation class named with the <code>Impl</code> postfix. The repository extends both the base repository and the fragment interface, and Spring Data composes them into one proxy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Modifying do, and what does such a method return?</summary>
+      <div class="answer"><p>It marks a <code>@Query</code> as an updating statement (<code>UPDATE</code>/<code>DELETE</code>/bulk <code>INSERT</code>) rather than a <code>SELECT</code>. It returns the affected-row count as <code>int</code>, or <code>void</code>, and must execute inside a transaction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> After a bulk @Modifying update, a managed entity still shows the old value. Why, and how do you fix it?</summary>
+      <div class="answer"><p>Bulk statements run straight against the database and bypass the persistence context, so the first-level cache is not refreshed — already-loaded entities keep the old state. Fix with <code>@Modifying(clearAutomatically = true)</code> (and <code>flushAutomatically = true</code> to flush pending changes first), or clear/refresh the context manually.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between a derived deleteByStatus(...) and a @Modifying @Query delete?</summary>
+      <div class="answer"><p>The derived <code>deleteBy</code> loads matching entities and removes them one by one, so lifecycle callbacks, cascades and orphan removal fire. The bulk <code>@Modifying</code> delete is a single JPQL statement — much faster, but it skips callbacks, cascade and the persistence context entirely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you make Spring auto-populate created/modified timestamps and users?</summary>
+      <div class="answer"><p>Add <code>@EnableJpaAuditing</code> to a config class, put <code>@EntityListeners(AuditingEntityListener.class)</code> on the entity or a <code>@MappedSuperclass</code> base, and annotate fields with <code>@CreatedDate</code>, <code>@LastModifiedDate</code>, <code>@CreatedBy</code>, <code>@LastModifiedBy</code>. For the user fields, expose an <code>AuditorAware</code> bean.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> @CreatedDate fills correctly but @CreatedBy is always null. What is missing?</summary>
+      <div class="answer"><p>There is no <code>AuditorAware&lt;T&gt;</code> bean supplying the current principal (or Spring Security is not wired to it). Timestamps come from the system clock and need nothing extra; the "by" fields depend entirely on the auditor.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is @EntityGraph on a repository method for, and what are its two forms?</summary>
+      <div class="answer"><p>It declares associations to fetch in the same query, defeating N+1 and <code>LazyInitializationException</code> without a hand-written fetch join. Two forms: reference a <code>@NamedEntityGraph</code> by its <code>value</code>, or define one inline with <code>attributePaths</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> @EntityGraph type FETCH vs LOAD — what is the difference?</summary>
+      <div class="answer"><p><code>FETCH</code>: attributes named in the graph are treated as eager and every other attribute is forced lazy. <code>LOAD</code>: named attributes are eager, but unlisted attributes keep their mapped/default fetch type. FETCH gives you the tightest control over exactly what loads.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Specifications vs Querydsl vs the Criteria API — when would you pick each?</summary>
+      <div class="answer"><p>All three build dynamic, type-checked queries. The raw Criteria API is the verbose JPA standard with no extra dependency; Specifications are Spring's composable, reusable wrapper over Criteria; Querydsl is a third-party fluent DSL with generated Q-classes — the most readable and refactor-safe, at the cost of a build-time code-generation step. Pick Specifications for Spring-native composition, Querydsl when query readability and refactoring safety dominate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A nightly job must reprice a million rows. Bulk @Modifying update vs loading entities and dirty-checking — trade-offs?</summary>
+      <div class="answer"><p>The bulk update is one SQL statement with no memory blow-up, but it bypasses optimistic locking (the <code>@Version</code> column is not bumped unless you set it explicitly), cascades, entity callbacks, and it leaves the first- and second-level caches stale. Entity-by-entity respects locking, events and cascade but is slow and memory-heavy. In practice: prefer the bulk statement, but handle <code>@Version</code> in the SQL, evict/clear affected caches, and chunk the work if it runs in one transaction.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.sda.specifications</li>
+      <li>jpa.sda.auditing</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

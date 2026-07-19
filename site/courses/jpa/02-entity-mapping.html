@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Entity Mapping Basics module: mapping a class to a table with @Entity/@Table/@Column, field vs property access, @Basic and @Transient, naming strategies, schema generation (ddl-auto) and modern java.time mapping — curated official and community resources plus the interview questions they power.">
+  <title>Entity Mapping Basics</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Entity Mapping Basics</h1>
+  <p class="standfirst">An entity is a plain Java class that a JPA provider agrees to keep in sync with a database row — this module is about the annotations that draw that class-to-table contract, and the one detail (field vs property access) that quietly decides how Hibernate reads every attribute you own.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Entity Mapping Basics</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Object-relational mapping starts here: turning a POJO into a managed entity. You will map the class to a table (<code>@Entity</code>, <code>@Table</code>, <code>@Column</code>), understand how Hibernate reaches an attribute (field vs property access), mark data in and out of persistence (<code>@Basic</code>, <code>@Transient</code>), let Hibernate name tables and columns for you (naming strategies), generate or validate the schema at boot (<code>ddl-auto</code>), and store dates the modern way with <code>java.time</code>. Everything after this — identifiers, relationships, inheritance — is layered on top of these basics.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Mapping a class to a table: @Entity, @Table, @Column</h3>
+    <p><code>@Entity</code> is the one annotation that makes a class persistent — it must be a non-final class with a no-arg constructor and an <code>@Id</code>. Without further hints Hibernate applies sensible defaults: the table is named after the class, each non-transient attribute becomes a column named after the field. <code>@Table</code> overrides the table name (and its schema, catalog, unique constraints); <code>@Column</code> overrides a single column's name and declares metadata like <code>nullable</code>, <code>length</code>, <code>unique</code> and <code>insertable</code>/<code>updatable</code>.</p>
+    <p>Why it matters: this is the vocabulary of every entity you will ever write, and interviewers lean on one subtlety — <code>@Entity(name=...)</code> renames the entity for JPQL, while <code>@Table(name=...)</code> renames the physical table. They are not the same knob.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Table(name = "app_user")
+public class User {
+    @Id @GeneratedValue
+    private Long id;
+
+    @Column(name = "email", nullable = false, unique = true, length = 320)
+    private String email;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#entity" rel="noopener">Entity types — Hibernate ORM User Guide</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/entity" rel="noopener">@Entity — Jakarta Persistence 3.2 API docs</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/key-jpa-hibernate-annotations/" rel="noopener">Key annotations you need to know when working with JPA and Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-entities" rel="noopener">Defining JPA Entities — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=agKHuVzw-6A" rel="noopener">JPA Annotations: @Table, @Column, @GeneratedValue, @UniqueConstraint — Java Guides</a></li>
+    </ul>
+
+    <h3>Field access vs property access</h3>
+    <p>Hibernate reads and writes an attribute in one of two ways: <em>field access</em> sets the instance variable directly by reflection, or <em>property access</em> calls the getter and setter. The default is decided by where you put the mapping annotations — specifically <code>@Id</code>: on the field means <code>AccessType.FIELD</code> for the whole class, on the getter means <code>AccessType.PROPERTY</code>. <code>@Access</code> overrides the default, per class or per attribute, and is the only way to mix the two safely.</p>
+    <p>Why it matters: this is one of the most common JPA interview questions because the choice has real consequences. Property access runs your getter/setter logic on every load and flush (a derived getter can corrupt the mapping); field access ignores methods entirely, so a getter can safely return an <code>Optional</code> or a computed view. Field access is the community default recommendation.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Access(AccessType.FIELD)          // explicit; annotations live on fields
+public class Product {
+    @Id private Long id;
+    private String name;
+
+    @Access(AccessType.PROPERTY)   // override just this attribute
+    @Column(name = "price_cents")
+    public long getPriceCents() { return Math.round(price * 100); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#access" rel="noopener">Access strategies — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/access-strategies-in-jpa-and-hibernate/" rel="noopener">Access Strategies in JPA and Hibernate — field or property access? — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3RGw86dQnBE" rel="noopener">Access Strategies in JPA and Hibernate — field vs property — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>@Basic and @Transient</h3>
+    <p>Every non-static, non-transient attribute is persistent by default — <code>@Basic</code> is implicit and rarely written. When it is written it carries two useful knobs: <code>optional</code> (whether the column may be null) and <code>fetch = FetchType.LAZY</code> (defer loading a large value). To keep an attribute <em>out</em> of the database, use JPA's <code>@Transient</code> annotation; the Java <code>transient</code> keyword also works but couples persistence to serialization, so <code>@Transient</code> is the clearer intent.</p>
+    <p>Why it matters: candidates routinely confuse the two "transients." <code>@Transient</code> affects persistence only; the <code>transient</code> keyword affects Java serialization only — and each incidentally influences the other. Knowing which tool expresses which intent is a quick signal of real JPA experience.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#basic" rel="noopener">@Basic — Basic Types, Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-transient-ignore-field" rel="noopener">Ignoring Fields With the JPA @Transient Annotation — Baeldung</a></li>
+    </ul>
+
+    <h3>Naming strategies: implicit and physical</h3>
+    <p>When you do not name a table or column explicitly, Hibernate derives it in two steps. The <em>implicit naming strategy</em> produces a logical name from the attribute or class name; the <em>physical naming strategy</em> then maps that logical name to the actual database identifier. Splitting the two lets you apply a house style — say, snake_case — in one place instead of hard-coding <code>@Column(name=...)</code> on every field.</p>
+    <p>Why it matters: Spring Boot silently installs its own <code>CamelCaseToUnderscoresNamingStrategy</code>, so <code>firstName</code> becomes <code>first_name</code> even though plain Hibernate would keep it <code>firstname</code>. Not knowing this is behind a classic "why can't it find my column?" bug when moving between a Spring Boot app and vanilla Hibernate.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#naming" rel="noopener">Naming strategies — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/naming-strategies-in-hibernate-5/" rel="noopener">Hibernate's Naming Strategies — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-field-naming-spring-boot" rel="noopener">Hibernate Field Naming with Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Schema generation: ddl-auto</h3>
+    <p>Hibernate can create, update, validate or drop the schema at startup from your entity mappings. The raw setting is <code>hibernate.hbm2ddl.auto</code>; Spring Boot exposes it as <code>spring.jpa.hibernate.ddl-auto</code> with values <code>none</code>, <code>validate</code>, <code>update</code>, <code>create</code> and <code>create-drop</code>. Boot defaults to <code>create-drop</code> for an embedded database and <code>none</code> otherwise — convenient for demos and tests.</p>
+    <p>Why it matters: <code>update</code> is the trap. It never drops columns, cannot express real migrations, and quietly diverges from your intended schema; the standard interview answer is <code>validate</code> or <code>none</code> in production with a migration tool (Flyway or Liquibase) owning the actual DDL.</p>
+    <pre class="code-block" data-label="Properties"><code># production
+spring.jpa.hibernate.ddl-auto=validate
+# local dev / integration tests
+spring.jpa.hibernate.ddl-auto=create-drop</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#schema-generation" rel="noopener">Schema generation — Hibernate ORM User Guide</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/data/sql.html" rel="noopener">SQL Databases — ddl-auto and JPA setup, Spring Boot reference</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-hbm2ddl-auto-schema/" rel="noopener">The best way to use hibernate.hbm2ddl.auto — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>@Temporal and modern java.time mapping</h3>
+    <p>The <code>java.time</code> types map cleanly with no annotation: <code>LocalDate</code> to <code>DATE</code>, and <code>LocalDateTime</code>/<code>Instant</code>/<code>OffsetDateTime</code> to <code>TIMESTAMP</code>. <code>@Temporal</code> exists only for the legacy <code>java.util.Date</code> and <code>Calendar</code> types, to say whether they become a DATE, TIME or TIMESTAMP — and it is deprecated in Jakarta Persistence 3.2. Applied to a <code>java.time</code> field it is unnecessary and, in recent Hibernate, harmful.</p>
+    <p>Why it matters: the right answer to "how do I persist a LocalDateTime?" is "just declare it" — no <code>@Temporal</code>. Interviewers use this to separate people who learned JPA on Java 8+ from those still copying <code>@Temporal</code> onto everything out of habit. Time zones then become the follow-up: <code>ZonedDateTime</code> storage is controlled with Hibernate's <code>@TimeZoneStorage</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Column(name = "created_at")
+private Instant createdAt;          // -&gt; TIMESTAMP, no @Temporal
+
+@Temporal(TemporalType.DATE)        // ONLY for legacy java.util.Date
+private java.util.Date legacyBirthday;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/temporal" rel="noopener">@Temporal (deprecated) — Jakarta Persistence 3.2 API docs</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-jpa-date-and-time/" rel="noopener">Date and Time Mappings with Hibernate and JPA — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-date-time" rel="noopener">Hibernate — Mapping Date and Time — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/date-timestamp-jpa-hibernate/" rel="noopener">How to map Date and Timestamp with JPA and Hibernate — Vlad Mihalcea</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-fundamentals.html">← JPA and Hibernate Fundamentals</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="03-identifiers.html">Primary Keys and Identifiers →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The entity-mapping questions that recur in Indian JPA and Spring interviews — screening rounds through product-company deep dives, with field-vs-property access almost guaranteed:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes a class a JPA entity?</summary>
+      <div class="answer"><p>The <code>@Entity</code> annotation, plus a few rules: a non-final class, a public or protected no-argument constructor, and at least one <code>@Id</code> attribute. Hibernate then maps it to a table (named after the class unless <code>@Table</code> says otherwise) and manages its persistent state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between @Entity(name) and @Table(name)?</summary>
+      <div class="answer"><p><code>@Entity(name=...)</code> sets the <em>entity</em> name used in JPQL/HQL queries; <code>@Table(name=...)</code> sets the physical <em>table</em> name in the database. They default to the class name and are independent — you can rename one without the other.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Column configure, and name some attributes?</summary>
+      <div class="answer"><p>It customizes the column a field maps to: <code>name</code>, <code>nullable</code>, <code>unique</code>, <code>length</code> (for strings), <code>precision</code>/<code>scale</code> (for decimals), and <code>insertable</code>/<code>updatable</code> to exclude a column from generated INSERT/UPDATE statements. It is optional — defaults apply when absent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you stop a field from being persisted?</summary>
+      <div class="answer"><p>Annotate it with <code>@Transient</code> (JPA), or use the Java <code>transient</code> keyword. <code>@Transient</code> affects persistence only; the keyword affects serialization only but also stops persistence. Prefer <code>@Transient</code> for clarity of intent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is @Basic required on a persistent field?</summary>
+      <div class="answer"><p>No. Every non-static, non-transient attribute is a basic mapping by default, so <code>@Basic</code> is implicit. You write it only to set <code>optional=false</code> or <code>fetch=FetchType.LAZY</code> (deferred loading of, say, a large text/blob column).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Field access vs property access — how does Hibernate choose the default?</summary>
+      <div class="answer"><p>By where the mapping annotations, chiefly <code>@Id</code>, are placed. On the field → <code>AccessType.FIELD</code> (Hibernate sets the variable directly by reflection). On the getter → <code>AccessType.PROPERTY</code> (Hibernate calls getters/setters). <code>@Access</code> overrides this at class or attribute level.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do most teams prefer field access?</summary>
+      <div class="answer"><p>Field access ignores your methods, so a getter is free to return an <code>Optional</code>, a defensive copy, or a computed value without breaking the mapping; it also avoids side effects on every load/flush. Property access runs getter/setter logic each time, so a "clever" accessor can silently corrupt persisted state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are implicit and physical naming strategies, and what does Spring Boot default to?</summary>
+      <div class="answer"><p>The implicit strategy derives a logical name for anything you did not name explicitly; the physical strategy converts that logical name into the actual DB identifier. Spring Boot defaults the physical strategy to <code>CamelCaseToUnderscoresNamingStrategy</code>, so <code>firstName</code> maps to <code>first_name</code> — different from vanilla Hibernate, which would use <code>firstname</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does spring.jpa.hibernate.ddl-auto do, and which value in production?</summary>
+      <div class="answer"><p>It controls Hibernate schema management at startup: <code>none</code>, <code>validate</code>, <code>update</code>, <code>create</code>, <code>create-drop</code>. In production use <code>validate</code> (or <code>none</code>) and let Flyway/Liquibase own migrations. Boot defaults to <code>create-drop</code> for embedded databases, <code>none</code> otherwise.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you persist a LocalDate or LocalDateTime — do you need @Temporal?</summary>
+      <div class="answer"><p>No. <code>java.time</code> types map automatically — <code>LocalDate</code> to DATE, <code>LocalDateTime</code>/<code>Instant</code> to TIMESTAMP. <code>@Temporal</code> is only for legacy <code>java.util.Date</code>/<code>Calendar</code> and is deprecated in Jakarta Persistence 3.2; putting it on a <code>java.time</code> field is unnecessary and can misbehave in recent Hibernate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can you mix field and property access in one entity, and what's the risk?</summary>
+      <div class="answer"><p>Yes — set a class default with <code>@Access</code> and override individual attributes with <code>@Access(AccessType.PROPERTY/FIELD)</code>. The risk: mixing implicitly (annotations scattered across fields and getters) without explicit <code>@Access</code> is undefined by the JPA spec, so behaviour becomes provider-dependent. Always make mixed access explicit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is ddl-auto=update dangerous in production?</summary>
+      <div class="answer"><p>It only makes additive changes — it never drops or alters columns, cannot rename, and cannot run data migrations — so the live schema silently drifts from what your mappings imply, and there is no reviewable, versioned record of changes. Real systems freeze the schema (<code>validate</code>) and drive DDL through Flyway/Liquibase.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you correctly store a timestamp with a time zone?</summary>
+      <div class="answer"><p>Prefer <code>Instant</code> or <code>OffsetDateTime</code> (mapped to TIMESTAMP) so the value is unambiguous. For <code>ZonedDateTime</code>/<code>OffsetDateTime</code>, Hibernate's <code>@TimeZoneStorage</code> chooses whether to normalize to UTC or keep an explicit offset/zone column; storing local <code>LocalDateTime</code> for cross-zone data loses the offset and is the common bug.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.map.entity</li>
+      <li>jpa.map.naming</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Value Types, Embeddables and Converters in JPA and Hibernate: value types vs entities, @Embeddable/@Embedded, @ElementCollection, the @Enumerated ORDINAL-vs-STRING pitfall, AttributeConverter/@Convert and @Lob — the best official and community resources for full study, plus the interview questions they power.">
+  <title>Value Types, Embeddables and Converters — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Value Types, Embeddables and Converters</h1>
+  <p class="standfirst">A customer's address is not an entity — it has no identity of its own and dies with the customer that owns it. This module maps that "part-of" data, and the ORDINAL-versus-STRING enum trap it contains is one of the most repeated JPA interview questions there is.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Value Types, Embeddables and Converters</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Not every class in your domain model deserves a primary key. Value types — embeddables, element collections, enums, and converter-mapped attributes — model data that belongs <em>inside</em> an entity rather than existing independently. This module covers <code>@Embeddable</code>/<code>@Embedded</code> composition, collections of value types via <code>@ElementCollection</code>, the <code>@Enumerated</code> ORDINAL-versus-STRING decision, and the <code>AttributeConverter</code> and <code>@Lob</code> machinery for whatever the built-in basic types cannot handle.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Value types versus entities</h3>
+    <p>A value type has no identity of its own and no independent lifecycle: it exists only as state inside an owning entity, is loaded and saved with that owner, and is never shared by reference between two entities. Hibernate recognises three kinds of type — <em>basic</em> (<code>String</code>, <code>int</code>, <code>LocalDate</code>), <em>embeddable</em> (a composite of basics), and <em>entity</em> (identity plus lifecycle) — and value types are the first two.</p>
+    <p>Why it matters: value-vs-entity is the first modelling question for any group of fields. Get it wrong and you either bolt a meaningless surrogate key onto an address, or you demote something with real identity (an Order) into a value type and lose the ability to reference it. The distinction also drives equality — value types compare by their contents, entities by their id.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html" rel="noopener">Hibernate ORM User Guide — basic, embeddable and entity types (JBoss/Red Hat)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1.html" rel="noopener">Jakarta Persistence 3.1 — Embeddable Classes (§2.6) and Collections of Embeddable/Basic Types (§2.7)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c2abcy0Q1a0" rel="noopener">Hibernate Tutorial 08 — Value Types and Embedding Objects — Java Brains</a></li>
+    </ul>
+
+    <h3>@Embeddable and @Embedded</h3>
+    <p><code>@Embeddable</code> marks a class whose fields map to columns of whatever entity embeds it; <code>@Embedded</code> (often optional) places one such value object into an entity. There is no separate table and no foreign key — the embeddable's columns sit directly in the owner's table, which keeps a naturally cohesive group (street/city/zip) together in code while staying flat in SQL.</p>
+    <p>When you embed the same type twice — a billing and a shipping <code>Address</code> — the two copies collide on column names. <code>@AttributeOverride</code> (and <code>@AttributeOverrides</code>) remaps the clashing columns per embedding. Embeddables can nest, and modern JPA/Hibernate let you model them as immutable Java records.</p>
+    <pre class="code-block" data-label="Java"><code>@Embeddable
+public class Address {
+    private String street;
+    private String city;
+    private String zipCode;
+}
+
+@Entity
+public class Customer {
+    @Id private Long id;
+    @Embedded private Address address;
+
+    @Embedded
+    @AttributeOverride(name = "city", column = @Column(name = "billing_city"))
+    private Address billing;   // same type, remapped columns
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/embeddable" rel="noopener">@Embeddable — Jakarta Persistence 3.1 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-embedded-embeddable" rel="noopener">JPA @Embedded and @Embeddable — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-attributeoverride" rel="noopener">Overriding Column Definition With @AttributeOverride — Baeldung</a></li>
+    </ul>
+
+    <h3>@ElementCollection: collections of value types</h3>
+    <p><code>@ElementCollection</code> persists a <code>Collection</code> of basic types or embeddables — a set of tags, a list of phone numbers — into a separate collection table linked back to the owner, without promoting each element to an entity. <code>@CollectionTable</code> names that table and its join column; <code>@Column</code> (or <code>@AttributeOverride</code> for embeddables) names the value columns.</p>
+    <p>Why it matters and the caveat: because the elements have no identity, Hibernate usually cannot update one row in place — most changes delete and re-insert the entire collection. That is fine for small, rarely-changing sets but a performance trap for large or frequently-edited ones, where a real <code>@OneToMany</code> is the better mapping. An element collection is also <code>LAZY</code> by default, so touching it outside a session throws <code>LazyInitializationException</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@ElementCollection
+@CollectionTable(name = "customer_phone",
+        joinColumns = @JoinColumn(name = "customer_id"))
+@Column(name = "phone")
+private Set&lt;String&gt; phoneNumbers = new HashSet&lt;&gt;();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/elementcollection" rel="noopener">@ElementCollection — Jakarta Persistence 3.1 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/collections-hibernate-jpa/" rel="noopener">Mapping Collections with Hibernate and JPA — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jpa-persist-string-list" rel="noopener">How to Persist a List of String in JPA (the canonical @ElementCollection example) — Baeldung</a></li>
+    </ul>
+
+    <h3>@Enumerated: ORDINAL versus STRING</h3>
+    <p>An enum field maps to a column two ways. <code>@Enumerated(EnumType.ORDINAL)</code> — the default when you write no annotation at all — stores the constant's zero-based position (0, 1, 2). <code>@Enumerated(EnumType.STRING)</code> stores the constant's name (<code>"PUBLISHED"</code>). Ordinal is compact; string is readable and self-documenting in the database.</p>
+    <p>The trap is that the default is ORDINAL. Reorder the enum, or insert a new constant anywhere but the end, and every already-stored ordinal now points at a different constant — silent data corruption with no error at write time. The standard advice: use STRING (refactor-safe) unless storage is genuinely critical, and never lean on the ordinal default. This is one of the most frequently asked JPA interview questions.</p>
+    <pre class="code-block" data-label="Java"><code>enum Status { DRAFT, PUBLISHED, ARCHIVED }
+
+@Enumerated(EnumType.STRING)   // stores "PUBLISHED" — safe to reorder
+private Status status;
+// no annotation, or ORDINAL, would store 0/1/2 — fragile</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/enumerated" rel="noopener">@Enumerated — Jakarta Persistence 3.1 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-persisting-enums-in-jpa" rel="noopener">Persisting Enums in JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-an-enum-type-with-jpa-and-hibernate/" rel="noopener">The Best Way to Map an Enum Type with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-enum-mappings/" rel="noopener">Enum Mappings with Hibernate — The Complete Guide — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xIvPDZnaFpM" rel="noopener">Enum Mappings with Hibernate — The Complete Guide — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>AttributeConverter and @Convert</h3>
+    <p>An <code>AttributeConverter&lt;X, Y&gt;</code> defines two methods — <code>convertToDatabaseColumn</code> and <code>convertToEntityAttribute</code> — that translate a Java attribute type X to a column type Y and back. Annotate the converter <code>@Converter</code> (with <code>autoApply = true</code> to cover every attribute of that type) or attach it to a single field with <code>@Convert</code>. It is the standard, portable JPA hook (since JPA 2.1) for a type the provider does not handle natively — a Boolean stored as <code>'Y'</code>/<code>'N'</code>, a money type, an encrypted string.</p>
+    <p>Converters are also the clean way to map enums to explicit, stable database codes — decoupling the stored value from both the name and the ordinal — which sidesteps the ORDINAL fragility entirely; JPA 3.2's <code>@EnumeratedValue</code> is a newer, narrower alternative. Note the limits: a converter cannot be applied to an <code>@Id</code>, a <code>@Version</code>, a relationship, or an attribute already marked <code>@Enumerated</code> or <code>@Temporal</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Converter(autoApply = true)
+public class BooleanToYNConverter
+        implements AttributeConverter&lt;Boolean, String&gt; {
+
+    public String convertToDatabaseColumn(Boolean value) {
+        return Boolean.TRUE.equals(value) ? "Y" : "N";
+    }
+    public Boolean convertToEntityAttribute(String db) {
+        return "Y".equals(db);
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/convert" rel="noopener">@Convert — Jakarta Persistence 3.1 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-attribute-converters" rel="noopener">JPA Attribute Converters — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-attributeconverter/" rel="noopener">JPA AttributeConverter — A Beginner's Guide — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/java-enum-custom-values/" rel="noopener">Map a Java Enum to Custom Values with a Converter — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=TIeeRif4ocg" rel="noopener">Implement a Custom Enum Mapping with an AttributeConverter — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>@Lob and large objects; custom types</h3>
+    <p><code>@Lob</code> tells the provider to map a field to a large-object column: a <code>String</code>/<code>char[]</code> becomes a CLOB (character data), a <code>byte[]</code> becomes a BLOB (binary). Use it for article bodies, images, or documents that would overflow an ordinary <code>VARCHAR</code>. Watch the database-specific behaviour — on PostgreSQL a <code>@Lob String</code> maps to a large-object <code>oid</code> rather than <code>TEXT</code>, a classic surprise, so many teams prefer <code>@Column(columnDefinition = "text")</code>.</p>
+    <p>When neither the basic types, an embeddable, nor an <code>AttributeConverter</code> is enough — you need control over the JDBC binding itself, or a JSON/array column — you reach for a custom Hibernate type. In practice most such needs (JSON, arrays) are already solved by the Hypersistence Utils library rather than a hand-written type.</p>
+    <pre class="code-block" data-label="Java"><code>@Lob
+private String article;   // CLOB / TEXT
+
+@Lob
+private byte[] image;     // BLOB</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/lob" rel="noopener">@Lob — Jakarta Persistence 3.1 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-lob" rel="noopener">Mapping LOB Data in Hibernate — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-to-map-json-objects-using-generic-hibernate-types/" rel="noopener">How to Map JSON Objects Using Generic Hibernate Types — Vlad Mihalcea</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-relationships.html">← Entity Relationships</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="06-inheritance.html">Inheritance Mapping →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The value-type questions Indian interviewers return to — mapping fundamentals in screening rounds, and the enum trap in almost every product-company deep dive:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a value type, and how does it differ from an entity?</summary>
+      <div class="answer"><p>A value type has no identity of its own and no independent lifecycle — it exists only as part of an owning entity's state, is loaded/saved with that owner, and is not shared by reference. An entity has a primary key and its own lifecycle. Basic types and embeddables are value types.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do @Embeddable and @Embedded do?</summary>
+      <div class="answer"><p><code>@Embeddable</code> marks a class as a reusable group of columns; <code>@Embedded</code> places one instance into an entity. The embeddable's columns live in the owning entity's table — no separate table, no foreign key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where are an embeddable's columns physically stored?</summary>
+      <div class="answer"><p>In the owning entity's own table, inline alongside its other columns. An embeddable is composition in Java that stays flat in SQL — it does not create a new table or a join.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is @ElementCollection for?</summary>
+      <div class="answer"><p>Persisting a collection of basic values or embeddables (tags, phone numbers) that are not entities. The elements go into a separate collection table (<code>@CollectionTable</code>) keyed back to the owner, but each element has no identity of its own.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between @Enumerated(ORDINAL) and @Enumerated(STRING)?</summary>
+      <div class="answer"><p>ORDINAL stores the constant's zero-based position (0, 1, 2); STRING stores its name (<code>"PUBLISHED"</code>). Ordinal is compact but positional; string is readable and survives reordering. If no annotation is given, the default is ORDINAL.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is @Enumerated(ORDINAL) considered dangerous?</summary>
+      <div class="answer"><p>Because it is the silent default and it stores position. Reorder the enum or insert a constant anywhere but the end, and every existing ordinal now decodes to a different constant — data corruption with no write-time error. Prefer STRING, or a converter with explicit codes, unless storage size is genuinely critical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you embed the same embeddable twice without a column-name clash?</summary>
+      <div class="answer"><p><code>@AttributeOverride</code> (or <code>@AttributeOverrides</code>) on the second <code>@Embedded</code> field remaps each colliding column — e.g. <code>Address</code> as both <code>billing</code> and <code>shipping</code> with <code>billing_city</code>/<code>shipping_city</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does @ElementCollection differ from @OneToMany, and what is its performance caveat?</summary>
+      <div class="answer"><p>@OneToMany relates two entities, each with identity; @ElementCollection stores non-entity values owned by one entity. Because element-collection rows have no identity, Hibernate typically deletes and re-inserts the whole collection on any change — fine for small, stable sets, but a trap for large or frequently-updated ones, where @OneToMany wins.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an AttributeConverter and when do you use one?</summary>
+      <div class="answer"><p>A class implementing <code>convertToDatabaseColumn</code>/<code>convertToEntityAttribute</code> to map a Java type to a column type and back — for types JPA does not persist natively (a Boolean as 'Y'/'N', a money type, an encrypted string). Apply it globally with <code>@Converter(autoApply = true)</code> or per field with <code>@Convert</code>. Standard since JPA 2.1 and provider-portable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you use an AttributeConverter instead of @Enumerated for an enum?</summary>
+      <div class="answer"><p>When you want an explicit, stable database code decoupled from both the enum's name and its ordinal — so reordering or renaming constants never breaks stored data, and the DB value stays meaningful (e.g. status codes 100/200). JPA 3.2's <code>@EnumeratedValue</code> is a newer, narrower option for the same goal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does @Lob do, and what is the common PostgreSQL pitfall?</summary>
+      <div class="answer"><p>@Lob maps a field to a large-object column — CLOB for <code>String</code>/<code>char[]</code>, BLOB for <code>byte[]</code>. On PostgreSQL a <code>@Lob String</code> is mapped to a large-object <code>oid</code> (stored out-of-line, accessed by handle) rather than <code>TEXT</code>, which surprises people; <code>@Column(columnDefinition = "text")</code> is the usual fix for large text.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What attributes can an AttributeConverter NOT be applied to?</summary>
+      <div class="answer"><p>It only applies to basic attributes. It cannot convert an <code>@Id</code>, a <code>@Version</code>, a relationship (<code>@ManyToOne</code> etc.), or an attribute already annotated <code>@Enumerated</code> or <code>@Temporal</code>. For those you use the appropriate mapping or a Hibernate-specific custom type.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why do equals and hashCode matter for embeddables, especially inside an @ElementCollection?</summary>
+      <div class="answer"><p>Value types compare by content, so an embeddable should implement <code>equals</code>/<code>hashCode</code> over all its fields. Inside an element collection Hibernate relies on that value equality to detect which elements changed and which rows to delete/insert — a missing or wrong implementation causes phantom updates or lost changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A production column uses @Enumerated(ORDINAL); a teammate inserts a new constant in the middle of the enum. What breaks, and how do you recover safely?</summary>
+      <div class="answer"><p>Every row stored before the change now decodes to the wrong constant, because the ordinals of all later constants shifted by one — a silent, data-wide corruption. Recovery: freeze writes, add the new constant only at the end as a stopgap, then migrate the column to STRING (or a converter with fixed codes) and backfill/translate existing values under a data migration. Long term, never rely on ORDINAL for a persisted enum.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.val.embeddable</li>
+      <li>jpa.val.converter</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

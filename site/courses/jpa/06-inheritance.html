@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JPA inheritance mapping module: the three strategies (SINGLE_TABLE, JOINED, TABLE_PER_CLASS), the discriminator column, the SINGLE_TABLE-vs-JOINED trade-off, @MappedSuperclass and polymorphic queries — with the best official and community resources, plus the interview questions they power.">
+  <title>Inheritance Mapping — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Inheritance Mapping</h1>
+  <p class="standfirst">Class hierarchies have no native form in SQL, so JPA offers three ways to project one onto tables — and choosing the wrong one is a performance and data-integrity decision you will keep re-explaining in every code review that follows.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Inheritance Mapping</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Object models use inheritance; relational schemas do not. This module covers the three <code>@Inheritance</code> strategies that bridge that gap — SINGLE_TABLE, JOINED and TABLE_PER_CLASS — plus the discriminator column that tags rows by type, the classic SINGLE_TABLE-versus-JOINED trade-off, and <code>@MappedSuperclass</code> for sharing state without modelling inheritance in the database. It closes on polymorphic queries: the reason you map a hierarchy in the first place.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Mapping a hierarchy: @Inheritance and the strategy choice</h3>
+    <p>A superclass annotated <code>@Inheritance</code> tells the provider to persist a whole Java hierarchy, and the <code>strategy</code> attribute picks how: SINGLE_TABLE (one table for everything), JOINED (a table per class, joined by shared id), or TABLE_PER_CLASS (a full table per concrete class). The default is SINGLE_TABLE. The mapping is inherited automatically — subclasses just add their own fields — and the abstract or concrete base class becomes queryable in its own right.</p>
+    <p>Why it matters: this single annotation determines table count, the shape of every generated SQL statement, and whether the database can enforce your constraints. It is a schema decision that is expensive to reverse once data lands, so interviewers probe whether you understand the consequences, not just the syntax.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+public abstract class Payment {
+    @Id @GeneratedValue Long id;
+    BigDecimal amount;
+}
+
+@Entity
+public class CardPayment extends Payment { String last4; }   // adds a column</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#entity-inheritance" rel="noopener">Entity inheritance — Hibernate ORM User Guide (all four mappings, with generated SQL)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/jakarta-persistence-spec-3.1.html#a966" rel="noopener">Inheritance Mapping Strategies — Jakarta Persistence 3.1 specification</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/inheritancetype" rel="noopener">InheritanceType — Jakarta Persistence API (Javadoc for the three constants)</a></li>
+    </ul>
+
+    <h3>SINGLE_TABLE and the discriminator column</h3>
+    <p>SINGLE_TABLE stores the entire hierarchy in one wide table, so a subclass's fields become nullable columns that only some rows populate. A <em>discriminator column</em> (Hibernate defaults to <code>DTYPE</code>, a VARCHAR of the entity name) records which subclass each row is, and <code>@DiscriminatorColumn</code> / <code>@DiscriminatorValue</code> let you rename it, change its type, or set custom values. It is the fastest strategy — no joins, polymorphic queries hit a single table — which is exactly why it is the default.</p>
+    <p>Why it matters: the cost is data integrity. Because subclass columns must be nullable for the other subclasses' rows, you cannot declare a genuinely-required subclass field as <code>NOT NULL</code>; you push that check into the application or a database CHECK constraint. A tip worth knowing: an INTEGER discriminator is far more compact than the default string at scale.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "payment_type", discriminatorType = DiscriminatorType.STRING)
+public abstract class Payment { @Id Long id; }
+
+@Entity @DiscriminatorValue("CARD")
+public class CardPayment extends Payment { String last4; }  // last4 must stay nullable</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-the-single_table-inheritance-with-jpa-and-hibernate/" rel="noopener">The best way to map SINGLE_TABLE inheritance — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-the-discriminatorcolumn-with-jpa-and-hibernate/" rel="noopener">The best way to map @DiscriminatorColumn — Vlad Mihalcea (STRING vs INTEGER cost)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7dBijbBdgbc" rel="noopener">Entities Inheritance Mapping — Single Table Strategy — CodeForgeYT</a></li>
+    </ul>
+
+    <h3>JOINED and TABLE_PER_CLASS: the normalized strategies</h3>
+    <p>JOINED gives each class its own table holding only that class's fields; the subclass primary key doubles as a foreign key back to the parent, and loading a subclass row joins across the levels of the hierarchy. It is the fully-normalized option: every column can be <code>NOT NULL</code>, no space is wasted, and the schema mirrors the class diagram. The price is a join per inheritance level on reads and an extra insert per level on writes.</p>
+    <p>TABLE_PER_CLASS gives each <em>concrete</em> class a standalone table that repeats the inherited columns, so single-type reads need no join at all. But a polymorphic query over the base type must <code>UNION ALL</code> every concrete table, which scales badly and interacts poorly with identity generation — which is why it is the least recommended of the three.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Inheritance(strategy = InheritanceType.JOINED)   // Payment table + one child table each
+public abstract class Payment { @Id Long id; BigDecimal amount; }
+
+@Entity
+public class BankTransfer extends Payment { String iban; }  // stored in its own joined table</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-use-entity-inheritance-with-jpa-and-hibernate/" rel="noopener">The best way to use entity inheritance (JOINED in depth) — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CMvq2i9Pcdo" rel="noopener">Entities Inheritance Mapping — Joined Table Strategy — CodeForgeYT</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YHA3LEwBMEE" rel="noopener">Entities Inheritance Mapping — Table Per Class Strategy — CodeForgeYT</a></li>
+    </ul>
+
+    <h3>Choosing a strategy: SINGLE_TABLE vs JOINED trade-offs</h3>
+    <p>When polymorphic queries and associations are needed, the real choice narrows to SINGLE_TABLE versus JOINED — and this comparison is one of the most common JPA interview questions. SINGLE_TABLE wins on query speed (no joins, one table) but forfeits <code>NOT NULL</code> on subclass columns and grows a sparse, wide table. JOINED wins on normalization and integrity but pays joins on every polymorphic read and multiple inserts per save. TABLE_PER_CLASS is usually a distant third; if you do not actually need polymorphism, <code>@MappedSuperclass</code> is the cleaner tool.</p>
+    <p>Why it matters: the honest answer is "it depends on the read pattern and how strict the constraints must be" — shallow hierarchies with mostly-shared fields and read-heavy workloads favour SINGLE_TABLE; deep hierarchies with many type-specific required fields favour JOINED. Being able to state that trade-off, with the NOT-NULL limitation as the deciding pivot, is what senior interviewers listen for.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/high-performance-java-persistence-chapter-12-inheritance/" rel="noopener">High-Performance Java Persistence, Chapter 12: Inheritance — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/complete-guide-inheritance-strategies-jpa-hibernate/" rel="noopener">Complete Guide: Inheritance strategies with JPA and Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-inheritance" rel="noopener">Hibernate Inheritance Mapping (pros and cons of each strategy) — Baeldung</a></li>
+    </ul>
+
+    <h3>@MappedSuperclass and polymorphic queries</h3>
+    <p><code>@MappedSuperclass</code> models inheritance only in Java: its mappings are copied into each subclass's table, but it is not an entity, has no table, and cannot be the target of a query or an association. It is the right tool for shared technical columns — <code>id</code>, <code>@Version</code>, audit timestamps — that every entity needs but that never define a queryable "base type". Compare it with <code>@Embeddable</code>, which composes rather than inherits; reach for <code>@MappedSuperclass</code> when you must share the id or version attribute.</p>
+    <p>Polymorphic queries are the payoff of a real inheritance mapping: <code>select p from Payment p</code> returns every subclass instance, and Hibernate assembles the correct types (via discriminator or joins) for you. The <code>TYPE()</code> operator narrows a query to specific subclasses. Crucially, this only works over an <code>@Inheritance</code> hierarchy — you cannot write a polymorphic query against a <code>@MappedSuperclass</code>, because the superclass is not an entity.</p>
+    <pre class="code-block" data-label="Java"><code>@MappedSuperclass
+public abstract class BaseEntity {
+    @Id @GeneratedValue Long id;
+    @Version int version;      // shared columns, copied into every entity table
+}
+
+// Polymorphic JPQL over an @Inheritance hierarchy:
+// select p from Payment p where type(p) = CardPayment</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/mappedsuperclass" rel="noopener">@MappedSuperclass — Jakarta Persistence API (Javadoc)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-to-inherit-properties-from-a-base-class-entity-using-mappedsuperclass-with-jpa-and-hibernate/" rel="noopener">Inheriting properties with @MappedSuperclass — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/mapping-shared-technical-attributes/" rel="noopener">Mapping shared technical attributes (@MappedSuperclass vs @Embeddable) — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-inheritance-single-table" rel="noopener">Querying subtypes with Spring Data JPA — Baeldung (polymorphic repositories)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eq7WCvXqUfE" rel="noopener">Entities Inheritance Mapping — @MappedSuperclass — CodeForgeYT</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-value-types.html">← Value Types, Embeddables and Converters</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="07-persistence-context.html">Persistence Context and Entity Lifecycle →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked inheritance-mapping questions in Indian interviews — the SINGLE_TABLE-vs-JOINED trade-off is a recurring product-company favourite:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What inheritance strategies does JPA support?</summary>
+      <div class="answer"><p>Three, via <code>@Inheritance(strategy = ...)</code>: SINGLE_TABLE (whole hierarchy in one table), JOINED (a table per class linked by the shared id), and TABLE_PER_CLASS (a table per concrete class). SINGLE_TABLE is the default. A fourth option, <code>@MappedSuperclass</code>, shares mappings but is not a database inheritance mapping.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the discriminator column and what is its default?</summary>
+      <div class="answer"><p>In SINGLE_TABLE (and optionally JOINED), a column that records which subclass each row represents so the provider can instantiate the right type. Hibernate defaults to <code>DTYPE</code>, a string holding the entity name; <code>@DiscriminatorColumn</code> and <code>@DiscriminatorValue</code> customize the name, type and values.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How is @MappedSuperclass different from a mapped @Entity superclass?</summary>
+      <div class="answer"><p><code>@MappedSuperclass</code> is not an entity: it has no table, cannot be queried or referenced by an association, and its columns are simply copied into each subclass's own table. An <code>@Inheritance</code> entity superclass is a real, queryable type with a database representation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> SINGLE_TABLE vs JOINED — compare the trade-offs.</summary>
+      <div class="answer"><p>SINGLE_TABLE: one table, no joins, fastest reads and polymorphic queries, but subclass columns must be nullable (no <code>NOT NULL</code>) and the table grows wide and sparse. JOINED: normalized, every column can be constrained, no wasted space, but each polymorphic read joins across levels and each insert writes multiple tables. Read-heavy with mostly-shared fields → SINGLE_TABLE; strict constraints and type-specific required fields → JOINED.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't SINGLE_TABLE enforce NOT NULL on a subclass field?</summary>
+      <div class="answer"><p>All subclasses share the one table, so a column that belongs to one subclass is null for every row of the others. Declaring it <code>NOT NULL</code> would break inserts of sibling types. You enforce the rule in application code or with a database CHECK constraint keyed on the discriminator value.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does TABLE_PER_CLASS work and why is it least recommended?</summary>
+      <div class="answer"><p>Each concrete class gets its own table repeating the inherited columns, so single-type reads need no join. But a polymorphic query over the base type must <code>UNION ALL</code> every concrete table, which scales poorly, and it conflicts with IDENTITY generation (ids must be unique across the union). If you don't need polymorphism, prefer <code>@MappedSuperclass</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a polymorphic query and how do the strategies affect its SQL?</summary>
+      <div class="answer"><p><code>select p from Payment p</code> returns all subclass instances of the base type. SINGLE_TABLE resolves it with one table scan filtered by discriminator; JOINED joins the parent to each child table; TABLE_PER_CLASS unions all concrete tables. Same JPQL, very different generated SQL and cost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you choose @MappedSuperclass over @Embeddable?</summary>
+      <div class="answer"><p><code>@MappedSuperclass</code> uses inheritance and can carry the <code>@Id</code>, <code>@Version</code> and lifecycle callbacks — ideal for a shared technical base like <code>BaseEntity</code>. <code>@Embeddable</code> uses composition and can be reused as a value object but can't own the primary key or version the same way. Rule of thumb: try <code>@Embeddable</code> for plain value groups; use <code>@MappedSuperclass</code> when the shared attributes include the id or version.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Can you make the discriminator column more compact than the default?</summary>
+      <div class="answer"><p>Yes. The default string discriminator repeats the entity name on every row. Setting <code>@DiscriminatorColumn(discriminatorType = INTEGER)</code> with numeric <code>@DiscriminatorValue</code>s (or a <code>TINYINT</code> columnDefinition) shrinks it dramatically at scale; a small lookup table can map the codes back to readable names.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A base type has many subclasses, is queried polymorphically, and reads must be fast. Which strategy?</summary>
+      <div class="answer"><p>SINGLE_TABLE — one table, no joins, discriminator-filtered scans make polymorphic reads cheapest. Accept the trade-off explicitly: subclass columns lose <code>NOT NULL</code>, so move those checks to CHECK constraints or the application layer, and watch the table width. Reach for JOINED only if the integrity constraints are non-negotiable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can you run a polymorphic query against a @MappedSuperclass? Why or why not?</summary>
+      <div class="answer"><p>No. The mapped superclass is not an entity and has no table, so <code>select b from BaseEntity b</code> is invalid — there is no queryable base type and JPA won't return its subclasses polymorphically. If you need "query all subtypes as one", you must use an <code>@Inheritance</code> mapping instead. This limitation is the usual reason to prefer an entity superclass over <code>@MappedSuperclass</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you restrict a polymorphic JPQL query to specific subclasses?</summary>
+      <div class="answer"><p>Use the <code>TYPE()</code> operator on the entity's runtime type: <code>select p from Payment p where type(p) = CardPayment</code>, or <code>type(p) in (CardPayment, BankTransfer)</code>. It filters the polymorphic result to chosen concrete types — on SINGLE_TABLE it becomes a discriminator predicate, on JOINED it prunes which child tables are joined.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the write- and read-time costs of a deep JOINED hierarchy?</summary>
+      <div class="answer"><p>Reads: fetching a leaf entity joins every table from the concrete class up to the root, and a polymorphic query outer-joins all child tables — cost grows with hierarchy depth. Writes: persisting one entity issues an insert per level (root table plus each ancestor), and deletes cascade the same way. Keep hierarchies shallow, or switch to SINGLE_TABLE when the join count starts hurting.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.inh.strategies</li>
+      <li>jpa.inh.mappedsuper</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

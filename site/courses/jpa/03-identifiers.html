@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JPA and Hibernate identifiers module: @Id and the @GeneratedValue strategies (IDENTITY, SEQUENCE, TABLE, AUTO, UUID), sequence tuning and the pooled optimizer, composite keys with @IdClass vs @EmbeddedId, natural keys, and the right way to write equals/hashCode for entities — with the best official and community resources plus the interview questions they power.">
+  <title>Primary Keys and Identifiers</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Primary Keys and Identifiers</h1>
+  <p class="standfirst">The identifier is where an entity meets its row — and the two most common ways to get it wrong, choosing IDENTITY over SEQUENCE and writing a naive equals/hashCode, are also the two questions interviewers reach for first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Primary Keys and Identifiers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every entity needs a primary key, and JPA gives you several ways to produce one: the <code>@GeneratedValue</code> strategies (AUTO, IDENTITY, SEQUENCE, TABLE, and UUID), the sequence tuning that decides how many database round-trips your inserts cost, composite keys via <code>@IdClass</code> and <code>@EmbeddedId</code>, and the identity contract itself — a correct <code>equals</code> and <code>hashCode</code>. The choices here quietly govern insert performance and whether entities behave in sets and maps, which is exactly why they dominate JPA interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>@Id and the @GeneratedValue strategies</h3>
+    <p>A single-attribute key is marked with <code>@Id</code>; add <code>@GeneratedValue</code> to have the provider populate it. Five strategies exist: <code>IDENTITY</code> (an auto-increment column), <code>SEQUENCE</code> (a database sequence object), <code>TABLE</code> (a table simulating a sequence — portable but slow), <code>AUTO</code> (the provider chooses per dialect), and <code>UUID</code> (a generated 128-bit value, standardized in Jakarta Persistence 3.1+). Hibernate 6's <code>AUTO</code> resolves to SEQUENCE for numeric keys and to the UUID generator for <code>java.util.UUID</code> fields.</p>
+    <p>Why it matters: the strategy decides <em>when</em> the id becomes available and what SQL is emitted, so it is a design decision, not a default to accept blindly. Knowing all five and Hibernate's <code>AUTO</code> resolution is standard screening material.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+public class Author {
+    @Id
+    @GeneratedValue(strategy = GenerationType.SEQUENCE)
+    private Long id;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#identifiers" rel="noopener">Identifiers (§3.7, all generation strategies) — Hibernate ORM User Guide</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/generatedvalue" rel="noopener">GeneratedValue — Jakarta Persistence 3.2 API (the spec definition)</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/jpa-generate-primary-keys/" rel="noopener">Generate Primary Keys Using JPA and Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-identifiers" rel="noopener">An Overview of Identifiers in Hibernate/JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=qn9SbW44rQ8" rel="noopener">How to generate primary keys with JPA and Hibernate — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>IDENTITY vs SEQUENCE: batching and sequence tuning</h3>
+    <p>This is the most-tested identifier topic. With <code>IDENTITY</code>, the id is assigned by the database only <em>after</em> the INSERT executes, so Hibernate must run each insert immediately and <strong>cannot use JDBC batching</strong> — a real throughput ceiling for bulk writes. <code>SEQUENCE</code> fetches the next value before the insert, so Hibernate can defer and batch statements and reuse one sequence across tables. Tuning comes from <code>allocationSize</code> on <code>@SequenceGenerator</code> (default 50): raising it makes Hibernate pull a block of ids per database call using the <em>pooled</em> optimizer, cutting round-trips — but the JPA <code>allocationSize</code> must match the database sequence's increment, or ids collide.</p>
+    <p>Why it matters: recommend SEQUENCE by default, explain the batching consequence of IDENTITY, and describe the pooled optimizer, and you have answered the single most common JPA performance question convincingly.</p>
+    <pre class="code-block" data-label="Java"><code>@Id
+@GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "author_seq")
+@SequenceGenerator(name = "author_seq", sequenceName = "author_seq",
+                   allocationSize = 50)   // one DB call per 50 ids (pooled)
+private Long id;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/sequencegenerator" rel="noopener">SequenceGenerator (allocationSize, default 50) — Jakarta Persistence 3.2 API</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-identity-sequence-and-table-sequence-generator/" rel="noopener">IDENTITY, SEQUENCE and TABLE generators compared — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-hidden-gem-the-pooled-lo-optimizer/" rel="noopener">The pooled and pooled-lo sequence optimizers — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-hibernate-uuid-primary-key" rel="noopener">Generate UUIDs as Primary Keys With Hibernate — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=n_tc6Nc4tfI" rel="noopener">Primary key generation strategies (AUTO, IDENTITY, SEQUENCE, TABLE) — Programming Techie</a></li>
+    </ul>
+
+    <h3>Composite keys: @IdClass vs @EmbeddedId</h3>
+    <p>When the key spans more than one column, JPA offers two mappings. <code>@EmbeddedId</code> groups the columns into an <code>@Embeddable</code> class used as one field — cleaner when you treat the key as a whole object. <code>@IdClass</code> keeps the fields flat on the entity (each marked <code>@Id</code>) with a separate matching id class — handier when you query the parts individually. Either way the key class must be public, have a no-arg constructor, implement <code>Serializable</code>, and override <code>equals</code> and <code>hashCode</code>. Modern practice favors a surrogate key on such join entities and reserves composite keys for genuine natural or many-to-many association keys.</p>
+    <pre class="code-block" data-label="Java"><code>@Embeddable
+public class OrderItemId implements Serializable {
+    private Long orderId;
+    private Long productId;   // + equals() and hashCode()
+}
+@Entity
+public class OrderItem {
+    @EmbeddedId private OrderItemId id;
+}</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/jpa-composite-primary-keys" rel="noopener">Composite Primary Keys in JPA (@IdClass vs @EmbeddedId) — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-map-a-composite-primary-key-with-jpa-and-hibernate/" rel="noopener">The best way to map a composite key with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/primary-key-mappings-jpa-hibernate/" rel="noopener">5 Primary Key Mappings Every Developer Should Know — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Natural keys and equals()/hashCode() for entities</h3>
+    <p>The other headline interview topic. A JPA entity's <code>equals</code>/<code>hashCode</code> must stay consistent across every state transition — transient, managed, detached — or the entity vanishes from a <code>Set</code> after being persisted. The trap: a database-generated id is <code>null</code> before the flush, so building the hash from it changes the hash mid-life. Two safe recipes: use a stable <strong>natural/business key</strong> (an email, an ISBN — known at construction) in both methods, or, for surrogate keys, compare on the id with a <code>null</code> guard while returning a <em>constant</em> <code>hashCode</code> (often <code>getClass().hashCode()</code>). Never let a generated field into <code>hashCode</code> directly.</p>
+    <pre class="code-block" data-label="Java"><code>@Override
+public boolean equals(Object o) {
+    if (this == o) return true;
+    if (!(o instanceof Author a)) return false;
+    return id != null &amp;&amp; id.equals(a.id);
+}
+@Override
+public int hashCode() { return getClass().hashCode(); }</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-implement-equals-hashcode-and-tostring-with-jpa-and-hibernate/" rel="noopener">The best way to implement equals, hashCode and toString — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/ultimate-guide-to-implementing-equals-and-hashcode-with-hibernate/" rel="noopener">Ultimate Guide to Implementing equals() and hashCode() with Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-hibernate-natural-ids" rel="noopener">Hibernate Natural IDs in Spring Boot — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-entity-mapping.html">← Entity Mapping Basics</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="04-relationships.html">Entity Relationships →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The identifier questions Indian interviewers ask most — generation strategy and entity equality lead almost every Hibernate round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does @GeneratedValue do, and what strategies can it use?</summary>
+      <div class="answer"><p>It tells the provider to generate the primary key value for a field marked <code>@Id</code>. Strategies: <code>IDENTITY</code> (auto-increment column), <code>SEQUENCE</code> (database sequence), <code>TABLE</code> (a table simulating a sequence), <code>AUTO</code> (provider picks per dialect), and <code>UUID</code> (Jakarta Persistence 3.1+).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between @Id and @GeneratedValue?</summary>
+      <div class="answer"><p><code>@Id</code> declares which attribute is the primary key. <code>@GeneratedValue</code> is optional and says the value is generated rather than assigned by your code. An <code>@Id</code> without <code>@GeneratedValue</code> is an application-assigned (often natural) key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does GenerationType.AUTO resolve to?</summary>
+      <div class="answer"><p>The provider chooses based on the dialect and field type. In Hibernate 6 a numeric id resolves to SEQUENCE (or TABLE if sequences are unsupported), and a <code>java.util.UUID</code> field resolves to the UUID generator — a change from older versions that defaulted to a shared hi/lo table.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When is the id value available for IDENTITY versus SEQUENCE?</summary>
+      <div class="answer"><p>With IDENTITY the id exists only after the INSERT runs and the database assigns it. With SEQUENCE Hibernate fetches the next value before the insert, so the id is known while the entity is still being prepared.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> IDENTITY vs SEQUENCE — which do you prefer and why?</summary>
+      <div class="answer"><p>SEQUENCE, in most cases. Because IDENTITY needs the database to assign the id per row, Hibernate must execute each insert immediately and cannot batch them — a throughput ceiling under bulk writes. SEQUENCE gets the id up front, so inserts can be deferred and JDBC-batched, and one sequence can serve several tables. IDENTITY's only edge is simplicity on MySQL, which lacks true sequences before 8.0.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't Hibernate batch inserts when using IDENTITY?</summary>
+      <div class="answer"><p>JDBC batching means holding a set of inserts and sending them together. But an IDENTITY id is only known after its own insert executes, and Hibernate must have the id to register the entity in the persistence context. It therefore flushes each insert individually, defeating batching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is allocationSize, and how does the pooled optimizer help?</summary>
+      <div class="answer"><p><code>allocationSize</code> on <code>@SequenceGenerator</code> (default 50) is how many ids Hibernate reserves per database call. With it above 1, Hibernate uses a pooled optimizer — one sequence round-trip yields a block of in-memory ids, cutting network chatter on bulk inserts. Critical rule: the JPA <code>allocationSize</code> must equal the sequence's actual increment in the database, or generated ids can clash.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you map a composite primary key, and what are @IdClass and @EmbeddedId?</summary>
+      <div class="answer"><p>Both express a multi-column key. <code>@EmbeddedId</code> puts the columns in one <code>@Embeddable</code> class held as a single field — best when you use the key as a whole. <code>@IdClass</code> keeps the fields flat on the entity (each <code>@Id</code>) with a parallel id class — handier when you access parts individually or can't modify the key class.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the requirements for a composite-key class?</summary>
+      <div class="answer"><p>It must be a public class, have a public no-arg constructor, implement <code>Serializable</code>, and override <code>equals</code> and <code>hashCode</code> based on all key fields. Hibernate uses those methods to identify the entity in the persistence context, so omitting them breaks lookups.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Would you use a UUID as a primary key? Trade-offs?</summary>
+      <div class="answer"><p>UUIDs are globally unique and can be generated in the app with no database round-trip — useful for distributed systems and merging data. Costs: 16 bytes vs 8 for a bigint (larger indexes), and random UUIDv4 fragments B-tree indexes badly. Prefer a time-ordered form (UUIDv7) or store as binary to keep inserts index-friendly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you correctly implement equals() and hashCode() for a JPA entity?</summary>
+      <div class="answer"><p>Keep them consistent across transient, managed and detached states. If a stable natural/business key exists (email, ISBN), use it in both methods. For surrogate keys, compare on the id with a <code>null</code> guard but return a <em>constant</em> <code>hashCode</code> (commonly <code>getClass().hashCode()</code>) so the hash never changes when the id is assigned at flush. Use <code>instanceof</code>, not <code>getClass()</code> equality, so Hibernate proxies still match.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is putting an auto-generated id into hashCode() dangerous?</summary>
+      <div class="answer"><p>Before persistence the id is <code>null</code>; after flush it has a value. If <code>hashCode</code> derives from the id, the entity's hash changes mid-life. Add it to a <code>HashSet</code> while transient, persist it, and it lands in the wrong bucket — you can no longer find or remove it. That is the concrete bug behind the constant-hashCode recipe.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Natural key vs surrogate key as the primary key — how do you choose?</summary>
+      <div class="answer"><p>A surrogate key (generated numeric/UUID, no business meaning) is stable, compact, and never needs to change — the default for most tables and the safe basis for foreign keys. A natural key (a real attribute) removes a column and is meaningful, but business values mutate and cascade painfully through referencing rows. Common compromise: a surrogate primary key plus a unique constraint (or Hibernate <code>@NaturalId</code>) on the business key for lookups.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.id.generation</li>
+      <li>jpa.id.composite</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

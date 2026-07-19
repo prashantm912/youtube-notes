@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring Data JPA Repositories module: the repository interface hierarchy, derived query methods, @Query (JPQL and native), pagination and sorting with Pageable/Slice, and interface/DTO projections — the best official and community resources plus the interview questions they power.">
+  <title>Spring Data JPA Repositories</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Spring Data JPA Repositories</h1>
+  <p class="standfirst">Declare an interface, get a working data-access layer: Spring Data JPA generates the implementation from your method names or an <code>@Query</code>. Knowing where that generation stops — and what it costs at runtime — is what interviewers actually probe.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Spring Data JPA Repositories</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring Data JPA sits on top of a JPA provider (usually Hibernate) and removes the hand-written DAO. This module walks the repository interface hierarchy, the two ways to declare queries — derived from the method name and explicit with <code>@Query</code> (JPQL or native SQL) — and the read-side features that dominate real code and interviews: pagination and sorting through <code>Pageable</code>, <code>Page</code> vs <code>Slice</code>, and interface- and DTO-based projections that fetch only the columns you need.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The repository interface hierarchy</h3>
+    <p>You never implement a repository — you extend one of Spring Data's interfaces and the container supplies a proxy at startup. The chain runs <code>Repository</code> (empty marker) → <code>CrudRepository</code> (save, findById, findAll, count, delete) → <code>ListCrudRepository</code> (same but returning <code>List</code> instead of <code>Iterable</code>) and <code>PagingAndSortingRepository</code> (findAll with a <code>Sort</code> or <code>Pageable</code>) → <code>JpaRepository</code>, which adds JPA-specific methods like <code>flush</code>, <code>saveAndFlush</code>, <code>getReferenceById</code> and <code>deleteAllInBatch</code>.</p>
+    <p>Why it matters: choosing the interface is a design decision. Extend <code>CrudRepository</code> to stay persistence-technology-agnostic; extend <code>JpaRepository</code> — what most applications do — when you want the full JPA surface and <code>List</code> return types. Every method here comes for free without a line of implementation.</p>
+    <pre class="code-block" data-label="Java"><code>interface UserRepository extends JpaRepository&lt;User, Long&gt; { }
+// inherited, no code written: save, findById (returns Optional),
+// findAll, count, delete, existsById — plus JPA extras:
+// flush, saveAndFlush, getReferenceById, deleteAllInBatch.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html" rel="noopener">Core concepts (Repository, CrudRepository, PagingAndSortingRepository) — Spring Data JPA reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/definition.html" rel="noopener">Defining Repository Interfaces — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-repositories" rel="noopener">Spring Data JPA Repositories compared — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-3-crud-repository-interfaces" rel="noopener">New CRUD Repository Interfaces in Spring Data 3 (List-returning repositories) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XszpXoII9Sg" rel="noopener">Spring Data JPA Tutorial — Full In-depth Course — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Derived query methods</h3>
+    <p>Spring Data parses the method name into a query: an introducer (<code>find</code>, <code>read</code>, <code>get</code>, <code>query</code>, <code>count</code>, <code>exists</code>, <code>delete</code>), an optional subject, the word <code>By</code>, then property expressions joined with <code>And</code>/<code>Or</code> and enriched by keywords such as <code>GreaterThan</code>, <code>Between</code>, <code>Like</code>, <code>StartingWith</code>, <code>In</code>, <code>IgnoreCase</code> and <code>OrderBy</code>. <code>findByEmailIgnoreCase</code> writes the JPQL for you. Result limiting comes from <code>First</code>/<code>Top</code> in the name or a <code>Limit</code>/<code>Pageable</code> parameter, and a single result maps cleanly to <code>Optional</code>.</p>
+    <p>Why it matters: derived queries are the fastest way to a correct query and one of the two most-asked Spring Data topics. The discipline interviewers look for is knowing the ceiling — keep derived methods to two or three simple <code>And</code>/<code>Or</code> conditions; past that the name becomes unreadable and you switch to <code>@Query</code>.</p>
+    <pre class="code-block" data-label="Java"><code>List&lt;User&gt; findByLastNameAndActiveTrue(String lastName);
+Optional&lt;User&gt; findByEmailIgnoreCase(String email);
+List&lt;User&gt; findTop3ByOrderByCreatedAtDesc();
+long countByActiveFalse();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/query-keywords-reference.html" rel="noopener">Repository query keywords (the full derivation keyword tables) — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-derived-queries" rel="noopener">Derived Query Methods in Spring Data JPA Repositories — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/ultimate-guide-derived-queries-with-spring-data-jpa/" rel="noopener">Derived Queries with Spring Data JPA — The Ultimate Guide — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GVeY08vUiPE" rel="noopener">Ultimate Guide: Derived Queries with Spring Data JPA — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>@Query: JPQL and native SQL</h3>
+    <p>When the method name can no longer express the query, <code>@Query</code> puts the statement in your hands. By default the value is JPQL; set <code>nativeQuery = true</code> for raw SQL. Bind parameters positionally (<code>?1</code>) or, preferably, by name with <code>:name</code> and <code>@Param</code>. <code>@Query</code> takes precedence over a <code>@NamedQuery</code> of the same name, and it is the natural home for joins, constructor-expression DTOs and anything a derived name would mangle.</p>
+    <p>Why it matters: this is the other headline Spring Data interview topic. Know the JPQL-vs-native switch, the parameter-binding styles, and the sharp edge — a native query returns raw SQL results, so an injected <code>Sort</code> is not translated and ordering must live inside the SQL itself.</p>
+    <pre class="code-block" data-label="Java"><code>@Query("select u from User u where u.email = :email")
+Optional&lt;User&gt; findByEmail(@Param("email") String email);
+
+@Query(value = "SELECT * FROM users WHERE active = true",
+       nativeQuery = true)
+List&lt;User&gt; findActiveNative();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html" rel="noopener">JPA Query Methods — @Query, @NativeQuery and @Param — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-query" rel="noopener">Spring Data JPA @Query — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/spring-data-jpa-query-annotation/" rel="noopener">Custom Queries with Spring Data JPA's @Query Annotation — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Pagination and sorting</h3>
+    <p>Add a <code>Pageable</code> parameter (built with <code>PageRequest.of(page, size, sort)</code>) and Spring applies the offset, limit and ordering. The return type decides the cost: <code>Page</code> knows the total element and page counts, which requires an extra <code>COUNT</code> query; <code>Slice</code> only knows whether a next slice exists, so it skips the count — ideal for infinite scroll; a plain <code>List</code> returns the window with no metadata at all. Sorting is either static (<code>OrderBy</code> in the name) or dynamic through a <code>Sort</code> argument.</p>
+    <p>Why it matters: the <code>Page</code>-vs-<code>Slice</code> count-query trade-off is a favourite interview question because it maps directly to a production performance decision. Reaching for <code>Page</code> on a huge table when the UI only needs "load more" pays for a count query nobody reads.</p>
+    <pre class="code-block" data-label="Java"><code>Page&lt;User&gt; findByActiveTrue(Pageable pageable);            // + COUNT query
+Slice&lt;User&gt; findByLastName(String name, Pageable pageable); // no COUNT
+
+Pageable p = PageRequest.of(0, 20, Sort.by("createdAt").descending());
+Page&lt;User&gt; page = repo.findByActiveTrue(p);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/query-methods-details.html" rel="noopener">Defining Query Methods — paging, sorting, limiting, Page and Slice — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-pagination-sorting" rel="noopener">Pagination and Sorting using Spring Data JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/query-pagination-jpa-hibernate/" rel="noopener">Query pagination with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wa0GQwWwzJE" rel="noopener">Pagination and Sorting With Spring Data JPA — Java Techie</a></li>
+    </ul>
+
+    <h3>Projections: interface and DTO</h3>
+    <p>Fetching whole entities to render a two-column list is wasteful; projections select only the properties you need. An <em>interface projection</em> declares getters and Spring returns a proxy — closed projections (getters that match entity properties) generate a narrow <code>SELECT</code>, while open projections using <code>@Value</code> SpEL compute values from the full entity. A <em>class/DTO projection</em> maps chosen columns into a POJO or Java record, typically via a JPQL constructor expression. A dynamic projection takes a <code>Class&lt;T&gt;</code> argument so one method can return either the entity or a DTO.</p>
+    <p>Why it matters: projections are the idiomatic answer to "how do you avoid over-fetching in Spring Data?" The catch worth stating: closed and constructor-expression projections narrow the SQL, but an open interface projection loads the entire entity first, so the performance win is lost — and DTO results are read-only, never managed.</p>
+    <pre class="code-block" data-label="Java"><code>interface NameOnly { String getFirstName(); String getLastName(); }
+List&lt;NameOnly&gt; findByActiveTrue();            // interface projection (proxy)
+
+record UserDto(String firstName, String email) { }
+@Query("select new com.app.UserDto(u.firstName, u.email) from User u")
+List&lt;UserDto&gt; findAllDtos();                   // DTO / constructor projection</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html" rel="noopener">Projections — interface-based and class-based (DTO) — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-projections" rel="noopener">Spring Data JPA Projections — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/spring-jpa-dto-projection/" rel="noopener">The best way to fetch a Spring Data JPA DTO Projection — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_WjUiYQdbm0" rel="noopener">JPA &amp; Hibernate — Why, When &amp; How to use DTO Projections — Thorben Janssen</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-queries.html">← JPQL, Criteria and Native Queries</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="11-spring-data-advanced.html">Spring Data JPA Advanced →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The Spring Data questions that recur in Indian backend interviews — derived queries and <code>@Query</code> are near-guaranteed at every level:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Spring Data JPA and how does it relate to JPA and Hibernate?</summary>
+      <div class="answer"><p>A Spring module that eliminates boilerplate DAO code. You declare a repository interface; at startup Spring generates an implementation backed by a JPA provider — Hibernate by default. JPA is the specification, Hibernate the implementation, Spring Data JPA the convenience layer that writes the repository for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk through the Spring Data repository interface hierarchy.</summary>
+      <div class="answer"><p><code>Repository</code> (empty marker) → <code>CrudRepository</code> (save, findById, findAll, count, delete) → <code>ListCrudRepository</code> (same, returning <code>List</code> not <code>Iterable</code>) and <code>PagingAndSortingRepository</code> (findAll with <code>Sort</code> or <code>Pageable</code>) → <code>JpaRepository</code>, which adds JPA-specific methods (flush, saveAndFlush, getReferenceById, deleteAllInBatch). You extend one; the proxy is generated.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> CrudRepository vs JpaRepository — when do you use which?</summary>
+      <div class="answer"><p><code>JpaRepository</code> extends <code>PagingAndSortingRepository</code>, which extends <code>CrudRepository</code>, and adds JPA-specific operations plus <code>List</code> return types. Extend <code>CrudRepository</code> to stay technology-agnostic; extend <code>JpaRepository</code> — the common choice — for the full JPA surface. There is no performance penalty either way; it is about the API you expose.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a derived query method and how is the name parsed?</summary>
+      <div class="answer"><p>A method whose name Spring turns into a query with no implementation. Structure: introducer (find/read/get/query/count/exists/delete) + optional subject + <code>By</code> + property expressions joined by <code>And</code>/<code>Or</code> and keywords like <code>GreaterThan</code>, <code>Between</code>, <code>Like</code>, <code>In</code>, <code>IgnoreCase</code>, <code>OrderBy</code>. Example: <code>findByLastNameAndActiveTrue</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you return a single optional result or limit the rows of a derived query?</summary>
+      <div class="answer"><p>Declare the return type as <code>Optional&lt;T&gt;</code> for a single result — <code>findById</code> already does this. Limit rows with <code>findFirst</code>/<code>findTop</code> (optionally <code>findTop10By…</code>) in the name, or by passing a <code>Limit</code> or <code>Pageable</code> argument.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When do you stop using a derived query and switch to @Query?</summary>
+      <div class="answer"><p>Rule of thumb: derived queries stay readable up to about two or three simple <code>And</code>/<code>Or</code> conditions. Beyond that — multiple joins, complex predicates, DTO construction, or a name that would become a sentence — switch to <code>@Query</code>, which gives full control over the statement and frees the method name from any convention.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does @Query work, and how do you write a native query?</summary>
+      <div class="answer"><p><code>@Query("…")</code> holds JPQL by default. For raw SQL set <code>nativeQuery = true</code> and put SQL in the value. <code>@Query</code> takes precedence over a <code>@NamedQuery</code> with the same name. A key caveat: with a native query an injected <code>Sort</code> is not translated to SQL, so ordering must be written into the SQL itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Positional versus named parameters in @Query?</summary>
+      <div class="answer"><p>Positional binds by index — <code>?1</code>, <code>?2</code> — to the arguments in order. Named binds <code>:email</code> to a method argument annotated <code>@Param("email")</code>. Named parameters are preferred: they survive argument reordering and read better. For an <code>IN</code> clause, pass a <code>Collection</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Page vs Slice vs List as a pagination return type?</summary>
+      <div class="answer"><p><code>Page</code> exposes total element and page counts, which costs an extra <code>COUNT</code> query. <code>Slice</code> only knows whether a next slice exists, skipping the count — good for infinite scroll or "load more". A plain <code>List</code> returns just the window with no metadata. Build the request with <code>PageRequest.of(page, size, sort)</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you sort, statically and dynamically?</summary>
+      <div class="answer"><p>Statically with <code>OrderBy</code> in the method name (<code>findByActiveTrueOrderByCreatedAtDesc</code>). Dynamically by passing a <code>Sort</code> (or a <code>Pageable</code> carrying one): <code>Sort.by("createdAt").descending()</code>. Native queries are the exception — the ordering must be embedded in the SQL because <code>Sort</code> is not applied to them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Interface projection vs class/DTO projection?</summary>
+      <div class="answer"><p>An interface projection declares getters and Spring returns a proxy; closed projections (getters matching entity properties) produce a narrow <code>SELECT</code>, open ones use <code>@Value</code> SpEL. A class/DTO projection maps selected columns into a POJO or record, usually via a JPQL constructor expression. A dynamic projection takes a <code>Class&lt;T&gt;</code> parameter so one method returns either shape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why do projections improve performance, and what is the trap with open interface projections?</summary>
+      <div class="answer"><p>Selecting only the needed columns cuts I/O and avoids managing entities (no dirty checking on read-only DTOs). The trap: an open interface projection using <code>@Value</code> SpEL must load the full entity to compute the expression, so the narrow-select benefit disappears. Closed interface projections and constructor-expression DTOs are the ones that actually reduce the columns fetched.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A @Query UPDATE fails or silently does nothing. What is missing, and what breaks the persistence context?</summary>
+      <div class="answer"><p>Modifying JPQL (<code>update</code>/<code>delete</code>) needs <code>@Modifying</code> and must run inside a transaction. Bulk modifying queries bypass the persistence context, so already-managed entities go stale — use <code>clearAutomatically</code>/<code>flushAutomatically</code> or clear the context afterwards. This is expanded in the Spring Data JPA Advanced module.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You paginate a query that JOIN FETCHes a one-to-many collection and Hibernate warns it is paginating in memory. Why, and how do you fix it?</summary>
+      <div class="answer"><p>Joining a collection multiplies parent rows, so the database offset/limit no longer maps to whole parents; Hibernate (warning HHH000104) applies pagination in memory after fetching everything — a scalability bug. Fix with a two-step approach: page the parent IDs first, then fetch the collection for those IDs (or use <code>@EntityGraph</code>/batch fetching). For very large sets, keyset pagination avoids the deep-offset cost entirely.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.sd.repos</li>
+      <li>jpa.sd.paging</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

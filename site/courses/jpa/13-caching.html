@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Hibernate and JPA caching module: the first-level (persistence context) vs second-level cache, cache concurrency strategies and providers, the query cache, @Cacheable/@Cache and shared-cache-mode, plus the pitfalls — with the best official and community resources and the interview questions they power.">
+  <title>Caching — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Caching</h1>
+  <p class="standfirst">Caching is where JPA performance is won or quietly corrupted — the first-level cache you always have, the second-level cache you have to earn one entity at a time, and the query cache you should reach for last. This module orients you on each and points to the resources that get the details right.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Caching</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two caches sit under every Hibernate application. The first-level cache (the persistence context) is mandatory, per-transaction and free; the second-level cache is SessionFactory-wide, opt-in per entity, and the one you actually configure. On top of those sits the query cache for repeated queries. This module covers how each works, the cache concurrency strategies and providers that keep the second-level cache consistent, the <code>@Cacheable</code>/<code>@Cache</code>/<code>shared-cache-mode</code> switches that turn caching on, and the pitfalls that make a badly-placed cache worse than none. First-level vs second-level cache is one of the most-asked JPA interview questions.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The first-level cache: the persistence context</h3>
+    <p>Every JPA application already has a cache it never switched on: the persistence context. Each <code>EntityManager</code> (Hibernate <code>Session</code>) keeps a map of the entities it has loaded or persisted, keyed by identifier, for the life of that context — normally a single transaction. Ask for the same row twice in one context and the second call returns the very same object reference from memory instead of firing a second <code>SELECT</code>. This is the first-level cache; it is mandatory and cannot be disabled.</p>
+    <p>Its role is wider than skipping queries. Because there is exactly one instance per row per context, it gives application-level repeatable reads, it is where dirty checking compares live state against the loaded snapshot at flush time, and it makes identity (<code>==</code>) meaningful inside a transaction. It is never shared across contexts or threads and it dies when the context closes — so it does nothing for the next request. That gap is precisely what the second-level cache fills.</p>
+    <pre class="code-block" data-label="Java"><code>Country a = em.find(Country.class, 1L); // SELECT executes, entity cached
+Country b = em.find(Country.class, 1L); // no SQL — served from the context
+assert a == b;                          // same reference: first-level identity</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-hibernate-first-level-cache/" rel="noopener">The JPA and Hibernate first-level cache — Vlad Mihalcea (the definitive walkthrough of the persistence context as a cache)</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/java/hibernate-enable-and-implement-first-and-second-level-cache/" rel="noopener">Hibernate: Enable and Implement First and Second Level Cache — GeeksforGeeks</a></li>
+      <li>[Article] <a href="https://www.java67.com/2017/10/difference-between-first-level-and-second-level-cache-in-Hibernate.html" rel="noopener">Difference between first-level and second-level cache — Java67 (framed as the interview question)</a></li>
+    </ul>
+
+    <h3>The second-level cache: what it is and how to enable it</h3>
+    <p>The second-level cache (2LC) lives on the <code>SessionFactory</code>/<code>EntityManagerFactory</code> and is shared by every context and thread in the JVM — or across a cluster, depending on the provider. When a context asks for an entity by id and misses its first-level cache, Hibernate consults the 2LC before touching the database; a hit rebuilds a managed entity from cached state with no SQL. Unlike the first-level cache, it is off by default and opt-in per entity — Hibernate never caches an entity you did not explicitly mark.</p>
+    <p>Enabling it takes two coordinated switches: turn the feature on (<code>hibernate.cache.use_second_level_cache=true</code> plus a provider on the classpath) and mark each cacheable entity with JPA's <code>@Cacheable</code> and/or Hibernate's <code>@Cache</code>. The cache stores a disassembled, dehydrated form of entity state — identifiers and column values, not your live object graph — so it is provider-serializable and detached from any session. Good candidates are read-mostly reference data (countries, categories, currencies), not write-heavy tables.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+@Cacheable                                          // JPA: opt this entity in
+@Cache(usage = CacheConcurrencyStrategy.READ_WRITE) // Hibernate: pick a strategy
+public class Country { /* ... */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/stable/orm/userguide/html_single/#caching" rel="noopener">Caching — Hibernate ORM User Guide (the canonical chapter: configuration, entity/collection/query caches)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/persist/persistence-cache/persistence-cache.html" rel="noopener">Using a Second-Level Cache with Jakarta Persistence — Jakarta EE Tutorial</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-hibernate-second-level-cache/" rel="noopener">The JPA and Hibernate second-level cache — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-second-level-cache" rel="noopener">Hibernate Second-Level Cache — Baeldung</a></li>
+    </ul>
+
+    <h3>@Cacheable, @Cache and shared-cache-mode</h3>
+    <p>Two annotations, two layers. JPA's <code>@Cacheable(true|false)</code> is the portable, spec-level opt-in; Hibernate's <code>@Cache</code> adds what JPA leaves unspecified — which concurrency strategy (<code>usage</code>) and which named region. In a Hibernate application you usually want <code>@Cache</code> to choose the strategy explicitly; <code>@Cacheable</code> on its own falls back to provider defaults.</p>
+    <p>Whether <code>@Cacheable</code> is even consulted depends on <code>shared-cache-mode</code> (the <code>jakarta.persistence.sharedCache.mode</code> property or the <code>persistence.xml</code> element). <code>ENABLE_SELECTIVE</code> caches only entities annotated <code>@Cacheable(true)</code> — the sane production default. <code>DISABLE_SELECTIVE</code> caches everything except <code>@Cacheable(false)</code>. <code>ALL</code> caches every entity and <code>NONE</code> disables the 2LC entirely — both ignore your annotations, and <code>UNSPECIFIED</code> leaves it to the provider. Knowing that <code>ALL</code>/<code>NONE</code> override the annotations is a common follow-up.</p>
+    <pre class="code-block" data-label="properties"><code>jakarta.persistence.sharedCache.mode=ENABLE_SELECTIVE  # cache only @Cacheable(true)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/cacheable" rel="noopener">@Cacheable — Jakarta Persistence 3.2 API</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/sharedcachemode" rel="noopener">SharedCacheMode — Jakarta Persistence 3.2 API (ALL / NONE / ENABLE_SELECTIVE / DISABLE_SELECTIVE / UNSPECIFIED)</a></li>
+      <li>[Official] <a href="https://docs.hibernate.org/stable/orm/javadocs/org/hibernate/annotations/Cache.html" rel="noopener">@Cache — Hibernate annotations Javadoc (usage, region, includeLazy)</a></li>
+    </ul>
+
+    <h3>Cache concurrency strategies</h3>
+    <p>A concurrency strategy tells Hibernate how to keep a shared, concurrent cache consistent with the database. <code>READ_ONLY</code> is for immutable reference data — fastest, no locking, and it refuses updates. <code>NONSTRICT_READ_WRITE</code> suits rarely-updated data: it simply invalidates (removes) the entry around a change and tolerates a brief stale window. <code>READ_WRITE</code>, the usual choice for mutable cached entities, uses soft locks — on update it replaces the entry with a lock marker and writes the new value only after the database transaction commits, so a concurrent reader falls through to the database rather than reading stale data. <code>TRANSACTIONAL</code> needs a fully transactional (JTA/XA) provider that participates in two-phase commit.</p>
+    <p>The practical rule: choose <code>READ_ONLY</code> whenever the data never changes, <code>READ_WRITE</code> when it does, and reach for <code>TRANSACTIONAL</code> only when a provider and infrastructure genuinely support it. Remember that <code>READ_WRITE</code> is an asynchronous, write-through cache — there is a short window after commit before the cache holds the new value, during which readers just hit the database.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/stable/core/javadocs/org/hibernate/annotations/CacheConcurrencyStrategy.html" rel="noopener">CacheConcurrencyStrategy — Hibernate annotations Javadoc</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-does-hibernate-read_write-cacheconcurrencystrategy-work/" rel="noopener">How does Hibernate READ_WRITE CacheConcurrencyStrategy work — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-does-hibernate-nonstrict_read_write-cacheconcurrencystrategy-work/" rel="noopener">How does Hibernate NONSTRICT_READ_WRITE CacheConcurrencyStrategy work — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Cache providers: JCache, Ehcache, Infinispan</h3>
+    <p>Hibernate does not implement a cache itself; it defines an SPI (<code>RegionFactory</code>) and delegates to a provider. Since Hibernate 5.3/6 the standard integration is JCache (JSR-107), so any JCache-compliant provider plugs in through a single adapter — Ehcache 3 and Infinispan are the common choices, with Hazelcast and others available. Infinispan is the go-to when you need a clustered or distributed cache; Ehcache is the simple in-process default.</p>
+    <p>The provider owns eviction and expiration (time-to-live, time-to-idle, maximum entries), local-versus-distributed topology, and statistics — Hibernate only decides what is eligible and which strategy governs consistency. Match the topology to your deployment: a distributed cache running <code>READ_WRITE</code> across many nodes behaves very differently from an in-process Ehcache, and a mismatch is a classic production surprise.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://infinispan.org/docs/stable/titles/hibernate/hibernate.html" rel="noopener">Hibernate second-level caching (2LC) — Infinispan documentation</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-ehcache/" rel="noopener">How to use Ehcache as Hibernate's 2nd Level Cache — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=G6Y5wDF6h5Q" rel="noopener">JPA &amp; Hibernate: How to use Ehcache as 2nd Level Cache — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>The query cache</h3>
+    <p>The 2LC keys entities by id, so it never helps a JPQL/HQL query such as "all active countries" — that still runs SQL. The query cache is a separate region that remembers, for an exact query-plus-parameter combination, the list of identifiers (and any scalar results) it returned. Re-running the identical query returns those ids and then resolves each entity from the 2LC. It is enabled globally with <code>hibernate.cache.use_query_cache=true</code> and, crucially, per query with the <code>org.hibernate.cacheable</code> hint (or <code>setCacheable(true)</code>) — nothing is query-cached unless you opt each query in.</p>
+    <p>Because it stores ids rather than entity state, the query cache is close to useless without second-level caching of the returned entities — otherwise every cache hit fires one <code>SELECT</code> per id to rehydrate them, re-introducing an N+1. Hibernate invalidates cached results through a timestamps region whenever any table the query touches is modified, which makes the query cache a poor fit for frequently-written tables.</p>
+    <pre class="code-block" data-label="Java"><code>hibernate.cache.use_query_cache=true                 // enable the region
+List&lt;Country&gt; list = em.createQuery(jpql, Country.class)
+    .setHint("org.hibernate.cacheable", true)        // opt THIS query in
+    .getResultList();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/stable/orm/userguide/html_single/#caching-query" rel="noopener">Query cache — Hibernate ORM User Guide (query cache and query cache regions)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-does-hibernate-query-cache-work/" rel="noopener">How does Hibernate Query Cache work — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-tips-use-querycache-avoid-additional-queries/" rel="noopener">Use the QueryCache to avoid additional queries — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Cache pitfalls and best practices</h3>
+    <p>A cache that quietly serves wrong data is worse than no cache. The big traps: caching write-heavy entities, where constant invalidation costs more than it saves; external changes made through native SQL, another application, or a bulk JPQL <code>update</code>/<code>delete</code> that bypass the cache and leave it stale — you must evict the affected regions yourself through the <code>Cache</code> API; and enabling the query cache on volatile tables, where timestamp-based invalidation thrashes.</p>
+    <p>Best practices: cache read-mostly reference data with <code>READ_ONLY</code> or <code>READ_WRITE</code>; keep the query cache for genuinely repeated, stable queries and always pair it with entity 2LC; size and monitor each region by its hit/miss ratio instead of guessing; and never treat the 2LC as a correctness layer — it is an optimization that must degrade safely to a database read. Programmatic eviction (<code>evictEntityData</code>, <code>evictQueryRegions</code>) is the escape hatch after out-of-band writes.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-tip-how-to-control-cache-invalidation-for-native-queries/" rel="noopener">How to control cache invalidation for native queries — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-does-hibernate-store-second-level-cache-entries/" rel="noopener">How does Hibernate store second-level cache entries — Vlad Mihalcea (why the cache holds dehydrated state)</a></li>
+      <li>[Official] <a href="https://docs.hibernate.org/stable/orm/javadocs/org/hibernate/Cache.html" rel="noopener">Cache — Hibernate Javadoc (programmatic eviction and containment checks)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-transactions-concurrency.html">← Transactions and Concurrency</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="14-performance.html">Performance and Best Practices →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The caching questions Indian interviewers return to — first-vs-second-level is a staple from screening rounds up to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between first-level and second-level cache?</summary>
+      <div class="answer"><p>First-level cache is the persistence context — bound to a single <code>EntityManager</code>/<code>Session</code>, always on, cleared when the context closes, not shared. Second-level cache is on the <code>SessionFactory</code>, shared by all contexts (and optionally across a cluster), off by default, and opt-in per entity. On a miss in the first, Hibernate checks the second, then the database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is the first-level cache enabled by default? Can you turn it off?</summary>
+      <div class="answer"><p>Yes, it is always on and cannot be disabled — it is the persistence context itself. You can only influence it indirectly: <code>clear()</code> detaches everything, <code>detach(entity)</code> evicts one, and closing the context discards it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you enable the second-level cache for an entity?</summary>
+      <div class="answer"><p>Turn the feature on (<code>hibernate.cache.use_second_level_cache=true</code> and a provider such as Ehcache/Infinispan on the classpath), set <code>shared-cache-mode</code> to <code>ENABLE_SELECTIVE</code>, and annotate the entity with <code>@Cacheable</code> plus Hibernate's <code>@Cache(usage = ...)</code> to choose a concurrency strategy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What scope does each cache have?</summary>
+      <div class="answer"><p>First-level: transaction/context scope, one per <code>EntityManager</code>, per thread. Second-level: <code>SessionFactory</code> scope, shared across all sessions in the JVM, and cluster-wide with a distributed provider. That difference is why the first-level cache never helps a second request but the second-level cache can.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does the query cache store, and why must it be paired with the 2LC?</summary>
+      <div class="answer"><p>It stores the identifiers (and scalar values) a specific query-plus-parameters returned, not the entities themselves. On a hit it resolves each id — from the second-level cache if the entity is cached there, otherwise with a <code>SELECT</code> per id. Without entity 2LC that is an N+1, so the query cache alone can hurt more than it helps.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain shared-cache-mode: ENABLE_SELECTIVE vs DISABLE_SELECTIVE, and ALL vs NONE.</summary>
+      <div class="answer"><p><code>ENABLE_SELECTIVE</code> caches only entities marked <code>@Cacheable(true)</code>; <code>DISABLE_SELECTIVE</code> caches everything except <code>@Cacheable(false)</code>. <code>ALL</code> caches every entity and <code>NONE</code> disables the 2LC — both ignore the <code>@Cacheable</code> annotations entirely. <code>ENABLE_SELECTIVE</code> is the safe production default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the cache concurrency strategies, and when do you use each?</summary>
+      <div class="answer"><p><code>READ_ONLY</code> for immutable data (no locking, rejects updates); <code>NONSTRICT_READ_WRITE</code> for rarely-changed data (invalidates around updates, brief stale window); <code>READ_WRITE</code> for mutable cached entities (soft locks, updates after commit); <code>TRANSACTIONAL</code> only with a JTA/XA-capable provider. Rule of thumb: <code>READ_ONLY</code> if you can, <code>READ_WRITE</code> if it changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> READ_WRITE vs NONSTRICT_READ_WRITE — what actually differs?</summary>
+      <div class="answer"><p><code>READ_WRITE</code> uses soft locks: during an update the entry becomes a lock marker so concurrent readers skip the cache and hit the DB until the new value is written after commit — no stale reads. <code>NONSTRICT_READ_WRITE</code> does no locking; it just evicts the entry before and after the update and accepts a small window where a stale value could be read. Use nonstrict only for data that rarely changes and can tolerate staleness.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does the second-level cache store your entity objects?</summary>
+      <div class="answer"><p>No. It stores a dehydrated, disassembled form — the identifier and column values, associations as foreign-key ids — not the managed object graph. On a hit Hibernate rehydrates a fresh managed entity in the current context. That is why cached entities need no shared mutable state and why the cache is provider-serializable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can the second-level cache serve stale data, and how do you deal with it?</summary>
+      <div class="answer"><p>The 2LC is unaware of changes made outside Hibernate — native SQL, another application, or bulk JPQL <code>update</code>/<code>delete</code> statements that operate straight on the tables. Those leave cached entries stale. Mitigations: evict affected regions programmatically via the <code>Cache</code> API (<code>evictEntityData</code>, <code>evictQueryRegions</code>), route bulk changes through Hibernate where possible, and only cache data whose out-of-band mutation you control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When is the query cache an anti-pattern?</summary>
+      <div class="answer"><p>On write-heavy or frequently-queried-with-varying-parameters tables. Every modification to a queried table bumps the timestamps region and invalidates results, so a volatile table thrashes the cache; distinct parameter combinations each create their own entry, so the region can grow unbounded; and without entity 2LC it degrades into an N+1. It pays off only for genuinely repeated, stable queries over rarely-changing data.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you cache a @OneToMany collection, and what is the trap?</summary>
+      <div class="answer"><p>Collection caching is separate from entity caching: you must annotate the association itself with <code>@Cache</code>, and the collection cache stores only the identifiers of the associated entities — so those child entities must also be cacheable, or each traversal re-queries them (another N+1). The trap is assuming caching the parent entity also caches its collections; it does not. Cache the collection deliberately and only for stable associations.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.cache.levels</li>
+      <li>jpa.cache.query</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

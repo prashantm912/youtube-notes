@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Persistence Context and Entity Lifecycle module: the first-level cache, the four entity states, persist vs merge, automatic dirty checking, flush modes, cascade types, orphanRemoval and lifecycle callbacks — with the best official and community resources and the interview questions they power.">
+  <title>Persistence Context and Entity Lifecycle — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Persistence Context and Entity Lifecycle</h1>
+  <p class="standfirst">The persistence context is the beating heart of Hibernate — a first-level cache that quietly tracks your entities and writes their changes to the database on its own. Understand its states and transitions and half of "why did Hibernate do that?" answers itself.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Persistence Context and Entity Lifecycle</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every <code>EntityManager</code> owns a persistence context: a first-level cache that holds the entities it manages, guarantees one Java object per database row, and — crucially — synchronizes their changes automatically at flush time. This module walks the lifecycle an entity travels (transient, managed, detached, removed), the operations that move it between states (<code>persist</code>, <code>merge</code>, <code>remove</code>, <code>detach</code>), how dirty checking and flush modes decide when SQL runs, and how cascading, <code>orphanRemoval</code> and lifecycle callbacks let one operation ripple across an object graph. It is the single most interview-tested area in all of JPA.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The persistence context and the first-level cache</h3>
+    <p>The persistence context is the in-memory set of entities an <code>EntityManager</code> (Hibernate <code>Session</code>) currently manages, scoped to a transaction by default. It is also the first-level cache: within one context, loading the same identifier twice returns the very same object instance — a repeatable-read identity guarantee that no query cache or second-level cache can substitute for. Every managed entity is watched for changes and flushed to the database without an explicit save call.</p>
+    <p>Why it matters: the first-level cache is always on and cannot be disabled — you can only <code>clear()</code> the whole context or <code>detach()</code> a single entity. Knowing that "managed" means "auto-tracked" is the mental model the rest of this module rests on.</p>
+    <pre class="code-block" data-label="Java"><code>Author a1 = em.find(Author.class, 1L);   // SELECT runs
+Author a2 = em.find(Author.class, 1L);   // no SQL — served from the context
+assert a1 == a2;                          // same instance: identity guarantee</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#pc" rel="noopener">Persistence Contexts — Hibernate ORM User Guide</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2" rel="noopener">Entity Managers and Persistence Contexts — Jakarta Persistence 3.2 Specification</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-hibernate-persistence-context" rel="noopener">JPA/Hibernate Persistence Context — Baeldung</a></li>
+    </ul>
+
+    <h3>The four entity states: transient, managed, detached, removed</h3>
+    <p>An entity is always in exactly one of four states. <em>Transient</em> (new): a plain object you just constructed — no identity, unknown to Hibernate. <em>Managed</em> (persistent): attached to a persistence context, tracked, its changes auto-flushed. <em>Detached</em>: was managed but its context closed, cleared, or it was explicitly detached — changes to it are ignored until reattached. <em>Removed</em>: scheduled for a DELETE that fires at flush.</p>
+    <p>Why it matters: nearly every surprising Hibernate behavior — an update that didn't happen, a <code>detached entity passed to persist</code> error, a stale read — traces back to misjudging which state an object is in. Interviewers ask you to name the four states and the transitions between them constantly.</p>
+    <pre class="code-block" data-label="Java"><code>Author a = new Author("Tan");   // transient
+em.persist(a);                  // transient -&gt; managed
+em.detach(a);                   // managed  -&gt; detached
+a = em.merge(a);                // detached -&gt; managed (new managed copy)
+em.remove(a);                   // managed  -&gt; removed (DELETE at flush)</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://thorben-janssen.com/entity-lifecycle-model/" rel="noopener">Entity Lifecycle Model in JPA &amp; Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-entity-lifecycle" rel="noopener">Hibernate Entity Lifecycle — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-session-object-states" rel="noopener">Object States in Hibernate's Session — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NipglW71TdA" rel="noopener">Hibernate Persistence Life Cycle and Entity States — KK HindiGyan</a></li>
+    </ul>
+
+    <h3>State transitions: persist, merge, remove, detach</h3>
+    <p>These are the operations that move an entity between states. <code>persist</code> is for a <em>transient</em> entity: it makes that same instance managed and schedules an INSERT — call it on a detached entity and you get an exception. <code>merge</code> is for a <em>detached</em> entity: it copies the incoming state onto a managed instance and <strong>returns that managed copy</strong>; the object you passed in stays detached. <code>remove</code> schedules a DELETE, and <code>detach</code>/<code>clear</code> evict from the context.</p>
+    <p>Why it matters: <code>persist</code> vs <code>merge</code> is the most-asked JPA interview question, and its most common bug is continuing to use the argument you passed to <code>merge</code> instead of its return value. Spring Data's <code>save()</code> hides this by choosing persist or merge for you based on whether the id looks new.</p>
+    <pre class="code-block" data-label="Java"><code>em.persist(author);              // returns void; THIS instance becomes managed
+Author managed = em.merge(author); // returns a managed COPY; 'author' stays detached
+managed.setName("new");            // tracked
+author.setName("ignored");         // NOT tracked — classic merge bug</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#pc-merge" rel="noopener">Merging detached data — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-persist-and-merge/" rel="noopener">How do persist and merge work in JPA — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-save-persist-update-merge-saveorupdate" rel="noopener">save, persist, update, merge, saveOrUpdate — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-jpa-hibernate-entity-state-transitions/" rel="noopener">A beginner's guide to entity state transitions with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zbQoSLq2uAU" rel="noopener">JPA EntityManager Persist vs Merge Differences — Code Java</a></li>
+    </ul>
+
+    <h3>Dirty checking, flush and flush modes</h3>
+    <p>When an entity becomes managed, Hibernate takes a snapshot of its loaded state. At flush time it compares each managed entity against its snapshot and issues UPDATEs for whatever changed — this is <em>automatic dirty checking</em>, and it is why you never call an update method for a managed entity. A flush translates the pending state changes into SQL; it happens before a query that could be affected (JPA's default <code>AUTO</code> mode) and on transaction commit, but <code>COMMIT</code> mode defers it to commit only.</p>
+    <p>Why it matters: dirty checking surprises people twice — an object updated "by accident" because it was still managed, and a performance cost, since every managed entity is compared at every flush. Loading thousands of entities you only read is wasteful; mark read-only or use DTO projections instead.</p>
+    <pre class="code-block" data-label="Java"><code>Author a = em.find(Author.class, 1L);  // snapshot captured
+a.setName("Updated");                   // no save() call
+tx.commit();                            // dirty checking emits UPDATE at flush</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#flushing" rel="noopener">Flushing — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-anatomy-of-hibernate-dirty-checking/" rel="noopener">The anatomy of Hibernate dirty checking — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-jpahibernate-flush-strategies/" rel="noopener">A beginner's guide to flush strategies in JPA and Hibernate — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>Cascade types and orphanRemoval</h3>
+    <p>By default an operation on a parent entity touches only that entity. <em>Cascading</em> propagates a state transition across an association: <code>CascadeType.PERSIST</code>, <code>MERGE</code>, <code>REMOVE</code>, <code>REFRESH</code>, <code>DETACH</code>, and <code>ALL</code> are the JPA-standard types (Hibernate adds <code>SAVE_UPDATE</code>, <code>LOCK</code>, <code>REPLICATE</code>). <code>orphanRemoval = true</code> goes further: it deletes a child the moment it is removed from the parent's collection — dereferenced, not just when the parent itself is deleted.</p>
+    <p>Why it matters: over-cascading (especially <code>CascadeType.REMOVE</code> or <code>ALL</code> on <code>@ManyToMany</code> and large <code>@OneToMany</code> collections) causes accidental mass deletes and N+1 delete storms. The difference between <code>REMOVE</code> and <code>orphanRemoval</code> is a standard trap question.</p>
+    <pre class="code-block" data-label="Java"><code>@OneToMany(mappedBy = "post",
+           cascade = CascadeType.ALL,
+           orphanRemoval = true)
+private List&lt;Comment&gt; comments = new ArrayList&lt;&gt;();
+
+post.getComments().remove(comment);  // orphanRemoval -&gt; DELETE this comment</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#pc-cascade" rel="noopener">Cascading entity state transitions — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-jpa-and-hibernate-cascade-types/" rel="noopener">A beginner's guide to JPA and Hibernate Cascade Types — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/orphanremoval-jpa-hibernate/" rel="noopener">How does orphanRemoval work with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GFy8dJNCRcY" rel="noopener">Why you should avoid CascadeType.REMOVE for to-many associations — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LpALF2fVd7A" rel="noopener">Top Interview Question — CascadeType in JPA with Real Examples — Java Techie</a></li>
+    </ul>
+
+    <h3>Entity lifecycle callbacks (@PrePersist and friends)</h3>
+    <p>JPA lets you hook custom logic into lifecycle transitions with seven callback annotations: <code>@PrePersist</code>/<code>@PostPersist</code>, <code>@PreUpdate</code>/<code>@PostUpdate</code>, <code>@PreRemove</code>/<code>@PostRemove</code>, and <code>@PostLoad</code>. Put them on methods of the entity itself, or extract them into a reusable listener class referenced with <code>@EntityListeners</code>. They power auditing timestamps, defaulting and normalizing fields, and validation before write.</p>
+    <p>Why it matters: callbacks are the JPA-native way to implement created/updated timestamps (the mechanism behind Spring Data's <code>@CreatedDate</code>/<code>@LastModifiedDate</code>). A common gotcha: a callback must not call the <code>EntityManager</code> or run queries, since it fires mid-flush.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+public class AuditedPost {
+    private Instant createdAt;
+
+    @PrePersist
+    void onCreate() { this.createdAt = Instant.now(); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#events" rel="noopener">Interceptors and events — Hibernate ORM User Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-entity-lifecycle-events" rel="noopener">JPA Entity Lifecycle Events — Baeldung</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/change-before-persist/" rel="noopener">How to change an attribute before INSERT and UPDATE — Thorben Janssen</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-inheritance.html">← Inheritance Mapping</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="08-fetching-nplus1.html">Fetching and the N+1 Problem →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The persistence context is the densest source of JPA interview questions in Indian product and service companies — persist vs merge and dirty checking come up in almost every Hibernate round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the persistence context?</summary>
+      <div class="answer"><p>The set of entity instances an <code>EntityManager</code>/<code>Session</code> currently manages, scoped to a transaction by default. It doubles as the first-level cache: it tracks managed entities, guarantees one object per database row, and flushes their changes to the database automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the four entity states and define each.</summary>
+      <div class="answer"><p><strong>Transient</strong>: a new object, not associated with any context. <strong>Managed/persistent</strong>: attached and change-tracked. <strong>Detached</strong>: was managed but its context ended, so changes are no longer tracked. <strong>Removed</strong>: scheduled for deletion at the next flush.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does entityManager.persist() do?</summary>
+      <div class="answer"><p>Transitions a <em>transient</em> entity to managed and schedules an INSERT that runs at flush/commit. It returns void — the instance you passed in becomes managed in place. Calling it on a detached entity throws.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the first-level cache, and can you turn it off?</summary>
+      <div class="answer"><p>It is the persistence context itself — a per-context cache keyed by entity type and id. You cannot disable it; it is fundamental to identity and dirty checking. You can only <code>em.clear()</code> the whole context or <code>em.detach(entity)</code> to evict one entity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> persist vs merge — what is the difference? (most-asked)</summary>
+      <div class="answer"><p><code>persist</code> is for transient entities and makes the passed instance managed (returns void). <code>merge</code> is for detached entities: it copies their state onto a managed instance and <strong>returns that managed copy</strong> — the argument stays detached. Rule of thumb: persist for new, merge for detached.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is dirty checking and when does the UPDATE fire?</summary>
+      <div class="answer"><p>When an entity becomes managed, Hibernate snapshots its state. At flush time it compares each managed entity to its snapshot and emits UPDATE statements for the changed ones — no save call needed. The UPDATE fires at flush (before an affected query, or on commit), not at the moment you call the setter.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a detached entity, and how do you reattach it?</summary>
+      <div class="answer"><p>An entity that was managed but whose context has closed or been cleared (or that was explicitly detached or serialized across a boundary). Its changes are not tracked. Reattach by passing it to <code>merge</code> (JPA) — which returns a fresh managed instance — or Hibernate's <code>Session.update/lock</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When does a flush happen, and what are the flush modes?</summary>
+      <div class="answer"><p>Flush occurs on transaction commit and, in JPA's default <code>FlushModeType.AUTO</code>, before running a query whose results could be affected by pending changes. <code>FlushModeType.COMMIT</code> defers flushing to commit only. You can also flush manually with <code>em.flush()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are cascade types, and which are JPA-standard?</summary>
+      <div class="answer"><p>Cascading propagates an operation from a parent to its associated entities. JPA defines <code>PERSIST</code>, <code>MERGE</code>, <code>REMOVE</code>, <code>REFRESH</code>, <code>DETACH</code>, and <code>ALL</code>. Hibernate adds non-standard ones like <code>SAVE_UPDATE</code>, <code>LOCK</code>, and <code>REPLICATE</code>. There is no cascade by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> CascadeType.REMOVE vs orphanRemoval — what's the difference?</summary>
+      <div class="answer"><p>Both delete child rows. <code>CascadeType.REMOVE</code> cascades only when the <em>parent</em> is removed. <code>orphanRemoval = true</code> also deletes a child the moment it is removed from the parent's collection (dereferenced), even if the parent lives on. orphanRemoval expresses a true parent-owns-child lifecycle.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> List the JPA lifecycle callbacks and give one real use.</summary>
+      <div class="answer"><p><code>@PrePersist</code>/<code>@PostPersist</code>, <code>@PreUpdate</code>/<code>@PostUpdate</code>, <code>@PreRemove</code>/<code>@PostRemove</code>, and <code>@PostLoad</code>. They can sit on the entity or in an <code>@EntityListeners</code> class. Classic use: setting created/updated timestamps — the mechanism under Spring Data's <code>@CreatedDate</code>/<code>@LastModifiedDate</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can merge trigger an extra SELECT, and how do you avoid it?</summary>
+      <div class="answer"><p>If the entity is not already in the context, <code>merge</code> fetches the current database row (a SELECT) to copy state onto before the UPDATE. In batch inserts this doubles the query count. Use <code>persist</code> for genuinely new entities, or Hibernate's <code>update()</code> when the row is known to exist and you want to skip the select.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You changed a managed entity but never called save, yet the DB updated. Why, and how do you prevent it?</summary>
+      <div class="answer"><p>Automatic dirty checking flushed the change because the entity was still managed. To prevent unwanted updates, detach it, or make it read-only — Hibernate's <code>@Immutable</code>, <code>Session.setReadOnly</code>, or the <code>org.hibernate.readOnly</code> query hint skip the snapshot so no UPDATE is generated.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> merge returns a new instance — what bug follows if you keep using the argument?</summary>
+      <div class="answer"><p>The instance you passed to <code>merge</code> remains detached; only the returned instance is managed. If you keep mutating the original, those changes are never flushed. Always assign and use the return value: <code>entity = em.merge(entity);</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is flushing inside a large loop dangerous, and what fixes it?</summary>
+      <div class="answer"><p>Every managed entity stays in the context, so it grows unbounded — memory climbs and each flush re-checks all N entities, making dirty checking O(n) per flush and the whole batch O(n squared). Fix by flushing and then <code>em.clear()</code> periodically (e.g. every batch-size rows), matching the JDBC batch size, to keep the context small.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.pc.states</li>
+      <li>jpa.pc.cascade</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Transactions and Concurrency module for JPA and Hibernate: @Transactional boundaries and flush-on-commit, the lost-update problem, optimistic locking with @Version, and pessimistic locking with LockModeType — the best official and community resources plus the interview questions they power.">
+  <title>Transactions and Concurrency — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Transactions and Concurrency</h1>
+  <p class="standfirst">A managed persistence context hides the SQL, but two users editing the same row is a correctness problem no framework quietly solves for you — this is the module where JPA stops being merely convenient and starts being careful.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Transactions and Concurrency</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two threads sit under every persistence layer: the <em>transaction</em> that groups your writes into an all-or-nothing unit, and the <em>concurrency control</em> that decides what happens when two of those units touch the same data. This module covers how <code>@Transactional</code> draws boundaries and when Hibernate flushes, then the lost-update anomaly and its two cures — optimistic locking with <code>@Version</code> and pessimistic locking with <code>LockModeType</code>. Optimistic-versus-pessimistic locking and the lost-update problem are among the most-asked JPA interview topics, so they get the most room here.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>@Transactional and transaction boundaries</h3>
+    <p><code>@Transactional</code> marks a method as a unit of work: Spring's proxy opens a physical database transaction before the method runs and commits (or rolls back on a runtime exception) after it returns. Everything inside shares one connection and one persistence context, so the entities you load stay managed and dirty-checking works across all the repository calls you make. Put it on the <strong>service layer</strong>, where a business operation spans several repositories — not on individual repository methods, which already get their own tiny transaction by default.</p>
+    <p>Why it matters: the boundary is where correctness lives. Too narrow and a multi-step operation can half-commit; too wide and you hold a connection while doing slow work. Two facts trip people up in interviews — a runtime (unchecked) exception rolls back but a checked exception does <em>not</em> unless you configure <code>rollbackFor</code>, and self-invocation (one method in a class calling another) bypasses the proxy, so the inner <code>@Transactional</code> is silently ignored.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+class OrderService {
+  @Transactional                       // one physical transaction for the whole method
+  public void placeOrder(Order o) {
+    orderRepo.save(o);
+    inventoryRepo.decrement(o.sku());  // both succeed, or both roll back together
+  }                                    // commit + flush happen here, on return
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html" rel="noopener">Transactionality — Spring Data JPA reference (default repository transactions, readOnly, @Modifying)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative.html" rel="noopener">Declarative transaction management — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/spring-transactional-annotation/" rel="noopener">A beginner's guide to the Spring @Transactional annotation — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/transaction-configuration-with-jpa-and-spring" rel="noopener">Transactions with Spring and JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=REXALUYxDIs" rel="noopener">Spring Transaction Management: End-to-End Guide — Java Techie</a></li>
+    </ul>
+
+    <h3>Flush timing: flush-on-commit and FlushMode</h3>
+    <p><code>persist</code>, <code>merge</code> and dirty state do not hit the database immediately — Hibernate buffers them in the persistence context and <em>flushes</em> (runs the actual INSERT/UPDATE/DELETE SQL) only when it has to. With the default <code>FlushModeType.AUTO</code> that happens at commit and again before a query whose results could be affected by pending changes, so a JPQL query never reads stale in-memory state. This is the "flush-on-commit" behaviour: your SQL is emitted at the transaction boundary, then the COMMIT follows.</p>
+    <p>Why it matters: flush is not commit. Calling <code>entityManager.flush()</code> pushes SQL early (useful to surface a constraint violation or read a generated id) but the transaction can still roll back. Switching to <code>FlushModeType.COMMIT</code> skips the pre-query flush for speed but risks a query reading pre-change data — a subtle bug worth being able to explain.</p>
+    <pre class="code-block" data-label="Java"><code>Product p = em.find(Product.class, id);
+p.setStock(0);                    // change is buffered, no SQL yet
+em.createQuery("select p from Product p ...").getResultList();
+                                  // AUTO flushes first, so the query sees stock = 0
+// tx.commit();                   // flush-on-commit emits any remaining SQL, then COMMIT</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#flushing" rel="noopener">Flushing — Hibernate ORM User Guide (AUTO / COMMIT / ALWAYS / MANUAL)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-do-jpa-and-hibernate-define-the-auto-flush-mode/" rel="noopener">How do JPA and Hibernate define the AUTO flush mode — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/flushmode-in-jpa-and-hibernate/" rel="noopener">FlushMode in JPA and Hibernate — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-jpa-flush" rel="noopener">Correct use of flush() in JPA — Baeldung</a></li>
+    </ul>
+
+    <h3>The lost-update problem</h3>
+    <p>The lost update is the anomaly all of this exists to prevent. Two transactions read the same row, each computes a new value from what it read, and both write back — the second write silently overwrites the first, and a change simply vanishes with no error. Under READ COMMITTED (the common default) the database does nothing to stop this, because neither transaction sees the other's uncommitted work. It gets worse in "long conversations" where a user reads a record in one HTTP request and saves it several requests later: the physical database transaction is long gone, so no row lock could have helped.</p>
+    <p>Why it matters: this is the concurrency scenario interviewers reach for first, usually as a story ("two admins edit the same product price — what happens?"). The correct answer names the anomaly, notes that isolation level alone rarely fixes it cheaply, and reaches for a locking strategy — optimistic by default, pessimistic when contention is high.</p>
+    <pre class="code-block" data-label="text"><code>T1 reads balance = 100        T2 reads balance = 100
+T1: 100 - 20  -> UPDATE 80
+                              T2: 100 + 50 -> UPDATE 150
+final balance = 150           (T1's debit of 20 is lost)</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/optimistic-locking-version-property-jpa-hibernate/" rel="noopener">Optimistic locking with JPA and Hibernate — Vlad Mihalcea (the lost-update anomaly, worked end to end)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/preventing-lost-updates-in-long-conversations/" rel="noopener">Preventing lost updates in long conversations — Vlad Mihalcea (application-level transactions)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/optimistic-vs-pessimistic-locking/" rel="noopener">Optimistic vs. pessimistic locking — Vlad Mihalcea (how to choose)</a></li>
+    </ul>
+
+    <h3>Optimistic locking with @Version</h3>
+    <p>Optimistic locking assumes conflicts are rare and detects them at write time instead of blocking readers. You add one <code>@Version</code> attribute (an <code>int</code>/<code>long</code> or a timestamp) and Hibernate takes over: every UPDATE carries the version in its WHERE clause and increments it. If another transaction already bumped the version, zero rows match, and Hibernate raises an <code>OptimisticLockException</code> — the conflicting write is refused rather than silently lost. No database lock is held, so it scales well and even works across detached entities in a long conversation.</p>
+    <p>Why it matters: it is the default recommendation for read-heavy, low-contention systems, and "how does @Version prevent lost updates?" is a near-guaranteed follow-up. Know the rules: exactly one version field per entity, never set it yourself, and on the recovery side catch the exception and retry the whole unit of work — the state you read is stale, so re-read before recomputing.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+class Product {
+  @Id Long id;
+  @Version int version;   // managed by Hibernate — never assign it yourself
+  int stock;
+}
+// UPDATE product SET stock = ?, version = ? WHERE id = ? AND version = ?
+//   -> 0 rows updated means someone else changed it first -> OptimisticLockException</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html#locking" rel="noopener">Locking — Hibernate ORM User Guide (optimistic and pessimistic, the definitive reference)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-optimistic-locking" rel="noopener">Optimistic locking in JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-entity-version-property-hibernate/" rel="noopener">How the entity @Version property works — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-tips-use-timestamp-versioning-optimistic-locking/" rel="noopener">Using a timestamp for versioning and optimistic locking — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Pessimistic locking with LockModeType</h3>
+    <p>Pessimistic locking assumes conflicts are likely and takes a database lock up front so no one else can interfere. You request it with a <code>LockModeType</code>: <code>PESSIMISTIC_WRITE</code> acquires an exclusive lock (a <code>SELECT ... FOR UPDATE</code>) that blocks other readers and writers of that row, while <code>PESSIMISTIC_READ</code> takes a shared lock that permits concurrent readers but blocks writers. The lock is held until the transaction commits or rolls back. In Spring Data you attach it declaratively with <code>@Lock</code> on a repository method; with the EntityManager you pass the mode to <code>find</code>, <code>lock</code>, or a query.</p>
+    <p>Why it matters: pessimistic locking is the right tool when contention is high and retrying would be expensive — inventory decrements, seat or ticket booking, wallet debits. The trade-off is throughput and the risk of deadlocks, so bound it with a lock timeout (<code>jakarta.persistence.lock.timeout</code>) and acquire locks in a consistent order. Being able to contrast it with optimistic locking — and say which you'd pick for a booking system — is a classic senior-round question.</p>
+    <pre class="code-block" data-label="Java"><code>public interface SeatRepository extends JpaRepository&lt;Seat, Long&gt; {
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query("select s from Seat s where s.id = :id")
+  Optional&lt;Seat&gt; findByIdForUpdate(@Param("id") Long id);
+}
+// emits SELECT ... FOR UPDATE — concurrent writers block until this tx commits</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html" rel="noopener">Locking — Spring Data JPA reference (the @Lock annotation on repository methods)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-pessimistic-locking" rel="noopener">Pessimistic locking in JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jpa-transaction-locks" rel="noopener">Enabling transaction locks in Spring Data JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-locking-patterns-how-do-pessimistic_read-and-pessimistic_write-work/" rel="noopener">How PESSIMISTIC_READ and PESSIMISTIC_WRITE work — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lR6y-0RC5cc" rel="noopener">Optimistic &amp; Pessimistic Locking with a movie seat-booking example — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-spring-data-advanced.html">← Spring Data JPA Advanced</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="13-caching.html">Caching →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Transactions and locking are among the most-asked JPA topics in Indian backend interviews — optimistic vs pessimistic locking and the lost-update problem surface in nearly every product-company round:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What does @Transactional do, and where should you put it?</summary>
+      <div class="answer"><p>It marks a method as one unit of work: a Spring proxy opens a database transaction before the method, commits after it returns, and rolls back on a runtime exception. All the work inside shares one connection and one persistence context. Put it on the <strong>service layer</strong> where a business operation spans multiple repositories — not on individual repository methods, which are already transactional on their own.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the transaction boundaries of a Spring Data JPA repository method?</summary>
+      <div class="answer"><p>Each CRUD/query method runs in its own transaction by default (<code>SimpleJpaRepository</code> is annotated), with reads marked <code>readOnly = true</code>. That is fine for a single call, but two repository calls that must be atomic need a surrounding <code>@Transactional</code> service method so they share one transaction instead of two.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> When does Hibernate actually write your changes to the database?</summary>
+      <div class="answer"><p>On flush, not on every setter. With the default <code>FlushModeType.AUTO</code>, Hibernate flushes before the transaction commits and before a query whose results could be affected by pending changes — so queries never read stale in-memory state. You can force an early flush with <code>entityManager.flush()</code>, but that still is not a commit.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the lost-update problem?</summary>
+      <div class="answer"><p>Two transactions read the same row, each computes a new value from what it read, and both write back — the second overwrites the first and a change disappears with no error. Under READ COMMITTED the database does not prevent it, which is why you add optimistic or pessimistic locking on top.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does optimistic locking with @Version prevent lost updates?</summary>
+      <div class="answer"><p>Hibernate adds the version to every UPDATE's WHERE clause and increments it: <code>UPDATE ... SET version = 4 WHERE id = ? AND version = 3</code>. If another transaction already moved the version to 4, zero rows match, and Hibernate throws <code>OptimisticLockException</code> instead of silently overwriting. You recover by re-reading the fresh state and retrying.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Optimistic vs pessimistic locking — how do you choose?</summary>
+      <div class="answer"><p>Optimistic (a <code>@Version</code> check at write time, no lock held) suits read-heavy, low-contention data and scales well; the cost is retrying on the occasional conflict. Pessimistic (a real DB lock taken up front) suits high-contention or high-cost-of-retry operations like inventory or seat booking; the cost is throughput and deadlock risk. Default to optimistic; escalate to pessimistic when conflicts are frequent.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> PESSIMISTIC_READ vs PESSIMISTIC_WRITE — what is the difference?</summary>
+      <div class="answer"><p><code>PESSIMISTIC_READ</code> takes a shared lock: other transactions can still read the row but not modify it. <code>PESSIMISTIC_WRITE</code> takes an exclusive lock (typically <code>SELECT ... FOR UPDATE</code>): other transactions can neither modify nor acquire a conflicting lock, so writes serialize. Use WRITE when you intend to update the row you just read.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What does readOnly = true on @Transactional buy you?</summary>
+      <div class="answer"><p>It is a hint, not a guard. Hibernate sets its flush mode so it skips dirty-checking and auto-flush for the transaction, saving work on pure reads, and it can propagate a read-only flag to the JDBC driver. It does not physically forbid an INSERT/UPDATE, though some databases or replicas may reject writes on a read-only connection.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does @Transactional sometimes do nothing when one method calls another in the same class?</summary>
+      <div class="answer"><p>Spring's transaction advice lives in a proxy that wraps the bean. A self-invocation calls the target instance directly, bypassing the proxy, so the inner method's <code>@Transactional</code> (and any propagation setting like <code>REQUIRES_NEW</code>) is ignored. Fixes: move the method to another bean, inject a self-reference, or use AspectJ weaving.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Which exception signals an optimistic-lock conflict, and how do you recover?</summary>
+      <div class="answer"><p>JPA throws <code>OptimisticLockException</code>; Spring translates it to <code>ObjectOptimisticLockingFailureException</code>. Because the entity you hold is stale, the recovery is to re-read the current row, reapply the user's intent, and retry the transaction — often wrapped in a bounded retry (for example Spring Retry). Blindly retrying with the old snapshot just fails again.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How do you apply a pessimistic lock through a Spring Data repository, and what SQL results?</summary>
+      <div class="answer"><p>Annotate the query method with <code>@Lock(LockModeType.PESSIMISTIC_WRITE)</code>. Spring issues the select with a <code>FOR UPDATE</code> clause (dialect-specific), so the row is exclusively locked for the rest of the transaction and concurrent writers block until commit. Pair it with a lock timeout so a stuck holder cannot stall the whole queue indefinitely.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A user edits a record across several HTTP requests. How do you prevent a lost update in that long conversation?</summary>
+      <div class="answer"><p>Row locks cannot help — the physical transaction ended when the first request returned. Use application-level optimistic locking: send the <code>@Version</code> to the client with the loaded data and send it back on save; the update's <code>WHERE version = ?</code> fails if anyone changed the row meanwhile. For detached entities, <code>merge</code> re-attaches and the version check still applies.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> LockModeType.OPTIMISTIC vs OPTIMISTIC_FORCE_INCREMENT — when would you force a version bump?</summary>
+      <div class="answer"><p><code>OPTIMISTIC</code> just verifies at flush time that the version you read is unchanged. <code>OPTIMISTIC_FORCE_INCREMENT</code> additionally increments the version even if the entity itself was not modified — used to signal that a change to a child or association logically modifies the aggregate root, so concurrent edits elsewhere in the aggregate are detected as conflicts.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What concurrency risk does pessimistic locking introduce, and how do you contain it?</summary>
+      <div class="answer"><p>Deadlock: two transactions each hold a lock the other needs and both wait forever until the database aborts one. Contain it by acquiring locks in a consistent global order, keeping locked transactions short, setting <code>jakarta.persistence.lock.timeout</code> so a wait fails fast instead of hanging, and handling the resulting <code>PessimisticLockException</code> / <code>LockTimeoutException</code> with a retry.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.tx.integration — @Transactional with JPA, transaction boundaries, flush-on-commit</li>
+      <li>jpa.tx.locking — optimistic locking (@Version), pessimistic locking (LockModeType), lost-update problem</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

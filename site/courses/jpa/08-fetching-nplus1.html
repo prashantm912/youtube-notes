@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Fetching and the N+1 Problem module: EAGER vs LAZY, lazy proxies and LazyInitializationException, the N+1 select problem, JOIN FETCH, @EntityGraph and batch fetching — the best official and community resources plus the interview questions these topics power.">
+  <title>Fetching and the N+1 Problem — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-spring lesson-page">
+<header class="page-header">
+  <h1>Module: Fetching and the N+1 Problem</h1>
+  <p class="standfirst">Fetching is where JPA quietly turns one intended query into hundreds. The N+1 problem, LazyInitializationException and fetch joins are the persistence questions interviewers reach for first — this module orients you on each and links the material that teaches it in depth.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Hibernate and JPA → Fetching and the N+1 Problem</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>How Hibernate decides <em>when</em> to load associated data: the LAZY/EAGER fetch types and their JPA defaults, the lazy proxies that cause the infamous <code>LazyInitializationException</code>, and the N+1 select problem that sinks so many real systems. Then the toolkit for fixing it per query — JOIN FETCH, <code>@EntityGraph</code> and batch fetching — with the trade-offs (duplicate rows, cartesian products, the pagination trap) that separate a screening answer from a senior one.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>EAGER vs LAZY: the default fetch plan</h3>
+    <p>Every association carries a <code>FetchType</code>. <code>LAZY</code> defers loading until the association is first accessed; <code>EAGER</code> loads it immediately with the owner. The JPA defaults trip people up: <code>@ManyToOne</code> and <code>@OneToOne</code> default to <strong>EAGER</strong>, while <code>@OneToMany</code> and <code>@ManyToMany</code> default to <strong>LAZY</strong>. Note that EAGER is a hard requirement the provider must honour, whereas LAZY is only a hint.</p>
+    <p>Why it matters: the widely-taught best practice is to map <em>everything</em> LAZY and fetch eagerly per query, because a global EAGER plan pulls data you rarely need, defeats query-level tuning, and silently multiplies SQL. Knowing the defaults and why you override the to-one ones is a standard opening question.</p>
+    <pre class="code-block" data-label="Java"><code>@ManyToOne(fetch = FetchType.LAZY)   // default is EAGER — override it
+private Author author;
+
+@OneToMany(mappedBy = "author")       // already LAZY by default — keep it
+private List&lt;Book&gt; books = new ArrayList&lt;&gt;();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/fetchtype" rel="noopener">FetchType — Jakarta Persistence 3.1 API (EAGER as requirement, LAZY as hint)</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/entity-mappings-introduction-jpa-fetchtypes/" rel="noopener">FetchType: Lazy/Eager loading for Hibernate &amp; JPA — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/eager-fetching-is-a-code-smell/" rel="noopener">JPA and Hibernate FetchType EAGER is a code smell — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-lazy-eager-loading" rel="noopener">Eager/Lazy Loading in Hibernate — Baeldung</a></li>
+    </ul>
+
+    <h3>Lazy proxies and the LazyInitializationException</h3>
+    <p>For a LAZY association Hibernate hands back a <em>proxy</em> (or an uninitialised collection wrapper) instead of the real data. The proxy fetches on first access — but only while its persistence context is still open. Access it after the transaction/session has closed and you get a <code>LazyInitializationException</code>: "could not initialize proxy — no Session". It is the single most common Hibernate runtime error, and it usually surfaces in a controller or view after the service-layer transaction ended.</p>
+    <p>Why it matters: the <em>wrong</em> fixes (switching to EAGER, <code>enable_lazy_load_no_trans</code>, Open Session in View) are traps interviewers probe. The right answer is to fetch what the caller needs <em>inside</em> the transaction — via a fetch join, an entity graph, or a DTO projection — so the data is already initialised when the session closes.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.hibernate.org/orm/current/userguide/html_single/Hibernate_User_Guide.html" rel="noopener">Fetching (Chapter 12) — Hibernate ORM User Guide (proxies, fetch strategies, profiles)</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/lazyinitializationexception/" rel="noopener">LazyInitializationException — what it is and the best way to fix it — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-initialize-proxy-exception" rel="noopener">Hibernate could not initialize proxy – no Session — Baeldung</a></li>
+    </ul>
+
+    <h3>The N+1 select problem</h3>
+    <p>The N+1 problem is when fetching a list of N entities triggers N extra SELECTs — one per entity — to load an associated relationship, instead of one combined query. It arises two ways: iterating a LAZY collection over each parent (a query fires on every access), or an EAGER association that a JPQL/Criteria query cannot satisfy in the primary select, so the provider issues secondary selects. With N in the thousands it turns a fast page into a slow one.</p>
+    <p>Why it matters: this is <strong>the</strong> canonical JPA performance interview question. You are expected to define it, show how to reproduce it, explain how to detect it (log <code>show_sql</code>, count statements, tools like datasource-proxy), and then reach for a fix — which the next three topics cover.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://vladmihalcea.com/n-plus-1-query-problem/" rel="noopener">N+1 query problem with JPA and Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-hibernate-n1-problem" rel="noopener">N+1 Problem in Hibernate and Spring Data JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zwF5ADW6eKs" rel="noopener">Hibernate N+1 Problem &amp; Fix — the bug you didn't know you had — Java Techie</a></li>
+    </ul>
+
+    <h3>Fetch joins: JOIN FETCH, DISTINCT and the bag trap</h3>
+    <p>A JPQL <code>JOIN FETCH</code> initialises an association in the <em>same</em> query as its owner, collapsing N+1 into one round-trip. Unlike a plain <code>JOIN</code> (which only affects the WHERE/filtering), <code>JOIN FETCH</code> actually loads the joined entities into the persistence context. It is the most direct, per-query fix and the one to demonstrate first.</p>
+    <p>Two gotchas make great follow-ups. Fetch-joining a collection produces duplicate parent references (one row per child) — historically fixed with <code>DISTINCT</code> (Hibernate 6 deduplicates automatically, so <code>passDistinctThrough</code> is gone). And fetch-joining <em>two</em> <code>List</code> collections throws <code>MultipleBagFetchException</code> to avoid a cartesian product — the fix is to fetch one collection per query, not to switch blindly to <code>Set</code>.</p>
+    <pre class="code-block" data-label="JPQL"><code>// One query instead of N+1 — books initialised while fetching authors
+List&lt;Author&gt; authors = em.createQuery(
+    "SELECT DISTINCT a FROM Author a JOIN FETCH a.books", Author.class)
+  .getResultList();</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://thorben-janssen.com/5-ways-to-initialize-lazy-relations-and-when-to-use-them/" rel="noopener">5 ways to initialize lazy associations and when to use them — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpql-distinct-jpa-hibernate/" rel="noopener">The best way to use the JPQL DISTINCT keyword — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-multiplebagfetchexception/" rel="noopener">The best way to fix the Hibernate MultipleBagFetchException — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QAaTLLYdHJ0" rel="noopener">JOIN FETCH with Hibernate — the end of n+1 select issues — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Entity graphs: declarative fetch plans</h3>
+    <p>An entity graph is a reusable, query-independent fetch plan: you declare which attributes to load and attach it to a query or repository method, so the association is fetched with a LEFT JOIN in one statement. Define one declaratively with <code>@NamedEntityGraph</code>, or build it dynamically via the <code>EntityManager</code>. In Spring Data JPA the <code>@EntityGraph</code> annotation on a repository method wires it up. A FETCH-type graph treats listed attributes as EAGER and everything else as LAZY.</p>
+    <p>Why it matters: entity graphs are the idiomatic way to keep mappings LAZY yet fetch eagerly per use case — the "override the global plan without JPQL" answer. They also avoid the duplicate-row and bag limitations of collection fetch joins in some cases, making the JOIN FETCH vs <code>@EntityGraph</code> comparison a common senior-level question.</p>
+    <pre class="code-block" data-label="Java"><code>@NamedEntityGraph(name = "Author.books",
+    attributeNodes = @NamedAttributeNode("books"))
+@Entity class Author { /* ... */ }
+
+// Spring Data JPA repository
+@EntityGraph("Author.books")
+List&lt;Author&gt; findAll();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/namedentitygraph" rel="noopener">NamedEntityGraph — Jakarta Persistence 3.1 API</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/jpa-21-entity-graph-part-1-named-entity/" rel="noopener">JPA Entity Graphs: how to define and use a @NamedEntityGraph — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-entity-graph/" rel="noopener">JPA Entity Graph — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-named-entity-graphs" rel="noopener">Spring Data JPA and Named Entity Graphs — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7gm30iX3Nfw" rel="noopener">Fix N+1 Select Issues with Hibernate's EntityGraphs — Thorben Janssen</a></li>
+    </ul>
+
+    <h3>Batch fetching: @BatchSize and fetch modes</h3>
+    <p>When a JOIN FETCH would create too large a cartesian product — or when you must paginate — batch fetching is the alternative. Hibernate's <code>@BatchSize</code> (or the global <code>hibernate.default_batch_fetch_size</code>) initialises LAZY associations for many parents at once using a single <code>IN (...)</code> query, turning N+1 into roughly N/batch. Related knobs: <code>FetchMode.SUBSELECT</code> loads a collection for all owners via one subselect, and <code>FetchMode.SELECT</code> is the default per-owner behaviour that causes N+1.</p>
+    <p>Why it matters: batch fetching is the pragmatic answer to "you can't JOIN FETCH everything." Interviewers like to hear when you would pick batch size or subselect over a fetch join — a signal you have tuned real workloads, not just read the annotation list.</p>
+    <pre class="code-block" data-label="Java"><code>@OneToMany(mappedBy = "author")
+@BatchSize(size = 25)     // load lazy books 25 parents per IN-clause query
+private List&lt;Book&gt; books = new ArrayList&lt;&gt;();
+// or globally: hibernate.default_batch_fetch_size = 25</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-tips-how-to-fetch-associations-in-batches/" rel="noopener">Hibernate Tips: how to fetch associations in batches — Thorben Janssen</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-fetchmode" rel="noopener">FetchMode in Hibernate (SELECT, JOIN, SUBSELECT) — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-persistence-context.html">← Persistence Context and Entity Lifecycle</a>
+    <a href="index.html">All Hibernate and JPA modules</a>
+    <a href="09-queries.html">JPQL, Criteria and Native Queries →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked fetching questions in Indian interviews — N+1, LazyInitializationException and fetch joins recur in almost every Java/Spring backend round, screening to system-design:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between EAGER and LAZY fetching?</summary>
+      <div class="answer"><p>EAGER loads the association immediately with its owner; LAZY defers loading until the association is first accessed, returning a proxy meanwhile. EAGER is a requirement the provider must honour; LAZY is a hint it may ignore for to-one mappings.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the default fetch types for JPA associations?</summary>
+      <div class="answer"><p><code>@ManyToOne</code> and <code>@OneToOne</code> default to EAGER; <code>@OneToMany</code> and <code>@ManyToMany</code> default to LAZY. The common recommendation is to override the to-one ones to LAZY and fetch eagerly per query instead.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a lazy proxy in Hibernate?</summary>
+      <div class="answer"><p>A stand-in object (a runtime subclass, or a wrapper for collections) that Hibernate returns for a LAZY association. It holds the identifier and loads the real data on first method access — provided the persistence context is still open.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the N+1 select problem?</summary>
+      <div class="answer"><p>Fetching N parent entities and then triggering N additional queries — one per parent — to load an association, instead of retrieving everything in one (or a few) queries. It happens by iterating a LAZY collection per parent, or when an EAGER association forces secondary selects after a JPQL query.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What causes LazyInitializationException and how do you fix it correctly?</summary>
+      <div class="answer"><p>Accessing a LAZY association after its persistence context/transaction has closed — typically in the view or controller after the service transaction ended. Correct fixes initialise the data inside the transaction: a JOIN FETCH query, an <code>@EntityGraph</code>, or a DTO projection. Avoid the anti-fixes: making it EAGER, <code>enable_lazy_load_no_trans</code>, or Open Session in View.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does JOIN FETCH solve N+1, and how does it differ from a plain JOIN?</summary>
+      <div class="answer"><p>JOIN FETCH loads the associated entities in the same SQL query as the owner, so no secondary selects fire. A plain JOIN only participates in filtering/WHERE and does not initialise the association — the collection stays lazy and N+1 remains.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is FetchType.EAGER considered an anti-pattern?</summary>
+      <div class="answer"><p>It applies globally to every query whether or not the data is needed, so it wastes I/O, prevents per-query tuning, and — with JPQL/Criteria — the provider often issues extra secondary selects (its own N+1). Best practice: map associations LAZY and fetch eagerly per query with JOIN FETCH or an entity graph.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is @EntityGraph and how does it differ from JOIN FETCH?</summary>
+      <div class="answer"><p>An entity graph is a declarative, reusable fetch plan (<code>@NamedEntityGraph</code> or built dynamically; in Spring Data via <code>@EntityGraph</code> on a method) that fetches listed attributes with a LEFT JOIN. JOIN FETCH is inline in a specific JPQL query. Graphs decouple the fetch plan from the query and reuse across methods; JOIN FETCH gives full query control but is tied to that one query string.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does JOIN FETCH on a collection return duplicate parents, and how do you fix it?</summary>
+      <div class="answer"><p>The SQL join produces one row per child, so the same parent reference repeats. Historically you added <code>DISTINCT</code> to the JPQL (deduplicated in memory, not pushed to SQL for entity queries). Since Hibernate 6 parent references are deduplicated automatically, so DISTINCT is usually unnecessary.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do @BatchSize and default_batch_fetch_size help?</summary>
+      <div class="answer"><p>They batch the initialisation of LAZY associations: instead of one query per parent, Hibernate loads them for many parents at once using an <code>IN (:ids)</code> clause, cutting N+1 down to about N/batchSize queries. Useful when a JOIN FETCH would build too large a cartesian product or when you need pagination.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why can't you combine JOIN FETCH of a collection with pagination, and what happens if you try?</summary>
+      <div class="answer"><p>The joined result has multiple rows per parent, so a SQL <code>LIMIT</code> would truncate mid-parent and return wrong data. Hibernate refuses to paginate in SQL and instead fetches the whole result set and paginates in memory, logging the HHH000104 warning — dangerous on large tables. Use batch fetching or a two-step query (page the IDs, then fetch the collection) instead.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is MultipleBagFetchException and how do you fetch two collections correctly?</summary>
+      <div class="answer"><p>Hibernate throws it when you JOIN FETCH two <code>List</code> (bag) associations at once, because the cartesian product would be huge and unindexed. The right fix is to fetch at most one collection per query — the persistence context merges the second into the already-loaded parents. Switching both to <code>Set</code> silences the exception but still generates the cartesian product, so it is not a real fix.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Is Open Session in View a good solution to LazyInitializationException?</summary>
+      <div class="answer"><p>No. OSIV keeps the persistence context open across the view render so lazy access "just works," but it leaks fetching into the presentation layer, holds the DB connection longer, encourages hidden N+1, and can cause data-integrity surprises. Prefer fetching what the caller needs inside the service transaction (JOIN FETCH / entity graph / DTO). Spring Boot enables OSIV by default and warns about it — disabling it forces explicit fetch plans.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> When would you choose batch fetching or SUBSELECT over a JOIN FETCH?</summary>
+      <div class="answer"><p>When a single fetch join would explode into a large cartesian product (multiple or deep collections), when you need pagination on the parent, or when many parents each need the same collection. <code>@BatchSize</code>/<code>default_batch_fetch_size</code> loads collections in <code>IN</code>-clause batches, and <code>FetchMode.SUBSELECT</code> loads all owners' collections via one subselect — both trade one big joined query for a few small, bounded ones.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Hibernate and JPA track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>jpa.fetch.strategies</li>
+      <li>jpa.fetch.nplus1</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Hibernate and JPA track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
