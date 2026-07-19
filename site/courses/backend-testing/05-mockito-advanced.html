@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Mockito Advanced module: ArgumentCaptor, custom Answer stubbing, spies and partial mocks, BDD-style given/willReturn, mocking static and final methods in Mockito 5, plus the pitfalls and anti-patterns — with the best official and community resources and the interview questions they power.">
+  <title>Mockito Advanced — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Mockito Advanced</h1>
+  <p class="standfirst">Basic stubbing gets you a green bar; capturing arguments, spying on real objects and taming static calls is where mocking either sharpens a test suite or quietly rots it — and interviewers know the difference.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Backend Testing → Mockito Advanced</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Building on <code>when/thenReturn</code> and <code>verify</code>, this module covers the tools that make mocks expressive: <code>ArgumentCaptor</code> for inspecting what a collaborator was called with, <code>Answer</code> for computed return values, spies for wrapping real objects, and <code>BDDMockito</code> for given/when/then phrasing. It then tackles the hardest interview territory — mocking static and final methods in Mockito 5 with <code>MockedStatic</code>, and the anti-patterns that make over-mocked tests fragile.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>ArgumentCaptor: asserting on what a collaborator received</h3>
+    <p>Sometimes verifying <em>that</em> a method was called is not enough — you need to inspect the object passed to it, especially when the test constructs it deep inside the code under test. <code>ArgumentCaptor</code> registers a special matcher inside a <code>verify(...)</code> call, grabs the actual argument, and lets you assert on its fields afterwards. Use <code>getValue()</code> for the last call and <code>getAllValues()</code> when the method fired several times; <code>@Captor</code> declares one without the boilerplate.</p>
+    <p>Why it matters: it is the standard way to test "fire-and-forget" collaborators — event publishers, mailers, repositories — whose input never returns to the caller. Interviewers pair it with a rule you should state unprompted: prefer an <code>ArgumentMatcher</code> for stubbing, and reserve the captor for verification.</p>
+    <pre class="code-block" data-label="Java"><code>ArgumentCaptor&lt;Email&gt; captor = ArgumentCaptor.forClass(Email.class);
+service.register("asha@example.com");
+verify(mailer).send(captor.capture());     // capture at verification time
+assertThat(captor.getValue().subject())    // now assert on the real object
+    .isEqualTo("Welcome");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/ArgumentCaptor.html" rel="noopener">ArgumentCaptor — Mockito Javadoc (capture / getValue / getAllValues, with examples)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-argumentcaptor" rel="noopener">Using Mockito ArgumentCaptor — Baeldung (with and without @Captor, plus the stubbing caveat)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-callbacks" rel="noopener">Testing Callbacks with Mockito — Baeldung (captor vs doAnswer for callback arguments)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IG3tqM9OOmk" rel="noopener">Argument Matchers vs Argument Capture in Mockito — Sourabh Shrivastava (Mockito + JUnit 5 series)</a></li>
+    </ul>
+
+    <h3>Custom return values with Answer</h3>
+    <p>When a fixed <code>thenReturn</code> is too rigid, <code>thenAnswer(Answer)</code> (or <code>doAnswer</code> for void methods) computes the result from the actual invocation. Its single method receives an <code>InvocationOnMock</code> exposing the arguments and the mock itself — so you can echo an argument back, return different values by input, simulate a generated id, or invoke a passed-in callback. Mockito's <code>AdditionalAnswers</code> ships ready-made ones like <code>returnsFirstArg()</code>.</p>
+    <p>Why it matters: it models stateful or input-dependent collaborators without hand-writing a fake. The tasteful boundary — asked in senior rounds — is that heavy logic inside an Answer is a smell; if the stub grows a brain, a hand-written fake or the real object reads better.</p>
+    <pre class="code-block" data-label="Java"><code>when(repo.save(any(User.class))).thenAnswer(inv -&gt; {
+    User u = inv.getArgument(0);   // read the real argument
+    return u.withId(99L);          // simulate a DB-assigned id
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/stubbing/Answer.html" rel="noopener">Answer — Mockito Javadoc (the answer(InvocationOnMock) contract)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-doanswer-thenreturn" rel="noopener">doAnswer() vs thenReturn() — Baeldung (when a dynamic answer is required)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-additionalanswers" rel="noopener">Introduction to Mockito's AdditionalAnswers — Baeldung (returnsFirstArg and friends)</a></li>
+    </ul>
+
+    <h3>Spies and partial mocks</h3>
+    <p>A spy wraps a <em>real</em> instance: unstubbed methods run the genuine implementation while every interaction is still recorded for verification, and chosen methods can be overridden. It is the tool for legacy code you cannot easily inject into, or for stubbing one method of an otherwise-real object. Create one with <code>spy(obj)</code> or <code>@Spy</code>.</p>
+    <p>Why it matters: the interview trap is stubbing syntax. <code>when(spy.get(0)).thenReturn(x)</code> actually <em>calls</em> the real <code>get(0)</code> first (which may throw); the safe form is <code>doReturn(x).when(spy).get(0)</code>, which never invokes the real method. Knowing why the doReturn family exists is a reliable senior signal — and a spy on a huge class usually means the class should be split.</p>
+    <pre class="code-block" data-label="Java"><code>List&lt;String&gt; spy = spy(new ArrayList&lt;&gt;());
+doReturn(100).when(spy).size();  // safe: real size() never runs
+spy.add("x");                    // real add() DOES run
+verify(spy).add("x");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html" rel="noopener">Mockito — main reference Javadoc (§13 spying on real objects, doReturn family)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-spy" rel="noopener">Mockito — Using Spies — Baeldung (spy vs mock, the doReturn stubbing pitfall)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-annotations" rel="noopener">@Mock, @Spy, @Captor and @InjectMocks — Baeldung (the annotation forms)</a></li>
+    </ul>
+
+    <h3>BDD-style stubbing with BDDMockito</h3>
+    <p><code>BDDMockito</code> renames the same behaviour to match Behaviour-Driven Development phrasing: the arrange step reads <code>given(mock.call()).willReturn(x)</code> instead of <code>when(...).thenReturn(...)</code>, and the assert step reads <code>then(mock).should().call()</code> instead of <code>verify(mock).call()</code>. It aligns test code with the given/when/then structure teams already use in specs.</p>
+    <p>Why it matters: many Spring codebases adopt this style, so recognising <code>given/willReturn/then/should</code> is expected. For void methods the order flips to <code>willThrow(ex).given(mock).voidCall()</code> — a detail interviewers like to probe because it mirrors the <code>doThrow().when()</code> reordering.</p>
+    <pre class="code-block" data-label="Java"><code>given(repo.findById(1L)).willReturn(Optional.of(user));  // arrange
+service.activate(1L);                                     // act
+then(repo).should().save(user);                          // assert interaction</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/BDDMockito.html" rel="noopener">BDDMockito — Mockito Javadoc (given/willReturn/then/should aliases)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/bdd-mockito" rel="noopener">Quick Guide to BDDMockito — Baeldung (full given/then walkthrough, incl. void methods)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-mockito-when-vs-do" rel="noopener">when() vs doXxx() Methods — Baeldung (why the argument-order differs for void)</a></li>
+    </ul>
+
+    <h3>Mocking static and final methods</h3>
+    <p>Since 5.0.0, plain <code>mockito-core</code> can mock static and final methods (the inline mock maker is the default; before that you added the separate <code>mockito-inline</code> artifact). <code>mockStatic(Utility.class)</code> returns a <code>MockedStatic</code> — a thread-local, scoped mock you stub with <code>mocked.when(Utility::now).thenReturn(...)</code>. It must be closed, which is why it lives inside try-with-resources; leaving it open leaks the mock onto the thread and corrupts later tests.</p>
+    <p>Why it matters: this is the module's headline interview topic. Be ready to write the try-with-resources block, explain the thread-local scope, and — the mature answer — note that needing to mock a static call often signals a design you do not own; wrapping it behind an injectable interface is usually cleaner than reaching for <code>mockStatic</code>.</p>
+    <pre class="code-block" data-label="Java"><code>try (MockedStatic&lt;Instant&gt; mocked = mockStatic(Instant.class)) {
+    mocked.when(Instant::now).thenReturn(FIXED);
+    assertEquals(FIXED, Instant.now());
+}   // static mock released here — scoped to this thread and block</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/MockedStatic.html" rel="noopener">MockedStatic — Mockito Javadoc (thread-local scope, close(), try-with-resources)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-mock-static-methods" rel="noopener">Mocking Static Methods With Mockito — Baeldung (mockStatic with and without arguments)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-core-vs-mockito-inline" rel="noopener">Mockito Core vs Mockito Inline — Baeldung (what changed in Mockito 5, final/static support)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sq69ejtcimc" rel="noopener">Mockito Static Method in JUnit — Sourabh Shrivastava (Mockito + JUnit 5 series)</a></li>
+    </ul>
+
+    <h3>Pitfalls and anti-patterns</h3>
+    <p>Advanced features are also the fastest way to write bad tests. The recurring offenders: over-mocking (mocking value objects or types you do not own instead of using the real thing), leaving a <code>MockedStatic</code> unclosed so it bleeds into the next test, stubbing on a spy with <code>when(...)</code> and triggering the real method, and dead stubs that <code>MockitoExtension</code>'s strict mode rejects with <code>UnnecessaryStubbingException</code>. Strict stubbing is a feature, not a nuisance — reach for <code>lenient()</code> only when a shared setup genuinely justifies it.</p>
+    <p>Why it matters: a senior answer is not "here is another Mockito method" but "here is when <em>not</em> to mock." Tests coupled to interaction detail break on every refactor; the discipline is to mock roles and boundaries, assert on observable behaviour, and let strict stubbing keep the suite honest.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://site.mockito.org/" rel="noopener">Mockito — official site (framework home, points to the main reference and good-tests guides)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mockito-unnecessary-stubbing-exception" rel="noopener">Strict Stubbing and UnnecessaryStubbingException — Baeldung (why it fires, and lenient())</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-mockito-basics.html">← Mockito Fundamentals</a>
+    <a href="index.html">All Backend Testing modules</a>
+    <a href="06-tdd.html">Test-Driven Development →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked advanced Mockito questions in Indian interviews — ArgumentCaptor and static mocking dominate the product-company rounds:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is ArgumentCaptor and when do you use it?</summary>
+      <div class="answer"><p>A helper that captures the actual argument passed to a mocked method so you can assert on it. Use it when the argument is built inside the code under test and never returned to the caller — e.g. an event or email object handed to a collaborator. Call <code>captor.capture()</code> inside <code>verify(...)</code>, then read <code>getValue()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a spy and how does it differ from a mock?</summary>
+      <div class="answer"><p>A mock is a bare shell — every method returns a default (null/0/empty) until stubbed. A spy wraps a real object: unstubbed methods run the real code while interactions are still recorded. Use a spy for partial mocking, when you need most of the real behaviour but want to override one or two methods.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you write BDD-style stubs in Mockito?</summary>
+      <div class="answer"><p>Use <code>BDDMockito</code>: arrange with <code>given(mock.call()).willReturn(x)</code> and assert with <code>then(mock).should().call()</code> — semantic aliases for <code>when/thenReturn</code> and <code>verify</code>. It aligns the test with the given/when/then structure of BDD specs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> ArgumentCaptor vs ArgumentMatcher — when to use which?</summary>
+      <div class="answer"><p>Matchers (like <code>any()</code>, <code>eq()</code>) belong in stubbing and verification to <em>select</em> which calls apply. A captor is for <em>inspecting</em> the argument after the fact. Rule: don't drive stubbing with a captor — use a matcher to choose behaviour, and reserve the captor for verifying complex arguments you then assert on.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> thenReturn vs thenAnswer (and doAnswer) — what's the difference?</summary>
+      <div class="answer"><p><code>thenReturn</code> gives a fixed, pre-computed value. <code>thenAnswer(Answer)</code> computes the result at call time from the <code>InvocationOnMock</code> — access to the real arguments and mock — so you can echo an argument, vary by input, or trigger a callback. <code>doAnswer</code> is the void-method / spy-safe equivalent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why prefer doReturn().when(spy) over when(spy.method())?</summary>
+      <div class="answer"><p>On a spy, <code>when(spy.method())</code> evaluates <code>spy.method()</code> for real before stubbing — which may run side effects or throw. <code>doReturn(x).when(spy).method()</code> stubs without invoking the real method. Same reason the <code>doThrow/doAnswer/doNothing</code> family exists.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you mock a static method, and why the try-with-resources?</summary>
+      <div class="answer"><p><code>mockStatic(Utility.class)</code> returns a <code>MockedStatic</code> you stub via <code>mocked.when(Utility::call).thenReturn(...)</code>. It is a thread-local scoped mock that must be closed; try-with-resources guarantees <code>close()</code> so the static mock does not leak into subsequent tests on the same thread.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> mockito-core vs mockito-inline — what changed in Mockito 5?</summary>
+      <div class="answer"><p>Static and final mocking need the inline mock maker. Before Mockito 5 you added the separate <code>mockito-inline</code> dependency; from 5.0.0 the inline maker became the default in <code>mockito-core</code>, so plain mockito-core mocks statics and finals out of the box. <code>mockito-inline</code> is now effectively redundant.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Can Mockito mock final classes and final methods? How?</summary>
+      <div class="answer"><p>Yes, with the inline mock maker (default since Mockito 5; opt-in via mockito-inline before that). It uses bytecode instrumentation rather than a subclass, so final classes/methods and statics become mockable — something classic Mockito could not do and PowerMock was once needed for.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> getValue() vs getAllValues() on ArgumentCaptor?</summary>
+      <div class="answer"><p><code>getValue()</code> returns the last captured argument — fine when the method was called once. <code>getAllValues()</code> returns a <code>List</code> of every captured argument, used with <code>verify(mock, times(n))</code> to assert on each call in order.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is UnnecessaryStubbingException and how do you handle it?</summary>
+      <div class="answer"><p>Strict stubbing (default under <code>MockitoExtension</code>) fails the test if a configured stub is never used, catching dead setup and typos in arguments. Fix it by removing the unused stub or correcting the matcher; only when a shared setup legitimately isn't hit by every test do you downgrade that stub with <code>lenient()</code>. Blanket-lenient defeats the purpose.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the main anti-patterns of advanced mocking, and how do you avoid them?</summary>
+      <div class="answer"><p>Over-mocking (mocking value objects or types you don't own — use the real object or a thin adapter you do own), unclosed <code>MockedStatic</code> leaking across tests, spy-stubbing via <code>when()</code> that fires real methods, and asserting on interactions so tightly that any refactor breaks the test. The remedy is to mock roles at boundaries, prefer state/behaviour assertions over interaction counts, and treat "I must mock a static" as a hint to introduce an injectable seam instead.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Backend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>test.mock.captors</li>
+      <li>test.mock.static</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Backend Testing track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

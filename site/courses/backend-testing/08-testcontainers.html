@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Testcontainers module: why real databases and brokers beat H2 and mocks, GenericContainer and the module containers, JUnit 5 lifecycle, Spring Boot @ServiceConnection and container reuse — with the best official and community resources plus the interview questions it powers.">
+  <title>Integration Testing with Testcontainers — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Integration Testing with Testcontainers</h1>
+  <p class="standfirst">An in-memory H2 will happily pass tests your production Postgres would reject. Testcontainers boots the real database, broker or cache in Docker for the length of a test and throws it away afterwards — and interviewers probe exactly why that fidelity is worth the startup cost.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Backend Testing → Integration Testing with Testcontainers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Testcontainers is a library that gives a test a throwaway, Docker-backed instance of whatever it really depends on — PostgreSQL, Kafka, Redis, Elasticsearch, even a browser. This module orients you on the case for testing against real dependencies instead of H2 or mocks, how to create containers (<code>GenericContainer</code> and the typed module containers), how JUnit 5 manages their lifecycle, and the Spring Boot 3.1+ integration (<code>@ServiceConnection</code>) that wires a running container into your application context with almost no code. It builds directly on the previous module's Spring integration testing.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why real dependencies, not H2 or mocks</h3>
+    <p>An in-memory database is a different database. H2 in "PostgreSQL mode" still diverges on JSON/array columns, native queries, upserts, sequences, isolation levels and vendor functions — so a green test suite can hide bugs that only surface in production. Testcontainers removes that gap by running the <em>same</em> engine and version you deploy, started fresh per run and discarded when the JVM exits, with no shared local install to drift or pollute.</p>
+    <p>Why it matters: "why not just use H2?" is the single most common Testcontainers interview question. The answer is fidelity — you test the real SQL dialect, the real driver, the real broker semantics — traded against a few seconds of Docker startup, which reuse and shared containers largely reclaim.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/" rel="noopener">Testcontainers for Java — home (what it is and why)</a></li>
+      <li>[Official] <a href="https://testcontainers.com/guides/getting-started-with-testcontainers-for-java/" rel="noopener">Getting started with Testcontainers for Java — testcontainers.com guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/docker-test-containers" rel="noopener">Docker Test Containers in Java Tests — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=erp-7MCK5BU" rel="noopener">Spring Boot Testcontainers — Integration Testing made easy! — Dan Vega</a></li>
+    </ul>
+
+    <h3>Creating containers: GenericContainer and the module containers</h3>
+    <p>Two ways to declare a dependency. <code>GenericContainer</code> wraps any Docker image and is fully manual — you set exposed ports, environment variables and wait strategy yourself. The <em>module containers</em> (<code>PostgreSQLContainer</code>, <code>KafkaContainer</code>, <code>MongoDBContainer</code>, …) are typed subclasses that pre-configure the image, ports and readiness checks and expose helpers like <code>getJdbcUrl()</code>, <code>getUsername()</code>, <code>getPassword()</code>. Always parse the image with <code>DockerImageName.parse(...)</code> and pin an explicit tag so tests are reproducible.</p>
+    <pre class="code-block" data-label="Java"><code>@Container
+static PostgreSQLContainer&lt;?&gt; postgres =
+    new PostgreSQLContainer&lt;&gt;(DockerImageName.parse("postgres:16-alpine"));
+
+// GenericContainer for anything without a dedicated module:
+static GenericContainer&lt;?&gt; redis =
+    new GenericContainer&lt;&gt;(DockerImageName.parse("redis:7-alpine"))
+        .withExposedPorts(6379);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/features/creating_container/" rel="noopener">Creating a container (GenericContainer) — Testcontainers for Java</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/modules/databases/postgres/" rel="noopener">Postgres Module — Testcontainers for Java</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/testcontainers-jdbc-support" rel="noopener">Testcontainers JDBC Support (the jdbc:tc: URL scheme) — Baeldung</a></li>
+    </ul>
+
+    <h3>Container lifecycle and the JUnit 5 integration</h3>
+    <p><code>@Testcontainers</code> is the JUnit 5 extension that finds every <code>@Container</code> field and drives its start/stop. The lifecycle turns on the field's modifier: a <strong>static</strong> <code>@Container</code> starts once and is shared by all test methods in the class; an <strong>instance</strong> <code>@Container</code> restarts for every method — correct but slow. A container is not "ready" the instant it is running, so Testcontainers applies a <em>wait strategy</em> (port listening, a log-line regex, an HTTP probe or a Docker healthcheck) and only unblocks the test once the readiness check passes.</p>
+    <pre class="code-block" data-label="Java"><code>@Testcontainers
+class OrderRepositoryTest {
+
+    @Container
+    static PostgreSQLContainer&lt;?&gt; db =
+        new PostgreSQLContainer&lt;&gt;("postgres:16-alpine"); // started once, shared
+
+    @Test void persists() {
+        String url = db.getJdbcUrl(); // host + mapped port, resolved at runtime
+        // ... connect and assert against real Postgres
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/quickstart/junit_5_quickstart/" rel="noopener">JUnit 5 Quickstart — Testcontainers for Java</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/test_framework_integration/junit_5/" rel="noopener">Jupiter / JUnit 5 integration (@Testcontainers, @Container) — Testcontainers for Java</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/features/startup_and_waits/" rel="noopener">Waiting for containers to start or be ready (wait strategies) — Testcontainers for Java</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q-0Z6KZF1xM" rel="noopener">Spring Boot 3 Integration Testing with Testcontainers &amp; JUnit 5 — Java Techie</a></li>
+    </ul>
+
+    <h3>Spring Boot integration: @ServiceConnection and @DynamicPropertySource</h3>
+    <p>Before Spring Boot 3.1 you glued a container to the context by hand: start it, then push its host/port/credentials into the <code>Environment</code> with <code>@DynamicPropertySource</code>. Boot 3.1 added <code>@ServiceConnection</code> — annotate a supported container and Boot detects its type, builds a <code>ConnectionDetails</code> bean, and configures the datasource (or Kafka, Redis, Mongo, RabbitMQ…) automatically. <code>@DynamicPropertySource</code> is still the escape hatch for anything without service-connection support, or for arbitrary property keys.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootTest
+@Testcontainers
+class ApiIntegrationTest {
+
+    @Container
+    @ServiceConnection                       // Boot wires the DataSource for you
+    static PostgreSQLContainer&lt;?&gt; db =
+        new PostgreSQLContainer&lt;&gt;("postgres:16-alpine");
+
+    // Fallback when there is no @ServiceConnection support:
+    // @DynamicPropertySource
+    // static void props(DynamicPropertyRegistry r) {
+    //     r.add("spring.datasource.url", db::getJdbcUrl);
+    // }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers — Spring Boot reference (service connections &amp; dynamic properties)</a></li>
+      <li>[Official] <a href="https://spring.io/blog/2023/06/23/improved-testcontainers-support-in-spring-boot-3-1/" rel="noopener">Improved Testcontainers Support in Spring Boot 3.1 — Spring blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-built-in-testcontainers" rel="noopener">Built-in Testcontainers Support in Spring Boot (@ServiceConnection) — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-testcontainers-integration-test" rel="noopener">DB Integration Tests with Boot and Testcontainers — Baeldung</a></li>
+    </ul>
+
+    <h3>Sharing containers: the singleton pattern and reuse</h3>
+    <p>Startup cost multiplies if every test class spins up its own container. Two remedies: the <strong>singleton-container pattern</strong> — start one container in a shared base class (or a static initializer) so the whole suite reuses it within a single run — and <strong>reusable containers</strong>, an experimental opt-in (<code>withReuse(true)</code> plus <code>testcontainers.reuse.enable=true</code>) that leaves the container running <em>between</em> runs so repeated local test cycles skip startup entirely. Reuse is for local speed, not CI, where each pipeline should start clean; Ryuk, the sidecar reaper, otherwise tears containers down when the JVM ends.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/features/reuse/" rel="noopener">Reusable Containers (experimental) — Testcontainers for Java</a></li>
+      <li>[Guide] <a href="https://testcontainers.com/guides/testcontainers-container-lifecycle/" rel="noopener">Container lifecycle management using JUnit 5 (singleton pattern) — testcontainers.com</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-spring-integration-testing.html">← Spring Boot Integration Testing</a>
+    <a href="index.html">All Backend Testing modules</a>
+    <a href="09-api-contract-testing.html">API and Contract Testing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked Testcontainers questions in Indian interviews — a staple for backend and Spring Boot roles at product companies:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Testcontainers and what problem does it solve?</summary>
+      <div class="answer"><p>A Java library that provides lightweight, throwaway Docker instances of real dependencies — databases, message brokers, caches, browsers — for the duration of a test. It solves the fidelity vs. convenience trade-off: you test against the actual engine you run in production instead of an in-memory stand-in or a shared, drift-prone local install, and the container is created and destroyed automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why use a real database in tests instead of H2?</summary>
+      <div class="answer"><p>H2 is a different database. Even in "PostgreSQL compatibility mode" it diverges on JSON/array types, native queries, sequences, upserts, isolation levels and vendor functions — so tests can pass on H2 while the same SQL fails on production Postgres. Testcontainers runs the exact engine and version you deploy, closing that gap. The cost is a few seconds of Docker startup, recovered via shared/reused containers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the prerequisite for running Testcontainers?</summary>
+      <div class="answer"><p>A working Docker (or compatible) runtime the tests can reach — Docker Desktop, Colima, Podman, Testcontainers Cloud, or a Docker-in-Docker service in CI. If no Docker environment is available the containers cannot start; you can annotate tests to be skipped in that case rather than fail.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> GenericContainer vs a module container like PostgreSQLContainer?</summary>
+      <div class="answer"><p><code>GenericContainer</code> wraps any image but you configure ports, env vars and wait strategy manually. Module containers are typed subclasses that pre-set the image, ports and readiness check and add helpers such as <code>getJdbcUrl()</code>/<code>getUsername()</code>. Use the module when one exists; drop to <code>GenericContainer</code> for images without a dedicated module.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What do @Testcontainers and @Container do, and how does static vs instance change behaviour?</summary>
+      <div class="answer"><p><code>@Testcontainers</code> is the JUnit 5 extension that manages every <code>@Container</code> field's lifecycle. A <strong>static</strong> <code>@Container</code> starts once and is shared across all test methods in the class; an <strong>instance</strong> (non-static) <code>@Container</code> restarts for each method — isolated but much slower. Static is the usual choice for read-heavy or transactionally-rolled-back tests.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you connect the application to a container's random port?</summary>
+      <div class="answer"><p>Never hardcode ports — Testcontainers maps the container port to a random free host port to avoid clashes. Read it at runtime via <code>getMappedPort()</code>/<code>getHost()</code> or module helpers like <code>getJdbcUrl()</code>, then feed those into config. In Spring Boot use <code>@ServiceConnection</code> or <code>@DynamicPropertySource</code> so the values reach the <code>Environment</code> before the context starts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is @ServiceConnection and how does it differ from @DynamicPropertySource?</summary>
+      <div class="answer"><p><code>@ServiceConnection</code> (Spring Boot 3.1+) is put on a supported container; Boot detects its type, creates a <code>ConnectionDetails</code> bean and auto-configures the datasource/broker — zero property plumbing. <code>@DynamicPropertySource</code> is the older, manual approach: a static method that registers individual property keys (e.g. <code>spring.datasource.url</code>) from the container. Prefer <code>@ServiceConnection</code>; fall back to <code>@DynamicPropertySource</code> for unsupported containers or custom keys.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why are integration tests slow, and how does Spring context caching interact with containers?</summary>
+      <div class="answer"><p>Cost comes from container startup plus building the Spring context. Spring caches the context across test classes that share the same configuration, so keep configurations uniform to reuse it; combine that with a shared/static container so the database also starts once. Divergent <code>@MockitoBean</code>/<code>@TestPropertySource</code> setups fragment the cache and re-pay both costs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a wait strategy and why is it needed?</summary>
+      <div class="answer"><p>A running container is not necessarily ready to serve requests. A wait strategy blocks the test until readiness is proven — the default is a listening port, but you can wait on a log-message regex, an HTTP endpoint returning a status, or a Docker healthcheck. Module containers ship sensible defaults; custom images often need an explicit strategy to avoid flaky "connection refused" failures.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain the singleton-container pattern and when you would choose it.</summary>
+      <div class="answer"><p>Start one container in a shared abstract base class (or a static block) so every test class that extends it reuses the same instance for the whole run, instead of each class starting its own. You choose it when many test classes hit the same dependency and tests are isolated by transaction rollback or unique data rather than a fresh database — it cuts total startup dramatically while a static <code>@Container</code> alone only shares within one class.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are reusable containers, and why keep them out of CI?</summary>
+      <div class="answer"><p>Reuse (<code>withReuse(true)</code> plus <code>testcontainers.reuse.enable=true</code> in <code>~/.testcontainers.properties</code>) leaves a container running <em>between</em> test runs so repeated local cycles skip startup — Ryuk does not reap it. It is experimental and local-only: CI wants a clean, reproducible environment each run and ephemeral agents, so reuse there risks stale state and leaked containers. Use it to speed the inner dev loop, not the pipeline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the jdbc:tc: URL scheme and Ryuk?</summary>
+      <div class="answer"><p>The special JDBC URL (e.g. <code>jdbc:tc:postgresql:16:///test</code>) tells Testcontainers' JDBC driver proxy to start and manage a database container purely from the connection string — no explicit container code, useful for legacy setups. Ryuk is the sidecar "resource reaper" container Testcontainers launches to guarantee cleanup: it watches the test JVM and removes containers, networks and volumes when the session ends, even if the JVM crashes.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Backend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>test.tc.basics</li>
+      <li>test.tc.spring</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Backend Testing track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
