@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java Streams terminal operations and Collectors module: the collect/reduce/find/match family, the Collectors toolbox (groupingBy/partitioningBy/teeing/joining), Java 24 stream gatherers, and primitive and parallel streams with Spliterator — the best official docs, Baeldung guides and videos, plus the interview questions they power.">
+  <title>Streams: Terminal Ops and Collectors</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Streams — Terminal Operations and Collectors</h1>
+  <p class="standfirst">A stream does nothing until a terminal operation pulls the data through. This module covers where pipelines land — the collect/reduce/find family, the full Collectors toolbox, Java 24's stream gatherers, and the parallel-execution machinery you should reach for only after measuring.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Streams: Terminal Ops and Collectors</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Intermediate operations build the pipeline lazily; the terminal operation is what finally runs it and produces a result or side effect. This module orients you on the three ways streams end and combine: the terminal-operation family (reduce, collect, count, find, match), the <code>Collectors</code> factory that powers mutable reductions like grouping and partitioning, the new <code>Gatherer</code> API for custom intermediate steps, and primitive and parallel streams built on the <code>Spliterator</code>. Depth lives in the linked official docs — this page maps the territory and the interview ground.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Terminal ops, Collectors (groupingBy/partitioningBy/teeing/joining)</h3>
+    <p>A terminal operation consumes the stream and yields something concrete: a value (<code>count</code>, <code>reduce</code>, <code>min</code>/<code>max</code>), an optional element (<code>findFirst</code>, <code>findAny</code>), a boolean (<code>anyMatch</code>, <code>allMatch</code>, <code>noneMatch</code>), a side effect (<code>forEach</code>), or a container via <code>collect</code> and <code>toList</code>. Once a terminal op runs the pipeline is spent — a stream is single-use. The general form <code>reduce</code> needs an identity plus an associative accumulator, but for anything richer than a single scalar you reach for <code>collect</code> and a <code>Collector</code>.</p>
+    <p>Why it matters: <code>Collectors</code> is where most real aggregation happens, and <code>groupingBy</code> with a downstream collector is the single most-asked Streams idiom in Indian interviews — group employees by department, then <code>counting()</code>, <code>summingInt()</code>, or <code>mapping(...).collect(joining())</code> the groups. Round it out with <code>partitioningBy</code> (a two-key <code>Boolean</code> split), <code>joining</code> (delimiter/prefix/suffix), <code>toMap</code>, and <code>teeing</code> (fork every element to two collectors, then merge — Java 12).</p>
+    <pre class="code-block" data-label="Java"><code>// static import java.util.stream.Collectors.*
+Map&lt;Dept, Long&gt; headcount = employees.stream()
+    .collect(groupingBy(Employee::dept, counting()));
+
+Map&lt;Boolean, List&lt;Employee&gt;&gt; parts = employees.stream()
+    .collect(partitioningBy(e -&gt; e.salary() &gt; 100_000)); // both keys always present
+
+String names = employees.stream()
+    .map(Employee::name)
+    .collect(joining(", ", "[", "]"));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/api/streams/terminal-operations/" rel="noopener">Adding a Terminal Operation on a Stream — dev.java (count, forEach, reduce, find, match, short-circuiting)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Stream.html" rel="noopener">Stream — Java SE 25 API (Javadoc for every terminal operation, incl. collect/reduce/toList)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Collectors.html" rel="noopener">Collectors — Java SE 25 API (groupingBy, partitioningBy, teeing, joining and the full factory)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/api/streams/using-collectors/" rel="noopener">Using a Collector as a Terminal Operation — dev.java (grouping and partitioning walkthrough)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-collectors" rel="noopener">Guide to Java Collectors — Baeldung (the community-standard tour of the whole collector family)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FWoYpM-E3EQ" rel="noopener">Java Streams Tutorial — Coding with John</a></li>
+    </ul>
+
+    <h3>Stream gatherers (Stream::gather, built-in Gatherers)</h3>
+    <p>A gatherer (<code>java.util.stream.Gatherer</code>) is a user-defined intermediate operation — the intermediate-op counterpart to what <code>Collector</code> is for terminal ops — plugged into a pipeline with <code>Stream::gather</code>. It has up to four parts: an initializer (per-run state), an integrator (called per element, may emit zero or more downstream elements and may short-circuit), a combiner (for parallel evaluation), and a finisher (flush at end of stream). That shape lets gatherers transform elements one-to-one, one-to-many, many-to-one, or many-to-many, remember earlier elements to shape later ones, and even turn an infinite stream finite.</p>
+    <p>Why it matters: before gatherers, custom intermediate logic — sliding windows, running totals, dedupe-by-key, bounded concurrency — forced clumsy stateful lambdas or an escape from the pipeline entirely. The built-in <code>Gatherers</code> factory ships <code>windowFixed</code>, <code>windowSliding</code>, <code>fold</code>, <code>scan</code>, and <code>mapConcurrent</code> (concurrent mapping on virtual threads that preserves order). Gatherers finalized in JDK 24 via JEP 485 (previewed in 22 and 23), so on any current-LTS interview "what problem do gatherers solve, and how do they differ from collectors?" is fair game.</p>
+    <pre class="code-block" data-label="Java"><code>// windowSliding: many-to-many, remembers prior elements
+List&lt;List&lt;Integer&gt;&gt; windows =
+    Stream.of(1, 2, 3, 4, 5).gather(Gatherers.windowSliding(2)).toList();
+// [[1, 2], [2, 3], [3, 4], [4, 5]]
+
+// scan: a running prefix reduction (each intermediate result is emitted)
+List&lt;String&gt; running =
+    Stream.of(1, 2, 3, 4).gather(Gatherers.scan(() -&gt; "", (s, n) -&gt; s + n)).toList();
+// ["1", "12", "123", "1234"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Gatherer.html" rel="noopener">Gatherer — Java SE 25 API (the interface: initializer/integrator/combiner/finisher, Stream::gather)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Gatherers.html" rel="noopener">Gatherers — Java SE 25 API (windowFixed, windowSliding, fold, scan, mapConcurrent)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/api/streams/gatherers/" rel="noopener">The Gatherer API — dev.java (when to reach for a gatherer, with examples)</a></li>
+      <li>[Spec] <a href="https://openjdk.org/jeps/485" rel="noopener">JEP 485: Stream Gatherers — OpenJDK (the design rationale, finalized in JDK 24)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-stream-gatherers" rel="noopener">Stream Gatherers in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Primitive streams, parallel streams + Spliterator, when NOT to parallelize</h3>
+    <p>Primitive streams — <code>IntStream</code>, <code>LongStream</code>, <code>DoubleStream</code> — avoid the cost of boxing every element and add numeric terminal ops: <code>sum</code>, <code>average</code>, <code>min</code>, <code>max</code>, and <code>summaryStatistics</code> (all five in one pass). You cross over with <code>mapToInt</code>/<code>mapToObj</code>/<code>boxed</code>. Parallel streams (<code>parallelStream()</code> or <code>.parallel()</code>) split work across the shared common <code>ForkJoinPool</code> by recursively decomposing the source; the engine that does the splitting is the <code>Spliterator</code> (a "splittable iterator") whose <code>trySplit</code> hands off a chunk and whose characteristics — <code>SIZED</code>, <code>SUBSIZED</code>, <code>ORDERED</code>, <code>IMMUTABLE</code> — tell the framework how evenly it can divide and whether order and size are known up front.</p>
+    <p>Why it matters: parallel is not free, and "when would you NOT parallelize?" is a senior-round favorite. Splitting, thread hand-off, and merging all cost, so a parallel stream is often slower than a sequential one. Favor it only for large element counts with cheaply, evenly splittable sources (arrays, <code>ArrayList</code>, range-based <code>IntStream</code>) doing CPU-bound, stateless, associative, side-effect-free work — and always measure. Avoid it for small data, I/O-bound tasks, ordered or stateful operations, poorly splitting sources (<code>LinkedList</code>, <code>iterate</code>), or shared mutable state. Remember too that the whole JVM shares one common pool, so a blocking parallel stream can starve every other one.</p>
+    <pre class="code-block" data-label="Java"><code>IntSummaryStatistics stats = employees.stream()
+    .mapToInt(Employee::salary)   // primitive stream: no boxing
+    .summaryStatistics();         // count, sum, min, average, max together
+
+long hits = LongStream.rangeClosed(2, 1_000_000)
+    .parallel()                   // splits across the common ForkJoinPool
+    .filter(MyMath::isPrime)
+    .count();                     // profile before assuming this beats sequential</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/IntStream.html" rel="noopener">IntStream — Java SE 25 API (primitive stream: sum, average, summaryStatistics, boxed)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/package-summary.html" rel="noopener">java.util.stream package summary — Java SE 25 API (parallelism, reduction, associativity rules)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/Spliterator.html" rel="noopener">Spliterator — Java SE 25 API (trySplit and the characteristics that govern split quality)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/api/streams/parallel-streams/" rel="noopener">Parallelizing Streams — dev.java (fork/join decomposition and the rules of thumb)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-when-to-use-parallel-stream" rel="noopener">When to Use a Parallel Stream in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=exlaPH9lfYk" rel="noopener">Java Parallel Streams Internals: Parallel Processing via the Common Fork-Join Pool — Defog Tech</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="14-streams-intermediate.html">← Streams: Pipeline and Intermediate Ops</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="16-concurrency-basics.html">Concurrency: Threads and Memory Model →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked terminal-ops and Collectors questions in Indian interviews — streams are a screening staple and the collector idioms recur in every product-company round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a terminal operation, and how does it differ from an intermediate one?</summary>
+      <div class="answer"><p>A terminal operation triggers the pipeline and produces a result or side effect (<code>collect</code>, <code>reduce</code>, <code>count</code>, <code>forEach</code>, <code>findFirst</code>, <code>anyMatch</code>). It consumes the stream, so a stream is single-use. Intermediate operations (<code>map</code>, <code>filter</code>) are lazy, return a new <code>Stream</code>, and do nothing until a terminal op runs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does collect() do, and what is a Collector?</summary>
+      <div class="answer"><p><code>collect</code> performs a mutable reduction — it accumulates elements into a container. A <code>Collector</code> is the recipe: a supplier (new container), an accumulator (add one element), a combiner (merge two containers, used in parallel), and an optional finisher. The <code>Collectors</code> factory supplies ready-made ones like <code>toList</code>, <code>groupingBy</code>, and <code>joining</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Stream.toList() vs Collectors.toList() — any difference?</summary>
+      <div class="answer"><p>Yes. <code>Stream.toList()</code> (Java 16) returns an <em>unmodifiable</em> list. <code>collect(Collectors.toList())</code> returns a mutable list with no guarantee about the exact type or mutability. Prefer <code>Stream.toList()</code> unless you specifically need to mutate the result.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a primitive stream and why use one?</summary>
+      <div class="answer"><p><code>IntStream</code>/<code>LongStream</code>/<code>DoubleStream</code> hold primitives directly, avoiding autobox/unbox overhead, and add numeric terminals — <code>sum</code>, <code>average</code>, <code>min</code>, <code>max</code>, <code>summaryStatistics</code>. Convert with <code>mapToInt</code> going in and <code>boxed</code>/<code>mapToObj</code> coming out.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three forms of reduce()?</summary>
+      <div class="answer"><p><code>reduce(accumulator)</code> returns an <code>Optional</code>; <code>reduce(identity, accumulator)</code> returns a plain value; <code>reduce(identity, accumulator, combiner)</code> adds a combiner for parallel streams (and when input and result types differ). The accumulator must be associative and the identity must be a true identity for correct parallel results.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Show groupingBy with a downstream collector.</summary>
+      <div class="answer"><p>The second argument post-processes each group: <code>groupingBy(Employee::dept, counting())</code> gives headcount per department; <code>groupingBy(Employee::dept, summingInt(Employee::salary))</code> totals salary; <code>groupingBy(Employee::dept, mapping(Employee::name, joining(", ")))</code> concatenates names. A word-frequency map is just <code>groupingBy(identity(), counting())</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> partitioningBy vs groupingBy?</summary>
+      <div class="answer"><p><code>partitioningBy(predicate)</code> always returns a <code>Map&lt;Boolean, ...&gt;</code> with <em>both</em> <code>true</code> and <code>false</code> keys present, even if one side is empty. <code>groupingBy(classifier)</code> creates a key per distinct classifier value, and keys with no elements simply don't appear. Use partitioning for a yes/no split, grouping for many buckets.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the teeing collector?</summary>
+      <div class="answer"><p><code>teeing(downstream1, downstream2, merger)</code> (Java 12) feeds every element to two collectors and combines their results with a <code>BiFunction</code> in a single pass — for example computing an average and a count together, or min and max, without streaming the data twice.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a parallel stream execute, and which pool runs it?</summary>
+      <div class="answer"><p>It recursively decomposes the source via <code>Spliterator.trySplit</code>, runs the leaf chunks on the shared common <code>ForkJoinPool</code> (with work-stealing), and merges results with the combiner. Default parallelism is roughly the number of available processors minus one — every parallel stream in the JVM shares this one pool unless you submit the pipeline inside your own <code>ForkJoinPool</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a Spliterator and why does it affect parallel performance?</summary>
+      <div class="answer"><p>A Spliterator is a splittable iterator: <code>trySplit</code> hands off a portion of the elements for another thread to process. Its characteristics — <code>SIZED</code>, <code>SUBSIZED</code>, <code>ORDERED</code>, <code>IMMUTABLE</code> — tell the framework how well and how evenly it can split. Arrays and <code>ArrayList</code> split cleanly in half; <code>LinkedList</code> and <code>iterate</code>-based streams split poorly, which cripples parallel speedup.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are stream gatherers, and how do they relate to collectors?</summary>
+      <div class="answer"><p>Gatherers (<code>Stream::gather</code> with a <code>Gatherer</code>) are custom <em>intermediate</em> operations — the intermediate-op analogue of a <code>Collector</code>, which is terminal. They can be one-to-many or many-to-many, keep state across elements, and short-circuit. Built-ins include <code>windowFixed</code>, <code>windowSliding</code>, <code>fold</code>, <code>scan</code>, and <code>mapConcurrent</code>. Finalized in JDK 24 (JEP 485).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When should you NOT use a parallel stream?</summary>
+      <div class="answer"><p>When the dataset is small, the per-element work is cheap, or the task is I/O-bound (threads block, no speedup); when the source splits poorly (<code>LinkedList</code>, <code>iterate</code>); when the pipeline is order-sensitive, stateful, or short-circuits early; and whenever there is shared mutable state (races). Also beware blocking calls inside a parallel stream — they tie up the common pool and starve other parallel work. Default to sequential and switch only after profiling proves a win.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can findFirst be more expensive than findAny on a parallel ordered stream?</summary>
+      <div class="answer"><p><code>findFirst</code> must honor encounter order, so it cannot just return the first match any thread happens to find — it has to coordinate to identify the earliest one. <code>findAny</code> drops that constraint and returns whatever a thread finds first, which is cheaper in parallel. The same order-vs-speed trade-off separates <code>forEach</code> (unordered, faster) from <code>forEachOrdered</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What must a reduction satisfy to be correct in parallel?</summary>
+      <div class="answer"><p>The identity must be a genuine identity (<code>combine(identity, x)</code> equals <code>x</code>), and the accumulator and combiner must be associative and mutually consistent; the behavioral parameters must be stateless, non-interfering, and side-effect-free. Violate these and parallel results become nondeterministic while sequential ones look fine. For concurrent collection into a map, use <code>groupingByConcurrent</code> with an unordered stream so threads can merge into one shared container safely.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.stream.terminal</li>
+      <li>java.stream.gatherers</li>
+      <li>java.stream.parallel</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

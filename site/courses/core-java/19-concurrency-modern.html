@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java modern concurrency module: virtual threads (Project Loom, final in Java 21) and scoped values, structured concurrency with StructuredTaskScope (still preview in Java 26), and deadlock/livelock/starvation with detection and the common concurrency bugs — with the best official and community resources plus the interview questions they power.">
+  <title>Concurrency: Virtual Threads and Modern</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Concurrency — Virtual Threads and Modern</h1>
+  <p class="standfirst">Project Loom rewrote what "a thread" costs in Java. This module covers the modern concurrency toolkit — virtual threads and scoped values, structured concurrency (still baking as a preview), and the liveness failures every interviewer still asks about — then points you at the source docs that go deep.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Concurrency: Virtual Threads and Modern</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the frontier of Java concurrency: <code>virtual threads</code> (final in Java 21) and the <code>scoped values</code> that replace <code>ThreadLocal</code> for passing context, <code>structured concurrency</code> via <code>StructuredTaskScope</code> — a feature still in preview as of Java 26 — and the classic liveness failures (deadlock, livelock, starvation) plus how to detect them and the everyday concurrency bugs that cause them. Virtual threads are the single most-hyped Java feature of the last few releases and now a screening staple in Indian interviews, so they lead. Where an API is still preview, this page says so plainly.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Virtual threads (Loom), scoped values</h3>
+    <p>Virtual threads (Project Loom, final in Java 21 via JEP 444) are lightweight threads scheduled by the JVM rather than the operating system. Many virtual threads are multiplexed (M:N) onto a small pool of platform <em>carrier</em> threads by a work-stealing scheduler; when a virtual thread hits a blocking call — I/O, a lock, <code>BlockingQueue.take()</code> — it <em>unmounts</em> from its carrier so another can run, and remounts later to continue. The payoff is that the simple thread-per-request, blocking style now scales to millions of concurrent tasks: you write straightforward synchronous code and get throughput that previously demanded reactive frameworks. Create them with <code>Thread.startVirtualThread(...)</code>, <code>Thread.ofVirtual()</code>, or <code>Executors.newVirtualThreadPerTaskExecutor()</code> — and never pool them (they are cheap to create); cap access to scarce resources with a <code>Semaphore</code> instead.</p>
+    <p>Scoped values (final in Java 25 via JEP 506) are the companion for passing context — a current user, a request id, a transaction — down a call chain without threading it through every method parameter, and without <code>ThreadLocal</code>'s baggage. A scoped value is immutable, bound only for the dynamic duration of a <code>run()</code>/<code>call()</code> lambda, and unbound automatically when that lambda returns, so it can never leak; it is also inherited cheaply by child threads under structured concurrency, which matters when you fan out across thousands of virtual threads. Why it matters: "what are virtual threads and how do they differ from platform threads" and "what replaces ThreadLocal now" are near-guaranteed questions.</p>
+    <pre class="code-block" data-label="Java"><code>Thread.startVirtualThread(() -&gt; log.info("hi"));          // one-off virtual thread
+
+try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (var task : tasks) pool.submit(task);             // a NEW thread per task, not a pool
+}                                                         // millions of tasks are fine
+
+static final ScopedValue&lt;User&gt; CURRENT = ScopedValue.newInstance();
+ScopedValue.where(CURRENT, user).run(() -&gt; handle());     // bound only for this scope
+// ...deep in the call stack, with no parameter passing:
+User u = CURRENT.get();                                   // auto-unbound when run() returns</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/new-features/virtual-threads/" rel="noopener">Virtual Threads — dev.java (Oracle's official tutorial: creating, scheduling, pinning, thread-locals)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html" rel="noopener">Virtual Threads — Java SE 21 Core Libraries Guide (mounting/unmounting, JFR events, adoption advice)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/444" rel="noopener">JEP 444: Virtual Threads — OpenJDK (the proposal that made them final in JDK 21)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/ScopedValue.html" rel="noopener">ScopedValue — Java SE 25 API (Javadoc; final, non-preview in Java 25)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/506" rel="noopener">JEP 506: Scoped Values — OpenJDK (finalized in JDK 25; the ThreadLocal alternative)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-virtual-thread-vs-thread" rel="noopener">Difference Between Thread and Virtual Thread in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z17QckCZ6fA" rel="noopener">Java Virtual Threads — Detailed Explanation With Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Structured concurrency (still preview as of Java 26)</h3>
+    <p>Structured concurrency treats a group of concurrent subtasks as a single unit of work. Using <code>StructuredTaskScope</code> inside a try-with-resources block, you <code>fork()</code> each subtask (each runs on its own virtual thread) and then <code>join()</code> them together: if one subtask fails, the rest are cancelled; when the scope exits, no subtask can outlive it. That removes the classic hazards of raw <code>ExecutorService</code> and <code>CompletableFuture</code> — leaked threads, orphaned work, swallowed exceptions, cancellation that never propagates — and lets concurrent code read with the same block structure as sequential code, while thread dumps show the real parent-child hierarchy.</p>
+    <p>The caveat matters for both interviews and production: structured concurrency is <strong>still a preview feature as of Java 26</strong> (JEP 525, its sixth preview), so it requires <code>--enable-preview</code> and its API is still moving. Java 25 reworked it substantially — public constructors gave way to the <code>StructuredTaskScope.open()</code> factory, and a separate <code>Joiner</code> now defines the completion policy (composition over inheritance) in place of the old <code>ShutdownOnFailure</code>/<code>ShutdownOnSuccess</code> subclasses. Learn the shape and state the caveat; do not assume the surface is frozen.</p>
+    <pre class="code-block" data-label="Java"><code>// Preview in Java 25/26 — compile and run with --enable-preview
+try (var scope = StructuredTaskScope.open()) {           // default policy: all-succeed-or-throw
+    Subtask&lt;User&gt;    user  = scope.fork(() -&gt; findUser(id));
+    Subtask&lt;Integer&gt; order = scope.fork(() -&gt; fetchOrder(id));
+    scope.join();                                        // wait for all; a failure cancels the rest
+    return new Response(user.get(), order.get());
+}                                                        // subtasks cannot outlive this block</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://openjdk.org/jeps/525" rel="noopener">JEP 525: Structured Concurrency (Sixth Preview) — OpenJDK (targets JDK 26; confirms still-preview status)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/StructuredTaskScope.html" rel="noopener">StructuredTaskScope — Java SE 25 API (Javadoc; marked PREVIEW, shows open()/fork()/join())</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-structured-concurrency" rel="noopener">Structured Concurrency in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Deadlock/livelock/starvation + detection, common concurrency bugs</h3>
+    <p>These are <em>liveness</em> failures — the program is running but no longer making progress. <strong>Deadlock</strong>: two or more threads each hold a lock the other needs, forming a circular wait; it requires all four Coffman conditions (mutual exclusion, hold-and-wait, no preemption, circular wait), so breaking any one prevents it. <strong>Livelock</strong>: threads keep reacting to one another and changing state but never advance — like two people repeatedly stepping the same way to pass in a corridor. <strong>Starvation</strong>: a thread runs but is perpetually denied a resource it needs, because an unfair lock or a greedy neighbour keeps taking it first.</p>
+    <p>Detect a deadlock in a running JVM with a thread dump — <code>jstack &lt;pid&gt;</code> or <code>jcmd &lt;pid&gt; Thread.print</code> — which prints "Found one Java-level deadlock" and the exact cycle of threads and locks; VisualVM and JConsole surface it in a GUI, and <code>ThreadMXBean.findDeadlockedThreads()</code> reports it programmatically. Beyond deadlock, the common concurrency bugs interviewers probe are race conditions, <em>visibility</em> bugs (a missing <code>volatile</code>/<code>synchronized</code> so one thread never sees another's write), check-then-act and other non-atomic compound actions, and unsafe publication. Prevention beats cure: acquire multiple locks in a globally consistent order, prefer <code>tryLock</code> with a timeout, keep critical sections small, and reach for <code>java.util.concurrent</code> constructs over hand-rolled locking. Why it matters: "what is a deadlock, and how do you detect and prevent it" is one of the most reliably asked concurrency questions in Indian interviews.</p>
+    <pre class="code-block" data-label="Java"><code>// Deadlock: T1 locks A then B; T2 locks B then A -&gt; circular wait, both stuck.
+// Fix: impose a global order so every thread takes the lower-id lock first.
+void transfer(Account a, Account b, long amount) {
+    Account first  = a.id() &lt; b.id() ? a : b;
+    Account second = a.id() &lt; b.id() ? b : a;
+    synchronized (first) {
+        synchronized (second) { /* move funds */ }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/concurrency/liveness.html" rel="noopener">Liveness: Deadlock, Starvation and Livelock — The Java Tutorials (Oracle)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-deadlock-livelock" rel="noopener">Java Thread Deadlock and Livelock — Baeldung (detection with a thread dump, prevention)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-common-concurrency-pitfalls" rel="noopener">Common Concurrency Pitfalls in Java — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="18-concurrency-atomics.html">← Concurrency: Atomics and Synchronizers</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="20-jvm.html">The JVM →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Modern-concurrency questions dominate current Indian interview loops — virtual threads especially. Ordered easiest first, hardest last:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a virtual thread, and how does it differ from a platform thread?</summary>
+      <div class="answer"><p>A platform thread is a thin wrapper over an OS thread — expensive (a large, mostly fixed stack), so you get at most a few thousand. A virtual thread is a lightweight thread scheduled by the JVM, not the OS: it lives on the heap, costs very little, and you can run millions. Many virtual threads are multiplexed onto a small set of platform "carrier" threads. Both are <code>java.lang.Thread</code>; the difference is who schedules them and how cheap they are. Virtual threads became final in Java 21 (JEP 444).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you create and run a virtual thread?</summary>
+      <div class="answer"><p><code>Thread.startVirtualThread(runnable)</code> for a one-off; <code>Thread.ofVirtual().name("x").start(runnable)</code> via the builder; or, most commonly, <code>Executors.newVirtualThreadPerTaskExecutor()</code>, which starts a new virtual thread for every submitted task. That executor is <code>AutoCloseable</code>, so use it in a try-with-resources block that waits for all tasks to finish.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why shouldn't you pool virtual threads?</summary>
+      <div class="answer"><p>Pools exist to reuse <em>expensive</em> resources. Virtual threads are cheap to create and effectively unlimited, so pooling them just adds contention and defeats the point. The idiom is one virtual thread per task. To limit concurrent access to a genuinely scarce resource (say a database with 10 connections), cap it with a <code>Semaphore</code>, not a thread pool.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a deadlock?</summary>
+      <div class="answer"><p>Two or more threads blocked forever, each holding a lock the other needs — a circular wait. Classic case: thread 1 holds lock A and wants B, while thread 2 holds B and wants A, so neither proceeds. It needs all four Coffman conditions (mutual exclusion, hold-and-wait, no preemption, circular wait); break any one to prevent it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Deadlock vs livelock vs starvation?</summary>
+      <div class="answer"><p><strong>Deadlock</strong> — threads are stuck waiting on each other and do nothing. <strong>Livelock</strong> — threads keep running and changing state in response to each other but still make no progress (two people repeatedly stepping the same way in a hallway). <strong>Starvation</strong> — a thread runs but is perpetually denied a resource (CPU time or a lock) because others keep taking it first, often due to unfair scheduling or priorities.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How are virtual threads scheduled — what are mounting and unmounting?</summary>
+      <div class="answer"><p>The JDK runs a work-stealing <code>ForkJoinPool</code> (in FIFO mode) of platform carrier threads. A runnable virtual thread is <em>mounted</em> on a carrier and executes; when it blocks (blocking I/O, a <code>BlockingQueue</code>, most <code>java.util.concurrent</code> locks) it <em>unmounts</em>, freeing the carrier to run another virtual thread, and its stack lives on the heap until it remounts to continue. This M:N multiplexing is what lets a handful of OS threads serve millions of virtual threads.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is pinning, and what changed in JDK 24?</summary>
+      <div class="answer"><p>Pinning is when a mounted virtual thread cannot unmount from its carrier, so a blocking call there also blocks the carrier — losing the scalability benefit. Historically (JDK 21–23) it happened inside <code>synchronized</code> blocks/methods and during native (JNI) calls. JEP 491 (JDK 24) reworked object monitors so <code>synchronized</code> no longer pins; native calls can still pin. Diagnose it with the <code>jdk.VirtualThreadPinned</code> JFR event. The older advice to swap <code>synchronized</code> for <code>ReentrantLock</code> is mostly unnecessary on JDK 24+.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What are scoped values, and why prefer them over ThreadLocal?</summary>
+      <div class="answer"><p>A scoped value (final in Java 25, JEP 506) shares an immutable value with all code called inside a bounded dynamic scope — <code>ScopedValue.where(KEY, value).run(() -&gt; ...)</code> — and the binding disappears automatically when that lambda returns. Versus <code>ThreadLocal</code>: it is immutable (no surprise mutation), has a clear bounded lifetime (no <code>set()</code>/<code>remove()</code> leaks), and is inherited cheaply by child threads in structured concurrency. That last point matters with virtual threads, where per-thread ThreadLocal copies across millions of threads are wasteful.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you detect a deadlock in a running JVM?</summary>
+      <div class="answer"><p>Take a thread dump — <code>jstack &lt;pid&gt;</code> or <code>jcmd &lt;pid&gt; Thread.print</code> — which explicitly reports "Found one Java-level deadlock" and shows the cycle of threads plus the locks each holds and awaits. VisualVM and JConsole detect and highlight it in a GUI, and <code>ThreadMXBean.findDeadlockedThreads()</code> returns the involved thread ids programmatically. Once you can see the cycle, the fix is usually a consistent lock-acquisition order.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is structured concurrency, and what does StructuredTaskScope give you?</summary>
+      <div class="answer"><p>It scopes a group of concurrent subtasks to a block so they behave as one unit. Inside a try-with-resources <code>StructuredTaskScope</code> you <code>fork()</code> each subtask (on its own virtual thread) and <code>join()</code> them; if one fails the scope cancels the others, and none can outlive the block. That yields reliable error propagation, no leaked threads, and thread dumps that show the parent-child hierarchy. Note it is still a <em>preview</em> feature as of Java 26 (JEP 525), so it needs <code>--enable-preview</code> and its API is still evolving.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why do ThreadLocals become a problem at virtual-thread scale?</summary>
+      <div class="answer"><p>ThreadLocals hold per-thread mutable state for the life of the thread. With a few pooled platform threads that is fine; with millions of short-lived virtual threads each value is duplicated per thread, inflating memory, and inheritable ThreadLocals copy the whole map to every child. They also depend on discipline (<code>remove()</code>) to avoid leaks. Scoped values fix all three: immutable, automatically bounded to a scope, and shared by reference (cheap) with child threads — which is exactly why they were introduced alongside Loom.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Structured concurrency vs ExecutorService / CompletableFuture — what does it guarantee that they don't?</summary>
+      <div class="answer"><p>With a raw <code>ExecutorService</code> an early failure can leave sibling subtasks running (leaked, orphaned work), exceptions can be swallowed inside Futures, and the parent-child relationship is invisible in a thread dump. Structured concurrency enforces that all subtasks complete or are cancelled before the scope exits, propagates the first failure and cancels the rest, and preserves the call hierarchy for observability. <code>CompletableFuture</code> composes async pipelines but has the same lifetime and cancellation gaps. Caveat: structured concurrency is still preview in Java 26 (JEP 525) and its API changed notably in Java 25 (the <code>open()</code> factory plus a <code>Joiner</code> policy), so treat it as not yet final.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your code must hold two locks — how do you prevent deadlock?</summary>
+      <div class="answer"><p>Impose a global ordering: every thread that needs both locks acquires them in the same canonical order (for example by object id or hash), which eliminates the circular-wait condition. Complement it with <code>tryLock(timeout)</code> so a thread backs off and retries instead of blocking forever; keep critical sections small and never call foreign/callback code while holding a lock; prefer a single coarser lock or a lock-free <code>java.util.concurrent</code> structure; and never hold a lock across a blocking call. Consistent lock ordering is the standard interview answer.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.conc.virtual</li>
+      <li>java.conc.structured</li>
+      <li>java.conc.bugs</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

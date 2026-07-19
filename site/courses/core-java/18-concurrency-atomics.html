@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java concurrency module on atomics and synchronizers: compare-and-swap and the atomic classes, ConcurrentHashMap and the concurrent collections, the CountDownLatch/CyclicBarrier/Semaphore/Phaser/Exchanger synchronizers and ForkJoinPool — with official docs, Baeldung guides, and the interview questions they power.">
+  <title>Concurrency: Atomics and Synchronizers</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Concurrency — Atomics and Synchronizers</h1>
+  <p class="standfirst">When two threads race for the same counter or the same map bucket, a lock is one answer and lock-free compare-and-swap is the faster one — this module maps the <code>java.util.concurrent</code> toolkit that production code leans on and interviewers keep probing.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Concurrency: Atomics and Synchronizers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module covers the high-level building blocks that sit above raw threads and locks: the atomic classes and the compare-and-swap (CAS) instruction they ride on, the thread-safe concurrent collections led by <code>ConcurrentHashMap</code>, and the synchronizers that coordinate groups of threads (<code>CountDownLatch</code>, <code>CyclicBarrier</code>, <code>Semaphore</code>, <code>Phaser</code>, <code>Exchanger</code>) plus the work-stealing <code>ForkJoinPool</code>. These are the tools that let you write correct concurrent code without hand-rolling <code>synchronized</code> blocks — and <code>ConcurrentHashMap</code>'s internals are one of the most-asked topics in Indian backend interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Atomics (CAS), concurrent collections (ConcurrentHashMap, CopyOnWrite, blocking queues)</h3>
+    <p>Atomic classes such as <code>AtomicInteger</code>, <code>AtomicLong</code> and <code>AtomicReference</code> give you lock-free, thread-safe updates to a single variable. Under the hood a method like <code>incrementAndGet()</code> runs a compare-and-swap loop: read the current value, compute the new one, and atomically install it only if nothing changed in between (<code>compareAndSet</code>), retrying if it did. CAS maps directly to a CPU instruction, so it is usually far cheaper than acquiring a monitor. The package also ships <code>LongAdder</code>/<code>LongAccumulator</code> for counters that are hammered by many writers, and <code>AtomicStampedReference</code> for the ABA problem.</p>
+    <p>The concurrent collections apply the same philosophy to data structures. <code>ConcurrentHashMap</code> allows fully concurrent, lock-free reads and locks only the individual bucket being written (Java 8+ dropped the old segment design in favour of per-bin synchronization plus CAS), which is why it scales where <code>Hashtable</code> and <code>Collections.synchronizedMap</code> — both single-lock — do not. <code>CopyOnWriteArrayList</code> trades write cost for lock-free iteration by copying its backing array on every mutation, ideal for read-mostly listener lists. The <code>BlockingQueue</code> family (<code>ArrayBlockingQueue</code>, <code>LinkedBlockingQueue</code>) is the backbone of producer–consumer designs: <code>put</code> blocks when full, <code>take</code> blocks when empty, so no busy-waiting is needed.</p>
+    <pre class="code-block" data-label="Java"><code>AtomicInteger hits = new AtomicInteger();
+hits.incrementAndGet();                      // lock-free CAS loop under the hood
+
+ConcurrentHashMap&lt;String, Integer&gt; m = new ConcurrentHashMap&lt;&gt;();
+m.merge("key", 1, Integer::sum);             // atomic per-bin read-modify-write
+m.computeIfAbsent(id, k -&gt; load(k));         // mapping computed at most once</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/package-summary.html" rel="noopener">java.util.concurrent.atomic — Java SE 21 API (CAS, LongAdder, atomic references)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html" rel="noopener">ConcurrentHashMap — Java SE 21 API (non-blocking retrieval, happens-before, weakly consistent iterators)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/BlockingQueue.html" rel="noopener">BlockingQueue — Java SE 21 API (the producer–consumer contract)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CopyOnWriteArrayList.html" rel="noopener">CopyOnWriteArrayList — Java SE 21 API (snapshot iterator, read-mostly use)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-atomic-variables" rel="noopener">An Introduction to Atomic Variables in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-concurrent-map" rel="noopener">A Guide to ConcurrentMap — Baeldung (ConcurrentHashMap in practice)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IPTa8EyiJGQ" rel="noopener">Internal Working of ConcurrentHashMap and Interview Questions — Code With Ease By Varsha</a></li>
+    </ul>
+
+    <h3>Synchronizers (CountDownLatch / CyclicBarrier / Semaphore / Phaser / Exchanger), ForkJoinPool</h3>
+    <p>Synchronizers coordinate <em>when</em> threads are allowed to proceed rather than protecting shared state. <code>CountDownLatch</code> is a one-shot gate: threads <code>await()</code> until a counter reaches zero, and it cannot be reused. <code>CyclicBarrier</code> is its reusable cousin — a fixed number of parties wait for each other at a rendezvous, then the barrier resets for the next round, with an optional barrier action. <code>Semaphore</code> hands out a bounded number of permits, so it caps how many threads touch a resource at once (a permit count of one gives you a simple mutual-exclusion lock). <code>Phaser</code> generalises the barrier idea to a dynamic party count across multiple phases, and <code>Exchanger</code> lets exactly two threads swap objects at a rendezvous point.</p>
+    <p><code>ForkJoinPool</code> is a different animal: an executor built for divide-and-conquer work. Each worker thread keeps its own deque and, when idle, <em>steals</em> tasks from the tail of another worker's deque, keeping cores busy on recursive workloads expressed as <code>RecursiveTask</code>/<code>RecursiveAction</code>. Its <code>commonPool()</code> also backs parallel streams — which is exactly why you must never run blocking I/O on it: a blocked common-pool thread starves every other parallel task in the JVM (use a <code>ManagedBlocker</code> or a dedicated pool instead).</p>
+    <pre class="code-block" data-label="Java"><code>CountDownLatch done = new CountDownLatch(n);          // one-shot gate
+for (var task : tasks)
+    executor.submit(() -&gt; { work(task); done.countDown(); });
+done.await();                                         // block until all n finish
+
+Semaphore permits = new Semaphore(3);                // at most 3 concurrent users
+permits.acquire(); try { useResource(); } finally { permits.release(); }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/package-summary.html" rel="noopener">java.util.concurrent — Java SE 21 API (the Synchronizers overview: Semaphore, CountDownLatch, CyclicBarrier, Phaser, Exchanger)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinPool.html" rel="noopener">ForkJoinPool — Java SE 21 API (work-stealing, the common pool)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/concurrency/forkjoin.html" rel="noopener">Fork/Join — The Java Tutorials (RecursiveTask and the divide-and-conquer pattern)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-cyclicbarrier-countdownlatch" rel="noopener">Java CyclicBarrier vs CountDownLatch — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-phaser" rel="noopener">Guide to Phaser — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Slb8uP7rY8U" rel="noopener">Synchronizers: CountDownLatch, CyclicBarrier, Semaphore — Concept &amp;&amp; Coding by Shrayansh</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="17-concurrency-executors.html">← Concurrency: Executors and Futures</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="19-concurrency-modern.html">Concurrency: Virtual Threads and Modern →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Weighted to Indian backend interviews, where ConcurrentHashMap internals and the latch-vs-barrier distinction are staples from the screening round up:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is compare-and-swap (CAS) and how do atomic classes use it?</summary>
+      <div class="answer"><p>CAS is a single hardware instruction that atomically sets a memory location to a new value only if it currently holds an expected value, returning whether it succeeded. Atomic classes expose it as <code>compareAndSet(expected, new)</code> and build methods like <code>incrementAndGet()</code> as a retry loop: read, compute, CAS, and try again if another thread won the race. It is lock-free — no thread ever blocks — which usually beats a monitor under moderate contention.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why use AtomicInteger instead of a synchronized counter?</summary>
+      <div class="answer"><p>A plain <code>int++</code> is read-modify-write and not atomic, so it loses updates under concurrency. You can fix it with <code>synchronized</code>, but that blocks threads and adds monitor overhead. <code>AtomicInteger.incrementAndGet()</code> gives the same correctness with a lock-free CAS loop — less contention and no risk of forgetting to synchronize a read.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Are reads from a ConcurrentHashMap thread-safe without locking?</summary>
+      <div class="answer"><p>Yes. Retrievals such as <code>get</code> never block and do not lock the table; they read <code>volatile</code> fields so they see a consistent, recent value. Writes lock only the affected bucket. This is why reads can freely overlap writes, unlike <code>Hashtable</code> where every operation contends on one lock.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a CountDownLatch and when do you use it?</summary>
+      <div class="answer"><p>A one-shot synchronizer initialised with a count; worker threads call <code>countDown()</code> as they finish and a waiter blocks in <code>await()</code> until the count hits zero. Classic uses: make a main thread wait for N startup tasks to be ready, or release many threads at once from a shared start signal. It cannot be reset — for a reusable barrier you need CyclicBarrier.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does ConcurrentHashMap work internally in Java 8 and later?</summary>
+      <div class="answer"><p>It is an array of buckets (bins), like HashMap. An insert into an empty bin is done with a lock-free CAS; if the bin is already occupied it synchronizes on that bin's first node only, so writers to different bins never block each other. Reads are lock-free volatile reads. Bins that grow past a threshold are treeified into red-black trees for O(log n) lookup. The old Java 7 design used a fixed set of segment locks; Java 8 replaced it with this finer-grained per-bin locking, and <code>size()</code> is tracked with a striped counter (the LongAdder idea) to avoid a single hot field.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> ConcurrentHashMap vs Hashtable vs Collections.synchronizedMap?</summary>
+      <div class="answer"><p>All three are thread-safe, but Hashtable and <code>synchronizedMap</code> guard every operation with a single lock, so concurrent access serialises. ConcurrentHashMap locks per bin and never locks the whole table for reads, so it scales with cores. Its iterators are weakly consistent and never throw <code>ConcurrentModificationException</code>, whereas the wrapped-map iterators are fail-fast and need external synchronization while iterating. Prefer ConcurrentHashMap for anything contended.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does ConcurrentHashMap forbid null keys and values?</summary>
+      <div class="answer"><p>Because a <code>get</code> returning null would be ambiguous under concurrency: it could mean "no mapping" or "mapped to null", and you cannot disambiguate with <code>containsKey</code> without a race, since another thread may change the map between the two calls. HashMap tolerates nulls only because the caller can check single-threaded. Disallowing nulls keeps the concurrent contract unambiguous.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> CountDownLatch vs CyclicBarrier — what's the difference?</summary>
+      <div class="answer"><p>A latch counts down to zero once and is done — waiters and counters are usually different threads. A barrier makes a fixed set of parties wait for <em>each other</em> at a common point, then resets and can be reused for the next phase, and it can run a barrier action when the last party arrives. Rule of thumb: latch for "wait until N things happen", barrier for "N threads meet here repeatedly".</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you choose CopyOnWriteArrayList, and what does it cost?</summary>
+      <div class="answer"><p>Use it for read-mostly, rarely-mutated shared lists — event listeners, subscriber lists, cached config. Every mutation copies the entire backing array, so writes are O(n) and memory-churny, but reads and iteration are lock-free and its iterator is a stable snapshot that never throws <code>ConcurrentModificationException</code>. If writes are frequent, it is the wrong choice.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What problem does Semaphore solve, and how is a binary semaphore different from a lock?</summary>
+      <div class="answer"><p>A Semaphore caps concurrent access to a resource by handing out a fixed number of permits — <code>acquire()</code> blocks when none are free, <code>release()</code> returns one. It is the tool for connection pools or rate limits. A binary semaphore (one permit) behaves like a lock but has no ownership: any thread can release a permit, not just the acquirer, so it can also signal between threads — a <code>ReentrantLock</code> must be released by the thread that holds it and is reentrant.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> volatile vs an Atomic class — when is volatile not enough?</summary>
+      <div class="answer"><p><code>volatile</code> gives visibility and ordering: a write is seen by later reads on other threads. But it does not make compound actions atomic — <code>volatile int i; i++</code> is still read-modify-write and can lose updates. Atomic classes add the atomic read-modify-write (via CAS) on top of volatile semantics, so use volatile for a simple published flag and an Atomic type when you also need atomic updates like increment or check-then-set.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is the ABA problem and how do you handle it?</summary>
+      <div class="answer"><p>A CAS only checks that the value equals the expected one, not that it never changed. If another thread moves it A → B → A, your CAS still succeeds even though the state churned underneath — dangerous for lock-free structures reusing nodes. The fix is to version the reference: <code>AtomicStampedReference</code> pairs the value with an integer stamp so a CAS succeeds only if both value and stamp match, defeating the A-then-back-to-A illusion.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> LongAdder vs AtomicLong under high contention?</summary>
+      <div class="answer"><p><code>AtomicLong</code> concentrates every writer on one CAS variable, so under heavy contention threads spin retrying the same hot field. <code>LongAdder</code> spreads writes across an array of cells, each updated independently, and sums them only when you call <code>sum()</code>. So it wins for high-throughput counters (metrics, hit counts) that are written far more often than read; for low contention or when you need an exact instantaneous value from a single variable, AtomicLong is simpler.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How does ForkJoinPool work-stealing work, and what is the pitfall of blocking in the common pool?</summary>
+      <div class="answer"><p>Each worker has its own double-ended queue: it pushes and pops subtasks from its own head (cache-friendly), and idle workers steal from the tail of a busy worker's deque, so load balances without a central queue. It shines on recursive <code>RecursiveTask</code>/<code>RecursiveAction</code> splits. The trap: the shared <code>commonPool()</code> also runs parallel streams and has a small, CPU-bound thread count, so blocking on I/O or locks inside it starves every other parallel task in the JVM. Do blocking work on a dedicated pool, or wrap it in a <code>ForkJoinPool.ManagedBlocker</code> so the pool can compensate with a spare thread.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.conc.atomics</li>
+      <li>java.conc.synchronizers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

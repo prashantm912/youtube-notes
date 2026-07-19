@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java Memory and Garbage Collection module: object lifecycle and reference types (strong/soft/weak/phantom), the Cleaner, the Serial/Parallel/G1/ZGC/Shenandoah collectors, tuning flags, OutOfMemoryError types and leak diagnosis — the best official docs plus the interview questions they power.">
+  <title>Memory and Garbage Collection — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Memory and Garbage Collection</h1>
+  <p class="standfirst">Java frees memory for you — but interviews probe the machinery underneath: which objects survive, which collector runs and why, and how a "garbage-collected" language still manages to leak.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Memory and Garbage Collection</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Automatic memory management is Java's headline feature, and this module maps its three interview-critical layers: the object lifecycle and the reference-strength API (<code>SoftReference</code>, <code>WeakReference</code>, <code>PhantomReference</code>, <code>Cleaner</code>) that lets you weaken the collector's grip on purpose; the collectors themselves (Serial, Parallel, G1, ZGC, Shenandoah) and the throughput-versus-pause trade-off between them; and the practical craft of tuning flags, reading <code>OutOfMemoryError</code> messages, and hunting down a leak. GC algorithms and memory leaks are among the most-asked topics in Indian back-end interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Object lifecycle and reference strength: strong, soft, weak, phantom, Cleaner</h3>
+    <p>An object lives exactly as long as it is <em>reachable</em> — traceable through a chain of references from a GC root (live thread stacks, static fields, JNI handles). When the last such path disappears the object becomes unreachable and eligible for collection; you never call <code>free</code>. The <code>java.lang.ref</code> package lets you deliberately loosen that grip: a <code>SoftReference</code> is retained until the heap is under memory pressure (memory-sensitive caches), a <code>WeakReference</code> is cleared at the next GC once no strong or soft path remains (canonicalizing maps, <code>WeakHashMap</code> keys), and a <code>PhantomReference</code> never hands the object back but signals precisely when it has been reclaimed.</p>
+    <p>Why it matters: reference strength is how you cache without leaking, and how you replace <code>finalize()</code>. <code>finalize()</code> is deprecated for removal — unpredictable timing, it can resurrect objects, and it burdens the collector — so <code>Cleaner</code> (built on phantom references and a daemon thread) is the modern way to release native resources, paired with <code>AutoCloseable</code> for the explicit path and acting as a safety net when <code>close()</code> is forgotten. "Which reference type would you pick for a cache, and why?" is a routine screening question.</p>
+    <pre class="code-block" data-label="Java"><code>Reference&lt;byte[]&gt; cache  = new SoftReference&lt;&gt;(payload);  // survives until memory is tight
+Reference&lt;Node&gt;   canon  = new WeakReference&lt;&gt;(node);      // cleared at next GC if only weakly reachable
+
+Cleaner cleaner = Cleaner.create();
+cleaner.register(this, state);   // state.run() executes once 'this' is phantom-reachable</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/jvm/tool/garbage-collection/intro/" rel="noopener">Introduction to Garbage Collection — dev.java (object lifecycle and reachability, Oracle's official tutorial)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/package-summary.html" rel="noopener">java.lang.ref — Java SE 21 API (the reachability levels, strongest to phantom)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/Cleaner.html" rel="noopener">Cleaner — Java SE 21 API (the finalize() replacement)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-reference-types" rel="noopener">Strong, Weak, Soft, and Phantom References in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_Cx0KEVX1Yg" rel="noopener">Java Hard, Soft, Weak and Phantom References — Heap Usage &amp; GC Behavior</a></li>
+    </ul>
+
+    <h3>The collectors: Serial, Parallel, G1, ZGC, Shenandoah</h3>
+    <p>HotSpot ships several collectors that make the same generational bet — most objects die young — but strike a different balance between throughput and pause time. <strong>Serial</strong> (one thread, stop-the-world) fits tiny heaps and single-CPU containers. <strong>Parallel</strong>, the throughput collector, throws many threads at GC to minimise total collection time — ideal for batch work that tolerates pauses. <strong>G1</strong> (Garbage-First, the default since Java 9) divides the heap into equal-sized regions and collects the ones with the most garbage first, chasing a soft pause-time goal (<code>-XX:MaxGCPauseTimeMillis</code>) while doing much of its work concurrently — the sensible default for typical services. <strong>ZGC</strong> and <strong>Shenandoah</strong> are the low-latency specialists: they perform nearly all their work concurrently with the application and keep pauses under a millisecond even on multi-terabyte heaps, trading some throughput and footprint for it.</p>
+    <p>Why it matters: interviewers rarely want barrier-level internals — they want the trade-off named (throughput versus pause time), the default identified (G1), and a switch justified (ZGC for a latency-sensitive service with a large heap; Parallel for a nightly ETL job). The young/old generation split and the difference between a minor GC and a major/full GC underpin every one of these answers.</p>
+    <pre class="code-block" data-label="Shell"><code>java -XX:+UseG1GC       -Xms2g -Xmx2g   App   # G1: balanced pauses, the default
+java -XX:+UseZGC        -Xmx16g          App   # ZGC: sub-millisecond pauses, huge heaps
+java -XX:+UseParallelGC -Xmx4g           App   # Parallel: maximum throughput, batch jobs
+java -XX:+UseSerialGC                    App   # Serial: tiny heaps, single CPU</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/gctuning/available-collectors.html" rel="noopener">Available Collectors — HotSpot GC Tuning Guide (Serial/Parallel/G1/ZGC and how to choose)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/jvm/tool/garbage-collection/java-specifics/" rel="noopener">Garbage Collection in Java — dev.java (generations, minor vs major GC, the JDK's collectors)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jvm-garbage-collectors" rel="noopener">JVM Garbage Collectors — Baeldung (each collector compared)</a></li>
+      <li>[Article] <a href="https://developers.redhat.com/articles/2024/05/28/beginners-guide-shenandoah-garbage-collector" rel="noopener">A beginner's guide to the Shenandoah garbage collector — Red Hat Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Mlbyft_MFYM" rel="noopener">Java's Garbage Collection Explained — Coding with John</a></li>
+    </ul>
+
+    <h3>Tuning flags, OutOfMemoryError types, and leak diagnosis</h3>
+    <p>Most tuning is two decisions: pick a collector and size the heap. <code>-Xms</code> and <code>-Xmx</code> set initial and maximum heap — set them equal in production so leaks surface quickly and the JVM never pauses to resize; <code>-Xss</code> sizes thread stacks; <code>-Xlog:gc*</code> prints GC activity so you can watch the live set. When the collector cannot reclaim enough room you get an <code>OutOfMemoryError</code>, and the message is the diagnosis: <em>Java heap space</em> (heap exhausted — a real leak or an undersized heap), <em>GC overhead limit exceeded</em> (over 98% of time spent in GC recovering under 2% of the heap), <em>Metaspace</em> (too many loaded classes — often a classloader leak), and <em>unable to create new native thread</em> (an OS or native limit, not the heap).</p>
+    <p>A leak in a managed runtime means objects stay <em>reachable but useless</em>. The classic causes: unbounded caches and collections, static references that never release, listeners or callbacks never unregistered, <code>ThreadLocal</code>s left set on pooled threads, and classloader leaks in application servers. Diagnosis is empirical — watch the live set (heap occupancy after a full GC) trend upward over time, capture a heap dump (<code>-XX:+HeapDumpOnOutOfMemoryError</code>, or <code>jcmd</code>/<code>jmap</code> on demand), and follow the dominator tree and "leak suspects" in Eclipse MAT back to the retaining GC root. Walking this end-to-end story convincingly is a favourite senior-round question.</p>
+    <pre class="code-block" data-label="Shell"><code>-Xms512m -Xmx512m                 # fix the heap so a leak surfaces fast
+-XX:+HeapDumpOnOutOfMemoryError   # write a heap dump at the moment of the crash
+-XX:HeapDumpPath=/var/log/app     # where the dump lands
+-Xlog:gc*                         # GC log — watch the live set climb after each full GC</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/troubleshooting-memory-leaks.html" rel="noopener">Troubleshoot Memory Leaks — Java SE Troubleshooting Guide (every OOM type, heap dumps, NMT, MAT)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/gctuning/introduction-garbage-collection-tuning.html" rel="noopener">Introduction to Garbage Collection Tuning — HotSpot GC Tuning Guide (when and why to tune)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-memory-leaks" rel="noopener">Understanding Memory Leaks in Java — Baeldung (the common leak patterns)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jvm-parameters" rel="noopener">Guide to the Most Important JVM Parameters — Baeldung (heap, stack and GC-logging flags)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JoQN4xoXY5Y" rel="noopener">Quickly Analysing a Heap Memory Leak — Jack Shirazi</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="20-jvm.html">← The JVM</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="22-performance-patterns.html">Performance and Design Patterns →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked memory and GC questions in Indian interviews — from screening rounds to product-company deep dives, where GC algorithms and leak diagnosis are staples:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is garbage collection, and why doesn't Java need manual free()?</summary>
+      <div class="answer"><p>The JVM automatically reclaims heap memory occupied by objects that are no longer reachable, so the programmer never explicitly deallocates. This eliminates dangling pointers and double-frees, and reduces (but does not eliminate) memory leaks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When does an object become eligible for garbage collection?</summary>
+      <div class="answer"><p>When it is no longer <em>reachable</em> — no chain of references from any GC root leads to it. Nulling the last reference, reassigning it, or the reference going out of scope all make an object unreachable. Eligibility is about reachability, not scope alone.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the young and old generations, and what is a minor vs a full GC?</summary>
+      <div class="answer"><p>The heap is split by the weak generational hypothesis: new objects go in the young generation (Eden plus two survivor spaces); objects that survive several collections are promoted to the old generation. A minor GC collects only the young generation (frequent, cheap); a major/full GC touches the old generation too (rarer, costlier).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Does System.gc() force garbage collection?</summary>
+      <div class="answer"><p>No — it is only a request; the JVM may ignore it. It typically triggers a full GC with a stop-the-world pause, so calling it in application code hurts performance. Treat it as a code smell and let the collector schedule itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between strong, soft, weak, and phantom references?</summary>
+      <div class="answer"><p>Strong: ordinary reference, never collected while reachable. Soft: kept until the heap is under memory pressure — good for caches. Weak: cleared at the next GC once only weakly reachable — used by WeakHashMap. Phantom: never dereferenceable, only tells you the object has been reclaimed — used for post-mortem cleanup.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are GC roots? Give examples.</summary>
+      <div class="answer"><p>The starting points the collector traces reachability from: active thread stack variables, static fields of loaded classes, JNI local/global references, and objects held by the JVM itself (e.g. active monitors). Anything not reachable from a root is collectible.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is G1 the default collector, and how does it work?</summary>
+      <div class="answer"><p>G1 divides the heap into equal-sized regions and collects the regions with the most garbage first, so it can meet a soft pause-time target (<code>-XX:MaxGCPauseTimeMillis</code>) while running mostly concurrently. It balances throughput and predictable pauses without hand-tuning, which suits the majority of server workloads — hence the default since Java 9.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> If GC is automatic, how can a Java application still leak memory?</summary>
+      <div class="answer"><p>A leak here means objects remain <em>reachable but never used again</em>, so the collector cannot free them. Common causes: unbounded caches/collections, static references, unregistered listeners, ThreadLocals on pooled threads, and classloader leaks in app servers. The heap grows until an OutOfMemoryError.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you choose Parallel over G1 or ZGC?</summary>
+      <div class="answer"><p>When raw throughput matters more than pause time — batch and ETL jobs that can tolerate stop-the-world pauses but must finish as fast as possible. Parallel spends the least total time in GC. Choose G1 for balanced services and ZGC/Shenandoah when pauses must stay sub-millisecond.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is finalize() deprecated, and what replaces it?</summary>
+      <div class="answer"><p>finalize() runs at an unpredictable time (or never), can resurrect the object, delays reclamation, and slows GC. Its replacement is <code>Cleaner</code> (or try-with-resources on <code>AutoCloseable</code>): register a cleaning action that runs when the object becomes phantom-reachable, with deterministic explicit cleanup available too.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the difference between OutOfMemoryError: Java heap space and Metaspace?</summary>
+      <div class="answer"><p>"Java heap space" means the object heap is exhausted — a leak or an undersized <code>-Xmx</code>. "Metaspace" means the native area holding class metadata is exhausted — usually too many loaded classes or a classloader leak (common with repeated redeploys), tuned with <code>-XX:MaxMetaspaceSize</code>. Different regions, different root causes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do ZGC and Shenandoah achieve sub-millisecond pauses?</summary>
+      <div class="answer"><p>They do almost all GC work — marking, relocation and reference updates — concurrently with the running application, so pause times stay roughly constant regardless of heap size. They rely on barriers (ZGC uses load barriers with coloured pointers; Shenandoah uses load-reference barriers with Brooks-style forwarding) to keep application threads consistent while objects move. The cost is extra throughput and footprint overhead versus G1.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk me through diagnosing a slow memory leak in production.</summary>
+      <div class="answer"><p>Confirm it first: enable GC logging (<code>-Xlog:gc*</code>) and watch the live set — heap occupancy after each full GC — trend upward once the app is at steady state. Capture a heap dump (<code>-XX:+HeapDumpOnOutOfMemoryError</code>, or on demand via <code>jcmd</code>/<code>jmap</code>), open it in Eclipse MAT, and use the dominator tree and leak-suspects report to find the object retaining the most memory and the GC root holding it. Then fix the retention (bound the cache, unregister the listener, clear the ThreadLocal).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does "GC overhead limit exceeded" tell you, and how do you respond?</summary>
+      <div class="answer"><p>The parallel collector throws it when the process spends over 98% of its time in GC while recovering under 2% of the heap — the JVM is thrashing near exhaustion rather than failing outright. It almost always signals a genuine leak or a badly undersized heap; the fix is to capture a heap dump and find the retained objects, not simply to raise <code>-Xmx</code> or disable the check.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can't garbage collection be made completely pause-free and free of cost?</summary>
+      <div class="answer"><p>Even the most concurrent collectors need brief stop-the-world safepoints (e.g. to establish an initial mark snapshot), and running concurrently forces read/write barriers on the application that cost throughput and CPU. Moving objects to compact the heap requires updating every reference consistently while threads run. So GC is always a trade among pause time, throughput, and footprint — you tune which one to favour, you cannot make all three free.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.gc.references</li>
+      <li>java.gc.algorithms</li>
+      <li>java.gc.tuning</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

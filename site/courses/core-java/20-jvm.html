@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The JVM module for the Core Java track: JVM architecture and class loading, bytecode and the Class-File API, StackWalker, JIT and tiered compilation, the heap/stack/metaspace/code-cache memory areas, and a JEP tour from Java 8 to today — with verified official resources and the interview questions they power.">
+  <title>The JVM — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: The JVM</h1>
+  <p class="standfirst">Every <code>.class</code> you run is loaded, verified, and eventually compiled to native code by a machine most Java developers never look inside — and the ones who do tend to clear the harder interview rounds.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → The JVM</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The JVM is the abstract computer that loads, verifies, and executes your bytecode — its class loader subsystem, run-time memory areas, and execution engine (interpreter plus JIT) are the machinery behind "write once, run anywhere". This page orients you on how a class travels from a <code>.class</code> file to optimized native code, where objects and metadata actually live, and the decade of language features that rode on top. Class loading and JIT compilation are two of the most-asked JVM topics in Indian interviews, so both get extra weight below.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>JVM architecture, class loading, bytecode and the Class-File API, StackWalker</h3>
+    <p>A JVM has three moving parts: the <strong>class loader subsystem</strong> (finds, links, and initializes types), the <strong>run-time data areas</strong> (where classes, objects, and stacks live), and the <strong>execution engine</strong> (interpreter, JIT compiler, garbage collector). Class loading itself is three phases — loading (read the bytes, build a <code>Class</code> object), linking (verify, prepare static fields, resolve symbolic references), and initialization (run <code>&lt;clinit&gt;</code>) — driven by loaders arranged bootstrap → platform → application under the parent-delegation model.</p>
+    <p>Why it matters: class identity is <em>name plus defining loader</em>, which is the root of both app-server isolation and the notorious "same class, ClassCastException" bug. The Class-File API (finalized in Java 24) is now the standard, ASM-free way to read and generate bytecode, and <code>StackWalker</code> is the modern, lazy replacement for scraping stack traces — both show up when interviewers probe past the surface.</p>
+    <pre class="code-block" data-label="Java"><code>// StackWalker: walk only the frames you need, lazily — no full trace materialized
+Class&lt;?&gt; caller = StackWalker.getInstance(Option.RETAIN_CLASS_REFERENCE)
+                             .getCallerClass();
+
+// The delegation chain: application -&gt; platform -&gt; bootstrap (null)
+ClassLoader cl = MyApp.class.getClassLoader(); // application / system loader
+cl.getParent();                                // platform loader
+cl.getParent().getParent();                    // null == bootstrap loader</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/specs/jvms/se21/html/index.html" rel="noopener">The Java Virtual Machine Specification, Java SE 21 Edition — Oracle (the source of truth for architecture, the class-file format, and the instruction set)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-5.html" rel="noopener">Chapter 5: Loading, Linking, and Initializing — JVM Specification</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/24/docs/api/java.base/java/lang/classfile/package-summary.html" rel="noopener">java.lang.classfile — the Class-File API (Java SE 24 API)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/StackWalker.html" rel="noopener">StackWalker — Java SE 21 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-classloaders" rel="noopener">Class Loaders in Java — Baeldung (the community-standard walkthrough of the loader hierarchy)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LvxD9mOyzjQ" rel="noopener">JVM (Part 2) — How ClassLoader works in Java — Telusko</a></li>
+    </ul>
+
+    <h3>JIT and tiered compilation; memory areas: heap, stack, metaspace, code cache</h3>
+    <p>HotSpot starts by <em>interpreting</em> bytecode for fast startup, profiles which methods run hot, and hands those to the <strong>JIT</strong> for native compilation. <strong>Tiered compilation</strong> (default since Java 8) blends two compilers across levels 0–4: C1 (the client compiler — quick to compile, lightly optimized, gathers profiling data) then C2 (the server compiler — slower to compile, aggressively optimized) once a method is proven hot. This is the "warm-up" every Java benchmark has to reckon with.</p>
+    <p>Why it matters: knowing <em>where</em> memory lives explains most production incidents. The <strong>heap</strong> and <strong>method area</strong> are shared across threads; each thread gets its own <strong>stack</strong>, pc register, and native method stack. <strong>Metaspace</strong> (native memory, replacing Java 7's PermGen) holds class metadata, and the JIT's compiled code lives in the fixed-size <strong>code cache</strong> — when it fills, compilation stops and throughput quietly falls off a cliff.</p>
+    <pre class="code-block" data-label="Shell"><code># See what the JIT is doing and bound where memory goes
+java -XX:+PrintCompilation           Main   # log each method as it is JIT-compiled
+java -Xss1m -Xmx512m                  Main   # per-thread stack size; max heap
+java -XX:ReservedCodeCacheSize=256m  Main   # cap the JIT code cache
+java -XX:MaxMetaspaceSize=256m       Main   # bound class-metadata (native) memory</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html" rel="noopener">Chapter 2: The Structure of the Java Virtual Machine — run-time data areas (JVM Specification)</a></li>
+      <li>[Official] <a href="https://www.oracle.com/technical-resources/articles/java/architect-evans-pt1.html" rel="noopener">Understanding Java JIT Compilation with JITWatch — Oracle Technical Resources</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jvm-run-time-data-areas" rel="noopener">The JVM Run-Time Data Areas — Baeldung (heap, stack, method area, pc register)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jvm-tiered-compilation" rel="noopener">Tiered Compilation in JVM — Baeldung (C1, C2, and the compilation levels)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-memory-beyond-heap" rel="noopener">Can a Java Application Use More Memory Than the Heap Size? — Baeldung (metaspace and native memory)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sJVenujWGjs" rel="noopener">AOT vs JIT compilation in Java (tiered compilation and the code cache) — Defog Tech</a></li>
+    </ul>
+
+    <h3>JEP timeline tour: Java 8 to the current release</h3>
+    <p>The JVM is a stable target, but the language on top of it has moved fast since the six-month cadence began in 2017. This is the "what changed and when" narrative interviewers use to gauge how current you are: Java 8 (lambdas, Streams, <code>Optional</code>), Java 9 (the module system, JShell), Java 10/11 LTS (<code>var</code>, the standard HTTP client), Java 17 LTS (sealed classes, records, text blocks, switch pattern matching), Java 21 LTS (virtual threads, record patterns, sequenced collections), and recent releases adding stream gatherers and the Class-File API.</p>
+    <p>Why it matters: features arrive as <strong>JEPs</strong> and usually spend a release or two in <em>preview</em> before finalizing, so "is it GA yet?" is a real question. Being able to trace records and sealed classes through Project Amber, or virtual threads through Project Loom, signals you follow the platform rather than a single frozen version.</p>
+    <pre class="code-block" data-label="Java"><code>// A decade in one screen: data-oriented Java the JVM now runs directly
+sealed interface Shape permits Circle, Square {}
+record Circle(double r) implements Shape {}
+record Square(double s) implements Shape {}
+
+double area = switch (shape) {                 // pattern matching for switch (Java 21)
+    case Circle c -&gt; Math.PI * c.r() * c.r();
+    case Square s -&gt; s.s() * s.s();
+};</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/evolution/" rel="noopener">Java Platform Evolution — dev.java (Oracle's official tour of features since Java 8)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/language/java-language-changes.html" rel="noopener">Java Language Changes — Oracle (feature-by-version, each linked to its JEP)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-lts-21-new-features" rel="noopener">New Features in Java 21 (the latest LTS) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1EfRxKzU11k" rel="noopener">Java New Features — Java 24, 21, 17, 8, 5 and more — in28minutes</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="19-concurrency-modern.html">← Concurrency: Virtual Threads and Modern</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="21-memory-gc.html">Memory and Garbage Collection →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked JVM questions in Indian interviews — class loading and JIT dominate, from screening rounds to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between JDK, JRE, and JVM?</summary>
+      <div class="answer"><p>The JVM is the abstract runtime that executes bytecode. The JRE is the JVM plus the core class libraries needed to <em>run</em> Java apps. The JDK is the JRE plus development tools (<code>javac</code>, <code>javadoc</code>, <code>jar</code>, <code>jdb</code>). Since Java 11 there is no standalone JRE download — you ship a JDK or a trimmed runtime image built with <code>jlink</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three main subsystems of the JVM?</summary>
+      <div class="answer"><p>The class loader subsystem (loads, links, and initializes types), the run-time data areas (heap, method area, JVM stacks, pc registers, native method stacks), and the execution engine (interpreter, JIT compiler, and garbage collector).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three phases the class loader performs?</summary>
+      <div class="answer"><p>Loading (read the <code>.class</code> bytes and create the <code>Class</code> object in the method area), linking (verification of the bytecode, preparation of static fields to default values, and resolution of symbolic references), and initialization (execute the static initializers and static-field assignments via <code>&lt;clinit&gt;</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which JVM memory areas are shared across threads, and which are per-thread?</summary>
+      <div class="answer"><p>Shared: the heap (all objects and arrays) and the method area (class metadata and the run-time constant pool). Per-thread: the JVM stack (frames with local variables and operand stacks), the pc register, and the native method stack. That split is exactly why local variables are inherently thread-safe while heap state needs synchronization.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the class loader hierarchy and the parent-delegation model.</summary>
+      <div class="answer"><p>Three loaders: bootstrap (loads core <code>java.*</code> modules, native, null parent), platform (formerly the extension loader), and application/system (your classpath and app modules). Under parent delegation, a loader first asks its parent to load a class and only loads it itself if the parent cannot. This guarantees core classes are loaded once from the trusted source and cannot be shadowed by user code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Interpreter vs JIT compiler — why does the JVM use both?</summary>
+      <div class="answer"><p>The interpreter executes bytecode immediately: no warm-up, fast startup, but slower per instruction. The JIT compiles frequently executed ("hot") methods to native code: expensive to warm up, but fast at steady state. HotSpot interprets first, profiles, then compiles the hot spots — getting startup speed and peak throughput from the same run.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is tiered compilation (C1 vs C2)?</summary>
+      <div class="answer"><p>A scheme (default since Java 8) that combines two JIT compilers across levels 0–4. C1, the client compiler, compiles quickly with light optimization and collects profiling data; C2, the server compiler, recompiles proven-hot methods with aggressive optimization. Code flows interpreter → C1-with-profiling → C2, balancing fast startup against maximum long-run throughput.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What replaced PermGen in Java 8, and why?</summary>
+      <div class="answer"><p>Metaspace. PermGen was a fixed-size region inside the heap that stored class metadata and routinely caused <code>OutOfMemoryError: PermGen space</code>. Metaspace moves class metadata into native memory and grows automatically (capped by <code>-XX:MaxMetaspaceSize</code>), which removed a common tuning headache and simplified garbage collection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the JIT code cache, and what happens when it fills up?</summary>
+      <div class="answer"><p>A fixed-size region of native memory that holds the machine code the JIT produces (sized by <code>-XX:ReservedCodeCacheSize</code>). If it fills, the JVM stops compiling — it may flush cold methods, but new hot methods fall back to the interpreter, so throughput drops silently. A "CodeCache is full. Compiler has been disabled" warning is the tell.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Roughly what landed from Java 8 through the latest LTS?</summary>
+      <div class="answer"><p>Java 8: lambdas, the Stream API, <code>Optional</code>, default methods, the new date/time API. Java 9: the module system and JShell. Java 10/11: <code>var</code> and the standard HTTP client. Java 17: sealed classes, records (finalized in 16), text blocks, switch pattern matching. Java 21: virtual threads, record patterns, sequenced collections. Recent releases add stream gatherers and the Class-File API. Cadence is six months, with an LTS every two to three years.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What actually triggers class initialization (when does &lt;clinit&gt; run)?</summary>
+      <div class="answer"><p>Lazily, on first active use: creating an instance with <code>new</code>, invoking or accessing a static method or non-constant static field, reflection, initializing a subclass, or launching the class that holds <code>main</code>. Reading a compile-time constant (a <code>static final</code> bound to a constant expression) does <em>not</em> trigger it — the value is inlined by the compiler. The JVM guarantees initialization happens exactly once, thread-safely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does bytecode verification check, and why is it security-critical?</summary>
+      <div class="answer"><p>The verifier, part of linking, proves a <code>.class</code> is structurally valid and type-safe before any of it executes: the operand stack never overflows or underflows, operand types match each instruction, branches land on valid instructions, and local variables are used consistently. It is what lets the JVM run untrusted bytecode safely; disabling it (the deprecated <code>-Xverify:none</code>) removes that guarantee.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can two classes with the same fully-qualified name coexist in one JVM?</summary>
+      <div class="answer"><p>Yes. A class's run-time identity is its fully-qualified name <em>plus its defining class loader</em>, not the name alone. Two loaders can each define <code>com.acme.Foo</code>, yielding two distinct <code>Class</code> objects that are not type-compatible: assigning an instance of one to a reference typed by the other throws <code>ClassCastException</code>, and mixing them can raise <code>LinkageError</code>. App servers exploit this for application isolation and hot redeploy — and it is the usual cause of the baffling "ClassCastException: Foo cannot be cast to Foo".</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.jvm.architecture</li>
+      <li>java.jvm.jit</li>
+      <li>java.jvm.jeptour</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

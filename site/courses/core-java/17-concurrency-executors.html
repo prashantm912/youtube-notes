@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java Executors and Futures module: ExecutorService and the ThreadPoolExecutor parameters that govern a pool under load, Future and CompletableFuture composition and error handling, and the explicit Lock family (ReentrantLock, ReadWriteLock, StampedLock, Condition) — with the best official and community resources plus the interview questions they power.">
+  <title>Concurrency: Executors and Futures</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Concurrency: Executors and Futures</h1>
+  <p class="standfirst">Raw threads do not scale; pools, futures and explicit locks do. This module maps the <code>java.util.concurrent</code> building blocks every backend service runs on — and flags the two, ThreadPoolExecutor tuning and CompletableFuture, that Indian backend interviews probe hardest.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Concurrency: Executors and Futures</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The executor framework decouples <em>what</em> runs (a task) from <em>how</em> it runs (which thread, from which pool). This module covers ExecutorService and the six ThreadPoolExecutor knobs that decide a pool's behavior under load, the Future and CompletableFuture result types — with CompletableFuture's composition and error-handling pipeline — and the explicit Lock family that supersedes <code>synchronized</code> when you need timeouts, fairness, multiple conditions, or reader/writer separation. Two of these, ThreadPoolExecutor sizing and CompletableFuture, are among the most-asked concurrency topics in Indian product and service-company interviews.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>ExecutorService and thread pools (ThreadPoolExecutor parameters)</h3>
+    <p>The Executor framework separates the task (a <code>Runnable</code> or <code>Callable</code>) from the machinery that runs it. <code>ExecutorService</code> is the workhorse interface: you <code>submit</code> tasks and get a <code>Future</code> back, and you shut the pool down with <code>shutdown</code>/<code>shutdownNow</code> plus <code>awaitTermination</code>. Under the hood most pools are a <code>ThreadPoolExecutor</code>, whose constructor parameters — <code>corePoolSize</code>, <code>maximumPoolSize</code>, <code>keepAliveTime</code> + unit, the <code>workQueue</code>, a <code>ThreadFactory</code>, and a <code>RejectedExecutionHandler</code> — fully determine how it behaves.</p>
+    <p>Why it matters: the task-arrival algorithm is the single most-tested detail. A new task starts a core thread until <code>corePoolSize</code> is reached, then it <em>queues</em>; the pool grows toward <code>maximumPoolSize</code> only when the queue is full; when queue and max threads are both saturated the <code>RejectedExecutionHandler</code> fires. That is why an unbounded queue — the hidden default of <code>Executors.newFixedThreadPool</code> — means <code>maximumPoolSize</code> is never reached, and one slow consumer becomes an <code>OutOfMemoryError</code>. Reaching for a bounded queue with a back-pressure policy is what separates a screening answer from a production one.</p>
+    <pre class="code-block" data-label="Java"><code>ExecutorService pool = new ThreadPoolExecutor(
+    4, 8, 60L, TimeUnit.SECONDS,               // core, max, keep-alive
+    new ArrayBlockingQueue&lt;Runnable&gt;(100),      // bounded work queue
+    new ThreadPoolExecutor.CallerRunsPolicy()); // back-pressure when saturated
+Future&lt;Integer&gt; f = pool.submit(() -&gt; compute());
+pool.shutdown();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html" rel="noopener">ThreadPoolExecutor — Java SE 21 API (the constructor parameters and the core → queue → max → reject rules)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Executors.html" rel="noopener">Executors — Java SE 21 API (newFixedThreadPool, newCachedThreadPool and their default queues)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html" rel="noopener">ExecutorService — Java SE 21 API (submit, invokeAll, the shutdown lifecycle)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-executor-service-tutorial" rel="noopener">A Guide to the Java ExecutorService — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-rejectedexecutionhandler" rel="noopener">Guide to RejectedExecutionHandler — Baeldung (the four saturation policies)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6Oo-9Can3H8" rel="noopener">Java ExecutorService — Part 1: Introduction — Defog Tech</a></li>
+    </ul>
+
+    <h3>Future and CompletableFuture (composition and error handling)</h3>
+    <p>A <code>Future</code> is a handle to a result that is not ready yet: <code>get()</code> blocks until it is, <code>cancel()</code> tries to stop the task, <code>isDone()</code> polls. Its limit is that you can only block or poll — you cannot say "when this finishes, do that." <code>CompletableFuture</code> (Java 8) removes that limit by implementing <code>CompletionStage</code>: you attach callbacks that fire on completion and chain transformations without ever parking a thread on <code>get()</code>.</p>
+    <p>Why it matters: <code>thenApply</code> transforms a result (like <code>map</code>), <code>thenCompose</code> flattens a CompletableFuture-returning step (like <code>flatMap</code>), and <code>thenCombine</code> joins two independent futures. Failures propagate down the chain and are recovered with <code>exceptionally</code>, <code>handle</code>, or <code>whenComplete</code> — not a <code>try/catch</code> around <code>get()</code>. The subtlety interviewers push on: non-async stages run on whatever thread completed the previous stage, while async stages (<code>thenApplyAsync</code>) run on the common <code>ForkJoinPool</code> unless you pass your own <code>Executor</code> — so blocking work left on the common pool can starve the whole JVM.</p>
+    <pre class="code-block" data-label="Java"><code>CompletableFuture
+    .supplyAsync(() -&gt; fetchUser(id), pool)  // run on YOUR executor
+    .thenApply(User::profile)                // transform (map)
+    .thenCompose(this::loadOrders)           // flatMap another CF
+    .exceptionally(ex -&gt; fallbackOrders())    // recover from failure
+    .thenAccept(this::render);               // consume, non-blocking</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CompletableFuture.html" rel="noopener">CompletableFuture — Java SE 21 API (thenApply, thenCompose, exceptionally, supplyAsync)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Future.html" rel="noopener">Future — Java SE 21 API (get, cancel, isDone, and the Java 19+ state/resultNow)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-completablefuture" rel="noopener">Guide to CompletableFuture — Baeldung (the community-standard walkthrough)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-executorservice-vs-completablefuture" rel="noopener">ExecutorService vs. CompletableFuture — Baeldung (when to reach for which)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GJ5Tx43q6KM" rel="noopener">Java 8 CompletableFuture Tutorial — runAsync &amp; supplyAsync (Part 1) — Java Techie</a></li>
+    </ul>
+
+    <h3>Explicit locks: ReentrantLock, ReadWriteLock, StampedLock, Condition</h3>
+    <p>The <code>Lock</code> interface is the explicit, flexible alternative to <code>synchronized</code>. <code>ReentrantLock</code> gives the same mutual exclusion plus <code>tryLock</code> (optionally with a timeout), interruptible acquisition, an optional fairness policy, and multiple <code>Condition</code> wait-sets — at the price of a mandatory <code>try/finally</code> so the lock is always released. A <code>Condition</code> replaces <code>wait</code>/<code>notify</code>, giving each lock one or more named wait queues (the classic <code>notFull</code> and <code>notEmpty</code> of a bounded buffer).</p>
+    <p>Why it matters: when reads vastly outnumber writes, <code>ReentrantReadWriteLock</code> lets many readers run together while writers stay exclusive — and you can <em>downgrade</em> a write lock to a read lock but never <em>upgrade</em> a read lock to a write lock (that deadlocks). <code>StampedLock</code> adds optimistic reads: <code>tryOptimisticRead</code> returns a stamp you <code>validate</code> after reading, skipping lock acquisition entirely on the happy path — but it is not reentrant and has no <code>Condition</code>. Picking the lightest tool that is still correct is the judgment interviewers are testing.</p>
+    <pre class="code-block" data-label="Java"><code>Lock lock = new ReentrantLock();
+lock.lock();
+try {
+    // critical section — mutually exclusive
+} finally {
+    lock.unlock();   // ALWAYS release in finally
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html" rel="noopener">ReentrantLock — Java SE 21 API (lock/unlock, tryLock, fairness)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantReadWriteLock.html" rel="noopener">ReentrantReadWriteLock — Java SE 21 API (reader/writer split, lock downgrading)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/StampedLock.html" rel="noopener">StampedLock — Java SE 21 API (tryOptimisticRead + validate)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/Condition.html" rel="noopener">Condition — Java SE 21 API (await/signal, the wait/notify replacement)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-concurrent-locks" rel="noopener">Guide to java.util.concurrent.Locks — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="16-concurrency-basics.html">← Concurrency: Threads and Memory Model</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="18-concurrency-atomics.html">Concurrency: Atomics and Synchronizers →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The concurrency questions that dominate Indian backend interviews — thread-pool tuning and CompletableFuture come up in almost every product-company round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the Executor framework and why prefer it over <code>new Thread()</code>?</summary>
+      <div class="answer"><p>It decouples task submission from thread management. Instead of creating a thread per task (unbounded, expensive, uncontrolled), you submit tasks to an <code>ExecutorService</code> that reuses a managed pool of worker threads, queues overflow, and gives back a <code>Future</code>. You get resource limits, reuse, graceful shutdown, and result handling for free.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Runnable vs Callable — and how do you get a task's result?</summary>
+      <div class="answer"><p><code>Runnable.run()</code> returns void and cannot throw checked exceptions; <code>Callable&lt;V&gt;.call()</code> returns a value and may throw. Submitting either to an executor returns a <code>Future</code>; <code>future.get()</code> blocks for the result (and rethrows the task's exception wrapped in <code>ExecutionException</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between <code>shutdown()</code> and <code>shutdownNow()</code>?</summary>
+      <div class="answer"><p><code>shutdown()</code> is orderly: it stops accepting new tasks but lets queued and running tasks finish. <code>shutdownNow()</code> tries to stop running tasks (via interrupt), drops the queue, and returns the never-started tasks. Either way you typically call <code>awaitTermination(timeout, unit)</code> afterwards to block until the pool actually drains.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> <code>submit()</code> vs <code>execute()</code>?</summary>
+      <div class="answer"><p><code>execute(Runnable)</code> is fire-and-forget from the base <code>Executor</code> — no handle, and an uncaught exception surfaces on the worker thread. <code>submit()</code> returns a <code>Future</code>; a task exception is captured and re-thrown only when you call <code>get()</code>. A silently swallowed exception is usually a <code>submit</code> whose Future is never inspected.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain every ThreadPoolExecutor constructor parameter.</summary>
+      <div class="answer"><p><code>corePoolSize</code> — threads kept alive even when idle; <code>maximumPoolSize</code> — the ceiling on threads; <code>keepAliveTime</code> + <code>unit</code> — how long above-core idle threads survive; <code>workQueue</code> — the <code>BlockingQueue</code> holding pending tasks; <code>threadFactory</code> — names/daemon-flags new threads; <code>RejectedExecutionHandler</code> — what happens when queue and max are both full. These six values fully define the pool's behavior. The most-asked ThreadPoolExecutor question in India.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When a task arrives, how does ThreadPoolExecutor decide to run, queue, or reject it?</summary>
+      <div class="answer"><p>Ordering: if threads &lt; <code>corePoolSize</code>, start a new core thread. Else try to enqueue in the <code>workQueue</code>. Only if the queue is full does it create threads up to <code>maximumPoolSize</code>. If the queue is full <em>and</em> max threads are running, the <code>RejectedExecutionHandler</code> fires. The trap: an unbounded queue never fills, so max is never reached and rejection never triggers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why are <code>newFixedThreadPool</code> and <code>newCachedThreadPool</code> risky in production?</summary>
+      <div class="answer"><p><code>newFixedThreadPool</code> uses an <em>unbounded</em> LinkedBlockingQueue — a faster-than-drained producer piles tasks until <code>OutOfMemoryError</code>. <code>newCachedThreadPool</code> has an unbounded thread count (SynchronousQueue + max = Integer.MAX_VALUE) — a burst spawns thousands of threads. Prefer an explicit <code>ThreadPoolExecutor</code> with a bounded queue and a chosen rejection policy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the built-in rejection (saturation) policies?</summary>
+      <div class="answer"><p><code>AbortPolicy</code> (default) throws <code>RejectedExecutionException</code>; <code>CallerRunsPolicy</code> runs the task on the submitting thread, which naturally throttles producers (back-pressure); <code>DiscardPolicy</code> silently drops the new task; <code>DiscardOldestPolicy</code> drops the oldest queued task and retries. You can also implement <code>RejectedExecutionHandler</code> yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Future vs CompletableFuture — what does CompletableFuture add?</summary>
+      <div class="answer"><p><code>Future</code> only lets you block (<code>get</code>) or poll (<code>isDone</code>) — no chaining, no completion callback, no easy combination. <code>CompletableFuture</code> implements <code>CompletionStage</code>: non-blocking composition (<code>thenApply</code>/<code>thenCompose</code>/<code>thenCombine</code>), explicit completion (<code>complete</code>), combinators (<code>allOf</code>/<code>anyOf</code>), and functional error handling — the foundation of async pipelines.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> <code>thenApply</code> vs <code>thenCompose</code> vs <code>thenCombine</code>?</summary>
+      <div class="answer"><p><code>thenApply</code> maps the result with a plain function (T → U). <code>thenCompose</code> flattens a function that itself returns a CompletableFuture, avoiding <code>CompletableFuture&lt;CompletableFuture&lt;U&gt;&gt;</code> — the <code>flatMap</code> of futures. <code>thenCombine</code> waits for <em>two</em> independent futures and merges both results with a BiFunction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you handle exceptions in a CompletableFuture chain?</summary>
+      <div class="answer"><p><code>exceptionally(fn)</code> supplies a fallback value only on the failure path; <code>handle(bi)</code> runs on both success and failure (receiving result-or-throwable); <code>whenComplete</code> observes the outcome without changing it. An exception short-circuits the remaining stages until one of these recovers it — you never wrap <code>get()</code> in try/catch inside a pipeline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> ReentrantLock vs <code>synchronized</code> — when do you choose the lock?</summary>
+      <div class="answer"><p>Both are reentrant and give the same visibility guarantees. Choose <code>ReentrantLock</code> when you need <code>tryLock</code>/timeouts, interruptible acquisition, fairness, or multiple <code>Condition</code> wait-sets. Choose <code>synchronized</code> for simple critical sections — it is JVM-optimized and cannot leak an unreleased lock. The lock's price is the mandatory <code>try/finally</code> unlock.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Which thread runs a CompletableFuture callback, and how do you control it?</summary>
+      <div class="answer"><p>A non-async stage (<code>thenApply</code>) runs on whichever thread completed the previous stage — possibly the caller, possibly a pool thread. An <code>...Async</code> stage runs on <code>ForkJoinPool.commonPool()</code> unless you pass an <code>Executor</code>. Because the common pool is shared JVM-wide and small, blocking or long tasks belong on your own executor via <code>supplyAsync(task, myPool)</code> / <code>thenApplyAsync(fn, myPool)</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain lock downgrading in ReentrantReadWriteLock — and why upgrading is forbidden.</summary>
+      <div class="answer"><p>Downgrading is legal: hold the write lock, acquire the read lock, then release the write lock — you keep reading with the fresh data you just wrote. Upgrading (read → write) is not: two readers each trying to become the writer would each wait for the other to release its read lock, a guaranteed deadlock, so the API disallows it. StampedLock offers <code>tryConvertToWriteLock</code> as a conditional alternative.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you size a thread pool for CPU-bound vs IO-bound work?</summary>
+      <div class="answer"><p>CPU-bound: about the number of cores (N or N+1) — more threads only add context-switching. IO-bound: threads spend most time waiting, so size up by the wait-to-compute ratio — Brian Goetz's formula is <code>N × targetUtilization × (1 + waitTime/computeTime)</code>. Measure under real load; a pool that is too large wastes memory and thrashes, too small underuses the machine.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a StampedLock optimistic read, and when is it wrong to use?</summary>
+      <div class="answer"><p><code>tryOptimisticRead</code> returns a stamp without acquiring any lock; you read the fields, then call <code>validate(stamp)</code> — if no writer intervened it returns true and you avoided all locking overhead; if not, you fall back to a real <code>readLock</code>. It shines for short, read-mostly sections. It is wrong when reads are long or side-effecting (you may read a torn state before validating), or when you need reentrancy or a Condition — StampedLock supports neither.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.conc.executors</li>
+      <li>java.conc.futures</li>
+      <li>java.conc.locks</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

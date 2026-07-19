@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Core Java concurrency basics: thread lifecycle and the Thread/Runnable/Callable API, the synchronized keyword, the volatile keyword, the Java Memory Model and its happens-before relationship, wait/notify, and ThreadLocal — with the best official and community resources plus the interview questions they power.">
+  <title>Concurrency: Threads and Memory Model</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Concurrency — Threads and Memory Model</h1>
+  <p class="standfirst">Threads are easy to start and hard to reason about — the difficulty lives in the memory model, not the API. This module orients you on how threads run and, more importantly, on the visibility and ordering rules (<code>synchronized</code>, <code>volatile</code>, happens-before) that decide whether one thread ever sees another's writes, then points you to the authoritative sources.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Core Java → Concurrency: Threads and Memory Model</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the foundation of Java concurrency: creating and controlling threads with <code>Thread</code>, <code>Runnable</code> and <code>Callable</code>; the <code>synchronized</code> keyword for mutual exclusion; the <code>volatile</code> keyword for visibility; the Java Memory Model (JMM) and its <em>happens-before</em> relationship — the rulebook that actually governs what a thread can see; <code>wait</code>/<code>notify</code> for coordination; and <code>ThreadLocal</code> for per-thread state. The memory-model trio — <code>synchronized</code>, <code>volatile</code>, and happens-before — is among the most-asked topics in Indian interviews, so it carries the most weight below. Higher-level tools (executors, futures, locks, atomics) build directly on these primitives and are covered in the next modules.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Thread lifecycle/API, Runnable/Callable</h3>
+    <p>A <code>Thread</code> is Java's unit of independent execution, each with its own call stack. You almost never subclass <code>Thread</code>; instead you pass the work as a <code>Runnable</code> (a no-argument, no-result, no-checked-exception task) and call <code>start()</code> — which spawns a new thread and invokes <code>run()</code> on it. Calling <code>run()</code> directly is the classic mistake: it just executes on the current thread with no concurrency. Over its life a thread moves through the six states of the <code>Thread.State</code> enum — <code>NEW</code>, <code>RUNNABLE</code>, <code>BLOCKED</code> (waiting for a monitor lock), <code>WAITING</code>, <code>TIMED_WAITING</code>, and <code>TERMINATED</code> — and useful control methods include <code>join()</code> (wait for another thread to finish), <code>interrupt()</code> (the cooperative cancellation signal), and <code>setDaemon(true)</code> (a background thread that does not keep the JVM alive).</p>
+    <p>Why it matters: <code>Callable&lt;V&gt;</code> is Runnable's result-returning cousin — it returns a value and may throw checked exceptions — but it can only be run through an <code>ExecutorService</code> (next module), not by a raw <code>Thread</code>. Interviewers use "Runnable vs Callable" and "start() vs run()" as reliable screening questions, and knowing the state machine lets you read thread dumps. Modern Java adds lightweight virtual threads (<code>Thread.ofVirtual()</code>, Java 21) for massive I/O concurrency, covered later in the track.</p>
+    <pre class="code-block" data-label="Java"><code>Runnable task = () -&gt; System.out.println("run on " + Thread.currentThread().getName());
+Thread t = new Thread(task);
+t.start();                 // NEW -&gt; RUNNABLE; runs task on a new call stack (NOT run())
+t.join();                  // caller blocks until t reaches TERMINATED
+
+// Callable returns a value and may throw checked exceptions
+Callable&lt;Integer&gt; job = () -&gt; 40 + 2;   // submit to an ExecutorService to get a Future</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html" rel="noopener">Thread — Java SE 21 API (Javadoc: start/join/interrupt, daemon, platform vs virtual)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Runnable.html" rel="noopener">Runnable — Java SE 21 API (the single run() task interface)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Callable.html" rel="noopener">Callable — Java SE 21 API (returns a result, may throw checked exceptions)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-thread-lifecycle" rel="noopener">Life Cycle of a Thread in Java — Baeldung (the six Thread.State values with examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SztE5W41on4" rel="noopener">Learn Java threading in 10 minutes — Bro Code</a></li>
+    </ul>
+
+    <h3>synchronized, volatile, Java Memory Model (happens-before), wait/notify</h3>
+    <p>This is the heart of the module. Without synchronization, the JVM and CPU are free to cache values in registers and reorder instructions, so a write by one thread may <em>never</em> become visible to another — that is a memory consistency error, and it is silent. Two keywords fix it. <code>synchronized</code> acquires an object's intrinsic lock (monitor): it gives both <strong>mutual exclusion</strong> (one thread in the critical section at a time) and <strong>visibility</strong> (an unlock happens-before the next lock on the same monitor, flushing changes). <code>volatile</code> is lighter — it guarantees <strong>visibility and ordering for a single field</strong> (every read sees the latest write, and it forbids reordering around the access) but provides <em>no</em> atomicity, so <code>volatile int count; count++</code> is still a race because the increment is read-modify-write.</p>
+    <p>The rules that make all of this precise are the Java Memory Model's <em>happens-before</em> relationship (JLS Chapter 17): if action A happens-before action B, then A's memory effects are visible to B. The guarantees you must know: program order within one thread; monitor unlock → subsequent lock; <code>volatile</code> write → subsequent <code>volatile</code> read; <code>Thread.start()</code> → the thread's first action; a thread's last action → another thread's successful <code>join()</code>; and transitivity. Separately, <code>wait()</code>/<code>notify()</code>/<code>notifyAll()</code> (on <code>Object</code>) coordinate threads: they must be called while holding the object's monitor, and <code>wait()</code> must always sit inside a <em>while</em> loop re-checking the condition (guarding against spurious wakeups and lost signals). This cluster — visibility vs atomicity, what happens-before guarantees, why volatile is not a lock — is the single most-tested concurrency area in Indian interviews.</p>
+    <pre class="code-block" data-label="Java"><code>class Counter {
+    private int count = 0;
+    synchronized void inc() { count++; }     // mutual exclusion + visibility
+    synchronized int get() { return count; } // must read under the same lock
+}
+
+private volatile boolean running = true;     // visibility only, no atomicity
+void stop() { running = false; }             // other threads see it promptly
+while (running) { /* work */ }               // safe stop flag; count++ would NOT be safe</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html" rel="noopener">Chapter 17: Threads and Locks — Java Language Specification SE 21 (the Memory Model and happens-before, §17.4)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/concurrency/syncmeth.html" rel="noopener">Synchronized Methods — Java Tutorials (intrinsic locks, the two guarantees)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/concurrency/memconsist.html" rel="noopener">Memory Consistency Errors — Java Tutorials (happens-before, plain-language)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/concurrency/guardmeth.html" rel="noopener">Guarded Blocks — Java Tutorials (wait/notifyAll, the while-loop condition)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-volatile" rel="noopener">Guide to the Volatile Keyword in Java — Baeldung (visibility and instruction ordering)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=oY14UyP61F8" rel="noopener">Java Happens-Before Guarantee (Java Memory Model, Part 2) — Defog Tech</a></li>
+    </ul>
+
+    <h3>ThreadLocal</h3>
+    <p><code>ThreadLocal&lt;T&gt;</code> gives every thread its own independently initialized copy of a variable: calls to <code>get()</code>/<code>set()</code> read and write only that thread's copy, so the value is confined to a thread and needs no synchronization. The idiomatic pattern is a <code>private static final</code> field created with <code>ThreadLocal.withInitial(supplier)</code>. Classic uses are holding non-thread-safe helpers per thread (the textbook example is a <code>SimpleDateFormat</code>, which is not thread-safe) and carrying implicit context — a user/security principal, a transaction, or a trace/correlation ID — through a call chain without threading it through every method signature.</p>
+    <p>Why it matters: the danger is memory leaks in thread pools. Pooled threads are reused and never die, so a value you <code>set()</code> lives on that thread indefinitely — leaking memory and, worse, leaking one request's data into the next request that reuses the thread. The rule interviewers want to hear: always <code>remove()</code> in a <code>finally</code> block when the unit of work ends. <code>InheritableThreadLocal</code> passes a value to child threads at creation, though it does not propagate across a thread pool.</p>
+    <pre class="code-block" data-label="Java"><code>private static final ThreadLocal&lt;SimpleDateFormat&gt; FMT =
+    ThreadLocal.withInitial(() -&gt; new SimpleDateFormat("yyyy-MM-dd"));
+
+try {
+    String today = FMT.get().format(new Date());  // each thread its own formatter
+    // ... use it ...
+} finally {
+    FMT.remove();   // essential on pooled threads to avoid leaks / stale data
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ThreadLocal.html" rel="noopener">ThreadLocal — Java SE 21 API (per-thread copies, withInitial, InheritableThreadLocal)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-threadlocal" rel="noopener">An Introduction to ThreadLocal in Java — Baeldung (patterns and the pool-leak pitfall)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sjMe9aecW_A" rel="noopener">ThreadLocal in Java — Defog Tech</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="15-streams-terminal.html">← Streams: Terminal Ops and Collectors</a>
+    <a href="index.html">All Core Java modules</a>
+    <a href="17-concurrency-executors.html">Concurrency: Executors and Futures →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The most-asked threads and memory-model questions in Indian interviews — the <code>volatile</code>, <code>synchronized</code> and happens-before cluster dominates, so those lead the intermediate tier and the hardest cases close the list:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the ways to create a thread, and which is preferred?</summary>
+      <div class="answer"><p>Two core ways: extend <code>Thread</code> and override <code>run()</code>, or implement <code>Runnable</code> (or <code>Callable</code>) and pass it to a <code>Thread</code> or executor. Prefer <code>Runnable</code>/<code>Callable</code>: it separates the task from the execution mechanism, leaves your single inheritance slot free, and works with thread pools. Extending Thread couples your logic to a specific thread and is rarely justified.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between start() and run()?</summary>
+      <div class="answer"><p><code>start()</code> creates a new thread and schedules <code>run()</code> to execute on it — you get real concurrency. Calling <code>run()</code> directly just invokes it as an ordinary method on the current thread, with no new thread at all. Also, you can only call <code>start()</code> once per Thread object; a second call throws <code>IllegalThreadStateException</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Runnable vs Callable?</summary>
+      <div class="answer"><p><code>Runnable.run()</code> returns void and cannot throw checked exceptions; <code>Callable.call()</code> returns a value of type <code>V</code> and may throw checked exceptions. Runnable can run on a raw <code>Thread</code> or an executor; Callable needs an <code>ExecutorService</code>, which hands back a <code>Future</code> to retrieve the result. Use Callable when the task produces a result or can fail with a checked exception.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the states in a thread's lifecycle?</summary>
+      <div class="answer"><p>The <code>Thread.State</code> enum defines six: <code>NEW</code> (created, not started), <code>RUNNABLE</code> (running or ready to run), <code>BLOCKED</code> (waiting to acquire a monitor lock), <code>WAITING</code> (waiting indefinitely, e.g. <code>wait()</code>/<code>join()</code> with no timeout), <code>TIMED_WAITING</code> (waiting with a timeout, e.g. <code>sleep(ms)</code>), and <code>TERMINATED</code> (finished). A thread is in exactly one state at a time.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a daemon thread?</summary>
+      <div class="answer"><p>A background thread (set via <code>setDaemon(true)</code> before <code>start()</code>) that does not prevent the JVM from exiting — when only daemon threads remain, the JVM shuts down and abandons them. Used for background housekeeping (GC helpers, timers). User (non-daemon) threads keep the JVM alive until they complete.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What does volatile guarantee, and what does it NOT?</summary>
+      <div class="answer"><p>It guarantees <em>visibility</em> (a read always sees the most recent write, no thread-local caching) and <em>ordering</em> (no reordering across the access; a volatile write establishes happens-before with a later volatile read of the same field). It does <em>not</em> guarantee atomicity of compound actions: <code>count++</code> on a volatile int is read-modify-write and still races. Use volatile for a one-writer flag or a safely published reference; use locks or atomics for compound updates.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What does synchronized lock, and what two guarantees does it give?</summary>
+      <div class="answer"><p>It acquires an object's intrinsic lock (monitor): a synchronized instance method locks <code>this</code>, a static synchronized method locks the <code>Class</code> object, and a synchronized block locks whatever object you name. Two guarantees: <em>mutual exclusion</em> (only one thread holds a given monitor at a time) and <em>visibility</em> (releasing the lock happens-before the next acquire of the same lock, so changes are flushed and re-read). Locking on different monitors gives no mutual exclusion.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the happens-before relationship.</summary>
+      <div class="answer"><p>It is the Java Memory Model's visibility guarantee: if action A happens-before action B, then A's memory writes are visible to and ordered before B. Key edges: statements within one thread (program order); a monitor unlock before a later lock on the same monitor; a volatile write before a later volatile read of that field; <code>Thread.start()</code> before the new thread's actions; a thread's final actions before a successful <code>join()</code>; and transitivity (A→B and B→C imply A→C). Without a happens-before edge, one thread's write may never be visible to another.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> volatile vs synchronized — when do you pick each?</summary>
+      <div class="answer"><p><code>volatile</code> is non-blocking and covers visibility/ordering of a single field — ideal for a status/stop flag or publishing an immutable object reference. <code>synchronized</code> blocks and covers both mutual exclusion and visibility — required when you must make several actions atomic (check-then-act, read-modify-write, updating multiple fields consistently). Rule of thumb: single-field visibility → volatile; compound invariant → synchronized (or a lock/atomic).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must wait()/notify() be called inside synchronized, and why wait() in a loop?</summary>
+      <div class="answer"><p><code>wait()</code>, <code>notify()</code> and <code>notifyAll()</code> operate on an object's monitor, so you must already hold that monitor — otherwise you get <code>IllegalMonitorStateException</code>. <code>wait()</code> atomically releases the lock and suspends, reacquiring it on wake-up. You loop (<code>while (!condition) wait();</code>) because of spurious wakeups and because another thread may change the condition between notify and reacquisition — re-checking on wake is the only safe pattern. Prefer <code>notifyAll()</code> to avoid stranding threads.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a race condition / memory consistency error?</summary>
+      <div class="answer"><p>A race condition is when the result depends on the unpredictable interleaving of threads accessing shared mutable state without proper synchronization (e.g. two threads both read-increment-write a counter and one update is lost). A memory consistency error is the visibility side: one thread's write is never seen by another because there is no happens-before edge, so a thread reads a stale value. Both are fixed by establishing happens-before via locks, volatile, or higher-level concurrency utilities.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is ThreadLocal, a real use case, and its main risk?</summary>
+      <div class="answer"><p>It gives each thread its own copy of a variable, accessed via <code>get()</code>/<code>set()</code>, so no synchronization is needed for that state. Use cases: a per-thread <code>SimpleDateFormat</code> (not thread-safe), or carrying request context (user, transaction, trace ID) implicitly. Main risk: memory leaks and data bleed in thread pools — because pooled threads are reused and never terminate, a value set for one task lingers for the next. Always <code>remove()</code> in a <code>finally</code> block.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why was double-checked locking broken before Java 5, and how does volatile fix it?</summary>
+      <div class="answer"><p>In lazy-singleton DCL, the object reference could be published before the constructor finished, because the JMM (pre-Java 5) allowed the write of the reference to be reordered ahead of the writes initializing the object. A second thread could then see a non-null but partially constructed instance. Java 5 strengthened <code>volatile</code>: declaring the field <code>volatile</code> forbids that reordering and creates a happens-before edge, so any thread reading a non-null reference sees a fully initialized object. (An enum or a static holder class is often cleaner.)</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Is count++ on a volatile int thread-safe? Explain.</summary>
+      <div class="answer"><p>No. <code>volatile</code> guarantees each read sees the latest value and each write is immediately visible, but <code>count++</code> is three operations — read, add one, write — that are not atomic together. Two threads can both read the same value, both increment, and both write it back, losing an update. Use <code>synchronized</code>, a <code>ReentrantLock</code>, or <code>AtomicInteger.incrementAndGet()</code> (a CAS-based atomic) for a correct concurrent counter.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How do ThreadLocal memory leaks happen in thread pools, and how do you prevent them?</summary>
+      <div class="answer"><p>A ThreadLocalMap is keyed by a weak reference to the ThreadLocal but holds the <em>value</em> strongly. On a pooled thread that lives for the whole application, values set during a task are never cleared when the ThreadLocal goes out of scope, so they accumulate — and one request's data can be read by the next task that reuses the thread. Prevention: call <code>remove()</code> in a <code>finally</code> at the end of each unit of work (frameworks like Spring do this around request scope); never rely on the thread dying to clean up.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Core Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.conc.threads</li>
+      <li>java.conc.sync</li>
+      <li>java.conc.threadlocal</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Core Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
