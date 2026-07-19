@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java Serialization module: the Serializable contract and serialVersionUID, customizing with writeObject/readObject and Externalizable, the deserialization security risk and serialization filters, and the modern JSON alternative with Jackson — the best official and community resources plus the interview questions they power.">
+  <title>Java Serialization — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Serialization</h1>
+  <p class="standfirst">Turning a live object into bytes looks like a checkbox — implement one empty interface and you are done. The senior skill is knowing what that checkbox costs you in versioning, security, and why most teams reach for JSON instead.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Serialization</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Serialization is converting an object graph into a byte stream (and back) so it can be stored or sent across a network. This module covers Java's built-in mechanism — the <code>Serializable</code> marker, <code>serialVersionUID</code>, the object streams, custom hooks and <code>Externalizable</code> — then the deserialization vulnerability that makes native serialization dangerous, and finally the JSON approach with Jackson that production systems actually use for data exchange.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The Serializable contract and serialVersionUID</h3>
+    <p>Implementing the empty <code>Serializable</code> marker interface makes a class eligible for the object streams: <code>ObjectOutputStream.writeObject</code> walks the whole reference graph and writes every non-transient, non-static field; <code>ObjectInputStream.readObject</code> rebuilds it — <em>without</em> calling any constructor. The <code>transient</code> keyword excludes a field (passwords, caches, derived data); static fields are never written because they belong to the class, not the instance.</p>
+    <p>Why it matters: the byte format is tied to the class shape, so evolving the class can break old data. <code>serialVersionUID</code> is the explicit version stamp callers check on read — omit it and the compiler generates one from the class structure, so any change (even adding a method) can flip it and throw <code>InvalidClassException</code>. Declaring it by hand is the single most-repeated serialization rule in interviews.</p>
+    <pre class="code-block" data-label="Java"><code>class Account implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String owner;
+    private transient String sessionKey; // excluded from the byte stream
+}
+try (var out = new ObjectOutputStream(new FileOutputStream("a.ser"))) {
+    out.writeObject(account);            // whole graph, no constructor on read
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/Serializable.html" rel="noopener">Serializable — Java SE 21 API (Javadoc; serialVersionUID rules and the special methods)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/io/objectstreams.html" rel="noopener">Object Streams — The Java Tutorials (Oracle, the canonical intro)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-serialization" rel="noopener">Introduction to Java Serialization — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-serial-version-uid" rel="noopener">What Is the serialVersionUID? — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8qK8jbICrY0" rel="noopener">Java Serialization Tutorial — Coding with John</a></li>
+    </ul>
+
+    <h3>Customizing the format: writeObject/readObject and Externalizable</h3>
+    <p>When default field-by-field writing is not enough, a class can supply private <code>writeObject</code>/<code>readObject</code> methods. They usually call <code>defaultWriteObject()</code>/<code>defaultReadObject()</code> for the standard fields, then read or write extra data — and <code>readObject</code> is the right place to re-validate invariants after a restore. <code>Externalizable</code> goes further: it hands you total control through <code>writeExternal</code>/<code>readExternal</code>, writes no default state, and requires a public no-arg constructor because the object is created the normal way before its state is read back.</p>
+    <p>Why it matters: <code>Externalizable</code> can be faster and more compact but is fully manual and easy to get wrong on class evolution. Knowing when each is appropriate — and how versioning of the serialized form works — is the difference between a screening answer and a design answer. Java 14+ also lets you tag these members with <code>@Serial</code> so the compiler checks their signatures.</p>
+    <pre class="code-block" data-label="Java"><code>private void writeObject(ObjectOutputStream out) throws IOException {
+    out.defaultWriteObject();      // the ordinary fields
+    out.writeInt(derivedChecksum()); // plus something extra
+}
+private void readObject(ObjectInputStream in)
+        throws IOException, ClassNotFoundException {
+    in.defaultReadObject();
+    validateInvariants();          // re-check after reconstruction
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/ObjectOutputStream.html" rel="noopener">ObjectOutputStream — Java SE 21 API (writeObject, defaultWriteObject)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/Externalizable.html" rel="noopener">Externalizable — Java SE 21 API (writeExternal/readExternal, no-arg constructor)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/index.html" rel="noopener">Java Object Serialization Specification — Oracle (serialized form and versioning)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-externalizable" rel="noopener">Guide to the Externalizable Interface — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-14-serial-annotation" rel="noopener">Guide to the @Serial Annotation — Baeldung</a></li>
+    </ul>
+
+    <h3>Security: the deserialization vulnerability</h3>
+    <p>This is the topic that makes native serialization controversial. Because <code>readObject</code> reconstructs arbitrary object graphs from bytes before your code sees them, a crafted stream can drive existing library classes (a "gadget chain") into executing code, exhausting memory with recursive or huge structures, or bypassing validation. It is CWE-502 — deserialization of untrusted data — and has produced remote-code-execution CVEs across the Java ecosystem. The core rule: never deserialize data you do not fully trust.</p>
+    <p>Why it matters: when you must accept serialized input, defend it. JEP 290 added serialization filters — <code>ObjectInputFilter</code> allow-lists (rather than reject-lists) that screen classes, array sizes, graph depth and stream length before objects are built. Mark sensitive fields <code>transient</code>, validate in <code>readObject</code>, and prefer a data format like JSON that never instantiates attacker-chosen types. Product companies in India increasingly probe this in security-conscious rounds.</p>
+    <pre class="code-block" data-label="Java"><code>// Allow only your own package and java.base; reject everything else
+var filter = ObjectInputFilter.Config
+    .createFilter("com.myapp.model.*;java.base/*;!*");
+ois.setObjectInputFilter(filter);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/ObjectInputFilter.html" rel="noopener">ObjectInputFilter — Java SE 21 API (JEP 290 serialization filters)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/core/serialization-filtering1.html" rel="noopener">Serialization Filtering — Oracle Java Core Libraries guide</a></li>
+      <li>[Official] <a href="https://www.oracle.com/java/technologies/javase/seccodeguide.html" rel="noopener">Secure Coding Guidelines for Java SE — Oracle (Section 8, Serialization)</a></li>
+      <li>[Article] <a href="https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data" rel="noopener">Deserialization of Untrusted Data — OWASP (CWE-502)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-deserialization-vulnerabilities" rel="noopener">Deserialization Vulnerabilities in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>The modern default: JSON with Jackson</h3>
+    <p>For storing and exchanging data, most teams skip native serialization and use JSON. Jackson's <code>ObjectMapper</code> is the workhorse: <code>writeValueAsString</code> serializes a POJO to JSON and <code>readValue</code> deserializes it back, driven by getters/setters and annotations. Field-level control comes from annotations — <code>@JsonProperty</code> (rename), <code>@JsonIgnore</code> (drop), <code>@JsonInclude</code> (omit nulls/empties), <code>@JsonFormat</code> (dates) — and when a type needs bespoke output you register a custom serializer by extending <code>StdSerializer</code> (or the matching deserializer).</p>
+    <p>Why it matters: JSON is human-readable, language-agnostic, versions gracefully (unknown fields can be ignored), and does not instantiate attacker-chosen classes the way <code>readObject</code> does. This is the format behind virtually every REST API and Spring Boot service, so Jackson fluency is expected of any enterprise Java developer. Create one <code>ObjectMapper</code> and reuse it — it is thread-safe and relatively expensive to build.</p>
+    <pre class="code-block" data-label="Java"><code>ObjectMapper mapper = new ObjectMapper();       // build once, reuse
+String json = mapper.writeValueAsString(user);  // POJO -&gt; JSON
+User back   = mapper.readValue(json, User.class); // JSON -&gt; POJO</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/FasterXML/jackson-databind" rel="noopener">jackson-databind — FasterXML (ObjectMapper, the databind home and docs)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jackson-object-mapper-tutorial" rel="noopener">Intro to the Jackson ObjectMapper — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jackson-annotations" rel="noopener">Jackson Annotation Examples — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jackson-custom-serialization" rel="noopener">Jackson Custom Serializer — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bV85_gIrHTc" rel="noopener">Intro to JSON and Jackson's ObjectMapper — Geekific</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-reflection.html">← Reflection</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="04-optional.html">Optional →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Serialization questions asked in Indian interviews — a screening staple for core Java, with security and Jackson coming up in product-company and backend rounds:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are serialization and deserialization in Java?</summary>
+      <div class="answer"><p>Serialization converts an object's state into a byte stream (for storage or network transfer); deserialization rebuilds the object from those bytes. A class opts in by implementing the empty marker interface <code>Serializable</code>, and the work is done by <code>ObjectOutputStream.writeObject</code> and <code>ObjectInputStream.readObject</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is serialVersionUID and why declare it explicitly?</summary>
+      <div class="answer"><p>It is a version stamp compared during deserialization to confirm the loaded class matches the serialized data. If you do not declare one, the compiler derives it from the class structure, so almost any change alters it and old bytes fail with <code>InvalidClassException</code>. Declaring a fixed <code>private static final long serialVersionUID</code> gives you control over compatibility.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the transient keyword do?</summary>
+      <div class="answer"><p>It marks a field to be skipped by serialization — nothing is written for it, and on read it comes back as the type default (null, 0, false). Use it for secrets, caches, and derived values you can recompute. Static fields are also not serialized because they belong to the class, not the instance.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Serializable vs Externalizable?</summary>
+      <div class="answer"><p><code>Serializable</code> is a marker; the runtime writes fields automatically. <code>Externalizable</code> extends it but you write and read every byte yourself in <code>writeExternal</code>/<code>readExternal</code>, and it requires a public no-arg constructor because the object is constructed first and populated after. Externalizable can be leaner and faster but is fully manual.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does deserialization call the constructor?</summary>
+      <div class="answer"><p>Not for the serializable class itself — the object is allocated and fields are restored directly from the stream, bypassing constructors and instance initializers. The exception: fields inherited from a non-serializable superclass are re-initialized by that superclass's accessible no-arg constructor, so a non-serializable parent must provide one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do writeObject/readObject customize the process?</summary>
+      <div class="answer"><p>A serializable class may define private <code>writeObject(ObjectOutputStream)</code> and <code>readObject(ObjectInputStream)</code>. They typically call <code>defaultWriteObject()</code>/<code>defaultReadObject()</code> for standard fields and then add custom data; <code>readObject</code> is also where you re-validate invariants after reconstruction, since no constructor ran to enforce them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How are object graphs with shared references or cycles handled?</summary>
+      <div class="answer"><p>The stream tracks each object with a handle; repeated references to the same object write a back-reference to that handle instead of duplicating it. This preserves shared identity on read and prevents infinite loops on cyclic graphs. It also means a mutable object serialized twice can be read back as two separate objects if written to different streams.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is Java's native serialization considered a security risk?</summary>
+      <div class="answer"><p>Because <code>readObject</code> builds arbitrary object graphs from untrusted bytes before your code runs. Attackers craft "gadget chains" of library classes that execute code during deserialization, or send recursive/oversized structures to exhaust memory (denial of service). This is CWE-502 and has caused many remote-code-execution CVEs — so untrusted data must never be deserialized directly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do most teams prefer Jackson/JSON over native serialization?</summary>
+      <div class="answer"><p>JSON is human-readable, language-agnostic, and versions gracefully (unknown fields can be ignored rather than throwing). It never instantiates attacker-chosen types the way <code>readObject</code> does, and it is the format behind REST and Spring Boot. Jackson's <code>ObjectMapper</code> maps POJOs to and from JSON with annotation-driven control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you defend a system that must accept serialized input?</summary>
+      <div class="answer"><p>First choice: do not deserialize untrusted data — use JSON. If you must, apply JEP 290 serialization filters (<code>ObjectInputFilter</code>) as an allow-list of permitted classes plus caps on array size, graph depth and stream length; keep libraries patched; mark sensitive fields <code>transient</code>; validate inside <code>readObject</code>; and isolate the code with least privilege. Allow-lists beat reject-lists because new gadget classes appear constantly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are some Jackson annotations you have used, and when?</summary>
+      <div class="answer"><p><code>@JsonProperty</code> renames or forces inclusion of a field; <code>@JsonIgnore</code>/<code>@JsonIgnoreProperties</code> drop fields; <code>@JsonInclude(NON_NULL)</code> omits empty values; <code>@JsonFormat</code> controls date/number shape; <code>@JsonCreator</code>/<code>@JsonProperty</code> bind constructor parameters for immutable types. For output a single type can't express with annotations, register a custom serializer by extending <code>StdSerializer</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What do writeReplace and readResolve do, and where would you use them?</summary>
+      <div class="answer"><p>They substitute a different object during serialization (<code>writeReplace</code>) and deserialization (<code>readResolve</code>). Classic uses: preserving a singleton's single instance across a round-trip (return the canonical instance from <code>readResolve</code>), and the serialization proxy pattern from Effective Java — serialize a small, well-formed proxy via <code>writeReplace</code> and rebuild the real object through the proxy's <code>readResolve</code>, which sidesteps the constructor-bypass and many deserialization attacks.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.serialization</li>
+      <li>java.adv.json</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

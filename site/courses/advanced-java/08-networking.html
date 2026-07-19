@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java Networking module: TCP sockets (Socket/ServerSocket), UDP datagrams, and the modern java.net.http.HttpClient — sync and async, HTTP/2 and HTTP/3 over QUIC, and WebSocket — with the best official and community resources plus the interview questions they power.">
+  <title>Networking and HttpClient — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Networking and HttpClient</h1>
+  <p class="standfirst">Java's network stack spans two eras: the 1990s blocking-socket API that still underpins every server, and the fluent java.net.http.HttpClient that speaks HTTP/2 today and HTTP/3 over QUIC as of Java 26. Interviewers probe both — the sockets to test fundamentals, the client to test whether you have shipped modern code.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Networking and HttpClient</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two layers of the <code>java.net</code> world. First, the classic blocking sockets: <code>Socket</code> and <code>ServerSocket</code> for connection-oriented TCP, and <code>DatagramSocket</code>/<code>DatagramPacket</code> for connectionless UDP. Second, the standardised <code>java.net.http.HttpClient</code> (final since Java 11) — synchronous and asynchronous requests, HTTP/2 by default, HTTP/3 over QUIC newly finalised in Java 26, and a built-in WebSocket. Depth lives in the linked docs; this page maps the terrain and the questions.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>TCP sockets: Socket and ServerSocket</h3>
+    <p>TCP gives you a reliable, ordered, bidirectional byte stream between two endpoints. A client creates a <code>Socket</code> to a host and port; a server binds a <code>ServerSocket</code> to a port and calls <code>accept()</code>, which blocks until a client connects and then returns a fresh <code>Socket</code> for that conversation. From there both sides talk through ordinary <code>InputStream</code>/<code>OutputStream</code> — sockets are just streams with a network on the other end.</p>
+    <p>Why it matters: this is the substrate under HTTP servers, database drivers, and message brokers. The one-thread-per-connection model here is also where interviewers pivot into concurrency and, later, into the non-blocking NIO selector model that scales past it.</p>
+    <pre class="code-block" data-label="Java"><code>// server: accept one client, echo a line
+try (ServerSocket server = new ServerSocket(5000);
+     Socket client = server.accept();            // blocks until a client connects
+     var in  = new BufferedReader(new InputStreamReader(client.getInputStream()));
+     var out = new PrintWriter(client.getOutputStream(), true)) {
+    out.println("echo: " + in.readLine());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/networking/sockets/index.html" rel="noopener">All About Sockets — The Java Tutorials (Custom Networking, Oracle)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/Socket.html" rel="noopener">Socket — Java SE 21 API (Javadoc, the client endpoint)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/ServerSocket.html" rel="noopener">ServerSocket — Java SE 21 API (Javadoc, accept/bind/backlog)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/a-guide-to-java-sockets" rel="noopener">A Guide to Java Sockets — Baeldung (client/server with a multi-threaded server)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3YoKVswJsKI" rel="noopener">Socket Programming in Java — Telusko</a></li>
+    </ul>
+
+    <h3>UDP datagrams: DatagramSocket and DatagramPacket</h3>
+    <p>UDP trades reliability for speed and simplicity: there is no connection, no handshake, and no delivery or ordering guarantee. Each message is an independently addressed <code>DatagramPacket</code> that you send and receive through a <code>DatagramSocket</code>. Packets can be lost, duplicated, or arrive out of order — the application must tolerate or handle that. In exchange you avoid TCP's per-connection state and head-of-line blocking, which is why UDP carries DNS, streaming media, game state, and (via QUIC) HTTP/3.</p>
+    <p>Why it matters: knowing when <em>not</em> to use TCP is a maturity signal. "Fire-and-forget telemetry where a dropped sample is fine" is a textbook UDP answer.</p>
+    <pre class="code-block" data-label="Java"><code>byte[] buf = "ping".getBytes();
+try (DatagramSocket socket = new DatagramSocket()) {
+    var addr = InetAddress.getByName("localhost");
+    socket.send(new DatagramPacket(buf, buf.length, addr, 5001)); // no connection, no ack
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/DatagramSocket.html" rel="noopener">DatagramSocket — Java SE 21 API (Javadoc, connectionless packet delivery)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/udp-in-java" rel="noopener">A Guide to UDP in Java — Baeldung (DatagramSocket + DatagramPacket end to end)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=A5fFxs_DUsQ" rel="noopener">UDP Socket Programming in Java Tutorial — Telusko</a></li>
+    </ul>
+
+    <h3>The modern HttpClient: synchronous and asynchronous</h3>
+    <p>Since Java 11 the platform ships a real HTTP client in <code>java.net.http</code>, retiring the awkward <code>HttpURLConnection</code>. The pieces are immutable and builder-made: one reusable <code>HttpClient</code>, an <code>HttpRequest</code> (URI, method, headers, a <code>BodyPublisher</code> for the request body), and an <code>HttpResponse</code> read via a <code>BodyHandler</code>. Call <code>send()</code> to block for the response, or <code>sendAsync()</code> to get a <code>CompletableFuture&lt;HttpResponse&gt;</code> you can compose without tying up a thread.</p>
+    <p>Why it matters: this is the default way to call a REST API from plain Java, and the <code>send</code>-vs-<code>sendAsync</code> distinction plus the handler/publisher pattern are standard interview ground. One <code>HttpClient</code> is meant to be created once and shared — it is immutable and thread-safe.</p>
+    <pre class="code-block" data-label="Java"><code>HttpClient client = HttpClient.newHttpClient();          // reuse this instance
+HttpRequest req = HttpRequest.newBuilder(URI.create("https://api.example.com/users"))
+    .header("Accept", "application/json")
+    .GET()
+    .build();
+
+HttpResponse&lt;String&gt; res = client.send(req, BodyHandlers.ofString()); // blocking
+client.sendAsync(req, BodyHandlers.ofString())                         // non-blocking
+      .thenApply(HttpResponse::body)
+      .thenAccept(System.out::println);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpClient.html" rel="noopener">HttpClient — Java SE 21 API (Javadoc, send/sendAsync/newWebSocketBuilder)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpRequest.html" rel="noopener">HttpRequest — Java SE 21 API (Javadoc, Builder + BodyPublishers)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/modernio/" rel="noopener">Common I/O Tasks in Modern Java — dev.java (reading from a website with HttpClient)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-9-http-client" rel="noopener">Exploring the New HTTP Client in Java — Baeldung (sync, async, and configuration)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5MmlRZZxTqk" rel="noopener">Send an HTTP GET Request with Java 11 HttpClient and parse JSON — Dan Vega</a></li>
+    </ul>
+
+    <h3>HTTP/2 by default, HTTP/3 over QUIC (final in Java 26)</h3>
+    <p>The client negotiates <code>HTTP_2</code> by default and transparently falls back to HTTP/1.1 when a server does not support it — your code does not change. As of Java 26, <code>HttpClient</code> also speaks HTTP/3, delivered as a final feature by <a href="https://openjdk.org/jeps/517" rel="noopener">JEP 517</a>. HTTP/3 runs over QUIC on UDP (with TLS 1.3 built in) instead of TCP, which removes TCP's connection-level head-of-line blocking. You opt in with <code>.version(HttpClient.Version.HTTP_3)</code>; because that is only a preference, use the alt-svc discovery mode so the first request goes over HTTP/2 and later ones upgrade once the server advertises HTTP/3.</p>
+    <pre class="code-block" data-label="Java"><code>HttpClient client = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_3)   // Java 26+; a preference, not a guarantee
+    .build();                              // downgrades to HTTP/2 or HTTP/1.1 if needed</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://openjdk.org/jeps/517" rel="noopener">JEP 517: HTTP/3 for the HTTP Client API — OpenJDK (final in JDK 26)</a></li>
+      <li>[Article] <a href="https://inside.java/2025/10/22/http3-support/" rel="noopener">HTTP/3 Support in JDK 26 — Inside.java (how to enable it and the alt-svc default)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-26-new-features" rel="noopener">New Features in Java 26 — Baeldung (the HTTP/3 section, with fallback behaviour)</a></li>
+    </ul>
+
+    <h3>WebSocket over HttpClient</h3>
+    <p>The same <code>HttpClient</code> opens WebSocket connections through <code>newWebSocketBuilder()</code>. A WebSocket is a full-duplex, long-lived channel: you send with <code>sendText</code>/<code>sendBinary</code> (each returning a <code>CompletableFuture</code>) and receive through a <code>WebSocket.Listener</code> whose <code>onText</code>/<code>onBinary</code>/<code>onPing</code>/<code>onClose</code> callbacks the client invokes. Flow control is explicit: the listener must call <code>request(n)</code> to signal it is ready for more messages — the same back-pressure idea as the reactive-streams <code>Flow</code> API.</p>
+    <pre class="code-block" data-label="Java"><code>WebSocket ws = HttpClient.newHttpClient()
+    .newWebSocketBuilder()
+    .buildAsync(URI.create("wss://echo.websocket.org"), new WebSocket.Listener() {
+        public CompletionStage&lt;?&gt; onText(WebSocket s, CharSequence data, boolean last) {
+            System.out.println(data);
+            s.request(1);            // ask for the next message (back-pressure)
+            return null;
+        }
+    }).join();
+ws.sendText("hello", true);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/WebSocket.html" rel="noopener">WebSocket — Java SE 21 API (Javadoc, Listener + request/back-pressure)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/WebSocket.Builder.html" rel="noopener">WebSocket.Builder — Java SE 21 API (Javadoc, buildAsync handshake)</a></li>
+      <li>[Article] <a href="https://kodejava.org/how-do-i-use-websocket-with-httpclient/" rel="noopener">How do I use WebSocket with HttpClient? — KodeJava (a complete runnable example)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-nio-channels.html">← NIO Channels and Buffers</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="09-regex-text.html">Regular Expressions and Text →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Networking questions common in Indian interviews — sockets test fundamentals, HttpClient tests whether you write current code:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between TCP and UDP, and when would you choose UDP?</summary>
+      <div class="answer"><p>TCP is connection-oriented, reliable, and ordered — a byte stream with handshake, acknowledgements, and retransmission. UDP is connectionless and best-effort: no handshake, no delivery or ordering guarantee, lower overhead and latency. Choose UDP when speed matters more than reliability and occasional loss is acceptable — DNS, live audio/video, telemetry, gaming, and the QUIC transport under HTTP/3.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Socket vs ServerSocket — what are their roles?</summary>
+      <div class="answer"><p><code>Socket</code> is the client endpoint: you construct it with a host and port to connect out. <code>ServerSocket</code> is the server endpoint: it binds to a port and listens. Its <code>accept()</code> returns a new <code>Socket</code> representing the accepted connection, which the server uses to talk to that one client.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does ServerSocket.accept() return, and why does it block?</summary>
+      <div class="answer"><p>It returns a connected <code>Socket</code> for a single client. It blocks because the server has nothing to do until a client actually arrives — the calling thread parks until the TCP handshake completes. To serve several clients you loop, calling <code>accept()</code> repeatedly and handing each returned socket to a worker thread.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which classes send and receive a UDP message?</summary>
+      <div class="answer"><p><code>DatagramSocket</code> is the send/receive endpoint; <code>DatagramPacket</code> wraps the payload bytes plus destination address and port. You call <code>socket.send(packet)</code> and <code>socket.receive(packet)</code>. There is no connection object because UDP has no connection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you handle many concurrent clients on a TCP server?</summary>
+      <div class="answer"><p>Classic model: an accept loop that hands each returned <code>Socket</code> to a thread — but thread-per-connection does not scale to tens of thousands of idle connections (memory and context-switching). Better: a bounded thread pool (<code>ExecutorService</code>), virtual threads (Java 21+) for cheap one-thread-per-connection, or the non-blocking NIO selector model where one thread multiplexes many channels.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why prefer java.net.http.HttpClient over HttpURLConnection?</summary>
+      <div class="answer"><p><code>HttpURLConnection</code> is verbose, mutable, HTTP/1.1-only, and clumsy for anything asynchronous. The modern <code>HttpClient</code> (final in Java 11) offers a fluent immutable builder API, HTTP/2 by default, native async via <code>CompletableFuture</code>, request/response body handlers, WebSocket support, and — from Java 26 — HTTP/3. No third-party library needed for common cases.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> send() vs sendAsync() — what is the difference?</summary>
+      <div class="answer"><p><code>send()</code> is synchronous: it blocks the calling thread and returns an <code>HttpResponse</code>. <code>sendAsync()</code> returns immediately with a <code>CompletableFuture&lt;HttpResponse&gt;</code> that completes when the response arrives, so you compose with <code>thenApply</code>/<code>thenAccept</code> and never block. Use async for high-throughput or when firing many requests concurrently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are BodyPublishers and BodyHandlers?</summary>
+      <div class="answer"><p><code>BodyPublisher</code> (from <code>HttpRequest.BodyPublishers</code>) supplies the request body — from a String, file, byte array, or input stream. <code>BodyHandler</code> (from <code>HttpResponse.BodyHandlers</code>) decides how to consume the response — <code>ofString()</code>, <code>ofByteArray()</code>, <code>ofFile()</code>, <code>ofInputStream()</code>. They decouple the request/response mechanics from how bodies are produced and read, using reactive-streams under the hood.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What HTTP version does HttpClient use by default, and what if the server can't?</summary>
+      <div class="answer"><p>It prefers <code>HTTP_2</code>. If the server does not support HTTP/2 the client transparently downgrades to HTTP/1.1 — the request still succeeds and your code is unchanged. Setting a version (including <code>HTTP_3</code> in Java 26) is a preference, not a guarantee; the client negotiates and falls back.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is HttpClient reusable and thread-safe? Do you create one per request?</summary>
+      <div class="answer"><p>No — create it once and share it. <code>HttpClient</code> is immutable and thread-safe, and it pools connections; instantiating one per request wastes connection setup and defeats HTTP/2 multiplexing. Build a single configured client (timeout, redirect policy, executor) and reuse it across the application.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> HTTP/2 vs HTTP/3 — what changed in the transport, and how do you enable HTTP/3 in Java 26?</summary>
+      <div class="answer"><p>HTTP/2 multiplexes many streams over one TCP connection, but a single lost TCP segment stalls every stream (connection-level head-of-line blocking). HTTP/3 runs over QUIC on UDP with TLS 1.3 integrated; QUIC's streams are independent, so one lost packet only stalls its own stream, and connection migration survives IP changes. In Java 26 (JEP 517, final) enable it with <code>HttpClient.newBuilder().version(Version.HTTP_3)</code>, ideally with alt-svc discovery so the client upgrades after the server advertises HTTP/3.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is head-of-line blocking, and how does QUIC address it?</summary>
+      <div class="answer"><p>Head-of-line blocking is when the first item in a queue stalls everything behind it. Over TCP, all HTTP/2 streams share one ordered byte stream, so a single dropped segment forces every multiplexed stream to wait for its retransmission — even streams whose data already arrived. QUIC gives each stream its own delivery ordering over UDP, so loss on one stream no longer blocks the others. (Application-level HOL blocking within a single stream still exists.)</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you consume a WebSocket with the JDK HttpClient, and what does request(n) do?</summary>
+      <div class="answer"><p>Call <code>client.newWebSocketBuilder().buildAsync(uri, listener)</code>, which performs the opening handshake and completes a <code>CompletableFuture&lt;WebSocket&gt;</code>. Send with <code>sendText</code>/<code>sendBinary</code>; receive through the <code>WebSocket.Listener</code> callbacks (<code>onText</code>, <code>onBinary</code>, <code>onClose</code>). <code>request(n)</code> is back-pressure: the client will only deliver up to <code>n</code> more messages until you ask for more, so a slow consumer is not overrun — analogous to a reactive-streams <code>Subscription</code>.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.sockets</li>
+      <li>java.adv.httpclient</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JDBC module: connecting with DriverManager and DataSource, PreparedStatement and SQL-injection safety, reading ResultSets, transactions, batching, and connection pooling — with the best official and community resources plus the interview questions they power.">
+  <title>JDBC — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: JDBC</h1>
+  <p class="standfirst">JDBC is the wire between Java and a relational database — and the one place where a single string concatenation turns a query into a security incident. This module orients you on the API and points to the best material for each part, official docs first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → JDBC</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>JDBC (Java Database Connectivity) is the standard <code>java.sql</code> API for talking to relational databases: getting a <code>Connection</code> (via <code>DriverManager</code> or a <code>DataSource</code>), running SQL through <code>Statement</code> and <code>PreparedStatement</code>, reading rows from a <code>ResultSet</code>, and controlling transactions, batching, and pooling. The headline skill — tested in almost every backend interview — is using <code>PreparedStatement</code> to make SQL injection impossible. Everything above JDBC (JPA, Hibernate, Spring Data, JdbcTemplate) is built on these six interfaces.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>JDBC architecture and establishing a connection</h3>
+    <p>JDBC is a set of interfaces in <code>java.sql</code>; a database vendor ships a <em>driver</em> that implements them. Your code asks <code>DriverManager.getConnection(url, user, password)</code> for a <code>Connection</code>, where the URL follows <code>jdbc:subprotocol:subname</code> (for example <code>jdbc:postgresql://host/shop</code>). Since JDBC 4.0 the matching driver on the classpath is discovered automatically through the service-provider mechanism, so the old <code>Class.forName(...)</code> call is no longer needed.</p>
+    <p>Why it matters: a <code>Connection</code> is a scarce, expensive OS-level resource. Always acquire it in a try-with-resources block so it — and every <code>Statement</code> and <code>ResultSet</code> under it — closes deterministically, even when an exception is thrown. Leaked connections are a classic production outage.</p>
+    <pre class="code-block" data-label="Java"><code>String url = "jdbc:postgresql://db.example.com/shop";   // driver auto-loaded (JDBC 4.0+)
+try (Connection conn = DriverManager.getConnection(url, user, password)) {
+    // ... use conn; it closes automatically at the end of the block
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/connecting.html" rel="noopener">Establishing a Connection — The Java Tutorials (JDBC Basics)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/DriverManager.html" rel="noopener">DriverManager — Java SE 21 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jdbc" rel="noopener">Introduction to JDBC — Baeldung</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/java/introduction-to-jdbc/" rel="noopener">JDBC (Java Database Connectivity) — GeeksforGeeks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7v2OnUti2eM" rel="noopener">Java Database Connectivity | JDBC — Telusko (Navin Reddy)</a></li>
+    </ul>
+
+    <h3>PreparedStatement and SQL injection safety</h3>
+    <p>A <code>Statement</code> sends the exact SQL string you build to the database; if any part of that string came from user input, the input can change the <em>structure</em> of the query — that is SQL injection. A <code>PreparedStatement</code> is a parameterized template: you write <code>?</code> placeholders and fill them with <code>setString</code>, <code>setInt</code>, <code>setBigDecimal</code>, and so on. The bound values travel to the server separately from the query text, so input is always treated as data, never parsed as SQL. This is the single most important JDBC habit and the most-asked JDBC interview point.</p>
+    <p>Why it matters: prepared statements are also the recommendation of every security authority (OWASP ranks parameterized queries as the primary defense), and they usually run faster on repeated execution because the database parses and plans the statement once. Treat <code>PreparedStatement</code> as the default and reach for plain <code>Statement</code> only for fixed, input-free SQL such as DDL.</p>
+    <pre class="code-block" data-label="Java"><code>// UNSAFE — concatenation lets input become SQL
+String bad = "SELECT * FROM users WHERE email = '" + input + "'";
+
+// SAFE — ? is a bind parameter, never parsed as code
+String sql = "SELECT * FROM users WHERE email = ?";
+try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    ps.setString(1, input);            // stays a value: ' OR '1'='1 matches nothing
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) { /* ... */ }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/prepared.html" rel="noopener">Using Prepared Statements — The Java Tutorials (JDBC Basics)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/PreparedStatement.html" rel="noopener">PreparedStatement — Java SE 21 API (Javadoc)</a></li>
+      <li>[Reference] <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html" rel="noopener">SQL Injection Prevention Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql-injection" rel="noopener">SQL Injection and How to Prevent It — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-statement-preparedstatement" rel="noopener">Difference Between Statement and PreparedStatement — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gU3DLOsw0Eg" rel="noopener">Java JDBC Tutorial — Part 5: Prepared Statements — luv2code (Chad Darby)</a></li>
+    </ul>
+
+    <h3>Reading results with ResultSet</h3>
+    <p><code>executeQuery</code> returns a <code>ResultSet</code>: a forward-moving cursor over the rows the database sent back. It starts positioned <em>before</em> the first row, so the idiom is <code>while (rs.next())</code>, pulling columns with typed getters (<code>getLong</code>, <code>getString</code>, <code>getBoolean</code>) by 1-based index or by column label. For non-query SQL, <code>executeUpdate</code> returns an <code>int</code> row count instead.</p>
+    <p>Why it matters: getters by index are faster but brittle to column reordering; getters by label are clearer. A <code>ResultSet</code> holds database resources and closes when its <code>Statement</code> closes, but closing it explicitly (try-with-resources) frees them sooner. Scrollable and updatable result sets exist, but the default forward-only, read-only cursor is the right choice for most reads.</p>
+    <pre class="code-block" data-label="Java"><code>String sql = "SELECT id, email FROM users WHERE active = ?";
+try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    ps.setBoolean(1, true);
+    try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {                  // cursor advances one row at a time
+            long id = rs.getLong("id");      // by column label
+            String email = rs.getString(2);  // or by 1-based index
+        }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/retrieving.html" rel="noopener">Retrieving and Modifying Values from Result Sets — The Java Tutorials</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/ResultSet.html" rel="noopener">ResultSet — Java SE 21 API (Javadoc)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/Statement.html" rel="noopener">Statement — Java SE 21 API (Javadoc)</a></li>
+    </ul>
+
+    <h3>Transactions and batch updates</h3>
+    <p>By default a connection is in <em>auto-commit</em> mode: every statement commits on its own. To make several statements atomic, call <code>setAutoCommit(false)</code>, run them, then <code>commit()</code> — and <code>rollback()</code> in the catch block so a failure leaves no partial writes. Isolation levels (<code>READ_UNCOMMITTED</code> through <code>SERIALIZABLE</code>) trade concurrency for protection against dirty, non-repeatable, and phantom reads. Batching is the sibling optimization: <code>addBatch</code> queues many parameter sets and <code>executeBatch</code> ships them in one round trip.</p>
+    <p>Why it matters: transactions are correctness (money moved out of one account must land in another), while batching is throughput (one network trip instead of thousands). The two combine — run a batch inside an explicit transaction so the whole set commits or rolls back together.</p>
+    <pre class="code-block" data-label="Java"><code>conn.setAutoCommit(false);                        // begin a transaction
+try (PreparedStatement ps = conn.prepareStatement(
+        "INSERT INTO ledger(acct, delta) VALUES (?, ?)")) {
+    for (Entry e : entries) {
+        ps.setString(1, e.acct());
+        ps.setBigDecimal(2, e.delta());
+        ps.addBatch();                            // queue; no round trip yet
+    }
+    ps.executeBatch();                            // one trip to the database
+    conn.commit();                                // all-or-nothing
+} catch (SQLException ex) {
+    conn.rollback();                              // undo the whole unit
+    throw ex;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/transactions.html" rel="noopener">Using Transactions — The Java Tutorials (JDBC Basics)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/Connection.html" rel="noopener">Connection (setAutoCommit / commit / rollback / isolation) — Java SE 21 API</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jdbc-batch-processing" rel="noopener">Batch Processing in JDBC — Baeldung</a></li>
+    </ul>
+
+    <h3>DataSource and connection pooling</h3>
+    <p>In real applications you rarely use <code>DriverManager</code> directly. A <code>javax.sql.DataSource</code> is a factory for connections that hides the URL and, crucially, supports <em>connection pooling</em>. Opening a physical connection (TCP handshake plus authentication) is slow, so a pool keeps a set of live connections and lends them out; calling <code>close()</code> returns the connection to the pool instead of tearing it down. HikariCP is the de-facto default (it is what Spring Boot auto-configures).</p>
+    <p>Why it matters: pooling bounds how many connections hit the database, cuts per-request latency, and keeps the app stable under load. Pool sizing is its own skill — bigger is not better; a small pool matched to the database's capacity usually beats an oversized one.</p>
+    <pre class="code-block" data-label="Java"><code>HikariConfig cfg = new HikariConfig();
+cfg.setJdbcUrl("jdbc:postgresql://db.example.com/shop");
+cfg.setMaximumPoolSize(10);
+try (HikariDataSource ds = new HikariDataSource(cfg);
+     Connection conn = ds.getConnection()) {     // borrowed from the pool
+    // conn.close() returns it to the pool, not to the OS
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/sqldatasources.html" rel="noopener">Connecting with DataSource Objects — The Java Tutorials</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/javax/sql/DataSource.html" rel="noopener">javax.sql.DataSource — Java SE 21 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-connection-pooling" rel="noopener">A Simple Guide to Connection Pooling in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hikaricp" rel="noopener">Introduction to HikariCP — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-best-practices-jdbc-connection-pool" rel="noopener">Best Practices for Sizing the JDBC Connection Pool — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-regex-text.html">← Regular Expressions and Text</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="11-jpms-modules.html">The Module System (JPMS) →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked JDBC questions in Indian interviews — a staple wherever a backend role touches a relational database, from screening rounds to product-company deep dives:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the core steps to run a query with JDBC?</summary>
+      <div class="answer"><p>Get a <code>Connection</code> (from <code>DriverManager</code> or a <code>DataSource</code>), create a <code>Statement</code>/<code>PreparedStatement</code>, execute it to get a <code>ResultSet</code> (or an update count), read the rows, and close everything. Use try-with-resources so <code>ResultSet</code>, <code>Statement</code>, and <code>Connection</code> close in reverse order even on exception.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does a JDBC connection URL look like, and who chooses the driver?</summary>
+      <div class="answer"><p>The form is <code>jdbc:subprotocol:subname</code>, e.g. <code>jdbc:postgresql://host/shop</code>. From JDBC 4.0, the matching driver on the classpath is registered automatically via the service-provider (SPI) mechanism, so <code>Class.forName(...)</code> is no longer needed; <code>DriverManager</code> maps the URL to a registered driver.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Statement vs PreparedStatement — what is the difference?</summary>
+      <div class="answer"><p><code>Statement</code> sends a raw SQL string every time; <code>PreparedStatement</code> is a precompiled, parameterized template with <code>?</code> placeholders filled by <code>setXxx</code>. PreparedStatement is safer (bound values can't become SQL), usually faster on repeated execution, and the default choice. Use plain <code>Statement</code> only for static, input-free SQL.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you read rows from a ResultSet?</summary>
+      <div class="answer"><p>The cursor starts before the first row, so loop <code>while (rs.next())</code> and pull each column with a typed getter (<code>getInt</code>, <code>getString</code>, …) by 1-based index or by column label. Close the <code>ResultSet</code> when done; it also closes when its <code>Statement</code> closes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How exactly does a PreparedStatement stop SQL injection?</summary>
+      <div class="answer"><p>Bound parameters are sent to the database separately from the query text, so user input is always evaluated as a data value, never parsed as SQL. An input like <code>' OR '1'='1</code> becomes a literal string compared against the column, not a new clause. String-concatenated SQL is precisely what lets input alter the query's structure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is PreparedStatement often faster for repeated execution?</summary>
+      <div class="answer"><p>The database can parse the SQL and build the execution plan once, then reuse it for each execution with new bind values. That removes repeated parsing/planning overhead, and pools plus drivers can cache prepared statements client-side and server-side.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is auto-commit, and how do you make several statements one transaction?</summary>
+      <div class="answer"><p>By default each statement commits immediately (auto-commit true). Call <code>setAutoCommit(false)</code>, run the statements, then <code>commit()</code>; on error <code>rollback()</code> so nothing partial persists. That gives all-or-nothing atomicity — essential for operations like transfers that must succeed or fail as a unit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the JDBC transaction isolation levels and the anomalies they control.</summary>
+      <div class="answer"><p><code>READ_UNCOMMITTED</code>, <code>READ_COMMITTED</code>, <code>REPEATABLE_READ</code>, <code>SERIALIZABLE</code> (plus <code>NONE</code>). Rising levels progressively prevent dirty reads, then non-repeatable reads, then phantom reads, trading concurrency for consistency. Set with <code>Connection.setTransactionIsolation</code>; the exact behavior is enforced by the database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is JDBC batching and why does it help?</summary>
+      <div class="answer"><p><code>addBatch</code> queues multiple statements or parameter sets, and <code>executeBatch</code> sends them in a single round trip — so you pay network latency once instead of per row, a large win for bulk inserts/updates. <code>executeBatch</code> returns an <code>int[]</code> of per-command update counts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why use a connection pool instead of DriverManager.getConnection each time?</summary>
+      <div class="answer"><p>Opening a physical connection (TCP + authentication handshake) is expensive. A pool (HikariCP and friends, behind a <code>DataSource</code>) keeps live connections ready and lends them out; <code>close()</code> returns the connection to the pool rather than tearing it down. It also caps concurrency against the database and improves latency and stability under load.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is PreparedStatement a 100% guarantee against SQL injection? Where can it still fail?</summary>
+      <div class="answer"><p>No. It parameterizes <em>values</em>, but you cannot bind <em>identifiers</em> — table/column names, an <code>ORDER BY</code> column, or dynamic SQL fragments built by concatenation remain injectable. Validate those against a whitelist of allowed names. Also handle <code>LIKE</code> wildcards and <code>IN</code>-lists carefully (bind one <code>?</code> per element). PreparedStatement is necessary but not sufficient if you still concatenate query structure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> executeBatch() throws BatchUpdateException partway through — what is the state afterwards, and what is the return array?</summary>
+      <div class="answer"><p>Each element of the <code>int[]</code> is one command's update count, or the sentinels <code>SUCCESS_NO_INFO</code> / <code>EXECUTE_FAILED</code>. On failure a driver may stop or keep going; <code>BatchUpdateException.getUpdateCounts()</code> tells you how far it got. Because partial effects could otherwise commit, run batches inside an explicit transaction and <code>rollback</code> on failure so the set stays atomic.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.jdbc-core</li>
+      <li>java.adv.jdbc-tx</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

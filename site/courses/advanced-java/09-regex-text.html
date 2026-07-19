@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Regular Expressions and Text module: Pattern and Matcher, capturing and named groups, lookaround, flags and catastrophic backtracking, plus Scanner, BreakIterator and text processing — with the best official and community resources, and the interview questions they power.">
+  <title>Regular Expressions and Text</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Regular Expressions and Text</h1>
+  <p class="standfirst">Regex and text handling are where correctness quietly meets Unicode: a pattern that flies on your laptop can hang forever on hostile input, and <code>split</code> can drop data you assumed it kept. This module maps the terrain and points you at the definitive resources.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Regular Expressions and Text</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two clusters. First, <code>java.util.regex</code>: compiling a <code>Pattern</code>, driving a <code>Matcher</code>, capturing and naming groups, lookaround assertions, flags, and the performance traps (catastrophic backtracking / ReDoS) that turn a one-line regex into a denial-of-service. Second, the text toolkit around it: <code>Scanner</code> for tokenized and typed input, <code>BreakIterator</code> for locale-aware word/sentence/line boundaries, and the everyday <code>String</code> operations (<code>split</code>, <code>replaceAll</code>, text blocks) that most parsing actually needs. The theme throughout: reach for the smallest correct tool, and know where each one bites.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Pattern and Matcher: compiling and matching</h3>
+    <p>A regex in Java is a two-step affair: <code>Pattern.compile(regex)</code> parses the expression once into a reusable, thread-safe <code>Pattern</code>; <code>pattern.matcher(input)</code> produces a stateful, single-threaded <code>Matcher</code> that does the work. The three entry points differ in scope: <code>matches()</code> demands the <em>entire</em> input match, <code>lookingAt()</code> anchors at the start only, and <code>find()</code> scans for the next matching subsequence anywhere — the one you loop over.</p>
+    <p>Why it matters: <code>String.matches("...")</code> recompiles the pattern on every call, so hot loops should hoist a compiled <code>Pattern</code> to a <code>static final</code> field. Getting <code>matches</code> vs <code>find</code> right is the most common regex misunderstanding in code review.</p>
+    <pre class="code-block" data-label="Java"><code>static final Pattern PHONE = Pattern.compile("\\d{3}-\\d{4}");
+
+Matcher m = PHONE.matcher("call 123-4567 today");
+while (m.find()) {          // scans for each occurrence
+    System.out.println(m.group());   // 123-4567
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/regex/Pattern.html" rel="noopener">Pattern — Java SE 21 API (the full regex-construct reference: classes, quantifiers, boundaries)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/regex/Matcher.html" rel="noopener">Matcher — Java SE 21 API (find/matches/lookingAt, group, replaceAll, regions)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/regex/" rel="noopener">Regular Expressions — dev.java (Oracle's current tutorial series)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/regular-expressions-java" rel="noopener">Guide to Java Regular Expressions API — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=f0lZbeueVzU" rel="noopener">Regular Expressions in Java — Java Regex Tutorial — Edureka</a></li>
+    </ul>
+
+    <h3>Groups: capturing, named, and backreferences</h3>
+    <p>Parentheses do two jobs. A capturing group <code>(...)</code> both groups a sub-pattern and remembers what it matched, retrievable by number via <code>group(1)</code> (group 0 is the whole match) or reused inside the pattern as a backreference <code>\1</code>. Named groups <code>(?&lt;name&gt;...)</code> trade numeric indices for readable <code>group("name")</code> — worth it the moment a pattern has more than two groups. When you only need grouping and not the capture, a non-capturing group <code>(?:...)</code> avoids allocating and renumbering.</p>
+    <pre class="code-block" data-label="Java"><code>Pattern p = Pattern.compile("(?&lt;year&gt;\\d{4})-(?&lt;month&gt;\\d{2})");
+Matcher m = p.matcher("2026-07");
+if (m.matches()) {
+    m.group("year");   // "2026"
+    m.group("month");  // "07"
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/regex/groups/" rel="noopener">Capturing Groups — dev.java (numbering, groupCount, backreferences)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/regex/index.html" rel="noopener">Lesson: Regular Expressions — The Java Tutorials (Essential Classes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-regex-non-capturing-groups" rel="noopener">Non-Capturing Regex Groups in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Lookaround: lookahead and lookbehind</h3>
+    <p>Lookaround assertions test the context around a position without consuming characters — they match the empty string but only where their condition holds. Positive lookahead <code>(?=...)</code> and negative lookahead <code>(?!...)</code> peek forward; lookbehind <code>(?&lt;=...)</code> and <code>(?&lt;!...)</code> peek backward. The classic use is multi-rule validation (a password that contains a digit <em>and</em> an uppercase letter) expressed as independent assertions rather than one tangled alternation. In replacements, lookaround and backreferences are two ways to keep surrounding text intact while rewriting the middle.</p>
+    <pre class="code-block" data-label="Java"><code>// at least one digit and one uppercase, min length 8 — assertions don't consume
+Pattern strong = Pattern.compile("^(?=.*\\d)(?=.*[A-Z]).{8,}$");
+strong.matcher("Passw0rd").matches();  // true</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/java-regex-lookahead-lookbehind" rel="noopener">Lookahead and Lookbehind in Java Regex — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-regex-replace-strings-back-reference-vs-lookaround" rel="noopener">Replacing Strings Using Regex: Backreference vs. Lookaround — Baeldung</a></li>
+    </ul>
+
+    <h3>Flags, modes, and catastrophic backtracking</h3>
+    <p>Flags change how a pattern is interpreted. Pass them as a bitmask to <code>compile</code> (<code>CASE_INSENSITIVE</code>, <code>MULTILINE</code> so <code>^</code>/<code>$</code> match per line, <code>DOTALL</code> so <code>.</code> spans newlines, <code>COMMENTS</code>, <code>UNICODE_CASE</code>) or inline as embedded flag expressions such as <code>(?i)</code> and <code>(?m)</code>. Beyond correctness lies performance: nested quantifiers over overlapping alternatives (the shape <code>(a+)+</code>) can trigger exponential <em>catastrophic backtracking</em> on non-matching input — a real ReDoS vector when the regex touches user data. Defenses are possessive quantifiers <code>a++</code>, atomic groups <code>(?&gt;...)</code>, and anchoring the pattern.</p>
+    <pre class="code-block" data-label="Java"><code>Pattern p = Pattern.compile("error", Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
+Pattern q = Pattern.compile("(?im)error");   // same, embedded flags</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/regex/patterns/" rel="noopener">The Pattern Class — dev.java (compiling with flags, embedded flag expressions)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-regex-performance" rel="noopener">Overview of Regular Expressions Performance in Java — Baeldung (backtracking, possessive quantifiers)</a></li>
+    </ul>
+
+    <h3>Scanner: tokenizing and typed input</h3>
+    <p><code>Scanner</code> wraps a source (a <code>String</code>, <code>InputStream</code>, or <code>Path</code>) and breaks it into tokens on a delimiter — whitespace by default, any regex via <code>useDelimiter</code>. Its selling point is typed reads: <code>nextInt()</code>, <code>nextDouble()</code>, and friends, each guarded by a matching <code>hasNextInt()</code> so you can validate before consuming. The infamous trap: after <code>nextInt()</code> the newline is still buffered, so a following <code>nextLine()</code> returns empty — you must consume the line ending first. For bulk line-reading Scanner is convenient but slow; <code>BufferedReader</code> wins on large files.</p>
+    <pre class="code-block" data-label="Java"><code>Scanner sc = new Scanner(System.in);
+int n = sc.nextInt();
+sc.nextLine();               // consume the leftover line terminator
+String label = sc.nextLine(); // now reads the real next line</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Scanner.html" rel="noopener">Scanner — Java SE 21 API (delimiters, hasNext/next, typed reads)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-scanner" rel="noopener">Java Scanner — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-scanner-usedelimiter" rel="noopener">Java Scanner useDelimiter with Examples — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-scanner-hasnext-vs-hasnextline" rel="noopener">Scanner hasNext() vs. hasNextLine() — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1n-_ZNM5SLc" rel="noopener">Scanner Class (Java Tutorial) — AP Computer Science A</a></li>
+    </ul>
+
+    <h3>BreakIterator: locale-aware text boundaries</h3>
+    <p>"Split on spaces" and "count sentences by periods" are wrong in almost every language — and even in English, where <code>Dr.</code> is not a sentence end and a URL has no spaces. <code>BreakIterator</code> encodes the Unicode text-segmentation rules for a given <code>Locale</code>, with factory methods for character, word, sentence, and line boundaries. You set the text, then walk boundaries with <code>first()</code>/<code>next()</code> until <code>DONE</code>. It is the correct tool for word counts, sentence extraction, and line-wrap points across scripts.</p>
+    <pre class="code-block" data-label="Java"><code>BreakIterator s = BreakIterator.getSentenceInstance(Locale.US);
+s.setText("Dr. Rao arrived. He spoke.");
+int count = 0;
+for (int e = s.first(); e != BreakIterator.DONE; e = s.next()) count++;
+// boundaries yield 2 sentences, not 3 — "Dr." is not treated as a break</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/text/BreakIterator.html" rel="noopener">BreakIterator — Java SE 21 API (word/sentence/line/character instances)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/i18n/text/boundaryintro.html" rel="noopener">Detecting Text Boundaries — The Java Tutorials (Internationalization)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-string-title-case" rel="noopener">Convert a String to Title Case (with BreakIterator) — Baeldung</a></li>
+    </ul>
+
+    <h3>Text processing: split, replace, and text blocks</h3>
+    <p>Most parsing does not need a hand-rolled <code>Matcher</code> loop — the <code>String</code> methods already take regexes. <code>split(regex)</code> is the workhorse, with one sharp edge: the zero-argument form discards trailing empty strings, so <code>"a,,b,".split(",")</code> silently loses the final field; pass a negative limit to keep them. <code>replaceAll</code>/<code>replaceFirst</code> apply regex substitutions (mind <code>Matcher.quoteReplacement</code> when the replacement contains <code>$</code> or <code>\</code>). Text blocks (<code>"""..."""</code>) make multi-line regex and expected test strings readable without escape soup.</p>
+    <pre class="code-block" data-label="Java"><code>"a,,b,".split(",");      // ["a", "", "b"]      — trailing empties dropped
+"a,,b,".split(",", -1);  // ["a", "", "b", ""]  — limit -1 keeps them</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://www.baeldung.com/string-split" rel="noopener">Java String split() — Baeldung (limits, trailing empties, escaping)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-text-blocks" rel="noopener">Java Text Blocks — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-networking.html">← Networking and HttpClient</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="10-jdbc.html">JDBC →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Regex and text handling recur in Indian interviews — from screening puzzles (validate an email, count words) to senior discussions on ReDoS and Unicode correctness:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the main classes in java.util.regex and how do they relate?</summary>
+      <div class="answer"><p><code>Pattern</code> is a compiled regex (immutable, thread-safe); <code>Matcher</code> is the stateful engine you get from <code>pattern.matcher(input)</code> to run match operations; <code>PatternSyntaxException</code> is thrown when the regex itself is malformed. You compile once, match many times.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between matches() and find()?</summary>
+      <div class="answer"><p><code>matches()</code> succeeds only if the <em>entire</em> input matches the pattern; <code>find()</code> scans for the next matching subsequence anywhere and can be called repeatedly in a loop. <code>lookingAt()</code> sits between them — it anchors at the start but need not consume the whole input.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you extract part of a match?</summary>
+      <div class="answer"><p>Wrap the part in a capturing group and read it after a successful <code>find()</code>/<code>matches()</code>: <code>m.group(1)</code> by index (group 0 is the whole match) or <code>m.group("name")</code> for a named group <code>(?&lt;name&gt;...)</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why prefer a precompiled Pattern over String.matches() in a loop?</summary>
+      <div class="answer"><p><code>String.matches()</code>, <code>replaceAll()</code>, and <code>split()</code> compile the regex on every call. In a hot path that is wasted work — hoist the pattern to a <code>static final Pattern</code> compiled once and reuse its <code>Matcher</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Greedy vs reluctant vs possessive quantifiers?</summary>
+      <div class="answer"><p>Greedy (<code>a*</code>) matches as much as possible then backtracks; reluctant/lazy (<code>a*?</code>) matches as little as possible then expands; possessive (<code>a*+</code>) matches greedily and never gives characters back. Possessive quantifiers trade some matching power for immunity to backtracking blowups.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Capturing vs non-capturing vs named groups — when each?</summary>
+      <div class="answer"><p>Capturing <code>(...)</code> when you need the matched text or a backreference; non-capturing <code>(?:...)</code> when you only need to group for a quantifier or alternation and want to avoid renumbering/allocation; named <code>(?&lt;name&gt;...)</code> for readability once there are several groups — the pattern documents itself and refactors safely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a lookahead, and how would you validate a password with one?</summary>
+      <div class="answer"><p>A lookahead <code>(?=...)</code> asserts what follows without consuming it. Stacking independent lookaheads expresses "must contain X and Y" cleanly: <code>^(?=.*\d)(?=.*[A-Z]).{8,}$</code> requires a digit, an uppercase letter, and length 8+ — each rule stays independent instead of one brittle alternation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> The Scanner nextInt()-then-nextLine() bug — what happens and why?</summary>
+      <div class="answer"><p><code>nextInt()</code> reads the number but leaves the trailing newline in the buffer, so the next <code>nextLine()</code> returns an empty string. Fix: call an extra <code>nextLine()</code> to consume the line terminator after the typed read, or read whole lines and parse them yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do regex flags work — CASE_INSENSITIVE vs (?i)?</summary>
+      <div class="answer"><p>Both do the same thing two ways: pass <code>Pattern.CASE_INSENSITIVE</code> (OR-combined with other flags like <code>MULTILINE</code>, <code>DOTALL</code>) to <code>compile</code>, or embed <code>(?i)</code> at the start of the pattern. For Unicode-correct case folding add <code>UNICODE_CASE</code> alongside <code>CASE_INSENSITIVE</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> String.split(",") drops your last field. Why, and how do you keep it?</summary>
+      <div class="answer"><p>The one-argument <code>split</code> uses limit 0, which removes trailing empty strings — so <code>"a,,b,"</code> yields <code>["a","","b"]</code>, losing the final empty field. Pass a negative limit (<code>split(",", -1)</code>) to preserve all trailing empties.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is catastrophic backtracking (ReDoS), and how do you prevent it?</summary>
+      <div class="answer"><p>Nested quantifiers over overlapping matches — the shape <code>(a+)+$</code> against a long non-matching input — cause the engine to explore exponentially many ways to split the string, freezing the thread. It is exploitable when the regex runs on user input. Prevent it with possessive quantifiers (<code>a++</code>), atomic groups <code>(?&gt;...)</code>, anchoring, simplifying the pattern, or bounding input length; never run untrusted regexes on untrusted input.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is BreakIterator more correct than split() for counting words or sentences?</summary>
+      <div class="answer"><p><code>split</code> on whitespace or punctuation encodes English-centric assumptions that break on abbreviations (<code>Dr.</code>), decimals, contractions, and non-spaced scripts (Chinese, Japanese, Thai). <code>BreakIterator</code> applies the Unicode text-segmentation rules for a <code>Locale</code>, so word and sentence boundaries are correct across languages — the difference between a demo and a shippable internationalized feature.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is a Pattern or Matcher safe to share across threads, and how does that shape reuse?</summary>
+      <div class="answer"><p><code>Pattern</code> is immutable and thread-safe — compile it once and share it as a constant. <code>Matcher</code> is stateful and <em>not</em> thread-safe: each thread must obtain its own via <code>pattern.matcher(...)</code>, or reuse one with <code>reset()</code> within a single thread. The idiom is a shared static <code>Pattern</code> plus a per-use <code>Matcher</code>.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.regex</li>
+      <li>java.adv.text</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

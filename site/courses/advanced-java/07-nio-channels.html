@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java NIO Channels and Buffers module: the ByteBuffer state machine (position/limit/capacity, flip/clear), FileChannel and socket channels, selectors and the non-blocking I/O model, and memory-mapped files — with the best official Javadocs and community guides, plus the interview questions they power.">
+  <title>NIO Channels and Buffers — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: NIO Channels and Buffers</h1>
+  <p class="standfirst">Classic streams block a whole thread per connection; NIO's buffers, channels, and selectors let one thread pump thousands of sockets — and the buffer state machine is exactly where most candidates stumble in interviews.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → NIO Channels and Buffers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Java NIO reworks I/O around three primitives: <strong>buffers</strong> hold the bytes, <strong>channels</strong> move them to and from files and sockets, and a <strong>selector</strong> lets a single thread watch many channels at once. This module orients you on the buffer state machine (position/limit/capacity and the flip/clear ritual), the channel families, non-blocking mode with selectors, and memory-mapped files — the foundation under Netty, Kafka, Tomcat's NIO connector, and nearly every high-throughput JVM server. Depth lives in the linked Javadocs and guides; this page maps the terrain and the interview traps.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Buffers: the ByteBuffer state machine</h3>
+    <p>A <code>ByteBuffer</code> is a fixed-capacity block of memory with three cursors that make it a little state machine: <code>capacity</code> (never changes), <code>position</code> (the next index to read or write), and <code>limit</code> (the first index you may <em>not</em> touch). The invariant <code>0 &lt;= mark &lt;= position &lt;= limit &lt;= capacity</code> holds at all times. You fill the buffer in "write mode", then call <code>flip()</code> to switch to "read mode" — it sets <code>limit = position</code> and <code>position = 0</code> so you read back exactly what you wrote. <code>clear()</code> resets to write mode, <code>rewind()</code> re-reads from the start, and <code>compact()</code> keeps the unread bytes and makes room for more.</p>
+    <p>Why it matters: buffers back every channel operation, so forgetting to <code>flip()</code> (writing nothing, or reading garbage) is the classic NIO bug and a favourite interview probe. Also know the split between <code>allocate()</code> (heap buffer, backed by a Java <code>byte[]</code>) and <code>allocateDirect()</code> (off-heap, native memory) — direct buffers avoid a copy on native I/O but cost more to allocate, so you reserve them for large, long-lived buffers.</p>
+    <pre class="code-block" data-label="Java"><code>ByteBuffer buf = ByteBuffer.allocate(1024);  // write mode: position=0, limit=capacity
+channel.read(buf);                            // bytes fill in; position advances
+buf.flip();                                   // read mode: limit=position, position=0
+while (buf.hasRemaining())
+    System.out.print((char) buf.get());
+buf.clear();                                  // back to write mode, ready to refill</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/Buffer.html" rel="noopener">Buffer — Java SE 21 API (the position/limit/capacity/mark invariant, flip/clear/rewind)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/ByteBuffer.html" rel="noopener">ByteBuffer — Java SE 21 API (allocate vs allocateDirect, get/put, compact)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-bytebuffer" rel="noopener">Guide to ByteBuffer — Baeldung</a></li>
+      <li>[Article] <a href="https://jenkov.com/tutorials/java-nio/buffers.html" rel="noopener">Java NIO Buffer — Jakob Jenkov (the clearest walkthrough of the flip/clear lifecycle)</a></li>
+    </ul>
+
+    <h3>Channels: FileChannel and socket channels</h3>
+    <p>A channel is a two-way conduit to an I/O source — unlike a stream it is bidirectional, always reads into or writes from a <code>ByteBuffer</code>, and can be put into non-blocking mode. <code>FileChannel</code> connects to files (and gives you <code>transferTo</code>/<code>transferFrom</code> for kernel-level "zero-copy" transfers that skip a user-space buffer entirely — the JVM can map these onto the OS <code>sendfile()</code> call). <code>SocketChannel</code> and <code>ServerSocketChannel</code> are the TCP client and listener; <code>DatagramChannel</code> handles UDP. Scatter/gather reads and writes (an array of buffers in one call) let you split a header and body without concatenating.</p>
+    <p>Why it matters: <code>transferTo</code> is the standard answer to "how would you copy a large file efficiently in Java", and the socket channels are the building blocks of every selector-based server. Interviewers expect you to name the channel families and explain why a channel needs a buffer rather than reading a byte at a time.</p>
+    <pre class="code-block" data-label="Java"><code>// static imports: java.nio.file.StandardOpenOption.*
+try (FileChannel in  = FileChannel.open(src, READ);
+     FileChannel out = FileChannel.open(dst, CREATE, WRITE)) {
+    in.transferTo(0, in.size(), out);  // OS may perform a zero-copy sendfile()
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileChannel.html" rel="noopener">FileChannel — Java SE 21 API (transferTo/transferFrom, map, file locking)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/SocketChannel.html" rel="noopener">SocketChannel — Java SE 21 API (non-blocking connect/finishConnect, read/write)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-filechannel" rel="noopener">Guide to Java FileChannel — Baeldung</a></li>
+      <li>[Article] <a href="https://jenkov.com/tutorials/java-nio/channels.html" rel="noopener">Java NIO Channel — Jakob Jenkov</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=h76n2R4HRts" rel="noopener">Socket Programming with Java NIO — Channels, Selectors, and Buffers — Will Tollefson</a></li>
+    </ul>
+
+    <h3>Selectors and the non-blocking I/O model</h3>
+    <p>Blocking I/O dedicates one thread to each connection — fine for a few hundred clients, ruinous at tens of thousands (the C10k problem). A <code>Selector</code> flips the model: you set channels to non-blocking with <code>configureBlocking(false)</code>, <code>register()</code> them with an interest set (<code>OP_ACCEPT</code>, <code>OP_CONNECT</code>, <code>OP_READ</code>, <code>OP_WRITE</code>), then loop on <code>select()</code>, which blocks until <em>some</em> registered channel is ready and hands you the ready keys. One thread now multiplexes every connection — the reactor pattern behind Netty and Nginx-style servers.</p>
+    <p>Why it matters: two details separate people who have used selectors from people who have only read about them. First, a <code>SelectionKey</code> carries an <em>interest set</em> (what you asked to be told about) that is distinct from its <em>ready set</em> (what the OS reports is ready now). Second, the selector adds keys to <code>selectedKeys()</code> but never removes them — you must call <code>iterator.remove()</code> after handling each key, or you will reprocess stale events forever. Both are staple interview questions.</p>
+    <pre class="code-block" data-label="Java"><code>Selector selector = Selector.open();
+serverChannel.configureBlocking(false);
+serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+while (true) {
+    selector.select();                       // blocks until a channel is ready
+    Iterator&lt;SelectionKey&gt; it = selector.selectedKeys().iterator();
+    while (it.hasNext()) {
+        SelectionKey key = it.next();
+        it.remove();                         // required: the selector won't clear it
+        if (key.isAcceptable())      { /* accept a new connection */ }
+        else if (key.isReadable())   { /* read into a buffer      */ }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/Selector.html" rel="noopener">Selector — Java SE 21 API (key sets, select/selectNow, multiplexing)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/SelectionKey.html" rel="noopener">SelectionKey — Java SE 21 API (interest set vs ready set, OP_* bits)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/ServerSocketChannel.html" rel="noopener">ServerSocketChannel — Java SE 21 API (accept in non-blocking mode, OP_ACCEPT)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-nio-selector" rel="noopener">Introduction to the Java NIO Selector — Baeldung</a></li>
+      <li>[Article] <a href="https://jenkov.com/tutorials/java-nio/selectors.html" rel="noopener">Java NIO Selector — Jakob Jenkov</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=VhSu1pRIEqQ" rel="noopener">Introduction to Java NIO and non-blocking sockets — ID1212, Network Programming</a></li>
+    </ul>
+
+    <h3>Memory-mapped files</h3>
+    <p><code>FileChannel.map()</code> maps a region of a file straight into the process address space and hands back a <code>MappedByteBuffer</code>. Reads and writes then go through the operating system's page cache — you touch the file as if it were a giant array, with no explicit <code>read()</code>/<code>write()</code> syscalls per access, and the OS lazily pages data in and flushes it out. For large files read or updated repeatedly this is dramatically faster than stream I/O, which is why it underpins databases, message brokers (Kafka's log segments), and off-heap caches.</p>
+    <p>Why it matters: the trade-offs are the interview content. Mappings are <code>READ_ONLY</code>, <code>READ_WRITE</code>, or <code>PRIVATE</code> (copy-on-write); changes are only guaranteed on disk after <code>force()</code>; the mapping lives (and holds the file) until the buffer is garbage-collected, so unmap timing is non-deterministic; and a mapping is capped at <code>Integer.MAX_VALUE</code> bytes because the buffer is indexed by <code>int</code>. Because the memory is shared with the OS, a mapped file is also a channel for inter-process communication.</p>
+    <pre class="code-block" data-label="Java"><code>try (FileChannel ch = FileChannel.open(path, READ, WRITE)) {
+    MappedByteBuffer mbb =
+        ch.map(FileChannel.MapMode.READ_WRITE, 0, ch.size());
+    mbb.putInt(0, 0x7FFFFFFF);  // writes into the page cache, not via read()/write()
+    mbb.force();                // ask the OS to flush dirty pages back to disk
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/MappedByteBuffer.html" rel="noopener">MappedByteBuffer — Java SE 21 API (load, force, mapping validity)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-mapped-byte-buffer" rel="noopener">Using Java MappedByteBuffer — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-sharing-memory-between-jvms" rel="noopener">Sharing Memory Between JVMs — Baeldung (memory-mapped files for IPC)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-io-nio.html">← IO and NIO.2 Files</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="08-networking.html">Networking and HttpClient →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>NIO is a favourite of product-company and senior backend rounds in India — buffers and selectors especially. The most-asked, roughly in order:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three core abstractions of Java NIO?</summary>
+      <div class="answer"><p>Buffers (fixed-size containers that hold the data), channels (bidirectional conduits to files/sockets that read into and write from buffers), and selectors (let one thread monitor many channels for readiness). Streams are one-directional and blocking; NIO's trio is buffer-oriented and can be non-blocking.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain a buffer's position, limit, and capacity.</summary>
+      <div class="answer"><p>Capacity is the fixed size set at allocation. Position is the index of the next byte to read or write. Limit is the first index you may not touch. The invariant <code>0 &lt;= mark &lt;= position &lt;= limit &lt;= capacity</code> always holds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does flip() do, and why is forgetting it a bug?</summary>
+      <div class="answer"><p><code>flip()</code> switches a buffer from writing to reading: it sets <code>limit = position</code> then <code>position = 0</code>, so you read back exactly the bytes you wrote. Skip it and a channel write sees position already at the end (writes nothing), or a read starts mid-buffer over uninitialised bytes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between clear() and compact()?</summary>
+      <div class="answer"><p><code>clear()</code> resets to write mode (position=0, limit=capacity) but does not erase data — it just forgets the old bounds, so old bytes get overwritten. <code>compact()</code> also returns to write mode but first copies the unread bytes (position to limit) to the front, preserving data you had not consumed yet. Use compact when a read left leftovers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Direct vs heap (non-direct) ByteBuffer — when do you use direct?</summary>
+      <div class="answer"><p><code>allocate()</code> gives a heap buffer backed by a Java <code>byte[]</code>; <code>allocateDirect()</code> gives an off-heap native buffer. Direct buffers let the JVM do native I/O without copying to an intermediate buffer, but cost more to allocate and free. Reserve them for large, long-lived buffers tied to native I/O; use heap buffers otherwise.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a channel differ from a classic stream?</summary>
+      <div class="answer"><p>A channel is bidirectional (a stream is one-way), always transfers via a <code>ByteBuffer</code> rather than a byte at a time, can be switched to non-blocking mode, and can be registered with a selector. FileChannel also adds transferTo/transferFrom and memory mapping that streams have no equivalent for.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What problem does a Selector solve?</summary>
+      <div class="answer"><p>It lets one thread manage many connections. Instead of a blocked thread per socket (thread-per-connection, which collapses at the C10k scale), you register non-blocking channels and call <code>select()</code>, which returns only the channels that are ready. This is the reactor pattern behind Netty, Tomcat's NIO connector, and similar servers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Interest set vs ready set on a SelectionKey?</summary>
+      <div class="answer"><p>The interest set is what you asked the selector to watch for on that channel (set at register time or via <code>interestOps</code>). The ready set (from <code>readyOps()</code>, or the <code>isReadable()</code>/<code>isWritable()</code>/<code>isAcceptable()</code>/<code>isConnectable()</code> helpers) is the subset the OS reports as actually ready after the last <code>select()</code>. You control the former; the selector fills in the latter.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must you remove keys from selectedKeys()?</summary>
+      <div class="answer"><p>The selector <em>adds</em> ready keys to the selected-key set but never removes them. If you do not call <code>iterator.remove()</code> after handling each key, the same key stays in the set and you reprocess a stale event on the next loop — a very common NIO bug. The key set and cancelled-key set are managed differently; only the selected set is yours to clear.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does FileChannel.transferTo give you over a read/write loop?</summary>
+      <div class="answer"><p>A potential zero-copy transfer: the JVM can ask the OS to move bytes from the file's page cache directly to the target channel (e.g. via <code>sendfile()</code>), skipping the user-space buffer and the extra copies a manual <code>read()</code>-then-<code>write()</code> loop makes. It is the idiomatic way to copy files or stream a file to a socket efficiently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a MappedByteBuffer and what are its trade-offs?</summary>
+      <div class="answer"><p>It maps a file region into memory via <code>FileChannel.map()</code>, so access goes through the OS page cache with no per-access syscall — great for large, repeatedly accessed files. Trade-offs: durability needs <code>force()</code>; the mapping (and file handle) is released only when the buffer is GC'd, so unmap timing is non-deterministic; a single mapping is limited to <code>Integer.MAX_VALUE</code> bytes; and content can change under you if another process edits the file.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Selector-based non-blocking vs thread-per-connection vs NIO.2 async vs virtual threads — when does each win?</summary>
+      <div class="answer"><p>Thread-per-connection (blocking streams) is simplest and fine for modest connection counts. Selector-based NIO scales one thread to many connections but the readiness event loop is complex to write correctly. NIO.2 <code>AsynchronousSocketChannel</code> uses completion callbacks/Futures, moving the loop into the runtime. Java 21 virtual threads (Loom) make blocking code cheap again — a virtual thread per connection now scales to huge counts with simple blocking style, so for most new servers virtual threads or a framework beat hand-rolled selectors; selectors remain where you need fine-grained readiness control or interop with existing reactor frameworks.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.nio-buffers</li>
+      <li>java.adv.nio-selectors</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

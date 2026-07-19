@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java Reflection module: obtaining Class objects, inspecting and invoking Method/Field/Constructor, setAccessible and the module-system constraints, dynamic proxies and the java.lang.invoke MethodHandles/VarHandles — with the best official and community resources, plus the interview questions they power.">
+  <title>Java Reflection — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Reflection</h1>
+  <p class="standfirst">Reflection lets code inspect and call other code it never imported — the engine under Spring, Hibernate and JUnit — and "how does the framework actually do that?" is a question every serious Java interview eventually reaches.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Reflection</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Reflection is the java.lang.reflect API for examining and manipulating types at runtime without knowing their names at compile time: getting a <code>Class</code>, enumerating and invoking its <code>Method</code>, <code>Field</code> and <code>Constructor</code> members, suppressing access checks with <code>setAccessible</code> under the constraints the module system now imposes, and building runtime stand-ins with dynamic proxies. It closes with <code>java.lang.invoke</code> — MethodHandles and VarHandles — the faster, strongly-typed successor the JDK itself uses.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Class objects: reflection's entry point</h3>
+    <p>Every reflective operation starts from a <code>java.lang.Class</code> instance — the runtime metadata for a type. You obtain one three ways: <code>obj.getClass()</code> from a live instance, <code>Type.class</code> as a compile-time literal, or <code>Class.forName("com.acme.User")</code> to load by name at runtime (the framework path, where the type is a string in a config file). From a Class you enumerate members with <code>getMethods()</code>/<code>getDeclaredMethods()</code>, <code>getFields()</code>/<code>getDeclaredFields()</code>, <code>getConstructors()</code>/<code>getDeclaredConstructors()</code>, plus metadata like <code>getName</code>, <code>getModifiers</code>, <code>getSuperclass</code> and <code>getInterfaces</code>.</p>
+    <p>Why it matters: the "declared" versus plain distinction is a constant point of confusion and a favourite probe — <code>getDeclaredMethods()</code> returns every method written in <em>this</em> class regardless of access level but excludes inherited ones, while <code>getMethods()</code> returns only public methods including inherited. Knowing which to reach for is the difference between an NPE and working code.</p>
+    <pre class="code-block" data-label="Java"><code>Class&lt;?&gt; c = Class.forName("com.acme.User");   // load by name at runtime
+for (Method m : c.getDeclaredMethods()) {        // this class only, any access
+    System.out.println(m.getName());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/reflection/" rel="noopener">The Reflection API — dev.java (Oracle's official tutorial series)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Class.html" rel="noopener">Class — Java SE 21 API (Javadoc, the member-query methods)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/reflect/index.html" rel="noopener">Trail: The Reflection API — The Java Tutorials (Oracle)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-reflection" rel="noopener">Guide to Java Reflection — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bhhMJSKNCQY" rel="noopener">Java Reflection Explained — Coding with John</a></li>
+    </ul>
+
+    <h3>Dynamic invocation and instantiation</h3>
+    <p>Once you hold a <code>Method</code>, <code>Field</code> or <code>Constructor</code>, you can act through it with no compile-time reference to the type. <code>Method.invoke(target, args)</code> calls the method (pass <code>null</code> as the target for a static one); <code>Field.get</code>/<code>set</code> read and write values; <code>Constructor.newInstance(args)</code> builds an object — the modern replacement for the deprecated <code>Class.newInstance()</code>, which could only use a no-arg constructor and swallowed its checked exceptions.</p>
+    <p>Why it matters: this is literally how DI containers wire beans and how JUnit calls your <code>@Test</code> methods. The interview trap is exceptions — if the invoked code throws, <code>invoke</code> wraps it in an <code>InvocationTargetException</code>, and you recover the real cause with <code>getCause()</code>.</p>
+    <pre class="code-block" data-label="Java"><code>Constructor&lt;User&gt; ctor = User.class.getDeclaredConstructor(String.class);
+User u = ctor.newInstance("Asha");             // build without 'new'
+Method setId = User.class.getMethod("setId", long.class);
+setId.invoke(u, 42L);                          // call without a direct reference</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/Method.html" rel="noopener">Method — Java SE 21 API (Javadoc for invoke)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/Field.html" rel="noopener">Field — Java SE 21 API (Javadoc for get/set)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-method-reflection" rel="noopener">Call Methods at Runtime Using Java Reflection — Baeldung</a></li>
+    </ul>
+
+    <h3>setAccessible and the module system</h3>
+    <p>By default reflection honours Java access control, so touching a private member throws <code>IllegalAccessException</code>. <code>AccessibleObject.setAccessible(true)</code> suppresses that check — "deep reflection", the mechanism behind serialization, ORMs and dependency injection. Since Java 9 a second gate applies: deep reflection into a package succeeds only if that package is <em>open</em> to your module (an open module, an <code>opens</code> directive, or an <code>--add-opens</code> flag on the launch line); otherwise you get an <code>InaccessibleObjectException</code>. Java 9 also added the gentler <code>trySetAccessible()</code> (returns false instead of throwing) and <code>canAccess()</code>.</p>
+    <p>Why it matters: "my library ran fine on Java 8 and now throws InaccessibleObjectException on Java 17" is a genuine migration story, and explaining the strong-encapsulation change separates people who read the release notes from those who did not.</p>
+    <pre class="code-block" data-label="Java"><code>Field f = User.class.getDeclaredField("password");
+f.setAccessible(true);    // needs the package 'open' on Java 9+
+Object value = f.get(u);  // otherwise throws InaccessibleObjectException</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/AccessibleObject.html" rel="noopener">AccessibleObject — Java SE 21 API (setAccessible and its module rules)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-reflection-read-private-field-value" rel="noopener">Reading the Value of private Fields — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-reflection-benefits-drawbacks" rel="noopener">Is Java Reflection Bad Practice? — Baeldung</a></li>
+    </ul>
+
+    <h3>Dynamic proxies</h3>
+    <p>A dynamic proxy is a class synthesised at runtime that implements a given set of interfaces and routes every call to one place: <code>InvocationHandler.invoke(proxy, method, args)</code>. You create it with <code>Proxy.newProxyInstance(loader, interfaces, handler)</code>. This is how Spring AOP, declarative transactions, retry/logging decorators and mocking libraries interpose behaviour without you hand-writing wrapper classes. The defining limitation: JDK proxies can implement <em>interfaces only</em> — the generated class already extends <code>Proxy</code>, and Java's single inheritance leaves no room to also extend a concrete class, so frameworks fall back to subclass-generating tools like CGLIB or ByteBuddy when they must proxy a class.</p>
+    <pre class="code-block" data-label="Java"><code>Foo proxy = (Foo) Proxy.newProxyInstance(
+    Foo.class.getClassLoader(),
+    new Class&lt;?&gt;[]{ Foo.class },
+    (p, method, args) -&gt; { audit(method); return method.invoke(target, args); });</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/Proxy.html" rel="noopener">Proxy — Java SE 21 API (newProxyInstance)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/InvocationHandler.html" rel="noopener">InvocationHandler — Java SE 21 API (the invoke contract)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-dynamic-proxies" rel="noopener">Dynamic Proxies in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=r43IH5Qhz_Q" rel="noopener">Dynamic Proxies in Java — Dr. Heinz Kabutz (Java Champion)</a></li>
+    </ul>
+
+    <h3>MethodHandles and VarHandles</h3>
+    <p>The <code>java.lang.invoke</code> package — <code>MethodHandle</code> since Java 7, <code>VarHandle</code> since Java 9 — is the modern, faster alternative to core reflection. A <code>MethodHandle</code> is a directly-executable, strongly-typed reference to a method or field, obtained through a <code>MethodHandles.Lookup</code> that captures the caller's access rights once at lookup time, so the per-call permission checks of <code>Method.invoke</code> disappear; <code>invokeExact</code> demands an exact type match. This machinery underpins lambda metafactories, <code>invokedynamic</code> and string concatenation.</p>
+    <p>A <code>VarHandle</code> gives typed access to a field or array element with explicit memory-ordering modes — plain, <code>volatile</code>, acquire/release, and atomic compare-and-set — and is the supported, safe replacement for the internal <code>sun.misc.Unsafe</code>.</p>
+    <pre class="code-block" data-label="Java"><code>MethodHandles.Lookup lk = MethodHandles.lookup();
+MethodHandle mh = lk.findVirtual(String.class, "length",
+        MethodType.methodType(int.class));
+int n = (int) mh.invokeExact("hello");   // 5 — exact types required</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/invoke/MethodHandles.html" rel="noopener">MethodHandles — Java SE 21 API (Lookup and factories)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/invoke/VarHandle.html" rel="noopener">VarHandle — Java SE 21 API (access modes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-method-handles" rel="noopener">Method Handles in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-variable-handles" rel="noopener">Java Variable Handles Demystified — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-annotations.html">← Annotations</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="03-serialization.html">Serialization →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Reflection questions asked in Indian interviews, from service-company screens to product-company framework deep dives — the "how does Spring/Hibernate work under the hood?" line always lands here:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is reflection and why does Java provide it?</summary>
+      <div class="answer"><p>The java.lang.reflect API for inspecting and manipulating classes, methods, fields and constructors at runtime, even when their names are unknown at compile time. It exists so frameworks — DI containers, ORMs, serializers, test runners — can work generically against types they never imported.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the ways to obtain a Class object?</summary>
+      <div class="answer"><p>Three: <code>instance.getClass()</code> at runtime, the <code>Type.class</code> literal at compile time, and <code>Class.forName("fully.qualified.Name")</code> to load by string name. The last is the framework path — the type comes from a config file or annotation, not source code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> getMethods() vs getDeclaredMethods()?</summary>
+      <div class="answer"><p><code>getMethods()</code> returns public methods including inherited ones. <code>getDeclaredMethods()</code> returns every method declared in <em>this</em> class — public, protected, package-private and private — but nothing inherited. The same declared-vs-plain split applies to fields and constructors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you create an object with reflection?</summary>
+      <div class="answer"><p>Get the constructor and call <code>newInstance(args)</code>: <code>clazz.getDeclaredConstructor(String.class).newInstance("x")</code>. The old <code>Class.newInstance()</code> is deprecated — it only handled a no-arg constructor and wrapped its checked exceptions unhelpfully.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you invoke a method reflectively, and what exception should you expect?</summary>
+      <div class="answer"><p><code>method.invoke(target, args)</code> (target null for static). If the invoked method itself throws, <code>invoke</code> wraps that in an <code>InvocationTargetException</code>; call <code>getCause()</code> to reach the actual exception. Bad arguments or access give <code>IllegalArgumentException</code>/<code>IllegalAccessException</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you read or modify a private field, and what does setAccessible do?</summary>
+      <div class="answer"><p><code>getDeclaredField(name)</code>, then <code>setAccessible(true)</code> to suppress the access check, then <code>get</code>/<code>set</code>. setAccessible turns off Java language access control for that reflected member — this is "deep reflection", used heavily by serialization and ORMs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What changed for reflection with the Java module system?</summary>
+      <div class="answer"><p>Since Java 9, <code>setAccessible(true)</code> into another module's package only works if that package is <em>open</em> — via an open module, an <code>opens</code> directive, or an <code>--add-opens</code> launch flag. Otherwise you get <code>InaccessibleObjectException</code>. Java 9 also added <code>trySetAccessible()</code> and <code>canAccess()</code>. This strong encapsulation is a common Java 8-to-17 migration break.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where have you seen reflection used in frameworks?</summary>
+      <div class="answer"><p>Spring instantiates beans and injects dependencies reflectively; Hibernate maps rows to entity fields; Jackson and Gson read/write fields for JSON; JUnit discovers and calls <code>@Test</code> methods; validators and mappers read annotations via reflection. Naming a couple concretely is what the interviewer wants.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a dynamic proxy and how do you build one?</summary>
+      <div class="answer"><p>A runtime-generated class implementing chosen interfaces, routing every call to an <code>InvocationHandler</code>. Build it with <code>Proxy.newProxyInstance(classLoader, interfaces, handler)</code>. It is the basis of Spring AOP, declarative transactions and mocking — cross-cutting behaviour with no hand-written wrappers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the drawbacks of reflection?</summary>
+      <div class="answer"><p>Slower than direct calls (access checks, no inlining in the naive path); loses compile-time type safety, so errors surface at runtime; breaks refactoring and static analysis since usages are strings; can violate encapsulation and raise security concerns; and now runs into module-system restrictions. Use it in frameworks and infrastructure, not hot application code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> MethodHandle vs reflection's Method — what is the difference?</summary>
+      <div class="answer"><p>A <code>MethodHandle</code> (java.lang.invoke) is a strongly-typed, directly-executable reference resolved through a <code>MethodHandles.Lookup</code> that captures access rights once at lookup time — so no per-call access check — and it optimizes closer to a direct call; <code>invokeExact</code> requires an exact signature match. It is what the JVM uses for lambdas and <code>invokedynamic</code>, and is generally faster than <code>Method.invoke</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a VarHandle and why prefer it over reflection or Unsafe?</summary>
+      <div class="answer"><p>A typed handle to a variable — instance field, static field, or array element — supporting explicit memory-ordering access modes: plain, volatile, acquire/release, and atomic compare-and-set. It is the supported, safe replacement for the internal <code>sun.misc.Unsafe</code>, giving low-level concurrency primitives without reflection's overhead or Unsafe's fragility.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can a JDK dynamic proxy only proxy interfaces, and what do you use for classes?</summary>
+      <div class="answer"><p>The generated proxy class already extends <code>java.lang.reflect.Proxy</code>, and Java allows only single inheritance, so it cannot also extend a target class — it can only implement interfaces. To proxy a concrete class you generate a subclass at runtime with a bytecode library like CGLIB or ByteBuddy (Spring picks the JDK proxy when a bean has an interface and CGLIB otherwise).</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.reflection</li>
+      <li>java.adv.proxies</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

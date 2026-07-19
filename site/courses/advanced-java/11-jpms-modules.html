@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The Java Platform Module System (JPMS) module: module-info directives (requires/exports/opens), decoupling with services and ServiceLoader, module import declarations, and the migration reality of the classpath, unnamed and automatic modules — with verified official resources and the interview questions they power.">
+  <title>The Module System (JPMS)</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: The Module System (JPMS)</h1>
+  <p class="standfirst">Java 9 broke the monolithic JDK into modules and handed your own code the same tool: a <code>module-info</code> that declares exactly what it needs and what it lets others see. Most projects still run happily on the classpath — knowing why, and when modules earn their keep, is what interviews actually probe.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → The Module System (JPMS)</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>JPMS (Java 9+) adds a level of grouping above packages: a named, self-describing module that lists its dependencies and its public API. This module orients you on the two guarantees it buys — reliable configuration and strong encapsulation — the <code>module-info.java</code> directives that express them, the services mechanism that decouples modules, the newer module import declarations, and the pragmatic migration story most teams actually live with.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why modules exist: reliable configuration and strong encapsulation</h3>
+    <p>A module is a named collection of packages plus a descriptor. At startup the runtime resolves the whole <em>module graph</em>, giving two guarantees the classpath never could. <em>Reliable configuration</em>: every required module must be present exactly once, so the missing-class-at-runtime and duplicate-JAR failures surface immediately as a resolution error. <em>Strong encapsulation</em>: a package is invisible to other modules unless it is explicitly exported, so <code>internal</code> packages stay internal even though their types are <code>public</code>.</p>
+    <p>Why it matters: this reframes access control from "public means everyone" to "public, and exported, means everyone". The JDK itself was modularised this way (JEP 261 / JSR 376), which is why reflecting into <code>sun.*</code> internals stopped working on Java 9+. Understanding the intent — not just the syntax — is what separates a rehearsed answer from a senior one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/modules/intro/" rel="noopener">Introduction to Modules in Java — dev.java (Oracle's official tutorial)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/261" rel="noopener">JEP 261: Module System — OpenJDK (the defining specification)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MGX-JfMl9-Y" rel="noopener">Modules in One Lesson — official Java channel (Alex Buckley, live-coded intro)</a></li>
+    </ul>
+
+    <h3>module-info.java: requires, exports, opens</h3>
+    <p>The descriptor lives as <code>module-info.java</code> at the source root and reads like a contract. <code>requires</code> declares a compile-and-runtime dependency; <code>requires transitive</code> re-exports that dependency so your callers read it too (implied readability); <code>requires static</code> is a compile-only optional dependency. <code>exports</code> makes one package's public types visible; <code>exports … to</code> restricts that to named modules (qualified). <code>opens</code> / <code>opens … to</code> grant deep reflective access at runtime — the switch frameworks like Spring, Hibernate and Jackson need to reach non-public members.</p>
+    <p>Why it matters: the single most common interview trap is confusing <code>exports</code> (compile-time API access) with <code>opens</code> (runtime reflective access). Export lets code call your methods; open lets a framework reflect into your fields. They are orthogonal, and picking the wrong one is the root cause of most "works on the classpath, breaks as a module" bugs.</p>
+    <pre class="code-block" data-label="Java"><code>module com.shop.billing {
+    requires com.shop.core;                       // compile + runtime
+    requires transitive org.slf4j;                // callers read slf4j too
+    requires static org.jetbrains.annotations;    // compile-only, optional
+
+    exports com.shop.billing.api;                 // public API package
+    exports com.shop.billing.spi to com.shop.reporting; // qualified export
+
+    opens com.shop.billing.model;                 // deep reflection for frameworks
+
+    uses com.shop.billing.spi.PaymentProvider;    // a service this module consumes
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/modules/qualified-exports-opens/" rel="noopener">Qualified exports and opens — dev.java</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-modularity" rel="noopener">A Guide to Java 9 Modularity — Baeldung (walks every directive with examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xnPpth9SanA" rel="noopener">Getting Started with Java Modules — Giuseppe Scaramuzzino</a></li>
+    </ul>
+
+    <h3>Services: ServiceLoader, uses and provides</h3>
+    <p>Modules should depend on abstractions, not implementations. The services mechanism lets a consumer declare <code>uses SomeService</code> and a provider declare <code>provides SomeService with SomeImpl</code>, with no direct module dependency between them. At runtime <code>ServiceLoader.load(SomeService.class)</code> discovers every registered provider and instantiates it (via a no-arg constructor or a static <code>provider()</code> method). It is the same Service Provider Interface pattern that has powered JDBC drivers and <code>java.util.logging</code> for years, now first-class in the module graph; on the classpath the equivalent registration lives in <code>META-INF/services</code>.</p>
+    <p>Why it matters: services are how the module system does dependency inversion without a container. Being able to sketch a plugin architecture with <code>uses</code>/<code>provides</code> and <code>ServiceLoader</code> is a frequent design-round question, and it lets a provider ship implementation packages without exporting them at all.</p>
+    <pre class="code-block" data-label="Java"><code>// consumer module-info:  uses com.shop.billing.spi.PaymentProvider;
+// provider module-info:  provides com.shop.billing.spi.PaymentProvider
+//                            with com.shop.upi.UpiPaymentProvider;
+
+ServiceLoader&lt;PaymentProvider&gt; loader = ServiceLoader.load(PaymentProvider.class);
+PaymentProvider provider = loader.findFirst()
+    .orElseThrow(() -&gt; new IllegalStateException("no payment provider on the module path"));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/ServiceLoader.html" rel="noopener">ServiceLoader — Java SE 21 API (Javadoc, the definitive contract)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/modules/services/" rel="noopener">Decoupling Modules with Services — dev.java</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-spi" rel="noopener">Java Service Provider Interface — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4mT7qPMLkYE" rel="noopener">Programming with the ServiceLoader API — Venkat Subramaniam</a></li>
+    </ul>
+
+    <h3>Module import declarations (JEP 511, Java 25)</h3>
+    <p>Finalised in Java 25 (preview in 23 and 24), a module import declaration — <code>import module java.base;</code> — imports, in one line, every package that the named module exports. It is a source-file convenience that reduces import clutter, and, importantly, it works even in code that is not itself a module. It takes a module name, so it cannot import the unnamed module (the classpath), mirroring the way <code>requires</code> only names modules.</p>
+    <p>Why it matters: this is the freshest JPMS-adjacent feature and a likely "what's new in recent Java" question. The nuance interviewers look for is that <code>import module</code> affects source-level imports only — it is not a substitute for a <code>requires</code> directive, which still governs the actual module dependency.</p>
+    <pre class="code-block" data-label="Java"><code>import module java.base;      // every package exported by java.base
+
+void main() {
+    var today = LocalDate.now();          // no per-package import needed
+    var ids = List.of("upi", "card");     // List, LocalDate, etc. all in scope
+    IO.println(today + " " + ids);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://openjdk.org/jeps/511" rel="noopener">JEP 511: Module Import Declarations — OpenJDK</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-25-features" rel="noopener">New Features in Java 25 — Baeldung (covers module import declarations)</a></li>
+    </ul>
+
+    <h3>Migration reality: classpath, unnamed and automatic modules</h3>
+    <p>The truth most tutorials bury: you do not have to modularise anything to run on Java 9 or later. Code on the classpath lands in the <em>unnamed module</em>, which reads every other module and exports everything — so existing applications keep working. When you do start, plain JARs placed on the <em>module path</em> become <em>automatic modules</em>: their name comes from the <code>Automatic-Module-Name</code> manifest header (or, as a fragile fallback, the file name), and they bridge modular code to whatever is still on the classpath. That lets you modularise top-down without waiting for every dependency to catch up.</p>
+    <p>Why it matters: the real pain of upgrading is strong encapsulation of JDK internals — libraries that reflected into <code>java.*</code> throw <code>InaccessibleObjectException</code>, fixed with launch-time <code>--add-opens</code> / <code>--add-exports</code> (or <code>--add-reads</code>). Split packages (the same package in two modules) are forbidden and must be resolved. Knowing these escape hatches, plus <code>jdeps</code> to analyse dependencies and <code>jlink</code> to build a slim runtime, is what "migration experience" means on a resume.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/modules/unnamed-module/" rel="noopener">Code on the Class Path: the Unnamed Module — dev.java</a></li>
+      <li>[Official] <a href="https://dev.java/learn/modules/automatic-module/" rel="noopener">Incremental Modularization with Automatic Modules — dev.java</a></li>
+      <li>[Official] <a href="https://dev.java/learn/modules/add-exports-opens/" rel="noopener">Circumventing Strong Encapsulation with --add-exports and --add-opens — dev.java</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-9-migration-issue" rel="noopener">Java 9 Migration Issues and Resolutions — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pfXsQyToipM" rel="noopener">The Java Module System Beyond the Basics — Nicolai Parlog (Devoxx)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-jdbc.html">← JDBC</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="12-platform-utilities.html">Platform Utilities and FFM →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>JPMS questions asked in Indian interviews — from screening "what is a module" to senior migration war stories:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the Java Platform Module System and which release introduced it?</summary>
+      <div class="answer"><p>JPMS (Project Jigsaw, JSR 376 / JEP 261) shipped in Java 9. It adds a named, self-describing unit above packages — a module that declares its dependencies and the packages it exposes — giving reliable configuration and strong encapsulation across the whole application, including a modularised JDK.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is module-info.java and where does it go?</summary>
+      <div class="answer"><p>The module descriptor. It sits at the root of the module's source (compiled to <code>module-info.class</code>) and names the module plus its directives: <code>requires</code> (dependencies), <code>exports</code> (public API), <code>opens</code> (reflective access), and <code>uses</code>/<code>provides</code> (services).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between requires and exports?</summary>
+      <div class="answer"><p><code>requires</code> is about what <em>this</em> module consumes — a dependency on another module. <code>exports</code> is about what this module offers — it makes one package's public types readable by others. One points inward, the other outward.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Do you have to convert an app to modules to run it on Java 17 or 21?</summary>
+      <div class="answer"><p>No. Code on the classpath runs inside the unnamed module, which reads all modules and exports everything, so non-modular apps keep working. Modularising is optional and can be done incrementally.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does strong encapsulation mean in JPMS?</summary>
+      <div class="answer"><p>A <code>public</code> type is only accessible to other modules if its package is exported. Non-exported packages are hidden even though their classes are public — "public" no longer means "accessible everywhere", which is why access into JDK internals broke on Java 9+.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> exports vs opens — when do you need opens?</summary>
+      <div class="answer"><p><code>exports</code> grants compile-time and runtime access to a package's public API — callers can invoke it. <code>opens</code> grants deep reflective access at runtime, including to non-public members. Frameworks that reflect (Spring, Hibernate, Jackson) need the package opened, not just exported. Getting these two confused is the classic module bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> requires transitive vs requires static?</summary>
+      <div class="answer"><p><code>requires transitive</code> implies readability: any module that reads yours also reads the transitively required one — used when your API exposes that module's types. <code>requires static</code> is a compile-time-only dependency that may be absent at runtime — used for optional libraries and annotations.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an automatic module and the Automatic-Module-Name header?</summary>
+      <div class="answer"><p>A plain (non-modular) JAR placed on the module path becomes an automatic module: it exports and opens all packages and reads every other module, including the unnamed module, so it bridges modular code to the classpath. Its name comes from the <code>Automatic-Module-Name</code> manifest entry, or is derived from the file name if that is missing — deriving from the file name is fragile, so libraries should set the header before others depend on them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do uses, provides and ServiceLoader work together?</summary>
+      <div class="answer"><p>The consumer declares <code>uses S</code>; each provider declares <code>provides S with Impl</code>. At runtime <code>ServiceLoader.load(S.class)</code> finds and instantiates the providers on the module path (no-arg constructor or a static <code>provider()</code> method). It is dependency inversion without a DI container, and the provider need not export its implementation package.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the unnamed module?</summary>
+      <div class="answer"><p>The catch-all module for everything loaded from the classpath. It has no name (so nothing can <code>requires</code> it), reads all modules, and exports/opens all its packages. It exists to keep pre-module code running unchanged alongside the module system.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> After upgrading, a library throws InaccessibleObjectException reflecting on JDK internals. How do you fix it?</summary>
+      <div class="answer"><p>Strong encapsulation now blocks that reflection. As a launch-time fix, open or export the specific package: <code>--add-opens java.base/java.lang=ALL-UNNAMED</code> (reflective access) or <code>--add-exports</code> (compile/runtime API access), and <code>--add-reads</code> to add a readability edge. The real fix is upgrading the offending library; the flags are a bridge, and each one is a deliberate, auditable hole in encapsulation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a split package and why does JPMS forbid it?</summary>
+      <div class="answer"><p>A split package is the same package name contributed by two different modules. JPMS forbids it because a package must belong to exactly one module for reliable configuration and consistent access rules — otherwise readability and encapsulation would be ambiguous. Split packages are a common migration blocker; the fix is to merge or rename, or during transition use <code>--patch-module</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What do module import declarations (JEP 511, Java 25) do, and how do they differ from a requires directive?</summary>
+      <div class="answer"><p><code>import module M;</code> is a source-level statement that imports every package exported by module M in one line, usable even in non-modular code; it cannot name the unnamed module. It only affects imports in that file — it does not create a module dependency. The actual dependency is still declared by <code>requires</code> in <code>module-info.java</code>; the two operate at different layers (source imports vs the module graph).</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.jpms</li>
+      <li>java.adv.services</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Advanced Java Common Pitfalls module: == vs equals and the Integer cache, equals/hashCode contract traps, autoboxing costs, BigDecimal vs double for money, string concatenation in loops, date bugs and finalizers — the best official and community resources, plus the interview questions they power.">
+  <title>Common Pitfalls — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Common Pitfalls</h1>
+  <p class="standfirst">These are the bugs that sail through code review and surface in production — Integer identity that flips at 128, money stored in doubles, an equals() with no hashCode() — and they are exactly what a sharp interviewer reaches for first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Common Pitfalls</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is a survey of the language's sharp edges: reference-vs-value comparison and the Integer cache, the equals/hashCode contract and the hash-collection failures it prevents, the hidden cost of autoboxing, why money never belongs in a <code>double</code>, quadratic string building in loops, the traps in the legacy date/calendar classes, and why finalizers are being retired. Each one is a favourite screening question in Indian interviews because the wrong answer is subtle and the right answer shows real understanding.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>== vs equals, and the Integer cache</h3>
+    <p><code>==</code> compares references for objects (are these the same object?) and values for primitives; <code>equals()</code> compares logical value once a class overrides it. Confusing the two is the root of most "why is this false?" bugs, because two distinct <code>String</code> or <code>Integer</code> objects with the same value are <code>equals()</code> but not <code>==</code>.</p>
+    <p>Why it matters: the classic trap is the Integer cache. Autoboxing routes through <code>Integer.valueOf</code>, which caches instances for <code>-128</code> to <code>127</code>, so <code>Integer a = 127, b = 127</code> gives <code>a == b</code> true, while <code>128</code> yields two objects and <code>==</code> false. The Java Language Specification guarantees the cached range; anything outside it is implementation-defined. Rule: compare wrapper values with <code>equals()</code>, never <code>==</code>.</p>
+    <pre class="code-block" data-label="Java"><code>Integer a = 127, b = 127;
+Integer c = 128, d = 128;
+a == b;        // true  -> both from the cache (-128..127)
+c == d;        // false -> two distinct objects
+c.equals(d);   // true  -> value equality, the correct comparison</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-5.html" rel="noopener">Boxing Conversion (§5.1.7) — Java Language Specification (the -128..127 == guarantee)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Integer.html" rel="noopener">Integer.valueOf — Java SE 21 API (states the cache is always -128..127 inclusive)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-equals-method-operator-difference" rel="noopener">Difference Between == and equals() in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>equals/hashCode contract traps</h3>
+    <p>Override one and you must override the other. The contract: equal objects must return equal hash codes, and results must be consistent while the object's identifying fields do not change. Break it and hash collections quietly misbehave — a <code>HashMap.get</code> misses a key that is <code>equals()</code> to the stored one because the two land in different buckets.</p>
+    <p>Why it matters: this is a top interview probe. The follow-ups are always the same — override both together, base both on the same immutable fields, and never mutate a field that participates in <code>hashCode()</code> after the object is used as a map key or set member. Records generate a correct value-based pair for you, removing the hand-written boilerplate that so often gets it wrong.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html" rel="noopener">Object.equals / Object.hashCode — Java SE 21 API (the general contract, verbatim)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/inheritance/objects/" rel="noopener">Object as a Superclass — dev.java (Oracle tutorial: overriding equals and hashCode)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-equals-hashcode-contracts" rel="noopener">Java equals() and hashCode() Contracts — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-hashcode" rel="noopener">Guide to hashCode() in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4X5Kgi2VltI" rel="noopener">Equals and Hashcode Contract in Java (Important Interview Question) — Code Decode</a></li>
+    </ul>
+
+    <h3>Autoboxing costs and unboxing NullPointerExceptions</h3>
+    <p>Autoboxing converts primitives to wrappers and back automatically, which reads cleanly but hides two hazards. First, unboxing a <code>null</code> wrapper throws NullPointerException — <code>int n = map.get(key)</code> blows up when the key is absent because <code>null</code> cannot become an <code>int</code>. Second, boxing allocates: a wrapper accumulator inside a tight loop creates a fresh object every iteration.</p>
+    <p>Why it matters: the NPE is a real production surprise (ternaries with mixed <code>Integer</code>/<code>int</code> branches unbox silently), and the allocation cost is a favourite "spot the bug" question. Rule: use primitives for arithmetic and loop counters; reach for wrappers only when nullability or collections genuinely require them.</p>
+    <pre class="code-block" data-label="Java"><code>Map&lt;String,Integer&gt; counts = ...;
+int n = counts.get("missing");     // NPE: null unboxed to int
+Long sum = 0L;
+for (long x : nums) sum += x;      // unbox + box every iteration -> garbage
+long fast = 0L;
+for (long x : nums) fast += x;     // primitive: no allocation</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/java/data/autoboxing.html" rel="noopener">Autoboxing and Unboxing — The Java Tutorials (Oracle)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-wrapper-classes" rel="noopener">Wrapper Classes in Java — Baeldung (valueOf, caching, boxing behaviour)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-primitives-vs-objects" rel="noopener">Java Primitives Versus Objects — Baeldung (the allocation cost)</a></li>
+    </ul>
+
+    <h3>BigDecimal vs double for money</h3>
+    <p>Binary floating point cannot represent most decimal fractions exactly, so <code>0.1 + 0.2</code> is not <code>0.3</code> and rounded totals drift by cents. Never store or compute money in <code>double</code>/<code>float</code>. Use <code>BigDecimal</code> — arbitrary precision with an explicit scale and rounding mode you control.</p>
+    <p>Why it matters: two follow-ups always appear. Construct from a <code>String</code> (or <code>BigDecimal.valueOf</code>), never <code>new BigDecimal(0.1)</code> — the double constructor captures the full binary error. And compare amounts with <code>compareTo</code>, not <code>equals</code>: <code>equals</code> considers scale, so <code>1.0</code> and <code>1.00</code> are unequal, while <code>compareTo</code> returns 0 as expected.</p>
+    <pre class="code-block" data-label="Java"><code>new BigDecimal(0.1);            // 0.10000000000000000555... captures binary error
+new BigDecimal("0.1");          // exactly 0.1 -> prefer the String constructor
+BigDecimal.valueOf(0.1);        // exactly 0.1 -> the canonical double bridge
+new BigDecimal("1.0").equals(new BigDecimal("1.00"));      // false (scale differs)
+new BigDecimal("1.0").compareTo(new BigDecimal("1.00"));   // 0 (same value)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/math/BigDecimal.html" rel="noopener">BigDecimal — Java SE 21 API (the double-constructor "unpredictable" note, scale, rounding)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-bigdecimal-biginteger" rel="noopener">BigDecimal and BigInteger in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-bigdecimal-equals-compareto-difference" rel="noopener">BigDecimal equals() vs. compareTo() — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-money-and-currency" rel="noopener">Java Money and the Currency API — Baeldung</a></li>
+    </ul>
+
+    <h3>String concatenation in loops</h3>
+    <p><code>String</code> is immutable, so <code>s += part</code> inside a loop allocates a brand-new string and copies everything each pass — O(n²) work and heavy garbage. Build with <code>StringBuilder</code> (or <code>String.join</code>/streams for the simple cases), which appends into one growable buffer in linear time.</p>
+    <p>Why it matters: the compiler rewrites a single <code>a + b + c</code> expression efficiently, but it cannot fuse concatenation spread across loop iterations — that is on you. It is a standard performance question, usually paired with "String vs StringBuilder vs StringBuffer" (StringBuffer is the synchronized, rarely-needed sibling).</p>
+    <pre class="code-block" data-label="Java"><code>String s = "";
+for (String p : parts) s += p;             // O(n^2): new String + copy each pass
+StringBuilder sb = new StringBuilder();
+for (String p : parts) sb.append(p);       // O(n): one reused buffer
+String joined = String.join(",", parts);   // clearest for a simple join</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/StringBuilder.html" rel="noopener">StringBuilder — Java SE 21 API (mutable character sequence, append/insert)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/numbers-strings/string-builders/" rel="noopener">String Builders — dev.java (Oracle tutorial: when a builder wins)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-string-concatenation-methods" rel="noopener">Performance Comparison Between Java String Concatenation Methods — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-string-performance" rel="noopener">String Performance Hints — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=i-OZbcvneqo" rel="noopener">Java String Interview Questions and Answers (Immutable, Most Asked) — Code Decode</a></li>
+    </ul>
+
+    <h3>Date and time bugs (legacy Date/Calendar)</h3>
+    <p>The legacy classes are a bug factory: <code>java.util.Date</code> is mutable and mostly deprecated, <code>Calendar</code> months are zero-based (January is 0), and <code>SimpleDateFormat</code> is not thread-safe — sharing one across threads corrupts output silently. Prefer the <code>java.time</code> package (<code>LocalDate</code>, <code>LocalDateTime</code>, <code>Instant</code>, <code>ZonedDateTime</code>): immutable, thread-safe, and explicit about time zones.</p>
+    <p>Why it matters: mutability means a returned <code>Date</code> can be changed by a caller, so old code needs defensive copies; <code>java.time</code> values are immutable, so operations like <code>plusMonths</code> return a new object and clamp sensibly. Knowing why the migration happened — not just the new method names — is what interviewers want.</p>
+    <pre class="code-block" data-label="Java"><code>LocalDate d = LocalDate.of(2026, 1, 31);
+LocalDate next = d.plusMonths(1);   // 2026-02-28, immutable -> new value returned
+// legacy traps: Calendar.set(2026, 1, 31) is FEBRUARY (months 0-based),
+// and one shared SimpleDateFormat is unsafe across threads</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/time/package-summary.html" rel="noopener">java.time — Java SE 21 API (the modern date/time model and its legacy equivalents)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/migrating-to-java-8-date-time-api" rel="noopener">Migrating to the Java Date Time API — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-8-date-time-intro" rel="noopener">Introduction to the Java Date/Time API — Baeldung</a></li>
+    </ul>
+
+    <h3>Finalizers and resource cleanup</h3>
+    <p><code>Object.finalize()</code> was meant to reclaim resources before garbage collection, but it is unreliable (no guarantee it ever runs, or when), slow, and a source of resurrection and security bugs — so it is deprecated for removal. Never rely on it to close files, sockets, or connections.</p>
+    <p>Why it matters: the right patterns are deterministic. Implement <code>AutoCloseable</code> and use try-with-resources so cleanup runs at a defined point; for the rare native-handle case, register a <code>Cleaner</code> as a safety net rather than a primary mechanism. Interviewers ask this to check that you reach for try-with-resources, not finalizers.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://openjdk.org/jeps/421" rel="noopener">JEP 421: Deprecate Finalization for Removal — OpenJDK (why it is being retired, and the migration path)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/Cleaner.html" rel="noopener">Cleaner — Java SE 21 API (the phantom-reference-based replacement)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-finalize" rel="noopener">A Guide to the finalize Method in Java — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-platform-utilities.html">← Platform Utilities and FFM</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="14-clean-code.html">Clean Code Practices →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>The pitfalls Indian interviewers probe most — reference vs value, the Integer cache, and money in doubles headline nearly every core-Java screen:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between == and equals() in Java?</summary>
+      <div class="answer"><p><code>==</code> tests reference identity for objects (same object in memory) and raw value for primitives. <code>equals()</code> tests logical equality as the class defines it. Two different <code>String</code> or <code>Integer</code> objects holding the same value are <code>equals()</code> but not <code>==</code>. Always compare object contents with <code>equals()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Integer a = 127, b = 127 gives a == b true, but 128 gives false. Why?</summary>
+      <div class="answer"><p>Autoboxing calls <code>Integer.valueOf</code>, which caches instances for <code>-128</code> to <code>127</code>. In range, both references point to the same cached object, so <code>==</code> is true; outside it, two new objects are created and <code>==</code> is false. The values are always <code>equals()</code>. This is the single most-asked pitfall question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why must you override hashCode() whenever you override equals()?</summary>
+      <div class="answer"><p>The contract requires equal objects to have equal hash codes. Override <code>equals()</code> alone and two "equal" objects can produce different hashes, so a <code>HashMap</code>/<code>HashSet</code> puts them in different buckets and lookups fail. Override both, from the same fields.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why should money never be stored in a double?</summary>
+      <div class="answer"><p>Binary floating point cannot represent most decimal fractions exactly, so sums and rounding drift (<code>0.1 + 0.2</code> is not <code>0.3</code>). Use <code>BigDecimal</code> with an explicit scale and rounding mode — or an integer count of the smallest currency unit (paise/cents).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the Integer cache and why does it exist?</summary>
+      <div class="answer"><p>A pool of pre-built <code>Integer</code> objects for small, frequently used values (always <code>-128</code> to <code>127</code>; the upper bound is tunable via <code>-XX:AutoBoxCacheMax</code>). <code>Integer.valueOf</code> returns cached instances to save allocation. The visible side effect is that <code>==</code> "works" in range and breaks outside it — which is exactly why you never use <code>==</code> on wrappers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> new BigDecimal(0.1) vs new BigDecimal("0.1") — what is the difference?</summary>
+      <div class="answer"><p>The double constructor takes the already-imprecise binary value, so <code>new BigDecimal(0.1)</code> is 0.1000000000000000055… The String constructor is exact: <code>new BigDecimal("0.1")</code> equals 0.1 precisely. Prefer the String constructor or <code>BigDecimal.valueOf(double)</code>, which uses the canonical <code>Double.toString</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can BigDecimal.equals() surprise you, and what should you use?</summary>
+      <div class="answer"><p><code>equals()</code> compares value <em>and</em> scale, so <code>new BigDecimal("1.0")</code> and <code>new BigDecimal("1.00")</code> are not equal. To compare numeric value, use <code>compareTo(...) == 0</code>. This also means <code>BigDecimal</code> is a risky <code>HashSet</code>/<code>HashMap</code> key unless scales are normalised first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How can autoboxing cause a NullPointerException?</summary>
+      <div class="answer"><p>Unboxing a <code>null</code> wrapper fails: <code>int n = map.get(key)</code> throws NPE when the key is absent because <code>null</code> cannot convert to <code>int</code>. Mixed <code>Integer</code>/<code>int</code> ternaries unbox silently and hit the same trap. Keep the type <code>Integer</code> and null-check, or supply a default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is building a String in a loop with += a problem, and the fix?</summary>
+      <div class="answer"><p><code>String</code> is immutable, so each <code>s += part</code> allocates a new string and copies all prior characters — O(n²) time and heavy garbage. Use a <code>StringBuilder</code> and <code>append</code> (one growable buffer, linear time), or <code>String.join</code>/a stream collector for simple joins. The compiler optimises a single <code>+</code> expression but not concatenation across iterations.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What happens if you mutate an object after using it as a HashMap key?</summary>
+      <div class="answer"><p>If you change a field that feeds <code>hashCode()</code>, the object now hashes to a different bucket than where it was stored, so <code>get</code>/<code>containsKey</code> can no longer find it — a silent leak. Use immutable keys, or never mutate the identifying fields once an object is a key or set member.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Show how autoboxing quietly hurts performance in a hot loop.</summary>
+      <div class="answer"><p>Declare the accumulator as a wrapper — <code>Long sum = 0L; for (long x : nums) sum += x;</code> — and every iteration unboxes <code>sum</code>, adds, then boxes a fresh <code>Long</code>, generating one garbage object per pass. Declaring <code>long sum</code> removes all of it. The same tax hits <code>Integer</code>/<code>Double</code> keys and accumulators; prefer primitives and primitive streams (<code>IntStream</code>/<code>LongStream</code>) on hot paths.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why are finalizers discouraged, and what replaces them?</summary>
+      <div class="answer"><p><code>finalize()</code> gives no guarantee it runs, or when; it delays reclamation, can resurrect objects, and has caused security bugs — so it is deprecated for removal (JEP 421). Replace it with deterministic cleanup: implement <code>AutoCloseable</code> and use try-with-resources; for native handles, register a <code>Cleaner</code> only as a backstop, not the primary release mechanism.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Name the classic legacy Date/Calendar bugs and how java.time fixes them.</summary>
+      <div class="answer"><p><code>java.util.Date</code> is mutable (callers can change a returned value — needs defensive copies) and largely deprecated; <code>Calendar</code> months are zero-based, so month 1 is February; <code>SimpleDateFormat</code> is not thread-safe and corrupts output when shared. <code>java.time</code> types are immutable and thread-safe, months are one-based, <code>DateTimeFormatter</code> is thread-safe, and time zones are explicit — removing the whole class of bugs.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.pitfalls-equals</li>
+      <li>java.adv.pitfalls-numeric</li>
+      <li>java.adv.pitfalls-misc</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

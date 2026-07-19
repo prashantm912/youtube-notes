@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Platform Utilities and FFM module: the Process API and ProcessHandle, Java internationalization (Locale, ResourceBundle, MessageFormat), the modern RandomGenerator API, and an overview of the final Foreign Function and Memory API — with the best official docs and the interview questions they power.">
+  <title>Platform Utilities and FFM — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: Platform Utilities and FFM</h1>
+  <p class="standfirst">The corners of <code>java.base</code> that touch the world outside the JVM — spawning OS processes, speaking every user's language, generating better randomness, and (new in Java 22) calling C without JNI. Breadth over depth: know what each exists for and where to read the rest.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → Platform Utilities and FFM</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Four platform utilities that appear in senior interviews and real systems: the <strong>Process API</strong> for launching and controlling native processes, <strong>internationalization</strong> (Locale, ResourceBundle, MessageFormat) for locale-correct output, the interface-based <strong>RandomGenerator</strong> API that superseded bare <code>java.util.Random</code>, and a survey of the <strong>Foreign Function &amp; Memory (FFM) API</strong> — finalized in Java 22 as the modern, safer replacement for JNI. Depth lives in the linked official docs; this page orients you.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Process API and ProcessHandle (and scripting)</h3>
+    <p><code>ProcessBuilder</code> is the supported way to spawn an OS process: set the command, working directory, environment, and I/O redirection, then <code>start()</code>. Java 9 added <code>ProcessHandle</code>, which represents <em>any</em> native process — not just ones you spawned — exposing <code>pid()</code>, a snapshot <code>info()</code>, <code>children()</code>/<code>descendants()</code>, an <code>onExit()</code> <code>CompletableFuture</code>, and <code>destroy()</code>/<code>destroyForcibly()</code>. Together they replace the anaemic legacy <code>Runtime.exec</code>.</p>
+    <p>Why it matters: build tools, test harnesses, and orchestration code all shell out. "Scripting" also lives here — the single-file source launcher (<code>java Hello.java</code>, with a shebang line) lets Java files run as scripts, and ProcessBuilder is how you drive shell scripts from Java. The classic gotcha (a subprocess deadlocking because its output pipe filled) is a favourite interview trap.</p>
+    <pre class="code-block" data-label="Java"><code>Process p = new ProcessBuilder("git", "status")
+    .redirectErrorStream(true)      // merge stderr into stdout
+    .start();
+String out = new String(p.getInputStream().readAllBytes());
+int code = p.waitFor();             // 0 = success
+ProcessHandle.current().info().command().ifPresent(System.out::println);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ProcessBuilder.html" rel="noopener">ProcessBuilder — Java SE 21 API (Javadoc)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Process.html" rel="noopener">Process — Java SE 21 API (Javadoc)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ProcessHandle.html" rel="noopener">ProcessHandle — Java SE 21 API (Javadoc, the Java 9 process-control interface)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-process-api" rel="noopener">Guide to java.lang.Process API — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1U4pAFcejqY" rel="noopener">Listing Java Processes with ProcessBuilder and "top" — airhacks (Adam Bien)</a></li>
+    </ul>
+
+    <h3>Internationalization: Locale and ResourceBundle</h3>
+    <p>Internationalization (i18n) is designing code so locale-specific data is pulled out, not hard-coded; localization (l10n) is supplying that data per region. A <code>Locale</code> (build it with <code>Locale.of("hi", "IN")</code> — the constructor is deprecated since Java 19) names a language and region. <code>ResourceBundle.getBundle("messages", locale)</code> then loads the best-matching <code>.properties</code> file by walking a candidate chain from most specific to the base bundle, falling back through the default locale.</p>
+    <p>Why it matters: any product shipping to India serves many languages; hard-coded English strings are an immediate red flag. Knowing the <em>fallback order</em> — and that Java 9+ reads property files as UTF-8 — is the level of detail interviewers probe.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/i18n/index.html" rel="noopener">Internationalization trail — The Java Tutorials (Oracle)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Locale.html" rel="noopener">Locale — Java SE 21 API (Javadoc)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/ResourceBundle.html" rel="noopener">ResourceBundle — Java SE 21 API (Javadoc)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-resourcebundle" rel="noopener">A Guide to the ResourceBundle — Baeldung</a></li>
+    </ul>
+
+    <h3>Formatting localized messages: MessageFormat</h3>
+    <p>Concatenating translated fragments breaks the moment a language reorders the sentence. <code>MessageFormat</code> solves this with numbered placeholders and format types: <code>{0}</code>, <code>{1,number,integer}</code>, <code>{2,date,long}</code> — so translators move the whole <code>{0}</code> token and numbers/dates render per the active Locale. Pair it with ResourceBundle: keep the pattern in the properties file, feed the arguments at runtime. For plural agreement, <code>ChoiceFormat</code> selects wording by quantity.</p>
+    <pre class="code-block" data-label="Java"><code>String pattern = "{0} sent you {1,number,integer} new messages.";
+String msg = new MessageFormat(pattern, Locale.of("en", "IN"))
+    .format(new Object[]{ "Asha", 3 });
+// -&gt; "Asha sent you 3 new messages."</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/text/MessageFormat.html" rel="noopener">MessageFormat — Java SE 21 API (Javadoc, full pattern syntax)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-localization-messages-formatting" rel="noopener">Java Localization — Formatting Messages — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-8-localization" rel="noopener">Internationalization and Localization in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Modern randomness: RandomGenerator and java.util.random</h3>
+    <p>JEP 356 (Java 17) introduced <code>java.util.random.RandomGenerator</code>, a uniform interface that <code>Random</code>, <code>SecureRandom</code>, <code>SplittableRandom</code>, and <code>ThreadLocalRandom</code> now all implement — plus a family of better algorithms (the LXM and Xoshiro groups) you obtain by name through <code>RandomGeneratorFactory</code>. Sub-interfaces like <code>SplittableGenerator</code> and <code>JumpableGenerator</code> serve parallel and reproducible-stream use cases. Program to the interface, not to <code>new Random()</code>.</p>
+    <p>Why it matters: legacy <code>Random</code> has a 48-bit seed, is not cryptographically secure, and its shared instance is a concurrency bottleneck. Knowing when to reach for <code>ThreadLocalRandom</code>, a splittable generator, or <code>SecureRandom</code> is a common senior discriminator.</p>
+    <pre class="code-block" data-label="Java"><code>RandomGenerator rng = RandomGenerator.of("L64X128MixRandom");
+int roll = rng.nextInt(1, 7);            // origin..bound, 1..6
+rng.ints(5, 0, 100).forEach(System.out::println);   // stream of 5</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/random/package-summary.html" rel="noopener">java.util.random — Java SE 21 API (package overview, algorithm groups)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/random/RandomGenerator.html" rel="noopener">RandomGenerator — Java SE 21 API (Javadoc)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/356" rel="noopener">JEP 356: Enhanced Pseudo-Random Number Generators — OpenJDK</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-17-random-number-generators" rel="noopener">Random Number Generators in Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Foreign Function &amp; Memory API (FFM)</h3>
+    <p>The FFM API — finalized in <strong>Java 22</strong> by JEP 454 — lets Java call native library functions and access off-heap memory without writing C glue or using the fragile JNI. Its pieces: <code>MemorySegment</code> models a bounded region of memory (on- or off-heap); <code>Arena</code> owns a segment's lifetime and deterministically frees it on <code>close()</code>; <code>Linker</code> turns a native symbol into a <code>MethodHandle</code> (a "downcall"), and the reverse ("upcall") lets native code call back into Java. The <code>jextract</code> tool generates bindings straight from C headers.</p>
+    <p>Why it matters: FFM gives Java spatial and temporal memory safety (bounds checks plus use-after-free detection) that raw JNI never had, and it is the foundation Project Panama built for high-performance native interop. As a survey topic, know the vocabulary and the "why over JNI" story — the linked tutorials carry the depth.</p>
+    <pre class="code-block" data-label="Java"><code>Linker linker = Linker.nativeLinker();
+SymbolLookup stdlib = linker.defaultLookup();
+MethodHandle strlen = linker.downcallHandle(
+    stdlib.find("strlen").orElseThrow(),
+    FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+try (Arena arena = Arena.ofConfined()) {          // freed at close
+    MemorySegment str = arena.allocateFrom("hello");   // UTF-8 C string
+    long len = (long) strlen.invoke(str);              // 5
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://openjdk.org/jeps/454" rel="noopener">JEP 454: Foreign Function &amp; Memory API — OpenJDK (the finalizing JEP, Java 22)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/22/docs/api/java.base/java/lang/foreign/package-summary.html" rel="noopener">java.lang.foreign — Java SE 22 API (package overview, worked examples)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/ffm/" rel="noopener">The Foreign Function and Memory API — dev.java (Oracle's tutorial series)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-foreign-memory-access" rel="noopener">Foreign Function and Memory API in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kUFysMkMS00" rel="noopener">Project Panama — Foreign Function &amp; Memory API (JVM Language Summit)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-jpms-modules.html">← The Module System (JPMS)</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="13-common-pitfalls.html">Common Pitfalls →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>What these platform utilities are actually asked about in Indian interviews — from service-company screens to product-company deep dives:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you run an external OS command from Java?</summary>
+      <div class="answer"><p>Use <code>ProcessBuilder</code>: set the command list, optionally the directory/environment/redirects, call <code>start()</code> to get a <code>Process</code>, then <code>waitFor()</code> for the exit code. The old <code>Runtime.getRuntime().exec(...)</code> still works but ProcessBuilder is the supported, configurable API.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What does ProcessHandle add over Process?</summary>
+      <div class="answer"><p><code>Process</code> represents a subprocess you started; <code>ProcessHandle</code> (Java 9) can reference <em>any</em> native process by PID, and exposes <code>pid()</code>, a snapshot <code>info()</code>, <code>children()</code>/<code>descendants()</code>, <code>onExit()</code> as a <code>CompletableFuture</code>, and <code>destroy()</code>/<code>destroyForcibly()</code>. Get one from a Process via <code>toHandle()</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a ResourceBundle and how does Java pick the right file?</summary>
+      <div class="answer"><p>A ResourceBundle holds locale-specific key/value data, usually in <code>.properties</code> files sharing a base name (<code>messages.properties</code>, <code>messages_hi_IN.properties</code>). <code>getBundle(base, locale)</code> searches from most specific (language+country) down to the base bundle, using the default locale as a fallback — the first match wins.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between internationalization and localization?</summary>
+      <div class="answer"><p>Internationalization (i18n) is engineering the code so locale-dependent data — text, number/date formats, collation — is externalized rather than hard-coded. Localization (l10n) is the act of providing that data for a specific locale (translations, formats). i18n is done once; l10n is repeated per market.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why use MessageFormat instead of string concatenation for user messages?</summary>
+      <div class="answer"><p>Because word order and number/date formatting differ by language. <code>MessageFormat</code> uses numbered placeholders (<code>{0}</code>, <code>{1,number}</code>), so a translator can reorder tokens and values render per Locale. Concatenation bakes in English grammar and breaks localization.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A subprocess hangs when you read its output. Why, and how do you fix it?</summary>
+      <div class="answer"><p>The child's stdout/stderr pipe has a limited OS buffer; if you don't drain it (or you read only one stream while the other fills), the child blocks writing and you block waiting — deadlock. Fixes: <code>redirectErrorStream(true)</code> and read fully, use <code>inheritIO()</code> or file redirects, or drain both streams on separate threads before <code>waitFor()</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through ResourceBundle's fallback resolution.</summary>
+      <div class="answer"><p>For <code>getBundle("msg", Locale.of("hi","IN"))</code> it tries <code>msg_hi_IN</code>, then <code>msg_hi</code>, then the default locale's candidates, then the base <code>msg</code>. Missing keys in a chosen bundle fall through to its parent bundle. You can customize the search with a <code>ResourceBundle.Control</code>. Java 9+ reads properties as UTF-8.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What does the RandomGenerator API (JEP 356) improve over java.util.Random?</summary>
+      <div class="answer"><p>It defines one interface all generators implement, so you program to <code>RandomGenerator</code> and select algorithms by name via <code>RandomGeneratorFactory</code>. It adds modern algorithm families (LXM, Xoshiro), stream and range methods, and specialized <code>Splittable</code>/<code>Jumpable</code> sub-interfaces for parallelism and reproducibility — none of which the single legacy <code>Random</code> class offered.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Is java.util.Random suitable for concurrent use? What are the alternatives?</summary>
+      <div class="answer"><p>A shared <code>Random</code> is thread-safe but its internal CAS on the seed becomes a contention hotspot. Use <code>ThreadLocalRandom.current()</code> for independent per-thread streams, or a <code>SplittableGenerator</code> (e.g. <code>L64X128MixRandom</code>) when a fork/join computation needs to split off child generators. For security, use <code>SecureRandom</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A server formats everything with Locale.getDefault(). Why is that risky?</summary>
+      <div class="answer"><p>The JVM default locale reflects the host, not the user — so the same request formats differently across machines and can silently change numbers, dates, and collation. Pass an explicit Locale everywhere; use <code>Locale.ROOT</code> for machine-facing formats (logs, IDs), and remember <code>Locale.Category</code> splits DISPLAY vs FORMAT defaults.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is the Foreign Function &amp; Memory API and why prefer it over JNI?</summary>
+      <div class="answer"><p>FFM (final in Java 22, JEP 454) calls native functions and accesses off-heap memory from pure Java. Over JNI it removes the hand-written C bridge, adds spatial and temporal memory safety (bounds checks plus use-after-free detection via arenas), models signatures with <code>FunctionDescriptor</code>/<code>Linker</code>, and generates bindings from headers with <code>jextract</code> — safer, faster to develop, and maintainable.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How does Arena give native memory temporal safety?</summary>
+      <div class="answer"><p>An <code>Arena</code> owns the lifetime of the <code>MemorySegment</code>s it allocates and frees them on <code>close()</code>. A confined arena restricts access to one thread; a shared arena allows many; an auto arena defers to the GC. Any access after the arena closes throws instead of corrupting memory — the guarantee raw JNI/<code>Unsafe</code> pointers never provided.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> When would you reach for ProcessHandle.onExit() and descendants()?</summary>
+      <div class="answer"><p><code>onExit()</code> returns a <code>CompletableFuture&lt;ProcessHandle&gt;</code> so you can react asynchronously to termination without a blocking <code>waitFor()</code> thread — chain cleanup or restart logic onto it. <code>descendants()</code> (with <code>destroy()</code>) lets you tear down a whole process tree, avoiding orphaned grandchild processes that a plain <code>destroy()</code> on the parent would leave running.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Contrast a downcall and an upcall in FFM, and what jextract is for.</summary>
+      <div class="answer"><p>A downcall is Java calling a native function: <code>Linker.downcallHandle</code> binds a native symbol to a <code>MethodHandle</code> you invoke. An upcall is the reverse — you wrap a Java method as a native function pointer (via <code>Linker.upcallStub</code>) so C code can call back, e.g. a comparator for <code>qsort</code>. <code>jextract</code> parses C headers and generates the boilerplate <code>MethodHandle</code>/layout bindings automatically.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.process</li>
+      <li>java.adv.i18n</li>
+      <li>java.adv.ffm</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

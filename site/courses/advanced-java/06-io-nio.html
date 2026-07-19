@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Java IO and NIO.2 module: byte and character streams, buffering, the legacy File class, and the modern Path/Files API with directory walking and the WatchService — the best official docs plus the interview questions they power.">
+  <title>IO and NIO.2 Files</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-java lesson-page">
+<header class="page-header">
+  <h1>Module: IO and NIO.2 Files</h1>
+  <p class="standfirst">Java ships two file APIs side by side — the original stream classes in <code>java.io</code> and the Java 7 NIO.2 <code>Path</code>/<code>Files</code> layer that quietly replaced them. Interviews probe which one to reach for, and why.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Advanced Java → IO and NIO.2 Files</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>File handling in Java spans byte and character streams, the buffering that makes them fast, the legacy <code>File</code> handle, and the modern NIO.2 world of <code>Path</code>, the <code>Files</code> utility class, recursive tree walking, and the <code>WatchService</code> for change notification. This module orients you across both APIs so you can read the enterprise codebases that mix them and answer the interview questions that compare them — depth lives in the linked official docs.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The java.io streams model: bytes vs characters</h3>
+    <p>Every classic I/O class descends from one of four abstract types. <code>InputStream</code>/<code>OutputStream</code> move raw 8-bit bytes — images, serialized objects, any binary payload. <code>Reader</code>/<code>Writer</code> move text, decoding and encoding bytes through a charset so multi-byte encodings like UTF-8 round-trip correctly. The bridge classes <code>InputStreamReader</code> and <code>OutputStreamWriter</code> convert between the two worlds.</p>
+    <p>Why it matters: choosing the wrong family corrupts data. Reading a JPEG through a <code>Reader</code> mangles it; reading UTF-8 text through a raw byte stream loses the character boundaries. The rule interviewers want back is simple — text takes <code>Reader</code>/<code>Writer</code>, everything else takes byte streams.</p>
+    <pre class="code-block" data-label="Java"><code>// Byte stream — raw bytes (an image, a binary file):
+try (InputStream in = new FileInputStream("photo.jpg")) { /* read bytes */ }
+
+// Character stream — text decoded through an explicit charset:
+try (Reader r = new FileReader("notes.txt", StandardCharsets.UTF_8)) { /* read chars */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/package-summary.html" rel="noopener">java.io package summary — Java SE 21 API (the full stream/reader/writer class map)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/java-io/intro/" rel="noopener">Understanding the Main Java I/O Concepts — dev.java (Oracle's official tutorial)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/io/" rel="noopener">Basic I/O — The Java Tutorials (streams, scanning, data and object streams)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e_S2yJKpTaw" rel="noopener">Java File Handling Explained: Streams, Buffers, Readers &amp; Writers — Concept &amp; Coding (Shrayansh)</a></li>
+    </ul>
+
+    <h3>Buffering, and the legacy File class</h3>
+    <p>An unbuffered stream calls the operating system on every byte or character — thousands of syscalls to read one file. Wrapping it in <code>BufferedReader</code>/<code>BufferedInputStream</code> (or the output equivalents) pulls a chunk into memory and serves from there, cutting native calls dramatically; <code>BufferedReader</code> also adds <code>readLine()</code>. Buffered output only reaches disk when the buffer fills, on <code>flush()</code>, or on <code>close()</code> — forget to close and the last chunk silently vanishes.</p>
+    <p>The old <code>java.io.File</code> is a thin, system-dependent handle to a pathname. It still appears in older enterprise code, but its failure reporting is weak (methods return <code>false</code> with no reason) and it has no real symlink or metadata support — which is exactly why NIO.2 exists. <code>File.toPath()</code> bridges legacy code into the modern API.</p>
+    <pre class="code-block" data-label="Java"><code>try (BufferedReader br = new BufferedReader(
+         new FileReader("app.log", StandardCharsets.UTF_8))) {
+    String line;
+    while ((line = br.readLine()) != null)
+        process(line);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/essential/io/buffers.html" rel="noopener">Buffered Streams — The Java Tutorials (wrapping, flushing, autoflush)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/File.html" rel="noopener">File — Java SE 21 API (the legacy abstract pathname handle)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/reading-file-in-java" rel="noopener">How to Read a File in Java — Baeldung (BufferedReader, Scanner, Files compared)</a></li>
+    </ul>
+
+    <h3>NIO.2: Path and the Files utility class</h3>
+    <p><code>Path</code> is a lightweight, immutable location object — building it does no I/O at all. <code>Path.of("logs", "app.log")</code> just describes where a file would be; the syntactic operations <code>resolve</code>, <code>relativize</code> and <code>normalize</code> are pure path math. All the real filesystem work goes through <code>Files</code>, a class of static methods that read, write, copy, move, delete, and inspect files while throwing descriptive <code>IOException</code>s.</p>
+    <p>Why it matters: this is the API modern Java code actually uses. One-liners like <code>Files.readString</code>, <code>Files.writeString</code> and <code>Files.readAllLines</code> replace pages of stream boilerplate for small files, and <code>Files</code> exposes atomic moves, attribute views and symlink control the old <code>File</code> never could.</p>
+    <pre class="code-block" data-label="Java"><code>Path log = Path.of("logs", "app.log");          // pure location, no I/O
+String text = Files.readString(log);            // whole small file at once
+Files.writeString(log.resolveSibling("out.txt"),
+                  "done\n", StandardCharsets.UTF_8);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Path.html" rel="noopener">Path — Java SE 21 API (creating paths, resolve/relativize/normalize)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html" rel="noopener">Files — Java SE 21 API (the static-method facade for every file operation)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/java-io/file-system/path/" rel="noopener">Working with Paths — dev.java (the official Path walkthrough)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-nio-2-file-api" rel="noopener">Introduction to Java NIO2 File API — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4Tke9LKQ0UQ" rel="noopener">Java Fundamentals — java.nio, Path and Files — Laur Spilca</a></li>
+    </ul>
+
+    <h3>Listing and walking the file tree</h3>
+    <p>To read a single directory level, <code>Files.newDirectoryStream</code> returns a closeable <code>DirectoryStream</code> and even supports glob filtering (<code>"*.java"</code>). To descend recursively, <code>Files.walk</code> hands back a lazy <code>Stream&lt;Path&gt;</code> you filter and map like any stream, while <code>Files.walkFileTree</code> drives a <code>FileVisitor</code> with per-entry callbacks — the most control, and the only clean way to do things like a recursive delete.</p>
+    <p>Extend <code>SimpleFileVisitor</code> to override just the callbacks you need (<code>visitFile</code>, <code>preVisitDirectory</code>, <code>postVisitDirectory</code>, <code>visitFileFailed</code>). Each returns a <code>FileVisitResult</code> — <code>CONTINUE</code>, <code>SKIP_SUBTREE</code>, <code>SKIP_SIBLINGS</code> or <code>TERMINATE</code> — so you can prune or stop the walk. Remember: the streams returned by <code>walk</code> and <code>list</code> hold a handle and must be closed.</p>
+    <pre class="code-block" data-label="Java"><code>try (Stream&lt;Path&gt; tree = Files.walk(Path.of("src"))) {
+    tree.filter(Files::isRegularFile)
+        .filter(p -&gt; p.toString().endsWith(".java"))
+        .forEach(System.out::println);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/java-io/file-system/listing/" rel="noopener">Listing the Content of a Directory — dev.java (DirectoryStream and globbing)</a></li>
+      <li>[Official] <a href="https://dev.java/learn/java-io/file-system/walking-tree/" rel="noopener">Walking the File Tree — dev.java (FileVisitor and walkFileTree)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-nio2-file-visitor" rel="noopener">A Guide to NIO2 FileVisitor — Baeldung</a></li>
+    </ul>
+
+    <h3>Watching a directory for changes (WatchService)</h3>
+    <p>The <code>WatchService</code> asks the operating system to notify you when files in a registered directory are created, modified or deleted — no polling loop of your own. You register a directory <code>Path</code> with the event kinds you care about and get back a <code>WatchKey</code>; a consumer loop then blocks on <code>take()</code> (or checks with <code>poll()</code>), drains <code>key.pollEvents()</code>, and calls <code>key.reset()</code> to keep the key active.</p>
+    <p>Two facts interviewers like: it watches a single directory level, not the whole subtree — to watch a tree you walk it and register each directory — and it can report an <code>OVERFLOW</code> event when changes arrive faster than they are drained. It is the backbone of hot-reload and file-drop deployment features in editors and application servers.</p>
+    <pre class="code-block" data-label="Java"><code>WatchService watcher = FileSystems.getDefault().newWatchService();
+Path dir = Path.of("inbox");
+dir.register(watcher, ENTRY_CREATE, ENTRY_MODIFY);
+WatchKey key = watcher.take();                  // blocks until an event
+for (WatchEvent&lt;?&gt; ev : key.pollEvents())
+    System.out.println(ev.kind() + " -&gt; " + ev.context());
+key.reset();                                     // false means the key is dead</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://dev.java/learn/java-io/file-system/watching-dir-changes/" rel="noopener">Watching a Directory for Changes — dev.java</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/WatchService.html" rel="noopener">WatchService — Java SE 21 API (register, take/poll, reset, OVERFLOW)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-nio2-watchservice" rel="noopener">A Guide to NIO2 WatchService — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-datetime.html">← The Date and Time API</a>
+    <a href="index.html">All Advanced Java modules</a>
+    <a href="07-nio-channels.html">NIO Channels and Buffers →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked IO and NIO.2 questions in Indian interviews — file handling is a reliable core-Java screen, and the File-vs-NIO.2 comparison separates rote answers from senior ones:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Byte streams vs character streams — when do you use each?</summary>
+      <div class="answer"><p>Byte streams (<code>InputStream</code>/<code>OutputStream</code>) move raw 8-bit bytes — images, serialized data, any binary. Character streams (<code>Reader</code>/<code>Writer</code>) decode and encode bytes to text through a charset, handling multi-byte encodings like UTF-8 correctly. Rule: text uses Reader/Writer, everything else uses byte streams; <code>InputStreamReader</code>/<code>OutputStreamWriter</code> bridge the two.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why wrap a stream in a BufferedReader or BufferedInputStream?</summary>
+      <div class="answer"><p>Unbuffered reads and writes hit the OS on every byte or character — a native call each time. A buffered wrapper transfers a block into memory and serves from it, slashing syscalls. <code>BufferedReader</code> also adds <code>readLine()</code>. Always buffer for line-by-line or byte-by-byte work.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between java.io.File and java.nio.file.Path?</summary>
+      <div class="answer"><p><code>File</code> is the legacy handle: methods report failure by returning <code>false</code> with no cause, and symlink/metadata support is poor. <code>Path</code> (Java 7, NIO.2) is a lightweight location object used with the <code>Files</code> utility class, which throws descriptive <code>IOException</code>s and supports symlinks, attributes, atomic moves and directory streams. New code uses Path/Files; <code>File.toPath()</code> bridges the old API.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Simplest way to read and write a small text file in modern Java?</summary>
+      <div class="answer"><p><code>Files.readString(path)</code> or <code>Files.readAllLines(path)</code> to read; <code>Files.writeString(path, text)</code> or <code>Files.write(path, bytes)</code> to write — one line each. For large files, stream instead of loading everything into memory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why use try-with-resources for I/O, and what does flush() do?</summary>
+      <div class="answer"><p>Streams hold OS file handles; leaking them exhausts descriptors. try-with-resources auto-closes in reverse order, even on exception. <code>close()</code> implicitly flushes buffered output; <code>flush()</code> forces buffered bytes out early. Forgetting to close a buffered writer can silently drop the last un-flushed chunk.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> DirectoryStream vs Files.list vs Files.walk vs Files.walkFileTree?</summary>
+      <div class="answer"><p><code>newDirectoryStream</code> and <code>Files.list</code> read one directory level (non-recursive). <code>Files.walk</code> returns a lazy <code>Stream&lt;Path&gt;</code> that descends recursively to a depth. <code>Files.walkFileTree</code> drives a <code>FileVisitor</code> with callbacks — the most control, needed for recursive delete or per-entry error handling. All of these hold handles and must be closed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are FileVisitor / SimpleFileVisitor and the FileVisitResult values?</summary>
+      <div class="answer"><p><code>FileVisitor</code> has four callbacks fired during <code>walkFileTree</code>: <code>preVisitDirectory</code>, <code>visitFile</code>, <code>visitFileFailed</code>, <code>postVisitDirectory</code>. <code>SimpleFileVisitor</code> is an adapter you subclass to override only what you need. Each callback returns a <code>FileVisitResult</code> — <code>CONTINUE</code>, <code>SKIP_SUBTREE</code>, <code>SKIP_SIBLINGS</code> or <code>TERMINATE</code> — to prune or stop the walk. Classic use: recursive delete removes files in <code>visitFile</code> and directories in <code>postVisitDirectory</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does the WatchService work?</summary>
+      <div class="answer"><p>Create it from the <code>FileSystem</code>, register a directory <code>Path</code> with event kinds (<code>ENTRY_CREATE</code>/<code>MODIFY</code>/<code>DELETE</code>) and receive a <code>WatchKey</code>. Loop: <code>take()</code> blocks (or <code>poll()</code> returns immediately) for a signalled key, read <code>key.pollEvents()</code>, then call <code>key.reset()</code> to keep watching — <code>reset()</code> returning <code>false</code> means the key is dead. It watches one directory level and reports <code>OVERFLOW</code> if events are lost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> resolve vs relativize vs normalize on Path?</summary>
+      <div class="answer"><p><code>resolve(other)</code> joins a base path with a child. <code>relativize(other)</code> computes the relative path from one to another — the inverse of resolve. <code>normalize()</code> strips redundant <code>.</code> and <code>..</code> segments purely syntactically. None of them touch the filesystem; they are string-level path math on immutable objects.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the default-charset pitfall when reading files, and how do you avoid it?</summary>
+      <div class="answer"><p>Before Java 18, <code>FileReader</code>/<code>FileWriter</code> and many APIs used the platform default charset, so a UTF-8 file written on Linux could garble on a Windows box defaulting to windows-1252 — a bug that surfaces only in production. Always pass an explicit <code>Charset</code> such as <code>StandardCharsets.UTF_8</code>. Java 18 (JEP 400) made UTF-8 the default, but being explicit remains the safe habit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Files.lines() and Files.walk() return a Stream — what is the trap?</summary>
+      <div class="answer"><p>Those streams are backed by an open file or directory handle, so they must be closed — <code>Stream</code> implements <code>AutoCloseable</code>. Use them in try-with-resources: <code>try (var s = Files.lines(p)) { ... }</code>. A bare <code>Files.lines(p).forEach(...)</code> leaks the descriptor. That is the difference from an ordinary collection stream, and a frequent senior-level gotcha.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Beyond convenience, why did NIO.2 replace the old File API?</summary>
+      <div class="answer"><p><code>File</code> reports failure as a bare <code>false</code>, cannot follow or detect symlinks properly, offers no atomic operations, and has no bulk or attribute APIs. NIO.2 gives descriptive exceptions, symlink control (<code>LinkOption.NOFOLLOW_LINKS</code>), atomic moves (<code>StandardCopyOption.ATOMIC_MOVE</code>), attribute views (<code>PosixFileAttributes</code>), pluggable <code>FileSystemProvider</code>s (zip and in-memory filesystems), and the <code>WatchService</code>. For raw throughput it pairs with channels and buffers — the next module.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Advanced Java track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>java.adv.io-classic</li>
+      <li>java.adv.nio-files</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Advanced Java track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
