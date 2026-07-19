@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RxJS Subjects, combination and error handling module: Subject vs BehaviorSubject vs ReplaySubject, hot vs cold and multicasting, combineLatest/forkJoin/merge/zip, catchError and retry, and subscription cleanup with takeUntilDestroyed — the best official RxJS and Angular resources plus the interview questions they power.">
+  <title>RxJS: Subjects, Combination and Error Handling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: RxJS — Subjects, Combination and Error Handling</h1>
+  <p class="standfirst">An Observable that only pushes is half the story. Subjects let you push values <em>in</em>, combination operators braid many streams into one, and getting error handling and cleanup right is what keeps a reactive Angular app from silently leaking. This is the RxJS interviewers actually probe.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Advanced → RxJS: Subjects, Combination and Error Handling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 3 covered plain Observables and the operators that transform them. This module covers the parts of RxJS that show up most in real Angular services and in interviews: <strong>Subjects</strong> (Subject, BehaviorSubject, ReplaySubject, AsyncSubject) and how they turn a cold stream <strong>hot</strong> by multicasting; the <strong>combination</strong> operators that merge multiple sources (combineLatest, forkJoin, merge, zip); <strong>error handling</strong> with catchError and retry; and <strong>subscription management</strong> — the discipline of not leaking long-lived subscriptions, culminating in <code>takeUntilDestroyed</code>. Subject-vs-BehaviorSubject, hot-vs-cold, and "how do you unsubscribe" are near-guaranteed screening questions for Angular roles.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Subjects: Subject, BehaviorSubject, ReplaySubject, AsyncSubject</h3>
+    <p>A <code>Subject</code> is both an Observable and an Observer: you can <code>subscribe</code> to it and you can call <code>next()</code>/<code>error()</code>/<code>complete()</code> on it to push values imperatively. That makes it the standard way to build an event bus or a shared state stream in a service. The three variants differ only in what a <em>late</em> subscriber receives. A plain Subject replays nothing — subscribe after a value was emitted and you miss it. <code>BehaviorSubject</code> requires an initial value and always hands new subscribers the current (last) value, which is why it is the idiomatic holder of "current state". <code>ReplaySubject(n)</code> replays the last <em>n</em> values regardless of timing, and <code>AsyncSubject</code> emits only the final value, and only once the stream completes.</p>
+    <p>Why it matters: the difference between Subject and BehaviorSubject is the single most-asked RxJS interview question in Angular rounds, because it maps directly to "how do I share state so a component that subscribes late still gets a value?"</p>
+    <pre class="code-block" data-label="TypeScript"><code>const subject  = new Subject&lt;number&gt;();           // no current value, no replay
+const behavior = new BehaviorSubject&lt;number&gt;(0);  // seeded with 0
+const replay   = new ReplaySubject&lt;number&gt;(2);    // replays last 2 to newcomers
+
+subject.subscribe(v =&gt; console.log('A', v)); // only values emitted AFTER this
+subject.next(1);                             // A sees 1
+behavior.subscribe(v =&gt; console.log('B', v));// B fires immediately with current value</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/guide/subject" rel="noopener">Subject (and BehaviorSubject / ReplaySubject / AsyncSubject) — RxJS guide</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/subjects" rel="noopener">Subjects — Learn RxJS (all four variants compared)</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/subjects/behaviorsubject" rel="noopener">BehaviorSubject — Learn RxJS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KPQ4wbtRUB4" rel="noopener">Differences between RxJS Subject, BehaviorSubject and ReplaySubject — Code Shots With Profanis</a></li>
+    </ul>
+
+    <h3>Hot vs cold observables and multicasting</h3>
+    <p>A <strong>cold</strong> observable creates its producer fresh for every subscriber — each subscription to an <code>http.get()</code> fires its own HTTP request. A <strong>hot</strong> observable shares one running producer across all subscribers; they see values from the moment they join. Subjects are inherently hot (one internal producer, many observers), which is the mechanism behind <strong>multicasting</strong>: taking a cold source and sharing a single execution. In modern RxJS you rarely wire a Subject by hand for this — you pipe <code>share()</code> or <code>shareReplay(1)</code>, which internally multicast through a Subject and, in the shareReplay case, hand the last value to late subscribers. This is the standard fix for duplicate HTTP calls when several components consume the same service stream.</p>
+    <p>Why it matters: "why is my HTTP call firing three times?" is a real bug and a common interview scenario; the answer is that the stream is cold and each async pipe subscribes independently — <code>shareReplay(1)</code> makes it hot.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// cold: every subscriber triggers its OWN request
+const users$ = this.http.get&lt;User[]&gt;('/api/users');
+
+// hot + cached: one request, multicast to all, last value replayed to latecomers
+const sharedUsers$ = users$.pipe(shareReplay(1));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/operators/share" rel="noopener">share — RxJS API (multicast a source to many subscribers)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/how-to-build-angular2-apps-using-rxjs-observable-data-services-pitfalls-to-avoid/" rel="noopener">Observable Data Services and shareReplay — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=oKqcL-iMITY" rel="noopener">Hot vs Cold Observable in RxJS — Decoded Frontend</a></li>
+    </ul>
+
+    <h3>Combination operators: combineLatest, forkJoin, merge, zip</h3>
+    <p>These take several source observables and produce one. They differ in <em>when</em> they emit. <code>forkJoin</code> waits for every source to <strong>complete</strong>, then emits one array/object of each source's <em>last</em> value — the RxJS analogue of <code>Promise.all</code>, ideal for firing several independent HTTP calls and acting once all return. <code>combineLatest</code> emits every time <em>any</em> source emits (once all have emitted at least once), giving the latest value from each — perfect for recomputing a view model from several live inputs like a search box plus a page number. <code>merge</code> interleaves emissions from all sources as they arrive, preserving none-to-one ordering, good for funnelling multiple event streams into one. <code>zip</code> pairs emissions by index — the 1st of each, then the 2nd of each — and is comparatively rare in app code.</p>
+    <p>Why it matters: <em>combineLatest vs forkJoin</em> and <em>forkJoin vs zip</em> are classic "do you actually understand the timing" questions. Reaching for forkJoin when a source never completes (a Subject, a router stream) is a common bug — it will hang forever.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// forkJoin: all complete, emit last of each ONCE (parallel HTTP)
+forkJoin({ user: user$, roles: roles$ })
+  .subscribe(({ user, roles }) =&gt; render(user, roles));
+
+// combineLatest: re-emit on ANY change, latest of each
+combineLatest([filter$, page$]).pipe(
+  switchMap(([filter, page]) =&gt; this.search(filter, page))
+).subscribe(setResults);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/combineLatest" rel="noopener">combineLatest — RxJS API</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/forkJoin" rel="noopener">forkJoin — RxJS API</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/merge" rel="noopener">merge — RxJS API</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/zip" rel="noopener">zip — RxJS API</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=heAbcedeIQY" rel="noopener">RxJS Operators — zip, combineLatest, withLatestFrom, forkJoin — The Code Captain</a></li>
+    </ul>
+
+    <h3>Error handling: catchError and retry</h3>
+    <p>An error terminates an observable — it fires the <code>error</code> callback and the stream is done; no further values, no <code>complete</code>. <code>catchError</code> intercepts that error and lets you recover by returning a <em>replacement</em> observable: return <code>of(fallback)</code> to swallow the error and continue with a default, or <code>throwError(() =&gt; err)</code> to rethrow after logging (catch-and-rethrow). Its <strong>placement in the pipe matters</strong> — a catchError inside a <code>switchMap</code>'s inner pipeline protects just that inner stream, keeping the outer stream alive; placed at the outer level it kills the whole stream on the first error. <code>retry({ count, delay })</code> re-subscribes to the source on error, which for a cold HTTP observable means re-issuing the request — useful for transient network failures. (<code>retryWhen</code> is deprecated; use retry's <code>delay</code> option instead.)</p>
+    <p>Why it matters: candidates routinely put catchError in the wrong place and kill a long-lived stream (a form's valueChanges, a typeahead) after one failed request. Explaining catch-and-replace vs catch-and-rethrow, and where the operator sits, signals real reactive experience.</p>
+    <pre class="code-block" data-label="TypeScript"><code>this.http.get&lt;User[]&gt;('/api/users').pipe(
+  retry({ count: 2, delay: 1000 }),   // re-issue the request on transient errors
+  catchError(err =&gt; {                 // last-resort recovery
+    this.logger.error(err);
+    return of([]);                    // swallow + provide a safe fallback
+  })
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/operators/catchError" rel="noopener">catchError — RxJS API</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/retry" rel="noopener">retry — RxJS API</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/rxjs-error-handling/" rel="noopener">RxJS Error Handling: Complete Practical Guide — Angular University</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/operators/error_handling/catch" rel="noopener">catchError — Learn RxJS</a></li>
+    </ul>
+
+    <h3>Subscription management: unsubscribe, takeUntil, takeUntilDestroyed</h3>
+    <p>Every manual <code>subscribe()</code> to a long-lived stream is a potential memory leak: if the component is destroyed while the stream is still alive, the subscription keeps the component (and its closure) in memory and the callback keeps running. HTTP observables self-complete after one emission so they rarely leak, but Subjects, <code>interval</code>, router events, and form <code>valueChanges</code> do not. The strategies, worst to best: store each <code>Subscription</code> and call <code>unsubscribe()</code> in <code>ngOnDestroy</code> (verbose, easy to forget); pipe <code>takeUntil(destroy$)</code> where <code>destroy$</code> is a Subject you <code>next()</code> in ngOnDestroy; or — the modern default — <code>takeUntilDestroyed()</code>, which reads the injection context's <code>DestroyRef</code> and completes the stream automatically when the enclosing component/service is destroyed. Best of all where possible: skip manual subscription entirely and let the <code>async</code> pipe subscribe and clean up for you.</p>
+    <p>Why it matters: "how do you avoid memory leaks with subscriptions?" is asked in almost every Angular interview. Naming <code>takeUntilDestroyed</code> and the async pipe — and knowing that outside an injection context you must pass a <code>DestroyRef</code> explicitly — marks you as current.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export class TickerComponent {
+  private destroyRef = inject(DestroyRef);
+
+  ngOnInit() {
+    interval(1000).pipe(
+      takeUntilDestroyed(this.destroyRef)  // auto-completes on component destroy
+    ).subscribe(t =&gt; this.tick = t);
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/rxjs-interop/takeUntilDestroyed" rel="noopener">takeUntilDestroyed — angular.dev API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/takeUntil" rel="noopener">takeUntil — RxJS API</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-reactive-templates/" rel="noopener">Reactive Templates with the Async Pipe (leak-free subscriptions) — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ddyxKtfOMqU" rel="noopener">takeUntilDestroyed — the new way to unsubscribe — Monsterlessons Academy</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-rxjs-observables.html">← RxJS: Observables and Operators</a>
+    <a href="index.html">All Angular Advanced modules</a>
+    <a href="05-advanced-http.html">Advanced HTTP →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked Subjects and RxJS questions in Indian Angular interviews — Subject-vs-BehaviorSubject, hot-vs-cold and unsubscribe strategies are screening-round staples across service companies and product firms alike:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Subject and how does it differ from an Observable?</summary>
+      <div class="answer"><p>A Subject is both an Observable and an Observer — you can subscribe to it <em>and</em> push values into it with <code>next()</code>. A plain Observable only produces values; you cannot feed it from outside. A Subject is also multicast (hot): all its subscribers share one execution, whereas a cold Observable runs separately per subscriber.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Subject vs BehaviorSubject — the difference that matters?</summary>
+      <div class="answer"><p>A BehaviorSubject requires an initial value and always emits its current (last) value to a new subscriber immediately; a plain Subject replays nothing, so a subscriber that joins after a value was emitted misses it. Use BehaviorSubject to hold "current state" (a selected item, a logged-in user) that late subscribers must still receive. It also exposes <code>.value</code> for a synchronous read.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are ReplaySubject and AsyncSubject for?</summary>
+      <div class="answer"><p><code>ReplaySubject(n)</code> replays the last <em>n</em> emitted values to any new subscriber regardless of timing (n defaults to infinite) — useful for a small history or a cache without needing an initial value. <code>AsyncSubject</code> emits only the final value and only when the source completes — rare, but fits "one result computed at the end".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a hot and a cold observable?</summary>
+      <div class="answer"><p>Cold: the producer is created per subscription, so each subscriber gets its own independent execution (each <code>http.get</code> subscription fires its own request). Hot: one producer is shared, and subscribers receive values from the moment they join. Subjects are hot; most creation operators and HttpClient are cold until you multicast them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A service exposes an HTTP stream and three components use the async pipe on it — you see three network calls. Why, and how do you fix it?</summary>
+      <div class="answer"><p>The HTTP observable is cold, so each async pipe subscribes independently and triggers its own request. Pipe <code>shareReplay(1)</code> (or <code>share()</code>) on the service stream to multicast a single execution and replay the last value to late subscribers — one request, three consumers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> combineLatest vs forkJoin — when do you use each?</summary>
+      <div class="answer"><p><code>forkJoin</code> waits for every source to <em>complete</em>, then emits each source's last value once — like <code>Promise.all</code>, for firing parallel HTTP calls and acting when all finish. <code>combineLatest</code> emits on every change from any source (after each has emitted once), giving the latest of each — for live view models built from multiple ongoing streams. Using forkJoin on a source that never completes hangs forever.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> forkJoin vs zip vs merge?</summary>
+      <div class="answer"><p><code>forkJoin</code> emits once, at completion, the last value of each. <code>zip</code> pairs values by index (1st of each, then 2nd of each) and emits per matched tuple. <code>merge</code> interleaves values from all sources as they arrive, no pairing, no waiting. forkJoin = "all done, final values"; zip = "line them up by position"; merge = "flatten several streams into one".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does catchError work, and why does its position in the pipe matter?</summary>
+      <div class="answer"><p>catchError intercepts an error and must return a replacement observable — <code>of(fallback)</code> to recover (catch-and-replace) or <code>throwError(() =&gt; err)</code> to rethrow after logging. Position matters because an error terminates the stream: catchError inside a <code>switchMap</code>'s inner pipe protects only that inner request and keeps the outer stream alive; at the outer level it terminates the whole stream on the first error. For a typeahead you catch inside the inner call so one failed request doesn't kill the search.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you avoid memory leaks from subscriptions in Angular?</summary>
+      <div class="answer"><p>Prefer the <code>async</code> pipe — it subscribes and unsubscribes with the view automatically. For manual subscriptions to long-lived streams, use <code>takeUntilDestroyed()</code>, or <code>takeUntil(destroy$)</code> with a Subject you complete in <code>ngOnDestroy</code>, or store the Subscription and call <code>unsubscribe()</code> in ngOnDestroy. One-shot HTTP observables self-complete, so the risk is really Subjects, <code>interval</code>, router and form value streams.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does retry do, and when is it appropriate?</summary>
+      <div class="answer"><p><code>retry({ count, delay })</code> re-subscribes to the source when it errors, up to <em>count</em> times, optionally waiting <em>delay</em> ms between attempts. For a cold HTTP observable that means re-issuing the request — appropriate for transient failures (network blips, 503s), not for deterministic errors like a 404 or 400 where retrying just repeats the failure. <code>retryWhen</code> is deprecated in favour of the delay option.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does takeUntilDestroyed work, and what is the catch when using it outside a constructor?</summary>
+      <div class="answer"><p>It completes the piped observable when the current <code>DestroyRef</code>'s host (component/directive/service) is destroyed. Called during construction it reads the injection context automatically; called later — in <code>ngOnInit</code>, a callback, or any non-injection context — there is no ambient context, so you must inject a <code>DestroyRef</code> and pass it explicitly: <code>takeUntilDestroyed(this.destroyRef)</code>. Omitting it there throws an "outside injection context" error.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is exposing a BehaviorSubject directly from a service risky, and what is the idiom?</summary>
+      <div class="answer"><p>If you expose the Subject itself, any consumer can call <code>next()</code> and mutate shared state from anywhere, breaking the single-source-of-truth. The idiom is to keep the Subject <code>private</code> and expose it as a read-only stream via <code>.asObservable()</code> (or a public <code>readonly x$ = this._x.asObservable()</code>), so components can subscribe but only the service can push. In signal-era code the same role is often filled by a writable signal exposed as read-only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> shareReplay can leak or replay stale data — how, and how do you control it?</summary>
+      <div class="answer"><p>By default <code>shareReplay(1)</code> keeps its internal replay buffer alive even after all subscribers leave, so the source stays subscribed (a leak for infinite sources) and a later subscriber may get a stale cached value. Pass the config form <code>shareReplay({ bufferSize: 1, refCount: true })</code> so the subscription is torn down when the refcount hits zero and re-established fresh on the next subscribe. Choose refCount based on whether you want a durable cache or a per-audience live share.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Advanced track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>nga.rx.subjects</li>
+      <li>nga.rx.combine</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Advanced track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

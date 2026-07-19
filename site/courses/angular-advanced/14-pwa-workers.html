@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular PWA, Workers and Advanced Patterns module: the Angular service worker and ngsw-config caching, the app shell and SwUpdate, offloading CPU work to web workers, and a survey of micro-frontends with Module and Native Federation — with the best official Angular, web.dev and MDN resources plus the interview questions they power.">
+  <title>PWA, Workers and Advanced Patterns — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: PWA, Workers and Advanced Patterns</h1>
+  <p class="standfirst">The last mile of production Angular: make the app installable and offline-capable with a service worker, push heavy computation off the UI thread with web workers, and learn how large teams split one app into independently deployed micro-frontends.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Advanced → PWA, Workers and Advanced Patterns</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module closes the track with the runtime and architecture patterns that harden an Angular app for the field. First, Progressive Web Apps: the Angular service worker (<code>@angular/service-worker</code>) that caches your shell and data so the app loads instantly and works offline, configured entirely through <code>ngsw-config.json</code>. Then the supporting patterns — the app shell for a fast first paint and <code>SwUpdate</code> for handling new deployments. Finally a survey tier: web workers to keep CPU-heavy work off the main thread, and micro-frontends with Module Federation / Native Federation for teams that need to build and ship parts of one app independently.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Progressive Web Apps and the Angular service worker</h3>
+    <p>A <strong>Progressive Web App</strong> is an ordinary web app that, thanks to a service worker plus a web app manifest, becomes installable to the home screen, launches full-screen, and keeps working offline. The <strong>service worker</strong> is the engine: a script the browser runs in the background as a network proxy, intercepting outgoing requests and deciding whether to answer from cache or the network. Angular ships one as <code>@angular/service-worker</code> — a declarative caching utility you configure rather than hand-code. You add it in one step: <code>ng add @angular/pwa</code> wires in the package, generates <code>ngsw-config.json</code> and a <code>manifest.webmanifest</code>, adds icons, and registers the worker (production builds only).</p>
+    <p>Why it matters: on flaky Indian networks an instant, offline-tolerant load is a real product advantage, and "how do you turn an Angular app into a PWA?" is a stock advanced-round question. Knowing that Angular's worker is a <em>caching</em> tool — not a general service-worker framework like Workbox — is the nuance interviewers listen for.</p>
+    <pre class="code-block" data-label="Bash"><code>ng add @angular/pwa
+# adds @angular/service-worker, ngsw-config.json,
+# manifest.webmanifest and icons, and registers the
+# worker via provideServiceWorker() in production builds</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/ecosystem/service-workers" rel="noopener">Service Workers &amp; PWAs — Overview — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/ecosystem/service-workers/getting-started" rel="noopener">Getting started with service workers (ng add @angular/pwa) — angular.dev</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps" rel="noopener">Progressive web apps — MDN</a></li>
+      <li>[Article] <a href="https://web.dev/explore/progressive-web-apps" rel="noopener">Progressive Web Apps — web.dev (Google)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sFsRylCQblw" rel="noopener">Progressive Web Apps in 100 Seconds — Fireship</a></li>
+    </ul>
+
+    <h3>How the service worker caches: ngsw-config.json</h3>
+    <p>The Angular service worker is driven entirely by <code>ngsw-config.json</code>, split into two kinds of rule. <strong>Asset groups</strong> cover the app's own build output (JS, CSS, <code>index.html</code>, images): <code>installMode: "prefetch"</code> caches them immediately for full offline support, <code>"lazy"</code> caches on first use. <strong>Data groups</strong> cover runtime data such as API calls, matched by URL and governed by a <code>cacheConfig</code>. The strategy choice is the crux: <code>performance</code> serves from cache first (fast, possibly stale), <code>freshness</code> hits the network first and falls back to cache (current, slower), with <code>maxSize</code>, <code>maxAge</code>, and a network <code>timeout</code> tuning the trade-off.</p>
+    <p>Why it matters: getting these two strategies backwards is the classic bug — caching an API "for performance" and then serving yesterday's prices. Being able to name <code>performance</code> vs <code>freshness</code> and pick correctly per resource is exactly what a deep-dive interview probes.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "assetGroups": [{
+    "name": "app",
+    "installMode": "prefetch",
+    "resources": { "files": ["/index.html", "/*.css", "/*.js"] }
+  }],
+  "dataGroups": [{
+    "name": "api",
+    "urls": ["/api/**"],
+    "cacheConfig": {
+      "strategy": "freshness",
+      "maxSize": 100, "maxAge": "1h", "timeout": "5s"
+    }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/ecosystem/service-workers/config" rel="noopener">Service worker configuration (asset groups, data groups, strategies) — angular.dev</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API" rel="noopener">Service Worker API (lifecycle, fetch interception) — MDN</a></li>
+      <li>[Article] <a href="https://web.dev/learn/pwa/service-workers" rel="noopener">Service workers — web.dev Learn PWA</a></li>
+      <li>[Article] <a href="https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Caching" rel="noopener">Caching strategies (cache-first, network-first, stale-while-revalidate) — MDN</a></li>
+    </ul>
+
+    <h3>App shell and handling updates with SwUpdate</h3>
+    <p>Two patterns round out a real PWA. The <strong>app shell</strong> pre-renders a minimal static skeleton at build time (<code>ng generate app-shell</code>) so the user sees UI immediately while the JS bundle loads — the shell ships inside <code>index.html</code> and is itself cached by the service worker. <strong>Updates</strong> are the other half: because the worker serves the cached app, a new deployment is not picked up until the worker installs it in the background. The <code>SwUpdate</code> service exposes this through the <code>versionUpdates</code> stream — listen for <code>VERSION_READY</code>, then prompt the user and reload so they move to the fresh version instead of staring at a stale one.</p>
+    <p>Why it matters: the number-one production complaint about Angular PWAs is "my users don't see my deploy." Explaining <em>why</em> (the worker serves cache) and the fix (<code>SwUpdate</code> + a reload prompt) signals you have actually shipped one.</p>
+    <pre class="code-block" data-label="TypeScript"><code>private sw = inject(SwUpdate);
+
+constructor() {
+  this.sw.versionUpdates.pipe(
+    filter((e): e is VersionReadyEvent =&gt; e.type === 'VERSION_READY')
+  ).subscribe(() =&gt; {
+    if (confirm('New version available. Reload?'))
+      document.location.reload();
+  });
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/ecosystem/service-workers/app-shell" rel="noopener">App shell pattern — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/ecosystem/service-workers/communications" rel="noopener">Communicating with the service worker (SwUpdate, versionUpdates) — angular.dev</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-service-worker/" rel="noopener">Angular Service Worker — Step-By-Step Guide — Angular University</a></li>
+    </ul>
+
+    <h3>Web workers: offloading the main thread</h3>
+    <p>A <strong>web worker</strong> runs JavaScript on a separate background thread, so CPU-intensive work — parsing a large file, image processing, heavy math — no longer freezes the UI. It shares no memory with the main thread; you communicate by passing messages with <code>postMessage()</code> and an <code>onmessage</code> / <code>message</code> handler, and the data is copied (structured clone), not shared. Crucially, a worker has <em>no DOM access</em>: no <code>window</code>, no <code>document</code>. Angular scaffolds one with <code>ng generate web-worker &lt;name&gt;</code>, which creates the worker file and configures the build. One caveat: workers don't exist during server-side rendering, so guard for that environment.</p>
+    <p>Why it matters: when an interviewer asks "the page jank-freezes during a big calculation — what do you do?", the expected answer is a web worker. Bonus points for noting it is a different thing from a <em>service</em> worker, a distinction that trips many candidates up.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// component
+const worker = new Worker(new URL('./app.worker', import.meta.url));
+worker.onmessage = ({ data }) =&gt; console.log(`result: ${data}`);
+worker.postMessage(input);
+
+// app.worker.ts  (no DOM here)
+addEventListener('message', ({ data }) =&gt; {
+  postMessage(heavyCompute(data));   // runs off the UI thread
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/ecosystem/web-workers" rel="noopener">Web workers (ng generate web-worker) — angular.dev</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Using_web_workers" rel="noopener">Using Web Workers (postMessage, dedicated workers) — MDN</a></li>
+      <li>[Article] <a href="https://jscrambler.com/blog/handling-cpu-intensive-work-using-web-workers-in-angular" rel="noopener">Handling CPU-Intensive Work Using Web Workers in Angular — Jscrambler</a></li>
+    </ul>
+
+    <h3>Micro-frontends and Module Federation (survey)</h3>
+    <p><strong>Micro-frontends</strong> extend the microservice idea to the browser: one product is split into several separately built and deployed frontends, each owned by a different team, composed at runtime. <strong>Module Federation</strong> (originally a webpack feature) makes this practical — a host app lazy-loads code exposed by remote apps at runtime and shares common libraries (Angular, RxJS) so they aren't downloaded twice. Because modern Angular builds on esbuild/Vite rather than webpack, the community's <strong>Native Federation</strong> (by Manfred Steyer / ANGULARarchitects) re-implements the same mental model on browser-native ES modules and import maps, so the pattern keeps working with the current build system. Treat this as awareness-level knowledge: know what problem it solves and the vocabulary, not every config key.</p>
+    <p>Why it matters: micro-frontends show up in system-design and architecture rounds for senior roles. You are expected to weigh the payoff (independent deployment, team autonomy) against the cost (shared-dependency version skew, operational complexity) — not to have memorized a config file.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://module-federation.io/" rel="noopener">Module Federation — official documentation</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/en/blog/micro-frontends-with-modern-angular-part-1-standalone-and-esbuild/" rel="noopener">Micro Frontends with Modern Angular — Part 1: Standalone and esbuild — ANGULARarchitects</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CDKK6FVvqvs" rel="noopener">Angular Micro Frontends with Module Federation — Manfred Steyer, ng-conf 2022</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="13-libraries-build.html">← Libraries and the Build System</a>
+    <a href="index.html">All Angular Advanced modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked PWA, worker and micro-frontend questions in Indian interviews — these are the closing advanced-round topics for senior Angular roles:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a service worker, and what makes a web app a PWA?</summary>
+      <div class="answer"><p>A service worker is a script the browser runs in the background as a network proxy — it intercepts requests and can serve them from a cache, enabling offline support. A <strong>Progressive Web App</strong> is a web app that combines a service worker with a web app manifest so it becomes installable, launches full-screen, and works offline like a native app.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you turn an Angular app into a PWA?</summary>
+      <div class="answer"><p>Run <code>ng add @angular/pwa</code>. It installs <code>@angular/service-worker</code>, generates <code>ngsw-config.json</code> and a <code>manifest.webmanifest</code>, adds app icons, links the manifest in <code>index.html</code>, and registers the service worker (through <code>provideServiceWorker()</code> / <code>ServiceWorkerModule</code>) so it activates in production builds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why doesn't the Angular service worker run during <code>ng serve</code>?</summary>
+      <div class="answer"><p>It's registered only for production builds. The dev server serves unhashed files and you want live reloads, not cached responses — a worker there would serve stale assets and mask changes. To test it, build for production and serve the <code>dist</code> output over HTTP (service workers also require HTTPS, with <code>localhost</code> exempted).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the app shell pattern?</summary>
+      <div class="answer"><p>Pre-rendering a minimal static skeleton (header, layout, spinner) at build time so the user sees meaningful UI instantly while the JavaScript bundle downloads and boots. In Angular you scaffold it with <code>ng generate app-shell</code>; the shell is baked into <code>index.html</code> and cached by the service worker, giving a fast, offline-capable first paint.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Asset groups vs data groups in ngsw-config.json?</summary>
+      <div class="answer"><p><strong>Asset groups</strong> describe the app's own build artifacts (JS, CSS, index.html, images) with an <code>installMode</code> of <code>prefetch</code> (cache immediately) or <code>lazy</code> (cache on first request). <strong>Data groups</strong> describe runtime data like API calls, matched by URL patterns and controlled by a <code>cacheConfig</code> (strategy, maxSize, maxAge, timeout). Rule of thumb: assets = your files, data = server responses.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Performance vs freshness caching strategy — when do you use each?</summary>
+      <div class="answer"><p><code>performance</code> serves from cache first and only hits the network if the resource is missing or expired — fast, but can be stale; good for rarely-changing reference data. <code>freshness</code> goes to the network first and falls back to cache on failure or timeout — current, but slower; good for data that must be up to date. Choosing <code>performance</code> for volatile API data is the classic stale-data bug.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A user doesn't see your latest deploy. Why, and how do you fix it?</summary>
+      <div class="answer"><p>The service worker serves the cached app and only installs the new version in the background, activating it on the next full load — so the running tab stays on the old version. Fix it with <code>SwUpdate</code>: subscribe to <code>versionUpdates</code>, and on a <code>VERSION_READY</code> event prompt the user (or call <code>activateUpdate()</code>) and reload the page.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a web worker, and when would you reach for one in Angular?</summary>
+      <div class="answer"><p>A web worker runs code on a separate background thread, so CPU-intensive work (large parsing, image processing, heavy calculations) doesn't block the main thread and freeze the UI. Add one with <code>ng generate web-worker</code>. You communicate via <code>postMessage()</code> and <code>onmessage</code>; the worker has no DOM access, so it's for computation, not UI updates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What can't you do inside a web worker, and how does data cross the boundary?</summary>
+      <div class="answer"><p>No DOM: no <code>window</code>, <code>document</code>, or direct Angular component access. It has its own global scope with things like <code>fetch</code> and timers. Data crosses via <code>postMessage()</code> and is <em>copied</em> using the structured clone algorithm (or moved with transferable objects like ArrayBuffers) — nothing is shared by reference, so you can't pass functions or DOM nodes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Service worker vs web worker — what's the difference?</summary>
+      <div class="answer"><p>Both run off the main thread, but they solve different problems. A <strong>web worker</strong> is a background compute thread tied to a page, used to offload CPU work. A <strong>service worker</strong> is a network proxy scoped to an origin that lives independently of any page, intercepts fetches, and manages caching for offline/PWA behavior — it can wake up without an open tab (for push/sync). Web worker = computation; service worker = network/caching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are micro-frontends, and how does Module Federation enable them?</summary>
+      <div class="answer"><p>Micro-frontends split one product into several independently built and deployed frontends, each owned by a team and composed at runtime. Module Federation lets a host application load code exposed by remote apps at runtime and share common libraries (Angular, RxJS) so they aren't shipped twice, with version negotiation for the shared dependencies. The payoff is independent deployment and team autonomy; the cost is shared-dependency skew and operational complexity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Module Federation vs Native Federation in modern Angular — why does Native Federation exist?</summary>
+      <div class="answer"><p>Module Federation is a webpack feature, but modern Angular's build system uses esbuild/Vite, not webpack. Native Federation (ANGULARarchitects) re-implements the same mental model and configuration on browser-native standards — ES modules and import maps — so it's build-tool-agnostic and keeps micro-frontends working with the current esbuild-based Angular builder. Same concepts, no webpack dependency.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are the sharpest production gotchas of the Angular service worker?</summary>
+      <div class="answer"><p>Stale content because updates activate on next load, not instantly (need <code>SwUpdate</code> + reload); a broken deploy getting "stuck" cached (ship the <code>safety-worker.js</code> / unregister path so you can recover); assuming it works in dev (production-only); forgetting HTTPS is required; and mis-scoped or over-eager <code>performance</code> data groups serving outdated API data. It's a caching utility, not a general service-worker framework — for advanced needs (background sync, custom fetch logic) you'd hand-write a worker or use Workbox.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Advanced track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>nga.adv.pwa</li>
+      <li>nga.adv.workers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Advanced track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RxJS Observables and Operators module: what an Observable is, creation functions (of, from, interval, fromEvent), pipeable operators (map, filter, tap) with marble intuition, and the higher-order mapping operators switchMap, mergeMap, concatMap and exhaustMap — with the best official rxjs.dev and angular.dev resources plus the interview questions they power.">
+  <title>RxJS: Observables and Operators — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: RxJS — Observables and Operators</h1>
+  <p class="standfirst">RxJS is the reactive engine under Angular — HttpClient, router events, reactive forms and signals interop all speak Observable. This module builds the model from a single <code>subscribe</code> up to the four higher-order operators, and the switchMap-vs-mergeMap-vs-concatMap-vs-exhaustMap choice interviewers reach for first.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Advanced → RxJS: Observables and Operators</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>RxJS models values that arrive over time as <strong>Observables</strong> — lazy, cancellable streams you shape with pipeable operators instead of nested callbacks. This module covers the Observable contract and the creation functions that produce streams, the everyday operators <code>map</code>/<code>filter</code>/<code>tap</code> and how to read a marble diagram, and the part interviewers press hardest: the four higher-order mapping operators and the reasoning that picks the right one. Angular leans on all of it, so this is the reactive foundation the rest of the advanced track builds on.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The Observable contract: lazy, cancellable streams</h3>
+    <p>An Observable is a lazy producer of zero or more values pushed to an <em>observer</em> over time, ending in either <code>complete</code> or <code>error</code> — or never ending at all. You consume it by subscribing with up to three callbacks: <code>next</code> for each value, <code>error</code> once on failure, <code>complete</code> once on success. Subscribing is also what starts the work — an Observable is <em>cold</em> by default and does nothing until someone listens. <code>subscribe()</code> returns a <code>Subscription</code> whose <code>unsubscribe()</code> tears the producer down, which is how RxJS cancels an in-flight HTTP request or a running interval.</p>
+    <p>Why it matters: this lazy, cancellable, multi-value contract is exactly what separates an Observable from a Promise, and "Observable vs Promise" opens most Angular interviews. It is also why a forgotten unsubscribe can leak, and why "my HTTP call never fired" is almost always a missing subscription.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const sub = interval$.subscribe({
+  next:     v =&gt; console.log(v),    // 0, 1, 2, … each emission
+  error:    e =&gt; console.error(e),  // at most once, ends the stream
+  complete: () =&gt; console.log('done'),
+});
+sub.unsubscribe();                   // cancels the producer</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/guide/observable" rel="noopener">Observable — RxJS guide</a></li>
+      <li>[Official] <a href="https://rxjs.dev/guide/overview" rel="noopener">Introduction to RxJS — RxJS guide</a></li>
+      <li>[Official] <a href="https://angular.dev/ecosystem/rxjs-interop" rel="noopener">RxJS interop with Angular signals (async pipe, toSignal) — angular.dev</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/concepts/rxjs-primer" rel="noopener">RxJS Primer — Learn RxJS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=g8S81JkATi0" rel="noopener">How to use Observables in Angular with RxJS — Decoded Frontend</a></li>
+    </ul>
+
+    <h3>Creating observables: of, from, interval, fromEvent</h3>
+    <p>Most streams come from a creation function rather than the raw <code>Observable</code> constructor. <code>of(a, b, c)</code> emits each argument as-is then completes; <code>from(...)</code> turns an array, iterable, Promise or observable-like into a stream, emitting each element; <code>interval(ms)</code> and <code>timer</code> emit ascending numbers on a clock; <code>fromEvent(target, 'input')</code> bridges DOM (or Node) events into a stream — the usual entry point for typeaheads and drag handlers. HttpClient methods are creation functions too: each returns a cold, single-shot Observable that emits one response and then completes.</p>
+    <p>Why it matters: choosing the factory that fits the source — a fixed set of values, an existing Promise, a timer, or a UI event — is table-stakes, and a debounced <code>fromEvent</code> pipeline is the exact setup behind the switchMap questions further down.</p>
+    <pre class="code-block" data-label="TypeScript"><code>of(1, 2, 3);                        // 1, 2, 3, then complete
+from([10, 20, 30]);                 // each array element, then complete
+from(fetch('/api').then(r =&gt; r.json())); // a Promise becomes a one-value stream
+interval(1000);                     // 0, 1, 2, … on a timer (never completes)
+fromEvent(searchBox, 'input');      // every keystroke as an event</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/of" rel="noopener">of — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/from" rel="noopener">from — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/interval" rel="noopener">interval — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/fromEvent" rel="noopener">fromEvent — RxJS API reference</a></li>
+    </ul>
+
+    <h3>Pipeable operators and marble intuition: map, filter, tap</h3>
+    <p>Operators are pure functions that take an Observable and return a new one, composed with <code>pipe()</code> as <code>source.pipe(op1, op2, op3)</code>. They never mutate the source — each returns a fresh stream, so one source can feed several independent pipelines. <code>map</code> transforms every emitted value, <code>filter</code> drops values that fail a predicate, and <code>tap</code> runs a side effect (logging, debugging) without touching the values flowing through. A good rule: if <code>tap</code> changes what downstream sees, you reached for the wrong operator.</p>
+    <p>Why it matters: a <strong>marble diagram</strong> is the standard way operators are explained and interviewed — a horizontal timeline where each marble is an emission, a vertical bar is <code>complete</code> and an X is <code>error</code>. Reading <code>map</code>/<code>filter</code> as "same timeline, changed or fewer marbles" is the intuition you carry into the harder operators below.</p>
+    <pre class="code-block" data-label="TypeScript"><code>source$.pipe(
+  filter(n =&gt; n % 2 === 0),   // keep only evens
+  map(n =&gt; n * 10),           // transform each value
+  tap(n =&gt; console.log(n)),   // peek for debugging, value unchanged
+).subscribe();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/guide/operators" rel="noopener">Operators (pipeable operators and pipe) — RxJS guide</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/map" rel="noopener">map — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/filter" rel="noopener">filter — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/tap" rel="noopener">tap — RxJS API reference</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/operators/transformation/map" rel="noopener">map — Learn RxJS (with runnable examples)</a></li>
+    </ul>
+
+    <h3>Higher-order observables and flattening</h3>
+    <p>When an operator's callback itself returns an Observable — say each keystroke maps to an <code>http.get()</code> — you get an Observable of Observables, a <em>higher-order observable</em>. Subscribing to the outer stream would hand you inner Observables, not their values, so you have to <em>flatten</em>: subscribe to each inner stream and re-emit its values on the outer one. The naive fix — calling <code>subscribe()</code> inside a <code>subscribe()</code> — is the classic anti-pattern: it leaks, it cannot be cancelled cleanly, and it throws away ordering guarantees.</p>
+    <p>Why it matters: the flattening operators exist precisely to replace nested subscribes. They all map-then-flatten; what differs is how each handles a new outer value while an inner stream is still running — cancel it, run both, queue it, or ignore the new one. That single question is the whole topic, and it is the most-asked RxJS material in Indian interviews.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// anti-pattern: subscribe inside subscribe
+this.search$.subscribe(term =&gt; {
+  this.http.get(url(term)).subscribe(res =&gt; this.show(res));
+});
+
+// flattened, cancellable, correct
+this.search$.pipe(
+  switchMap(term =&gt; this.http.get(url(term)))
+).subscribe(res =&gt; this.show(res));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/guide/higher-order-observables" rel="noopener">Higher-order Observables — RxJS guide</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/rxjs-switchmap-operator/" rel="noopener">RxJs switchMap Operator: How Does It Work? — Angular University</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/operators/transformation/switchmap" rel="noopener">switchMap — Learn RxJS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2zJRw3Cl_Vs" rel="noopener">map, switchMap, mergeMap, concatMap, exhaustMap — what is the difference? — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Choosing switchMap vs mergeMap vs concatMap vs exhaustMap</h3>
+    <p>All four map an outer value to an inner Observable and flatten the result; they differ only in concurrency. <code>switchMap</code> unsubscribes from the previous inner stream the moment a new value arrives and switches to the newest — only the latest matters, which is ideal for a typeahead search where an older request is now irrelevant and cancelling it also kills a race. <code>mergeMap</code> (formerly <code>flatMap</code>) subscribes to every inner stream concurrently and merges all their emissions — maximum throughput, no cancellation, no ordering. <code>concatMap</code> queues inner streams and runs them one at a time in order, waiting for each to complete. <code>exhaustMap</code> ignores new outer values while an inner stream is still running — the mirror image of <code>switchMap</code>.</p>
+    <p>Why it matters: the interview drill is mapping a scenario to an operator — reads that supersede each other use <code>switchMap</code>; independent parallel requests use <code>mergeMap</code>; work whose order must be preserved uses <code>concatMap</code>; an action that should ignore repeats while busy (a save or login button) uses <code>exhaustMap</code>. Two traps to name aloud: <code>switchMap</code> on a POST can cancel an in-flight write, so prefer <code>concatMap</code>/<code>mergeMap</code>/<code>exhaustMap</code> for mutations; and <code>mergeMap</code> on a fast source can open unbounded concurrent requests unless you cap it with its concurrency argument.</p>
+    <pre class="code-block" data-label="TypeScript"><code>switchMap(x =&gt; inner(x))   // new x cancels the previous inner   → typeahead search
+mergeMap(x =&gt; inner(x))    // all inners run at once, unordered   → parallel writes
+concatMap(x =&gt; inner(x))   // queue: one inner at a time, in order → ordered writes
+exhaustMap(x =&gt; inner(x))  // ignore new x while inner runs        → submit / login button</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/operators/switchMap" rel="noopener">switchMap — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/mergeMap" rel="noopener">mergeMap — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/concatMap" rel="noopener">concatMap — RxJS API reference</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/exhaustMap" rel="noopener">exhaustMap — RxJS API reference</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/rxjs-higher-order-mapping/" rel="noopener">switchMap vs mergeMap vs concatMap vs exhaustMap — Angular University (marble diagrams + use cases)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-routing-advanced.html">← Routing Advanced</a>
+    <a href="index.html">All Angular Advanced modules</a>
+    <a href="04-rxjs-subjects.html">RxJS: Subjects, Combination and Error Handling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked RxJS questions in Indian interviews — "Observable vs Promise" is a near-certain screen, and the switchMap-vs-mergeMap-vs-concatMap-vs-exhaustMap comparison is the single most repeated RxJS question for Angular roles:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an Observable, and how is it different from a Promise?</summary>
+      <div class="answer"><p>An Observable is a lazy stream that can push zero, one or many values over time and is cancellable. A Promise is eager (runs immediately), resolves exactly once, and cannot be cancelled or composed with operators. Observables also start only on <code>subscribe</code>, so the same Observable can be run many times; a Promise runs once regardless.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does it mean that an Observable is "cold" or "lazy", and when does work start?</summary>
+      <div class="answer"><p>Cold means the producer is created per subscriber and does nothing until subscribed. The work — an HTTP request, a timer, an event listener — starts on <code>.subscribe()</code> (or when the <code>async</code> pipe subscribes). No subscriber means no side effect, which is why a returned-but-never-subscribed HTTP Observable never hits the network.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between of and from?</summary>
+      <div class="answer"><p><code>of(a, b, c)</code> emits each argument whole, in order, then completes. <code>from(x)</code> expects a single iterable/Promise/observable-like and emits its elements one by one — <code>from([1,2,3])</code> emits 1, 2, 3, and <code>from(promise)</code> emits the resolved value then completes. So <code>of([1,2,3])</code> emits one array; <code>from([1,2,3])</code> emits three numbers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is pipe(), and what is a pipeable operator?</summary>
+      <div class="answer"><p>A pipeable operator is a pure function that takes an Observable and returns a new Observable. <code>pipe()</code> is the method that chains them left to right — <code>source.pipe(map(...), filter(...))</code> — building a transformation pipeline without mutating the source. Because each operator returns a new stream, the original stays reusable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is tap used for, and what should it never do?</summary>
+      <div class="answer"><p><code>tap</code> performs a side effect — logging, debugging, triggering something external — while passing every value through unchanged. It must not transform the value or the stream; if you find yourself relying on <code>tap</code> to change downstream data, you wanted <code>map</code> instead. It is the safe way to inspect a pipeline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> map vs filter, and how do operators compose without breaking the source?</summary>
+      <div class="answer"><p><code>map</code> transforms every value one-to-one; <code>filter</code> passes only values that satisfy a predicate and drops the rest. Both are pure and return new Observables, so chaining them in <code>pipe()</code> never mutates the source — the same source Observable can feed multiple pipelines independently, each with its own operators.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a higher-order observable, and why is subscribing inside a subscribe an anti-pattern?</summary>
+      <div class="answer"><p>A higher-order observable is an Observable whose values are themselves Observables — common when a mapping callback returns <code>http.get(...)</code>. Nested <code>subscribe()</code> calls "work" but leak subscriptions, cannot be cancelled together, break error propagation, and lose ordering. The fix is a flattening operator (switchMap/mergeMap/concatMap/exhaustMap) that subscribes to the inner stream and manages it for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does switchMap behave, and what is its canonical use case?</summary>
+      <div class="answer"><p>On each new outer value, <code>switchMap</code> unsubscribes from the previous inner Observable (cancelling it) and switches to the new one, so only the latest inner stream is active. Canonical use: a typeahead search — a new keystroke makes the previous request obsolete, and cancelling it avoids an out-of-order stale response overwriting a newer one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you choose mergeMap over switchMap, and what is its risk?</summary>
+      <div class="answer"><p><code>mergeMap</code> keeps every inner Observable running concurrently and merges their emissions — use it when results must not be cancelled and can complete in any order, e.g. firing independent writes or loading many items in parallel. Risk: no ordering, and on a fast source it can open unbounded simultaneous requests; cap it with the concurrency argument (<code>mergeMap(fn, concurrent)</code>).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does concatMap guarantee that mergeMap does not?</summary>
+      <div class="answer"><p>Order. <code>concatMap</code> queues inner Observables and subscribes to the next only after the previous completes, so emissions stay in source order and never overlap. Use it for sequential work where order matters — dependent writes, a queue of saves. The cost is throughput: a slow inner stream blocks the queue behind it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is exhaustMap for, and how is it the opposite of switchMap?</summary>
+      <div class="answer"><p><code>exhaustMap</code> ignores new outer values while the current inner Observable is still running, then accepts the next after it completes. Where <code>switchMap</code> always favours the newest (cancelling the old), <code>exhaustMap</code> favours the in-progress one (dropping the new). Ideal for a login or save button: rapid repeated clicks should not stack duplicate submissions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Pick the operator: (a) a search box, (b) saving edits where order matters, (c) many independent GETs, (d) a submit button that must ignore double-clicks. Justify each.</summary>
+      <div class="answer"><p>(a) <code>switchMap</code> — cancel the superseded request. (b) <code>concatMap</code> — preserve order, one write at a time. (c) <code>mergeMap</code> — run in parallel, order irrelevant. (d) <code>exhaustMap</code> — ignore new clicks while the request is in flight. The reasoning axis is always: on a new value while busy, do you cancel, queue, run in parallel, or ignore?</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why can switchMap be dangerous on a POST/write, and what do you use instead?</summary>
+      <div class="answer"><p>Because <code>switchMap</code> cancels the previous inner stream on a new emission, a still-pending mutation can be aborted mid-flight — the server may or may not have applied it, leaving inconsistent state. For writes prefer <code>concatMap</code> (ordered, no loss), <code>mergeMap</code> (parallel, no loss), or <code>exhaustMap</code> (ignore duplicates). Reserve <code>switchMap</code> for idempotent reads whose older results you genuinely no longer want.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Advanced track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>nga.rx.observables</li>
+      <li>nga.rx.flattening</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Advanced track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

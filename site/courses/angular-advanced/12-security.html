@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular Security module: how Angular's contextual auto-sanitization stops XSS, the DomSanitizer and bypassSecurityTrust escape hatch and its risks, Trusted Types and Content Security Policy, and HttpClient XSRF protection — with the best official Angular and OWASP resources plus the interview questions they power.">
+  <title>Angular Security — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Security</h1>
+  <p class="standfirst">Angular is secure by default — it treats every value as untrusted and escapes it before it touches the DOM. The risk starts the moment you reach for <code>bypassSecurityTrust</code> or wire XSRF up wrong; this module maps exactly where the framework's guarantees hold and where you take ownership of the danger.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Advanced → Security</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Front-end security in Angular is mostly about one attack — cross-site scripting (XSS) — and the defences the framework gives you against it. You will see how Angular's contextual auto-sanitization escapes untrusted values automatically, why the <code>DomSanitizer</code> bypass methods are the one place you can undo that protection, and how the browser-level layers — Trusted Types and Content Security Policy (CSP) — back it up. The module closes on <code>HttpClient</code>'s XSRF (CSRF) protection, the cookie-to-header token scheme that needs your backend's cooperation to work.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>XSS and Angular's contextual auto-sanitization</h3>
+    <p>Cross-site scripting is when attacker-controlled data is interpreted as code by the browser — stored (persisted in a database), reflected (echoed from the URL), or DOM-based (a client-side sink like <code>innerHTML</code>). Angular's core defence is that it <em>treats every value as untrusted</em>: interpolation with <code>{{ }}</code> always escapes, so a bio containing <code>&lt;script&gt;</code> renders as visible text, never as an element. When you bind to a sink like <code>[innerHTML]</code>, Angular does not escape but <em>sanitizes</em> — it parses the HTML and strips dangerous parts (script tags, <code>on*</code> handlers, <code>javascript:</code> URLs) while keeping safe markup.</p>
+    <p>Why it matters: the sanitizer chooses its behaviour by <strong>context</strong> — HTML, style, URL, or resource-URL — because the same string is dangerous in different ways in each. Understanding that "Angular is safe by default, and I only lose that safety when I opt out" is the mental model interviewers are testing, not the API surface.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// interpolation escapes — this renders the angle brackets as text
+@Component({ template: `&lt;p&gt;{{ userBio }}&lt;/p&gt;` })
+// [innerHTML] sanitizes — &lt;script&gt; and onclick are stripped, &lt;b&gt; survives
+@Component({ template: `&lt;div [innerHTML]="commentHtml"&gt;&lt;/div&gt;` })</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/best-practices/security" rel="noopener">Security — Angular's official guide (the model, sanitization, CSP, Trusted Types, XSRF)</a></li>
+      <li>[Reference] <a href="https://owasp.org/www-community/attacks/xss/" rel="noopener">Cross Site Scripting (XSS) — OWASP (attack types and impact)</a></li>
+      <li>[Reference] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html" rel="noopener">XSS Prevention Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Article] <a href="https://developer.okta.com/blog/2022/07/21/angular-security-xss" rel="noopener">Protect Your Angular App From Cross-Site Scripting — Okta Developer</a></li>
+    </ul>
+
+    <h3>DomSanitizer and the bypassSecurityTrust escape hatch</h3>
+    <p>Sometimes you genuinely need to render markup Angular would strip — a rich-text field you control, or a trusted embed URL. <code>DomSanitizer</code> is the service that both sanitizes values and, through its <code>bypassSecurityTrust*</code> family (<code>Html</code>, <code>Style</code>, <code>Script</code>, <code>Url</code>, <code>ResourceUrl</code>), lets you mark a value as trusted so Angular renders it verbatim. That is the single most dangerous call in an Angular app: passing user-controlled data to any bypass method reopens the exact XSS hole the framework closed.</p>
+    <p>Why it matters: the rule interviewers want to hear is "bypass only values you fully control, applied as close to the source as possible, and never raw user input." The common safe pattern is a tiny <code>SafeHtml</code>/<code>SafeUrl</code> pipe wrapping the sanitizer — for example building a YouTube <code>&lt;iframe&gt;</code> src from a known video id, not from a value a user typed.</p>
+    <pre class="code-block" data-label="TypeScript"><code>constructor(private sanitizer: DomSanitizer) {}
+
+// safe: the id is validated/known, not free user input
+embedUrl(videoId: string): SafeResourceUrl {
+  return this.sanitizer.bypassSecurityTrustResourceUrl(
+    'https://www.youtube.com/embed/' + videoId);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/platform-browser/DomSanitizer" rel="noopener">DomSanitizer — Angular API reference (sanitize and the bypassSecurityTrust* methods)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-innerhtml/" rel="noopener">Angular innerHTML and DomSanitizer: Complete Guide (building a SafeHtml pipe) — Angular University</a></li>
+      <li>[Article] <a href="https://dev-academy.com/preventing-xss-in-angular/" rel="noopener">Angular XSS Prevention — Modern Best Practices — Dev Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xcSK4-Hrjic" rel="noopener">How to bypass Angular's built-in sanitization with DomSanitizer — Angular tutorial</a></li>
+    </ul>
+
+    <h3>Trusted Types and Content Security Policy (CSP)</h3>
+    <p>Framework sanitization protects the code paths Angular controls, but raw DOM APIs (<code>element.innerHTML =</code>, <code>eval</code>, <code>document.write</code>) sit outside it. <strong>Trusted Types</strong> is a browser feature that locks those dangerous sinks so they only accept specially-created typed objects, not plain strings — turning a whole class of DOM-based XSS into a hard error you can catch in development. <strong>CSP</strong> is the complementary HTTP header that tells the browser which scripts, styles and other resources are allowed to load and run; a strict, nonce-based policy stops injected inline scripts from executing even if one slips through.</p>
+    <p>Why it matters: these are defence-in-depth layers, not replacements for sanitization. Angular supports both — it can enforce Trusted Types policies and emits a nonce onto its scripts (via the <code>ngCspNonce</code> attribute or the <code>CSP_NONCE</code> token) so a strict CSP does not break the app. Interviewers like candidates who know CSP alone does not stop context-specific and DOM-based XSS — you still need the framework's escaping.</p>
+    <pre class="code-block" data-label="HTTP"><code>Content-Security-Policy:
+  require-trusted-types-for 'script';
+  script-src 'self' 'nonce-{RANDOM}';
+  object-src 'none'; base-uri 'none';</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://web.dev/articles/trusted-types" rel="noopener">Prevent DOM-based XSS with Trusted Types — web.dev (Google)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP" rel="noopener">Content Security Policy (CSP) — MDN (nonces, hashes, strict CSP)</a></li>
+    </ul>
+
+    <h3>HttpClient XSRF (CSRF) protection and best practices</h3>
+    <p>Cross-site request forgery tricks an authenticated user's browser into sending a state-changing request the user did not intend, riding on cookies the browser attaches automatically. Angular's <code>HttpClient</code> implements the client half of the standard cookie-to-header defence: an interceptor reads a token from a cookie (default <code>XSRF-TOKEN</code>) and copies it into a header (default <code>X-XSRF-TOKEN</code>) on mutating requests to relative URLs. Because a cross-origin site can send the cookie but cannot read it to set the header, the forged request fails.</p>
+    <p>Why it matters: this only works if your <strong>backend</strong> sets that cookie and verifies the header — Angular does the client side, not the whole scheme, and it skips GET/HEAD and absolute-URL requests by design. Round out "security best practices" with the layered discipline: keep AOT compilation (never build templates from user strings), avoid <code>ElementRef.nativeElement</code>/<code>Renderer2</code> DOM writes with untrusted data, keep dependencies patched (<code>npm audit</code>), and prefer the framework's safe defaults everywhere.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// app.config.ts — customise the cookie/header names if your backend differs
+provideHttpClient(
+  withXsrfConfiguration({
+    cookieName: 'XSRF-TOKEN',
+    headerName: 'X-XSRF-TOKEN',
+  })
+)</code></pre>
+    <ul class="resources">
+      <li>[Reference] <a href="https://owasp.org/www-community/attacks/csrf" rel="noopener">Cross Site Request Forgery (CSRF) — OWASP (attack and mitigations)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpClientXsrfModule" rel="noopener">HttpClientXsrfModule — Angular API (default XSRF-TOKEN / X-XSRF-TOKEN names)</a></li>
+      <li>[Article] <a href="https://dev-academy.com/angular-csrf-protection-implementation/" rel="noopener">CSRF Protection in an Angular Application — How to Implement — Dev Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-CGuxS5jiGI" rel="noopener">Understanding CSRF (aka XSRF) — Step-by-Step Attack Simulation — Angular University</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-i18n-a11y.html">← Internationalization and Accessibility</a>
+    <a href="index.html">All Angular Advanced modules</a>
+    <a href="13-libraries-build.html">Libraries and the Build System →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Most-asked Angular security questions in Indian interviews — XSS, the DomSanitizer bypass risk, and XSRF are the near-certain trio for senior front-end rounds:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is XSS and what are its main types?</summary>
+      <div class="answer"><p>Cross-site scripting is injecting attacker-controlled data that the browser then executes as code — stealing sessions, cookies, or defacing content. Three types: <strong>stored</strong> (saved on the server and served to victims), <strong>reflected</strong> (echoed back from the request, e.g. a URL parameter), and <strong>DOM-based</strong> (a client-side sink like <code>innerHTML</code> runs the payload without the server ever seeing it).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does Angular protect against XSS out of the box?</summary>
+      <div class="answer"><p>Angular treats all values as untrusted by default. In templates, interpolation escapes values so markup renders as text, and binding to sinks like <code>[innerHTML]</code> is <em>sanitized</em> — dangerous parts are stripped. You get this automatically as long as you use template bindings and do not opt out with the DomSanitizer bypass methods.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is <code>{{ }}</code> interpolation safe from XSS?</summary>
+      <div class="answer"><p>Yes. Interpolation always escapes its output, so a value like <code>&lt;img src=x onerror=alert(1)&gt;</code> is displayed as literal text, not parsed into an element. Escaping is unconditional here — there is no context in which interpolation injects live HTML.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens when you bind untrusted HTML to <code>[innerHTML]</code>?</summary>
+      <div class="answer"><p>Angular sanitizes it: it parses the HTML and removes unsafe content — <code>&lt;script&gt;</code>, event handler attributes (<code>onclick</code>, <code>onerror</code>), and <code>javascript:</code> URLs — while leaving benign tags like <code>&lt;b&gt;</code> or <code>&lt;p&gt;</code>. The value is rendered as HTML, but the dangerous pieces are gone. This differs from interpolation, which escapes everything.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are Angular's sanitization contexts, and why do they exist?</summary>
+      <div class="answer"><p>HTML, style, URL, and resource URL. The same string is dangerous in different ways depending on where it lands — a <code>javascript:</code> URL is harmless as text but executable in an <code>href</code>, and a resource URL (script/iframe src) can load and run remote code. Angular picks the sanitizer that matches the binding context so it strips the right things.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is DomSanitizer and when would you legitimately use it?</summary>
+      <div class="answer"><p>It is the service behind Angular's sanitization, exposing both <code>sanitize()</code> and the <code>bypassSecurityTrust*</code> methods. You reach for it when you must render markup or a URL Angular would otherwise strip and you can prove the value is safe — a rich-text field you own, or an embed URL built from a known id. The idiom is a small <code>SafeHtml</code>/<code>SafeResourceUrl</code> pipe so the bypass lives in one reviewed place.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is <code>bypassSecurityTrustHtml</code> considered dangerous, and how do you use it safely?</summary>
+      <div class="answer"><p>It tells Angular "trust this value, do not sanitize it" — so passing user-controlled data straight to it reintroduces the XSS vulnerability Angular removed. Safe use: apply it only to values you fully control, as close to the source as possible, never to raw user input, and ideally after your own validation or a library like DOMPurify. Treat every call as a code-review flag.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Angular's XSRF/CSRF protection work?</summary>
+      <div class="answer"><p><code>HttpClient</code> ships an interceptor that reads a token from a cookie (default <code>XSRF-TOKEN</code>) and sets it as a header (default <code>X-XSRF-TOKEN</code>) on mutating requests (POST/PUT/DELETE) to relative URLs. A cross-origin attacker's page can cause the cookie to be sent but cannot read it to reproduce the header, so the forged request is rejected by the server. Names are configurable via <code>withXsrfConfiguration</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is Angular's XSRF support "only half" of the protection?</summary>
+      <div class="answer"><p>Angular implements the client side — copying the cookie value into a header. The scheme fails unless the <em>backend</em> issues that token cookie and verifies the matching header on every eligible request. It also deliberately does not send the header on GET/HEAD or on absolute-URL (cross-origin) requests, so those must be handled by other means. Without server cooperation, the client behaviour alone protects nothing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are Trusted Types, and how do they relate to CSP and Angular?</summary>
+      <div class="answer"><p>Trusted Types is a browser feature that restricts dangerous DOM sinks (<code>innerHTML</code>, <code>eval</code>, script <code>src</code>) so they accept only typed, policy-created objects instead of raw strings — closing DOM-based XSS at the sink. It is enabled through the CSP header (<code>require-trusted-types-for 'script'</code>). Angular integrates with it, enforcing its own policies, so an app built on safe bindings keeps working while ad-hoc string-to-DOM writes become errors. CSP and Trusted Types are defence-in-depth on top of, not instead of, Angular's sanitization.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you run Angular under a strict CSP, and does CSP replace sanitization?</summary>
+      <div class="answer"><p>Use a nonce-based policy (<code>script-src 'self' 'nonce-{RANDOM}'</code>) and let Angular stamp the nonce onto its scripts via the <code>ngCspNonce</code> attribute on the root element or the <code>CSP_NONCE</code> injection token; add <code>object-src 'none'</code> and <code>base-uri 'none'</code> to harden it. CSP does <em>not</em> replace sanitization: it blocks disallowed script execution but does nothing about context-specific encoding or a sanitizer bypass you wrote yourself — you need both layers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Beyond bypassSecurityTrust, what escape hatches silently reopen XSS in an Angular app?</summary>
+      <div class="answer"><p>Any path that writes untrusted data to the DOM outside Angular's bindings: direct <code>ElementRef.nativeElement.innerHTML</code> assignments, <code>Renderer2</code> writes of raw HTML, building templates or component source from user strings (which also breaks AOT's safety), server-side rendering that templates unescaped values into the HTML shell, and unpatched dependencies with known XSS CVEs. The fix is discipline: stay on template bindings, keep AOT, sanitize deliberately, and run <code>npm audit</code>. Trusted Types helps catch the raw-DOM cases at runtime.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Advanced track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>nga.sec.xss</li>
+      <li>nga.sec.csp</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Advanced track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

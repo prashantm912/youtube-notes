@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular Advanced HTTP module: functional interceptors (withInterceptors, HttpInterceptorFn), auth/error/retry, HttpContext, HttpParams and HttpHeaders, caching, request cancellation and typed clients including httpResource — with the best official Angular resources and the interview questions they power.">
+  <title>Advanced HTTP — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Advanced HTTP</h1>
+  <p class="standfirst">Basic <code>HttpClient</code> gets you a response; production Angular is the layer you wrap around it — functional interceptors, <code>HttpContext</code>, caching and cancellation — the middleware that attaches auth tokens and absorbs flaky networks before your components ever see the request.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular Advanced → Advanced HTTP</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything past <code>get()</code> and <code>post()</code>: <strong>functional interceptors</strong> — the modern middleware for auth, error handling, retries and logging — plus <code>HttpContext</code> for per-request metadata, immutable <code>HttpParams</code>/<code>HttpHeaders</code>, response caching, request cancellation, and typed clients (including the signal-based <code>httpResource</code>). The through-line is that HttpClient returns cold Observables you compose and cancel, and that cross-cutting concerns belong in one interceptor rather than scattered across every service.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Functional interceptors: the modern middleware</h3>
+    <p>An interceptor is middleware in the HttpClient pipeline: every outgoing request flows through the chain on the way out, and every response event flows back through it. Modern Angular writes one as a plain function — an <code>HttpInterceptorFn</code> that receives the outgoing <code>HttpRequest</code> and a <code>next</code> handler and returns the <code>Observable</code> of HTTP events that <code>next</code> produces. You register the set once with <code>provideHttpClient(withInterceptors([...]))</code>, and they run in the order you list them. Auth headers, logging, global error handling, retries and caching all live here instead of being copied into every service.</p>
+    <p>Why it matters: requests are <em>immutable</em>, so an interceptor that changes one calls <code>req.clone({...})</code> and forwards the copy to <code>next</code>. The functional form (Angular 15+) is the current recommendation — tree-shakable, composable, dependencies pulled in with <code>inject()</code>, and with more predictable ordering than the older class-based <code>HttpInterceptor</code> registered through the <code>HTTP_INTERCEPTORS</code> token. Knowing that class interceptors are legacy (not wrong, just superseded) is exactly what marks you as current in an interview.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const loggingInterceptor: HttpInterceptorFn = (req, next) =&gt; {
+  console.log(`${req.method} ${req.urlWithParams}`);
+  return next(req);            // pass it down the chain
+};
+
+// app.config.ts
+providers: [provideHttpClient(withInterceptors([loggingInterceptor]))];</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/interceptors" rel="noopener">Intercepting requests and responses — angular.dev (functional interceptors, response events, HttpContext)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/http/setup" rel="noopener">Setting up HttpClient — angular.dev (withInterceptors, why functional is recommended over DI)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpInterceptorFn" rel="noopener">HttpInterceptorFn — angular.dev API reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BNM5203kxgs" rel="noopener">Angular Interceptors — Auth &amp; Global HTTP Error Handling — Decoded Frontend</a></li>
+    </ul>
+
+    <h3>The classic jobs: auth tokens, error handling and retry</h3>
+    <p>Three jobs account for most interceptors ever written. <strong>Auth</strong>: clone the request to add an <code>Authorization: Bearer …</code> header (or let Angular's built-in XSRF interceptor attach <code>X-XSRF-TOKEN</code> for you). <strong>Errors</strong>: pipe <code>catchError</code> onto <code>next(req)</code> to turn an <code>HttpErrorResponse</code> into a redirect on a 401, a toast on a 500, or a domain error — and you must re-emit with <code>throwError</code> so the caller's own error handler still runs. <strong>Retry</strong>: RxJS <code>retry</code> re-subscribes to the request observable (which re-issues the call) on failure; add a growing delay for exponential backoff against flaky networks, but never blindly retry non-idempotent writes.</p>
+    <p>Why it matters: "how do you add a token to every request" and "where do you handle errors globally" are near-certain Angular interview questions in Indian screening rounds — and the subtle trap is forgetting to rethrow, which silently makes failed calls look successful.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const errorInterceptor: HttpInterceptorFn = (req, next) =&gt;
+  next(req).pipe(
+    retry({ count: 2, delay: 500 }),
+    catchError((err: HttpErrorResponse) =&gt; {
+      if (err.status === 401) inject(Router).navigate(['/login']);
+      return throwError(() =&gt; err);   // re-emit so callers still see it
+    })
+  );</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://blog.angular-university.io/angular-http/" rel="noopener">Angular HTTP Client — QuickStart Guide (interceptors and the auth-header pattern) — Angular University</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/withXsrfConfiguration" rel="noopener">withXsrfConfiguration — angular.dev (customising the built-in XSRF interceptor)</a></li>
+      <li>[Article] <a href="https://levioconsulting.com/insights/retrying-failed-http-requests-using-exponential-backoff-rxjs-and-http-interceptors-in-angular/" rel="noopener">Retrying Failed HTTP Requests with Exponential Backoff — Levio Consulting</a></li>
+    </ul>
+
+    <h3>HttpContext: per-request metadata and scoped behavior</h3>
+    <p>Sometimes an interceptor needs a hint that is meant for it, not for the server — "skip auth on this one call", "this response is cacheable", "hide the global spinner". <code>HttpContext</code> carries exactly that: a typed map keyed by <code>HttpContextToken&lt;T&gt;</code> that rides on the request's <code>.context</code> and is never serialised onto the wire. You set it per call with <code>context: new HttpContext().set(TOKEN, value)</code> and read it inside the interceptor with <code>req.context.get(TOKEN)</code>.</p>
+    <p>Why it matters: it is the clean alternative to sniffing URLs or headers to decide behaviour. The canonical example in the docs is a caching interceptor whose token lets each caller opt in; the same pattern drives per-route auth toggles and route-scoped interceptor logic.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const CACHE_ENABLED = new HttpContextToken&lt;boolean&gt;(() =&gt; false);
+
+// caller opts in for this request only:
+http.get&lt;Config&gt;('/api/config', { context: new HttpContext().set(CACHE_ENABLED, true) });
+
+// interceptor reads the hint:
+if (req.context.get(CACHE_ENABLED)) { /* serve or store the cached response */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpContext" rel="noopener">HttpContext — angular.dev API reference</a></li>
+      <li>[Article] <a href="https://blog.logrocket.com/caching-with-httpinterceptor-in-angular/" rel="noopener">Caching with HttpInterceptor in Angular — LogRocket</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KJj8E8jJcxw" rel="noopener">Route-Scoped HTTP Interceptors in Angular Explained — Decoded Frontend</a></li>
+    </ul>
+
+    <h3>Building requests: HttpParams, HttpHeaders and typed responses</h3>
+    <p>For the request itself, <code>HttpParams</code> builds the query string and <code>HttpHeaders</code> builds the headers — both are <em>immutable</em>, so every <code>set()</code>/<code>append()</code> returns a new instance you must reassign or chain. In everyday code you pass a plain object to the <code>params</code>/<code>headers</code> option and HttpClient constructs them for you; reach for the explicit classes when you need repeated keys, custom encoding, or to build values up conditionally.</p>
+    <p>Typed responses are the companion habit: the generic on <code>get&lt;T&gt;()</code>/<code>post&lt;T&gt;()</code> tells the compiler and template the shape of the body. It is a <em>compile-time assertion</em>, not runtime validation — the server can still send something else — so treat it as a contract and validate at the boundary when the data is untrusted. Options such as <code>observe: 'response'</code> (the whole <code>HttpResponse</code>) and <code>responseType</code> change what you receive.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const params = new HttpParams().set('page', '2').set('q', term);
+const headers = new HttpHeaders({ 'X-Api-Version': '3' });
+
+this.http.get&lt;Product[]&gt;('/api/products', { params, headers });</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/making-requests" rel="noopener">Making HTTP requests — angular.dev (params, headers, body, typed responses, cancellation)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpParams" rel="noopener">HttpParams — angular.dev API reference</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpHeaders" rel="noopener">HttpHeaders — angular.dev API reference</a></li>
+    </ul>
+
+    <h3>Typed clients, request cancellation and the reactive future</h3>
+    <p>An HttpClient call returns a <em>cold</em> Observable, so nothing leaves the browser until you subscribe — and unsubscribing aborts an in-flight request. That is the whole mechanism behind cancellation: <code>switchMap</code> cancels the previous request when a new search term arrives (the standard fix for typeahead race conditions), and the <code>async</code> pipe cancels when the view is destroyed. A "typed client" is simply the disciplined pattern of a service that returns <code>Observable&lt;Model&gt;</code> from <code>get&lt;Model&gt;()</code> and keeps the subscription out of the component.</p>
+    <p>The reactive direction is <code>httpResource</code> (Angular v19/20): a signal-based wrapper over HttpClient that fires <em>eagerly</em>, exposes <code>value()</code>/<code>status()</code>/<code>error()</code> as signals, re-requests when its input signals change, and cancels the outstanding request automatically. It still runs through your interceptors. Use it for reads that feed the template reactively; keep the plain HttpClient — with <code>switchMap</code>, retries and cancellation you control — for mutations and complex streams.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// classic typed client — cancellation via switchMap
+this.search.valueChanges.pipe(
+  switchMap(term =&gt; this.http.get&lt;Product[]&gt;('/api/products', { params: { q: term } }))
+).subscribe(list =&gt; this.results.set(list));
+
+// signal-based read — auto-cancels when id() changes
+readonly user = httpResource&lt;User&gt;(() =&gt; `/api/users/${this.id()}`);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http" rel="noopener">HTTP Client overview — angular.dev (typed responses, interception, the feature map)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/HttpClient" rel="noopener">HttpClient — angular.dev API reference (the generic request methods)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/http/http-resource" rel="noopener">Reactive data fetching with httpResource — angular.dev</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-rxjs-subjects.html">← RxJS: Subjects, Combination and Error Handling</a>
+    <a href="index.html">All Angular Advanced modules</a>
+    <a href="06-content-projection.html">Content Projection and Templates →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Interceptors, error handling and request patterns are staples of Angular rounds in Indian product and services interviews — the ones below run screening depth to senior deep-dive:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an HTTP interceptor and what is it used for?</summary>
+      <div class="answer"><p>Middleware in the HttpClient pipeline that sees every outgoing request and incoming response. It centralises cross-cutting concerns — attaching auth tokens, logging, global error handling, retries, caching — so the logic lives in one place and applies to all requests instead of being repeated in each service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you register a functional interceptor in a standalone app?</summary>
+      <div class="answer"><p><code>provideHttpClient(withInterceptors([authInterceptor, errorInterceptor]))</code> in <code>app.config.ts</code>. Each is an <code>HttpInterceptorFn</code>, and they execute in the order listed. This is the modern replacement for providing class tokens through <code>HTTP_INTERCEPTORS</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> HttpRequest is immutable — how do you modify a request in an interceptor?</summary>
+      <div class="answer"><p>You cannot mutate it. Call <code>req.clone({ setHeaders: {...} })</code> (or set params, body, url) to get a modified copy and pass that to <code>next()</code>. Cloning leaves the original untouched, which matters because the same request flows through several interceptors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Functional vs class-based (DI) interceptors — which is current?</summary>
+      <div class="answer"><p>Functional interceptors (<code>HttpInterceptorFn</code> + <code>withInterceptors</code>, Angular 15+) are recommended: tree-shakable, composable, dependencies via <code>inject()</code>, predictable ordering. Class interceptors implementing <code>HttpInterceptor</code> and registered via <code>HTTP_INTERCEPTORS</code> still work but are legacy — new code should use functions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you attach a JWT/auth token to every request?</summary>
+      <div class="answer"><p>An auth interceptor injects the auth service, reads the token, clones the request adding an <code>Authorization: Bearer …</code> header, and forwards it. Skip public endpoints via an <code>HttpContext</code> flag or URL check. Angular's built-in XSRF interceptor uses the same clone-and-add-header idea for <code>X-XSRF-TOKEN</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you handle HTTP errors globally, and why must you rethrow?</summary>
+      <div class="answer"><p>Pipe <code>catchError</code> onto <code>next(req)</code> in an interceptor and branch on <code>HttpErrorResponse.status</code> — redirect on a 401, toast on a 500. You must return <code>throwError(() =&gt; err)</code> (or a replacement error) so the observable stays in an error state and the component's error callback still fires; swallowing it makes a failed call look successful.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is HttpContext and when would you use it?</summary>
+      <div class="answer"><p>A typed, per-request metadata map (keys are <code>HttpContextToken&lt;T&gt;</code>) that rides on <code>req.context</code> and is never sent to the server. Use it to pass hints to interceptors — skip auth, mark a request cacheable, suppress the global spinner — without abusing headers or sniffing URLs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> HttpParams and HttpHeaders are immutable — what does that imply?</summary>
+      <div class="answer"><p>Every <code>set()</code>/<code>append()</code> returns a <em>new</em> instance; the original is unchanged. So <code>params.set('a','1')</code> on its own is a no-op unless you reassign or chain (<code>params = params.set(...)</code>). Passing a plain object to the <code>params</code> option lets HttpClient build them for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In what order do multiple interceptors execute?</summary>
+      <div class="answer"><p>They form a chain in registration order. On the way out (request phase) they run top-to-bottom before the call hits the network; on the way back (response phase) events flow through in reverse. So an outer logging interceptor sees the request first and the response last.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you cancel an in-flight HTTP request?</summary>
+      <div class="answer"><p>Unsubscribe — that aborts the underlying request. In practice <code>switchMap</code> does it for you (cancelling the previous request when a new value arrives, the classic typeahead fix), and <code>takeUntilDestroyed</code>/the <code>async</code> pipe cancel on teardown. Only unsubscribing cancels; those operators cancel because they unsubscribe.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you implement a caching interceptor, and what are the pitfalls?</summary>
+      <div class="answer"><p>Keep a <code>Map</code> keyed by <code>req.urlWithParams</code>; on a cacheable GET, return the stored <code>HttpResponse</code> if present, otherwise let it through and store the response via <code>tap</code>. Gate it with an <code>HttpContext</code> token so callers opt in. Pitfalls: cache only GETs (never mutations), invalidate on writes, and bound size/TTL so you avoid stale data and unbounded memory growth.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does Angular's built-in XSRF protection work?</summary>
+      <div class="answer"><p>HttpClient's XSRF interceptor reads a token from the <code>XSRF-TOKEN</code> cookie and echoes it back as the <code>X-XSRF-TOKEN</code> header on mutating (POST/PUT/DELETE), same-origin requests — not on GET/HEAD. The backend sets the cookie and verifies the header, proving the request came from your app. Customise the names with <code>withXsrfConfiguration</code>, or turn it off with <code>withNoXsrfProtection</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you choose httpResource over a classic Observable HttpClient call?</summary>
+      <div class="answer"><p><code>httpResource</code> (Angular v19/20) is a signal-based read: it fires eagerly, exposes value/status/error as signals, re-requests when its input signals change, and auto-cancels the previous request — ideal for template-driven reads in a signals app, and it still runs through interceptors. Keep plain HttpClient for mutations (POST/PUT) and for streams needing explicit operator control (switchMap, retries, manual cancellation). Bridging the other way, <code>toSignal(http.get&lt;T&gt;(...))</code> turns a one-shot call into a signal.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular Advanced track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>nga.http.interceptors</li>
+      <li>nga.http.patterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular Advanced track — Enterprise course. Links verified: <time datetime="2026-07-19">19 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
