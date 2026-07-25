@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Supply chain security module: transitive dependency risk, CVE, CVSS, EPSS and reachability, OWASP Dependency-Check, Snyk and Dependabot, dependency trees and forced versions, lockfiles and reproducible builds, typosquatting and dependency confusion, container image scanning, SBOM with CycloneDX and SPDX, SLSA provenance and Sigstore signing, CI gates, secret scanning and least-privilege pipelines — with verified resources and interview questions.">
+  <title>Supply Chain Security — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Supply Chain Security</h1>
+  <p class="standfirst">You reviewed every line your team wrote. Nobody reviewed the nine hundred packages your build downloaded. This module is about the code you ship but did not write, and about the fact that one compromised library reaches every one of its users at once.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Secure Coding track → Supply Chain Security</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Count the dependencies in a typical Spring Boot plus Angular application. The <code>pom.xml</code> might declare thirty artifacts and the <code>package.json</code> another fifty; the resolved graph is routinely several hundred JARs and well over a thousand npm packages. Every one of them executes inside your process, with your credentials, against your database. Your direct dependency count is not your attack surface — it is a small, comfortable fraction of it.</p>
+    <p>That asymmetry is what makes the supply chain attractive to an attacker. Compromising your application gets them one application; compromising a library that fifty thousand applications depend on gets them all fifty thousand, and they arrive through your own trusted build pipeline rather than through your firewall. This module covers the defensive half of that story in two parts: managing what you depend on — scanning for known vulnerabilities, prioritising them honestly, tracing transitive versions, locking builds so they are reproducible, and resisting typosquatting and dependency confusion — and then hardening the pipeline that turns those dependencies into a running artifact: container scanning, SBOM, provenance and signing, and the CI gates that decide what is allowed to ship.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Most of the code you ship is code you did not write</h3>
+    <p>Run <code>mvn dependency:tree</code> on a real service and the output is usually a shock: a handful of declared starters expand into hundreds of artifacts, most of which you have never heard of, several of which are the third-order dependency of a logging shim. The npm side is worse by an order of magnitude. Those packages are not sandboxed. A JAR on the classpath can read your environment, open sockets and load classes; an npm package can execute an install script on the machine that ran <code>npm install</code>, which on a build agent means it runs with the pipeline's credentials.</p>
+    <p>Two incidents make the blast radius concrete without needing any attack detail. <strong>Log4Shell</strong> (CVE-2021-44228) was a remote code execution flaw in Log4j, a library almost nobody chose deliberately — it arrived transitively through frameworks — and in December 2021 an enormous share of the Java-speaking internet discovered simultaneously that it was affected and could not quickly say <em>where</em>. <strong>xz-utils</strong> (CVE-2024-3094) was different and more unsettling: a patient social-engineering campaign in which a contributor spent years earning maintainer trust on a compression library before landing a backdoor into release tarballs. The first is a bug; the second is a human process failure. Your defences have to address both, and the practical lesson from Log4Shell is that the expensive part was not patching — it was <em>inventory</em>.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Software_Supply_Chain_Security_Cheat_Sheet.html" rel="noopener">Software Supply Chain Security Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://logging.apache.org/security.html" rel="noopener">Security Vulnerabilities — Apache Logging Services (the Log4Shell advisories and fixed versions)</a></li>
+      <li>[Official] <a href="https://www.cisa.gov/news-events/news/apache-log4j-vulnerability-guidance" rel="noopener">Apache Log4j Vulnerability Guidance — CISA</a></li>
+      <li>[Article] <a href="https://security.googleblog.com/2021/12/apache-log4j-vulnerability.html" rel="noopener">Understanding the Impact of Apache Log4j Vulnerability — Google Security Blog (how much of Maven Central was transitively affected)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wq6yMdt11LM" rel="noopener">npm installs can hack your laptop (here's how to stop it) — Better Stack</a></li>
+    </ul>
+
+    <h3>CVE, CVSS, EPSS: scoring tells you where to start, not what to do</h3>
+    <p>A <strong>CVE</strong> is an identifier — a stable name for one publicly disclosed flaw, so that your scanner, the vendor advisory and your ticket all refer to the same thing. <strong>CVSS</strong> is a severity score attached to it, computed from characteristics like attack vector, required privileges and impact on confidentiality, integrity and availability. The number is useful and it is also the single most misused figure in application security, because CVSS base scores describe the vulnerability's worst plausible case <em>in the abstract</em>. They know nothing about your deployment. A 9.8 in a parser you never invoke, inside a library loaded only by a CLI tool you do not ship, is not a 9.8 to you.</p>
+    <p>Two things narrow the list to what matters. <strong>EPSS</strong>, published by FIRST, estimates the probability that a given CVE will be exploited in the wild in the next thirty days, drawn from observed exploitation data rather than theory — and the distribution is brutally skewed, with a tiny fraction of CVEs accounting for most real-world exploitation. CISA's <strong>Known Exploited Vulnerabilities</strong> catalogue is the blunt version of the same idea: these are being exploited now, patch them regardless of score. The third input is <strong>reachability analysis</strong>, which several commercial scanners now perform: static call-graph analysis that asks whether any path in your code actually reaches the vulnerable function. The mature policy combines all of it — high CVSS <em>and</em> high EPSS <em>and</em> reachable <em>and</em> internet-facing is an emergency; high CVSS alone is a ticket. Say exactly that in an interview and you will sound like someone who has run a backlog rather than read a dashboard.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cve.org/" rel="noopener">The CVE Program — cve.org (what a CVE record is and how it is assigned)</a></li>
+      <li>[Official] <a href="https://www.first.org/cvss/" rel="noopener">Common Vulnerability Scoring System — FIRST (base, temporal and environmental metrics)</a></li>
+      <li>[Official] <a href="https://www.first.org/epss/" rel="noopener">Exploit Prediction Scoring System (EPSS) — FIRST</a></li>
+      <li>[Official] <a href="https://www.cisa.gov/known-exploited-vulnerabilities-catalog" rel="noopener">Known Exploited Vulnerabilities Catalog — CISA</a></li>
+      <li>[Article] <a href="https://www.endorlabs.com/learn/epss-exploit-prediction-reachability-analysis" rel="noopener">Combining EPSS and reachability analysis to optimize vulnerability management — Endor Labs</a></li>
+    </ul>
+
+    <h3>Scanning your dependencies: Dependency-Check, Dependabot, Snyk</h3>
+    <p>Software composition analysis works the same way everywhere: enumerate the resolved dependency graph, match each component against a vulnerability database, report. <strong>OWASP Dependency-Check</strong> is the free, self-hosted baseline for the JVM — Maven and Gradle plugins, plus a CLI — matching artifacts to CPE identifiers and CVE records from the National Vulnerability Database. Its <code>failBuildOnCVSS</code> property is the crude but effective build gate. Its two operational quirks are worth knowing before an interview: it needs an NVD API key and a warmed local data cache or the first run is painfully slow, and CPE matching produces false positives you will need a suppression file for.</p>
+    <p><strong>Dependabot</strong> is the zero-setup option on GitHub: alerts tell you a vulnerable version is in the graph, and version updates open pull requests to bump it. <strong>Snyk</strong> and equivalents add a curated database that is often ahead of NVD, reachability analysis, and fix advice that accounts for transitive paths. Whichever you pick, the design decisions are the same: scan on every pull request <em>and</em> on a schedule (a dependency you have not touched becomes vulnerable while you sleep — new CVEs arrive against code you already shipped), maintain a reviewed suppression file with an expiry date on every entry rather than a permanent silence, and treat the scanner as an input to triage rather than an oracle.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;plugin&gt;
+  &lt;groupId&gt;org.owasp&lt;/groupId&gt;
+  &lt;artifactId&gt;dependency-check-maven&lt;/artifactId&gt;
+  &lt;configuration&gt;
+    &lt;nvdApiKey&gt;${env.NVD_API_KEY}&lt;/nvdApiKey&gt;
+    &lt;failBuildOnCVSS&gt;7&lt;/failBuildOnCVSS&gt;      &lt;!-- fail on high and critical --&gt;
+    &lt;suppressionFiles&gt;&lt;suppressionFile&gt;owasp-suppressions.xml&lt;/suppressionFile&gt;&lt;/suppressionFiles&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-project-dependency-check/" rel="noopener">OWASP Dependency-Check — project page</a></li>
+      <li>[Official] <a href="https://jeremylong.github.io/DependencyCheck/" rel="noopener">Dependency-Check documentation — Maven, Gradle, CLI, suppression files</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-alerts" rel="noopener">About Dependabot alerts — GitHub Docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-maven-owasp-dependency-check" rel="noopener">Check Component Vulnerabilities Using OWASP Dependency-Check — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KAr_NqjMtGs" rel="noopener">Finding and Remediating Vulnerabilities with Maven Dependency Management — OtherDevOpsGene</a></li>
+    </ul>
+
+    <h3>Transitive risk: where did that version come from, and how do you move it?</h3>
+    <p>The scanner names a vulnerable artifact you never declared. The first question is always <em>who pulled it in</em>. On Maven, <code>mvn dependency:tree -Dincludes=groupId:artifactId</code> prints the paths that reach it, and <code>-Dverbose</code> additionally shows the versions that were considered and rejected. On Gradle, <code>gradle dependencyInsight --dependency &lt;name&gt; --configuration runtimeClasspath</code> explains not just the path but the <em>reason</em> the chosen version won. Learn both commands properly; "how would you find where this transitive dependency comes from" is a stock interview question and the answer is a command, not a paragraph.</p>
+    <p>Then understand the resolution rules, because they differ and the difference bites. Maven uses <strong>nearest-wins</strong> mediation: the version at the shallowest depth in the tree is selected, with declaration order breaking ties at equal depth — so a transitive version can quietly beat one you consider newer. Gradle instead selects the <strong>highest</strong> requested version by default. To force an outcome, Maven's idiomatic tool is <code>&lt;dependencyManagement&gt;</code>, which pins a version for the whole reactor without adding a dependency (and which Spring Boot's parent POM already uses extensively); Gradle offers <code>constraints</code>, and a stricter <code>strictly</code>/<code>force</code> when a constraint is not enough. Exclusions exist too, but excluding a dependency that something actually calls trades a CVE for a <code>NoClassDefFoundError</code> at runtime.</p>
+    <p>The genuinely hard case is the maintenance one: a direct dependency pins a vulnerable transitive version, and overriding it may break that library's assumptions. The order of preference is: upgrade the direct dependency to a release that already picks up the fix (correct, supported, and someone else tested the combination); if none exists, override the transitive version yourself and back it with integration tests, accepting that you now own an unsupported combination; if the API changed incompatibly, open an issue or a pull request upstream and, meanwhile, assess exploitability honestly — reachability, exposure, compensating controls — and record the risk acceptance with an owner and a review date rather than letting it rot silently in a suppression file.</p>
+    <pre class="code-block" data-label="Shell"><code># Maven - who pulls in the vulnerable artifact, and which versions lost?
+mvn dependency:tree -Dincludes=com.fasterxml.jackson.core:jackson-databind -Dverbose
+
+# Gradle - the same question, with the reason the winning version was chosen
+gradle dependencyInsight --dependency jackson-databind --configuration runtimeClasspath</code></pre>
+    <pre class="code-block" data-label="XML"><code>&lt;!-- Maven: force a fixed version everywhere, without declaring a new dependency --&gt;
+&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;com.fasterxml.jackson.core&lt;/groupId&gt;
+      &lt;artifactId&gt;jackson-databind&lt;/artifactId&gt;
+      &lt;version&gt;${jackson.patched.version}&lt;/version&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-dependency-plugin/tree-mojo.html" rel="noopener">dependency:tree — Apache Maven Dependency Plugin reference</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html" rel="noopener">Introduction to the Dependency Mechanism — Apache Maven (mediation and dependencyManagement)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/viewing_debugging_dependencies.html" rel="noopener">Viewing and debugging dependencies — Gradle User Manual (dependencyInsight)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/dependency_constraints.html" rel="noopener">Upgrading versions of transitive dependencies — Gradle User Manual (constraints, strictly, force)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-version-collision" rel="noopener">How to Resolve a Version Collision of Artifacts in Maven — Baeldung</a></li>
+    </ul>
+
+    <h3>Lockfiles and reproducible builds</h3>
+    <p>A build that can resolve different bytes tomorrow than it did today is not auditable, and a scan of yesterday's resolution says nothing about tomorrow's artifact. That is what a <strong>lockfile</strong> fixes. <code>package-lock.json</code> records the exact resolved version <em>and integrity hash</em> of every package in the tree, direct and transitive. The critical discipline is which command you run: <code>npm install</code> is allowed to update the lockfile to satisfy the ranges in <code>package.json</code>, whereas <code>npm ci</code> installs strictly from the lockfile, fails if the two files disagree, and wipes <code>node_modules</code> first. CI should always run <code>npm ci</code>. A pipeline that runs <code>npm install</code> is a pipeline that can silently ship a version nobody reviewed.</p>
+    <p>The JVM story is looser. A Maven POM with a hard version coordinate is already close to deterministic for that module, but ranges, <code>LATEST</code>/<code>RELEASE</code>, and snapshot dependencies destroy it — a version range in a build file means your build is not reproducible, full stop, and someone else's release can change what you ship without a commit on your side. Gradle offers explicit <strong>dependency locking</strong>, which writes lockfiles per configuration and fails the build when resolution drifts. Beyond version pinning there is the wider <strong>reproducible builds</strong> goal: the same source producing byte-identical artifacts, which requires stripping timestamps and ordering nondeterminism out of the archive. Maven supports this through the <code>project.build.outputTimestamp</code> property and the reproducible-build guidance, and the payoff is verifiability — if the published JAR is bit-for-bit what your source produces, a tampered release is detectable rather than a matter of trust.</p>
+    <pre class="code-block" data-label="Shell"><code># CI: install exactly what the lockfile says, or fail
+npm ci                     # never `npm install` on a build agent
+
+# Gradle: write and then enforce lock state
+gradle dependencies --write-locks
+gradle build --update-locks=none</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.npmjs.com/cli/v10/configuring-npm/package-lock-json/" rel="noopener">package-lock.json — npm Docs (resolved versions and integrity hashes)</a></li>
+      <li>[Official] <a href="https://docs.npmjs.com/cli/v10/commands/npm-ci/" rel="noopener">npm ci — npm Docs (how it differs from npm install)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/dependency_locking.html" rel="noopener">Locking dependency versions — Gradle User Manual</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/mini/guide-reproducible-builds.html" rel="noopener">Configuring for Reproducible Builds — Apache Maven</a></li>
+      <li>[Official] <a href="https://reproducible-builds.org/" rel="noopener">Reproducible Builds — the cross-ecosystem project and its rationale</a></li>
+    </ul>
+
+    <h3>Typosquatting, dependency confusion and the human failure modes</h3>
+    <p><strong>Typosquatting</strong> is the cheapest attack in the catalogue: publish a package whose name is one keystroke or one hyphen away from something popular, and wait for installs. Defences are unglamorous — copy dependency names from the official documentation rather than typing them, review every new dependency in code review the way you would review new code, prefer packages with real maintenance signals, and let a lockfile plus <code>npm ci</code> ensure that only reviewed names ever get installed on a build agent.</p>
+    <p><strong>Dependency confusion</strong> is subtler and has hit very large companies. Internal packages often carry unscoped names like <code>acme-billing-utils</code>, and package managers configured with both a private registry and the public one may resolve to whichever offers the "best" match — commonly the highest version number. An attacker who learns your internal package name (from a leaked <code>package.json</code>, a stack trace, a public build log) publishes that name on the public registry with an absurdly high version, and your build prefers it. The defences are structural rather than reactive: use <strong>scoped</strong> package names (<code>@acme/billing-utils</code>) so the namespace itself is owned, map that scope explicitly to your private registry in <code>.npmrc</code>, run a private registry with a deliberate upstream policy so internal names are <em>never</em> resolved from a public source, and — as a belt-and-braces move — defensively register your organisation's scope publicly. The equivalent JVM discipline is to keep internal group IDs on a repository manager that does not fall through to Maven Central for those coordinates.</p>
+    <p>Finally the human layer, where tooling helps least. <strong>Protestware</strong> is a maintainer deliberately shipping disruptive behaviour in their own package for political reasons — rare, but a reminder that "the maintainer is on your side" is an assumption, not a guarantee. <strong>Maintainer-account compromise</strong> is the commoner and more dangerous version: a stolen npm token or a phished account publishes a malicious patch release of a legitimate library, and it flows straight into every build using a caret range. That is precisely why pinned lockfiles, integrity hashes, a delay before adopting brand-new patch versions, and signed releases are worth the friction. The xz-utils case adds the slow version of the same problem — a trusted maintainer who was never trustworthy — and the honest defence there is project health signals such as OpenSSF Scorecard, multiple maintainers, and preferring dependencies you could realistically fork.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.npmjs.com/cli/v10/using-npm/scope/" rel="noopener">Scoped packages — npm Docs (scopes and mapping a scope to a registry)</a></li>
+      <li>[Official] <a href="https://github.blog/security/supply-chain-security/avoiding-npm-substitution-attacks/" rel="noopener">Avoiding npm substitution attacks — GitHub Blog (the dependency confusion mitigations, in order)</a></li>
+      <li>[Article] <a href="https://openssf.org/blog/2024/03/30/xz-backdoor-cve-2024-3094/" rel="noopener">The xz-utils backdoor (CVE-2024-3094) — OpenSSF blog</a></li>
+      <li>[Article] <a href="https://research.swtch.com/xz-timeline" rel="noopener">Timeline of the xz open source attack — Russ Cox (how long the trust-building took)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-MmyAFR_pYw" rel="noopener">npm supply chain attacks explained (and how to stop them) — DigitalOcean</a></li>
+    </ul>
+
+    <h3>Container image scanning: most of your CVEs come from the base image</h3>
+    <p>Scan a freshly built application image and the finding count is usually dominated by things you never wrote or chose: OpenSSL, glibc, curl, coreutils, a shell, a package manager. They came with the base image. <strong>Trivy</strong>, <strong>Grype</strong> and <strong>Docker Scout</strong> all read the image layer by layer, enumerate OS packages from the distribution database and language packages from lockfiles and JARs, and match everything against vulnerability feeds. Trivy is the common default in CI because it is a single binary, scans images, filesystems, IaC and repositories, and emits SARIF or SBOM formats directly.</p>
+    <p>The consequence is the point worth carrying into an interview: <strong>choosing a base image is a security decision, not a packaging preference</strong>. A full distribution image ships hundreds of packages your application never calls, and every one of them is CVE surface you must triage forever. A slim variant cuts that; an Alpine variant cuts it further (with the musl caveat for JVM workloads); a <strong>distroless</strong> image ships the runtime and your application and essentially nothing else — no shell, no package manager, no busybox — which shrinks both the vulnerability count and what an attacker can do after landing a foothold. Pair that with multi-stage builds so build tooling never reaches the runtime layer, pin base images by digest rather than by a mutable tag like <code>latest</code>, and rebuild regularly: an image built six months ago accumulates CVEs even if your code has not changed by a single line.</p>
+    <pre class="code-block" data-label="Shell"><code># Fail CI only on fixable high/critical findings in the image
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 acme/orders:1.4.2
+
+# Same scan, emitting an SBOM for the artifact store
+trivy image --format cyclonedx --output orders-sbom.json acme/orders:1.4.2</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://trivy.dev/" rel="noopener">Trivy — Aqua Security (image, filesystem, repository and IaC scanning)</a></li>
+      <li>[Official] <a href="https://github.com/anchore/grype" rel="noopener">Grype — Anchore (vulnerability scanner for images and filesystems)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/scout/" rel="noopener">Docker Scout — Docker Docs (image analysis and policy evaluation)</a></li>
+      <li>[Official] <a href="https://github.com/GoogleContainerTools/distroless" rel="noopener">Distroless container images — GoogleContainerTools</a></li>
+      <li>[Article] <a href="https://www.chainguard.dev/unchained/minimal-container-images-towards-a-more-secure-future" rel="noopener">Minimal container images: towards a more secure future — Chainguard</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-IH5inFyEqU" rel="noopener">Container image scanning with Trivy, episode one: Trivy overview — Aqua Security Open Source</a></li>
+    </ul>
+
+    <h3>SBOM: the inventory you will want before the next Log4Shell</h3>
+    <p>A <strong>Software Bill of Materials</strong> is a machine-readable list of every component in a build: name, version, package URL, licence, hashes, and the dependency relationships between them. Two formats matter. <strong>CycloneDX</strong> came out of OWASP and is security-first — compact, with first-class support for vulnerabilities, VEX statements, services and attestations. <strong>SPDX</strong> came out of the Linux Foundation with a licence-compliance heritage and is now an ISO standard; it is the format procurement and legal teams usually ask for. Both describe the same underlying facts; generate whichever your consumers want, and note that most tools convert between them.</p>
+    <p>Generate the SBOM <em>at build time</em>, from the resolved graph, and publish it as a release artifact alongside the binary. Generating it later by re-scanning a running container is guesswork; generating it during the build is exact. On the JVM the CycloneDX Maven and Gradle plugins attach one to the build; container scanners emit one for an image; GitHub can export a dependency graph as SPDX.</p>
+    <p>The real value is not the file, it is the query. When the next Log4Shell lands on a Tuesday evening, the only question your leadership will ask is "which of our services contains this library, and at what version?" A team with SBOMs stored per release answers in minutes with a database query. A team without them spends three days grepping repositories, and still cannot be sure about the services nobody has rebuilt this year. Store SBOMs centrally and make them searchable — that is the difference between an inventory and a compliance checkbox.</p>
+    <pre class="code-block" data-label="Shell"><code># Attach a CycloneDX SBOM to a Maven build (goal binds to the package phase)
+mvn org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cyclonedx.org/" rel="noopener">CycloneDX — the OWASP Foundation BOM standard</a></li>
+      <li>[Official] <a href="https://spdx.dev/" rel="noopener">SPDX — the Linux Foundation SBOM standard (ISO/IEC 5962)</a></li>
+      <li>[Official] <a href="https://www.cisa.gov/topics/information-communications-technology-supply-chain-security/sbom" rel="noopener">Software Bill of Materials (SBOM) — CISA (minimum elements and use cases)</a></li>
+      <li>[Official] <a href="https://github.com/CycloneDX/cyclonedx-maven-plugin" rel="noopener">cyclonedx-maven-plugin — generating an SBOM during a Maven build</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vNpj6ogou9U" rel="noopener">SBOM SmackDown: conquer dragons in the shadows with OWASP CycloneDX (Steve Springett) — OWASP Foundation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IQledp8WccU" rel="noopener">CycloneDX vs SPDX — FOSSA</a></li>
+    </ul>
+
+    <h3>Provenance, SLSA levels and signing what you ship</h3>
+    <p>An SBOM says what is <em>in</em> an artifact. <strong>Provenance</strong> says where the artifact <em>came from</em>: which source commit, which builder, which build definition, with what inputs. Without it, "this image is our release" rests entirely on the fact that it is sitting in your registry under the expected tag — which is exactly the assumption an attacker with registry write access is counting on.</p>
+    <p><strong>SLSA</strong> (Supply-chain Levels for Software Artifacts) turns that into a ladder you can actually climb. In the current specification, Build Level 1 means provenance exists and is published; Level 2 means it is signed and produced by a hosted build platform, so it cannot be forged from a developer laptop; Level 3 means the build platform additionally provides strong protection against tampering with the build itself — isolated, ephemeral builds with non-falsifiable provenance. The useful framing in an interview is that SLSA describes properties of the <em>build process</em>, not of the code; it makes "our releases are built only by our pipeline from our reviewed source" a verifiable claim instead of a policy statement.</p>
+    <p><strong>Sigstore</strong> is what made signing practical, because the historic obstacle was key management — long-lived signing keys that must be stored, rotated and never leaked. Sigstore's keyless flow issues a short-lived certificate bound to an OIDC identity (your CI workflow's identity, for example), signs with it, records the signature in the public <strong>Rekor</strong> transparency log, and discards the key. <code>cosign sign</code> and <code>cosign verify</code> are the everyday commands. The part teams skip, and the part that makes all of it worthwhile, is <strong>verification at deploy time</strong>: an admission controller in the cluster that refuses any image without a valid signature from your expected identity. Signing without enforced verification produces a signature nobody checks — reassuring and useless.</p>
+    <pre class="code-block" data-label="Shell"><code># Keyless sign in CI (identity comes from the workflow's OIDC token)
+cosign sign --yes ghcr.io/acme/orders@sha256:9f2c...
+
+# Verify at deploy: only images built by our workflow are admitted
+cosign verify ghcr.io/acme/orders@sha256:9f2c... \
+  --certificate-identity-regexp '^https://github.com/acme/orders/.github/workflows/release.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://slsa.dev/" rel="noopener">SLSA — Supply-chain Levels for Software Artifacts</a></li>
+      <li>[Official] <a href="https://slsa.dev/spec/v1.0/levels" rel="noopener">Security levels — SLSA specification (what Build L1, L2 and L3 actually require)</a></li>
+      <li>[Official] <a href="https://www.sigstore.dev/" rel="noopener">Sigstore — keyless signing, Fulcio certificates and the Rekor transparency log</a></li>
+      <li>[Official] <a href="https://docs.sigstore.dev/cosign/signing/overview/" rel="noopener">Signing with cosign — Sigstore documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m5eTw4x33kU" rel="noopener">Sigstore: a wax seal of security for the digital era — OpenSSF Project Spotlight</a></li>
+    </ul>
+
+    <h3>CI security gates, secret scanning and least-privilege pipelines</h3>
+    <p>Every control above needs a decision point: fail the build, or warn. The pragmatic policy that survives contact with a real backlog is <strong>block on new findings, warn on the existing ones</strong>. A team that switches on a scanner and immediately fails the build on a two-hundred-finding legacy backlog will have the gate disabled within a week — and the gate that got disabled protects nothing. So gate hard on newly introduced critical and high findings that have a fix available, gate hard on anything in the CISA KEV catalogue, gate hard on secrets, and drive the historic backlog down on a schedule with named owners. Any exception must be time-boxed and re-reviewed, never a permanent suppression.</p>
+    <p><strong>Secret scanning</strong> deserves its own gate because a leaked credential needs no exploit at all. Scanning history finds what is already committed; <strong>push protection</strong> is the control that matters more, because it blocks the credential at the moment of the push, before it ever reaches a remote where it must be treated as compromised. Remember the rule that catches people out: rewriting history does not un-leak a secret — anything pushed must be rotated, not merely deleted.</p>
+    <p>Then harden the pipeline itself, because CI is a machine with production credentials that executes third-party code on demand. <strong>Pin third-party actions to a full commit SHA</strong> rather than a mutable tag: <code>@v4</code> is a pointer the action's owner can repoint at any time, and a compromised maintainer repointing a popular tag reaches every workflow that uses it on the next run. Give each job the minimum <code>permissions</code> block it needs rather than inheriting a broad default token. Prefer short-lived <strong>OIDC</strong> credentials over long-lived cloud keys stored as repository secrets — the pipeline exchanges a workflow-scoped identity token for temporary credentials, so there is no static key to steal, and the trust policy on the cloud side can be scoped to a specific repository, branch and environment. And treat pull requests from forks as untrusted input: they must not be able to read secrets or run privileged workflows.</p>
+    <pre class="code-block" data-label="YAML"><code>permissions:                       # least privilege, per job
+  contents: read
+  id-token: write                  # only what OIDC needs
+
+steps:
+  # Pin to an immutable commit SHA, not a mutable tag; the comment records the version
+  - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/CI_CD_Security_Cheat_Sheet.html" rel="noopener">CI/CD Security Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/code-security/concepts/secret-security/secret-scanning" rel="noopener">About secret scanning — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/code-security/concepts/secret-security/push-protection" rel="noopener">About push protection — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/security/secure-use" rel="noopener">Secure use reference for GitHub Actions — GitHub Docs (SHA pinning, permissions, untrusted input)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/security/openid-connect" rel="noopener">OpenID Connect — GitHub Docs (short-lived cloud credentials for workflows)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bDG40Y1nPEk" rel="noopener">How to use GitHub Actions with security in mind (Rob Bos) — NDC Conferences</a></li>
+    </ul>
+
+    <h3>The operational verdict: cadence beats perfect scanning</h3>
+    <p>Here is the uncomfortable conclusion of everything above. Teams invest heavily in choosing the perfect scanner and comparatively nothing in the boring habit that actually reduces risk: <strong>upgrading regularly</strong>. A team on a weekly patch cadence is, on the day a new CVE drops, usually one small version bump away from safe. A team that upgrades once a year faces a major-version migration under incident pressure, with breaking API changes, at the worst possible moment. The scanner tells you what is wrong; only cadence lets you act on it quickly. Automate the churn — Dependabot or Renovate opening grouped, scheduled pull requests — and make a decent test suite the thing that gives you the confidence to merge them.</p>
+    <p>The second verdict concerns dependencies nobody is maintaining. <strong>An unmaintained dependency is a vulnerability with a delayed fuse</strong>: it has no known CVE today only because nobody is looking, and when a flaw is finally found there will be no patch, so your options collapse to forking it or ripping it out under pressure. Evaluate maintenance before you adopt — recent releases, more than one maintainer, responsive issue tracker, a security policy — and re-evaluate periodically; OpenSSF Scorecard automates exactly those checks. Weigh the cost of a dependency honestly too: pulling in a large library for one utility function buys you its entire transitive graph, forever. The cheapest supply chain vulnerability to fix is the dependency you never added.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-version-updates" rel="noopener">About Dependabot version updates — GitHub Docs (scheduling and grouping upgrade pull requests)</a></li>
+      <li>[Official] <a href="https://docs.renovatebot.com/" rel="noopener">Renovate documentation — automated dependency updates across ecosystems</a></li>
+      <li>[Official] <a href="https://openssf.org/projects/scorecard/" rel="noopener">OpenSSF Scorecard — automated project health and security-practice checks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sMqOwNHomS4" rel="noopener">SBOM and security scanning in CI/CD: secure your DevOps pipeline with GitHub Actions — Techi Nik</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-input-validation.html">← Input Validation and File Handling</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="10-api-security-review.html">Secure API Design Review →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Supply chain questions have moved from "nice to know" to standard in Indian product-company and services interviews, largely because clients now ask for SBOMs contractually — expect the transitive-CVE question in almost every senior round:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a software supply chain attack, and why is it attractive to an attacker?</summary>
+      <div class="answer"><p>An attack that compromises something you depend on — a library, a base image, a build tool, a CI action, a registry — rather than your application directly. It is attractive because of leverage: compromising one popular library reaches every downstream consumer at once, and the malicious code arrives through your own trusted build pipeline rather than across your firewall, so perimeter controls never see it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a direct and a transitive dependency, and why does the distinction matter?</summary>
+      <div class="answer"><p>A direct dependency is one you declared in your POM or package.json; a transitive dependency is one pulled in by a direct dependency, at any depth. It matters because the transitive set is usually an order of magnitude larger and nobody chose it. Log4j reached most affected applications transitively — teams did not know they had it. Your real attack surface is the resolved graph, not the declared list.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is CVSS, and is a critical CVSS score always a critical risk to you?</summary>
+      <div class="answer"><p>CVSS is a standard severity score derived from a vulnerability's characteristics — attack vector, required privileges, impact. It is a starting point, not a verdict, because the base score describes the flaw in the abstract and knows nothing about your deployment. A critical CVE in a code path you never call, in a component that is not network reachable, is a low practical risk. Add EPSS (probability of exploitation in the wild), the CISA KEV catalogue, reachability and exposure before you decide.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between npm install and npm ci, and which belongs in CI?</summary>
+      <div class="answer"><p><code>npm install</code> resolves against the ranges in package.json and may update the lockfile; <code>npm ci</code> installs strictly from package-lock.json, deletes node_modules first, and fails if the lockfile and manifest disagree. CI must use <code>npm ci</code> — it makes the build deterministic and guarantees you ship the exact versions that were reviewed and scanned. A pipeline running <code>npm install</code> can silently ship a version nobody looked at.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A scanner reports a critical CVE in a transitive dependency. Walk me through how you handle it.</summary>
+      <div class="answer"><p>First locate it: <code>mvn dependency:tree -Dincludes=group:artifact -Dverbose</code> or <code>gradle dependencyInsight --dependency name</code> to find which direct dependency pulls it in and which version won. Second, assess: is the vulnerable code reachable from our paths, is the component exposed, what do EPSS and KEV say — that decides emergency versus ticket. Third, fix in order of preference: upgrade the direct dependency to a release that already picks up the patched version; failing that, force the transitive version through <code>&lt;dependencyManagement&gt;</code> or a Gradle constraint and back it with integration tests; failing that, raise it upstream and record a time-boxed, owned risk acceptance. Last resort is exclusion, which risks a NoClassDefFoundError if the class is actually used. Then add a regression test or a scan gate so it cannot silently return.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Maven decide which version wins when two paths request different versions? How does Gradle differ?</summary>
+      <div class="answer"><p>Maven uses nearest-wins mediation: the version at the shallowest depth in the dependency tree is selected, and at equal depth the first declaration wins. Gradle by default selects the highest requested version. The practical consequence is that on Maven a shallow transitive path can beat a newer version you expected, so you pin explicitly with <code>&lt;dependencyManagement&gt;</code>; on Gradle you express intent with <code>constraints</code>, or <code>strictly</code> when a constraint is not binding enough.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a dependency confusion attack and how do you defend against it?</summary>
+      <div class="answer"><p>Internal packages often have unscoped names. If the build resolves from both a private registry and a public one, an attacker who learns an internal name can publish it publicly with a very high version number, and the resolver prefers the public package — malicious code executes in your build. Defences are structural: use scoped names (<code>@acme/lib</code>) so the namespace is owned, map that scope explicitly to the private registry in .npmrc, run a private registry whose upstream policy never resolves internal names from a public source, defensively register your scope publicly, and use lockfiles with integrity hashes so only reviewed artifacts install. Same discipline on the JVM for internal group IDs.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an SBOM, and what is its actual operational value?</summary>
+      <div class="answer"><p>A machine-readable inventory of every component in a build — name, version, package URL, hashes, licence and dependency relationships — in CycloneDX (OWASP, security-oriented) or SPDX (Linux Foundation, ISO, compliance-oriented) format. Its value is answering one question fast: "which of our services contains this library, at what version?" With SBOMs generated at build time and stored per release, the next Log4Shell is a database query answered in minutes. Without them it is days of grepping repositories with no certainty about services nobody has rebuilt. Generate at build time from the resolved graph; generating later by re-scanning is guesswork.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do most CVEs in a container image come from the base image, and what do you do about it?</summary>
+      <div class="answer"><p>Because a general-purpose base ships an entire userland — OpenSSL, glibc, curl, a shell, a package manager — none of which your application chose, and all of which is CVE surface. Choosing a base is therefore a security decision: prefer slim or distroless images that contain the runtime and your application and little else, which cuts both the finding count and post-exploitation capability since there is no shell to use. Also use multi-stage builds so build tooling never reaches the runtime layer, pin the base by digest rather than a mutable tag, and rebuild on a schedule — an old image accumulates CVEs even when your code has not changed.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Where in the pipeline do you fail the build versus warn, and why?</summary>
+      <div class="answer"><p>Fail hard on newly introduced critical and high findings that have a fix available, on anything listed in the CISA KEV catalogue, and on detected secrets. Warn and track for the pre-existing backlog. The reason is behavioural: switch on a gate that fails a two-hundred-finding legacy backlog and the team disables the gate, so it protects nothing. Blocking the delta keeps the codebase from getting worse while the backlog is burned down on a schedule with named owners and time-boxed exceptions rather than permanent suppressions.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why pin GitHub Actions to a commit SHA instead of a version tag, and what else hardens a pipeline?</summary>
+      <div class="answer"><p>A tag like <code>@v4</code> is a mutable pointer the action owner can move at any time; if that account is compromised, repointing the tag executes attacker code inside every workflow using it on the next run — with your pipeline's credentials. A full commit SHA is immutable, so the code you reviewed is the code that runs (keep the version in a trailing comment, and let Dependabot bump the pin). Beyond pinning: a minimal per-job <code>permissions</code> block instead of a broad default token, OIDC-issued short-lived cloud credentials instead of long-lived keys in repository secrets, no secret access for fork pull requests, isolated ephemeral runners, and never interpolating untrusted PR content into a shell step.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What do SLSA levels describe, and how do signing and verification fit in?</summary>
+      <div class="answer"><p>SLSA describes properties of the build process, not of the code. Build Level 1 means provenance is generated and published; Level 2 adds a signed provenance produced by a hosted build platform, so it cannot be forged locally; Level 3 requires a build platform with strong tamper resistance — isolated, ephemeral builds with non-falsifiable provenance. Sigstore makes the signing practical by removing key management: a short-lived certificate bound to your CI workflow's OIDC identity, signature recorded in the Rekor transparency log, key discarded. The step teams skip is enforcement — an admission controller that verifies the signature and the expected certificate identity at deploy time. Signing without verification produces a signature nobody checks.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A version range in a build file — what is wrong with it, and what does "reproducible build" mean?</summary>
+      <div class="answer"><p>A range means resolution can differ between two builds of the same commit, so what you scanned and reviewed is not necessarily what you shipped, and someone else's release can change your artifact without any commit on your side. Pin exact versions, lock the full graph (package-lock.json with integrity hashes, Gradle dependency locking), and install strictly from the lock in CI. A reproducible build goes further: the same source produces byte-identical artifacts, which needs timestamps and ordering nondeterminism stripped out — in Maven via <code>project.build.outputTimestamp</code>. The payoff is verifiability: anyone can rebuild and confirm the published artifact matches the source, so a tampered release is detectable instead of a matter of trust.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A direct dependency you cannot upgrade pins a vulnerable transitive version. What now?</summary>
+      <div class="answer"><p>Establish exploitability first — is the vulnerable function reachable, is the component exposed, what are EPSS and KEV saying — because that sets the urgency and justifies the effort. Then work down the options: force the patched transitive version through dependencyManagement or a constraint and run the integration suite hard, accepting that you now own an untested combination; check whether a maintained fork or a backported release exists; contribute the upgrade upstream and get it released; apply a compensating control such as disabling the vulnerable feature, blocking the input path at a gateway, or configuring the library to avoid the affected code path; and if none of that is viable, plan replacement of the dependency. Whatever you choose, record it as a dated risk acceptance with a named owner and a review date — never as a silent permanent suppression.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How do you assess whether a new dependency is safe to adopt, and why is an unmaintained library a problem before any CVE exists?</summary>
+      <div class="answer"><p>Assess maintenance and blast radius, not just features: release recency and cadence, more than one active maintainer, a published security policy and disclosure history, responsiveness on issues, whether releases are signed, popularity as a weak proxy for scrutiny, and how large a transitive graph the package drags in. OpenSSF Scorecard automates many of these checks. An unmaintained library is dangerous before any CVE because the absence of findings reflects the absence of anyone looking; when a flaw is eventually reported there will be no patch, so your only options are forking or emergency removal. Maintainer-account compromise and the xz-utils case also show that trust in a maintainer is an assumption, which is why lockfiles, integrity hashes, a short delay before adopting brand-new releases, and signed artifacts are worth the friction. The cheapest supply chain vulnerability to fix is the dependency you never added.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.sup.deps — Dependency scanning with CVE, CVSS, EPSS and reachability prioritisation, OWASP Dependency-Check, Snyk and Dependabot, transitive risk with dependency trees and forced versions, lockfiles, reproducible builds, typosquatting, dependency confusion and maintainer compromise</li>
+      <li>sec.sup.pipeline — Container image scanning and base-image choice, SBOM with CycloneDX and SPDX, provenance and SLSA levels, artifact signing with Sigstore and verification at deploy, CI security gates, secret scanning and push protection, pinned actions and least-privilege OIDC pipeline tokens</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

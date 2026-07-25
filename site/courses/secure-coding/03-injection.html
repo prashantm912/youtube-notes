@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="Injection module: why every injection flaw is the same bug, SQL injection mechanics and impact classes, PreparedStatement and bind parameters, JPQL and Spring Data safety, the unbindable ORDER BY problem, OS command, LDAP, XPath, NoSQL, log and expression-language injection — with verified resources and interview questions.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Injection — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Injection</h1>
+  <p class="standfirst">Injection has stayed near the top of every vulnerability list for twenty years not because it is subtle, but because the pattern that causes it — building a command out of string pieces — is the most natural thing a programmer can do.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Secure Coding track → Injection</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>SQL injection, command injection, LDAP injection, log injection, expression-language injection, XPath and NoSQL injection are usually taught as a list of separate vulnerabilities to memorise. They are not separate. They are one bug wearing different clothes, and once you can see the shape of it you can spot it in an interpreter you have never used before.</p>
+    <p>This module states that shared principle first, then works through the variants a Java and Spring developer actually meets: the JDBC and JPA layer where most real defects live, the process-launching and directory-lookup APIs that get reached for once a year and therefore get reviewed by nobody, the logging framework that turned out to be an interpreter all along, and the Java-specific expression languages that quietly evaluate whatever string you hand them. Everything here is framed as prevention — vulnerable code next to the fixed version — because the point is to write the fixed version by reflex.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>One bug, one fix: data that an interpreter parses as code</h3>
+    <p>Every injection flaw has the same anatomy. Your program builds a string that some interpreter will parse — a SQL engine, a shell, an LDAP directory, an XML query processor, a logging layout, an expression evaluator. Untrusted input is concatenated into that string. The interpreter has no way to know which characters came from you and which came from the request, so it parses the whole thing uniformly, and any character in the input that happens to be <em>syntax</em> in that grammar changes the meaning of the command rather than the value inside it. The attacker did not "inject code" in any exotic sense; they supplied data that crossed the line into the code position because there was no line.</p>
+    <p>That single diagnosis produces a single prescription: <strong>keep data and code in separate channels instead of trying to clean the data</strong>. Every real defense in this module is one implementation of that idea — bind parameters in JDBC, named parameters in JPQL, an argument array instead of a shell string, a structured logging API instead of a formatted message, a fixed expression compiled once with the input supplied as a variable. Filtering and escaping are the alternative approach, and they are the approach that keeps failing, because they require you to model the interpreter's grammar perfectly, including the parts introduced in the version that shipped last week. Note the asymmetry that makes this worth internalising: the parameterised fix is usually the same length as the vulnerable code or shorter, so unlike most security work it costs nothing to adopt.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Injection_Prevention_Cheat_Sheet.html" rel="noopener">Injection Prevention Cheat Sheet — OWASP Cheat Sheet Series (the general rule before the variants)</a></li>
+      <li>[Official] <a href="https://owasp.org/Top10/A03_2021-Injection/" rel="noopener">Injection — OWASP Top 10 category page (scope, CWEs rolled up, prevention checklist)</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/74.html" rel="noopener">CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component — MITRE (the parent class of every injection CWE)</a></li>
+      <li>[Article] <a href="https://learn.snyk.io/lesson/sql-injection/" rel="noopener">SQL injection — Snyk Learn (interactive lesson, vulnerable and fixed side by side)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1DiCtP8Ah3Y" rel="noopener">Web security: Injection Attacks with Java &amp; Spring Boot — Ali Gelenler</a></li>
+    </ul>
+
+    <h3>SQL injection: how concatenation changes a query's structure</h3>
+    <p>Write <code>"SELECT * FROM users WHERE email = '" + email + "'"</code> and you have handed the caller control of the SQL grammar. The value they send is pasted between two quote characters, so a quote inside their value ends the string literal early and everything after it lands in the query as syntax: a boolean condition that is always true, an extra clause, a comment marker that discards the rest of your statement, or a second statement entirely if the driver permits batching. The database is behaving correctly throughout — it received a valid query and ran it. The defect is entirely upstream, in the moment the two strings were joined.</p>
+    <p>Know the impact classes, because interviewers grade on whether you understand the range rather than just the login-bypass demo. <strong>Authentication bypass</strong>: a tampered <code>WHERE</code> clause makes the credential check succeed. <strong>Data exfiltration</strong>: a <code>UNION</code>-style addition appends rows from another table to a result set the page already renders. <strong>Blind injection</strong>: the page shows no data or errors, but a conditional expression changes the response — a different page, a different status code — so the attacker reconstructs data one true/false question at a time. <strong>Time-based blind injection</strong>: even the response is identical, so a conditional sleep turns the answer into a measurable delay; this one works against a completely silent endpoint and is why "we don't show SQL errors" is not a mitigation. And injection is not read-only — a reachable statement can update or delete rows, and on some engines call into the file system or run OS commands through database features. Second-order injection deserves its own mention: input that was safely parameterised on the way in is stored, then later concatenated into a query by a batch job, and the flaw surfaces far from the code that accepted it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/SQL_Injection" rel="noopener">SQL Injection — OWASP Community (mechanics, impact classes, references)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/Blind_SQL_Injection" rel="noopener">Blind SQL Injection — OWASP Community (inferential and time-based extraction)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/sql-injection" rel="noopener">SQL injection — PortSwigger Web Security Academy (the definitive free walkthrough of every variant)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/sql-injection/blind" rel="noopener">Blind SQL injection — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8XVHftQskxk" rel="noopener">SQL Injection Explained — SQL Injection Attack in Cyber Security — Simplilearn</a></li>
+    </ul>
+
+    <h3>PreparedStatement: why binding works at the protocol level</h3>
+    <p>A <code>PreparedStatement</code> is not a fancier way of escaping quotes. The SQL text, with <code>?</code> markers where values go, is sent to the server and parsed <em>first</em> — the statement's structure is fixed and named before any user value exists in the same room as it. The values then travel as separate, typed fields in a distinct part of the wire protocol (or, for drivers that emulate binding client-side, through the driver's own type-correct encoder). By the time your value arrives, the parser has already finished its job and there is no longer any parsing step for the value to influence. A quote inside the value is just a byte in a character field. That is why binding is a categorical defense and escaping is a probabilistic one.</p>
+    <p>Three practical notes. Bind by type, not by <code>toString()</code> — use <code>setLong</code>, <code>setInt</code>, <code>setTimestamp</code> rather than pushing everything through <code>setString</code>, because a numeric column bound as text can force a cast and, on some engines, an index-defeating plan. Reuse the prepared statement across a loop instead of rebuilding it; correctness is the point but the parse-once behaviour is a genuine performance win. And do not let the concatenation sneak back in as a "convenience" — the moment any part of the SQL string is assembled from a variable, the protection is gone for that part, even if the other twelve values are properly bound.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — the value becomes part of the parsed statement
+String sql = "SELECT id, email FROM users WHERE email = '" + email + "'";
+try (Statement st = conn.createStatement();
+     ResultSet rs = st.executeQuery(sql)) { ... }
+
+// FIXED — structure is parsed first, the value arrives as a typed field
+String sql = "SELECT id, email FROM users WHERE email = ? AND status = ?";
+try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    ps.setString(1, email);
+    ps.setInt(2, status);          // bind by type, not via toString()
+    try (ResultSet rs = ps.executeQuery()) { ... }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html" rel="noopener">SQL Injection Prevention Cheat Sheet — OWASP (primary, secondary and last-resort defenses, ranked)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html" rel="noopener">Query Parameterization Cheat Sheet — OWASP (correct parameterised syntax per language and framework)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/javase/tutorial/jdbc/basics/prepared.html" rel="noopener">Using Prepared Statements — Java JDBC Tutorial (Oracle)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/PreparedStatement.html" rel="noopener">PreparedStatement — Java SE 21 API documentation (the full setter contract)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3Xd520EcpFM" rel="noopener">JDBC Tutorial Part 7: PreparedStatement Insert, Select, Update and Delete Operations — Java Guides</a></li>
+    </ul>
+
+    <h3>JPA, JPQL and Spring Data: where Java developers actually get caught</h3>
+    <p>"We use JPA, so we are safe from SQL injection" is the single most common wrong answer in Java security interviews. JPA protects you when you let it build the SQL; it does nothing at all when you build the query text yourself. <code>entityManager.createQuery("FROM User u WHERE u.email = '" + email + "'")</code> is injectable exactly like the JDBC version — Hibernate faithfully translates your JPQL, including the parts an attacker wrote, into SQL. JPQL injection is more constrained than raw SQL injection because JPQL is a smaller grammar over your entity model, but it is quite enough to bypass a condition or read entities the user should not see, and with <code>createNativeQuery</code> you are back to full SQL with nothing between the input and the database.</p>
+    <p>In Spring Data the same fork appears inside <code>@Query</code>. A query string with <code>" + param + "</code> spliced into it is vulnerable; the same query with a <code>:name</code> placeholder and <code>@Param</code> is not, because Spring Data hands the value to the JPA binder. Two more mechanisms are safe by construction and worth naming: <strong>derived query methods</strong> such as <code>findByEmailAndStatus</code>, where the query is generated from the method name at bootstrap and user input can only ever arrive as an argument; and the <strong>Criteria API</strong> (or Spring Data <code>Specification</code>), where you assemble a typed object tree rather than a string, so predicates are built from metamodel attributes and literals become bind parameters automatically. Criteria code is verbose, which is why people abandon it for string building — that abandonment is where the bug is introduced, so prefer Specifications for genuinely dynamic filters.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — JPA does not save you here; the JPQL string is attacker-shaped
+em.createQuery("SELECT u FROM User u WHERE u.email = '" + email + "'", User.class);
+em.createNativeQuery("SELECT * FROM users WHERE email = '" + email + "'");
+
+// FIXED — named parameters, bound by the provider
+em.createQuery("SELECT u FROM User u WHERE u.email = :email", User.class)
+  .setParameter("email", email);
+
+// Spring Data: vulnerable @Query on the left, safe on the right
+@Query("SELECT u FROM User u WHERE u.status = '" + "?#{[0]}" + "'")   // don't
+@Query("SELECT u FROM User u WHERE u.status = :status")               // do
+List&lt;User&gt; findByStatus(@Param("status") String status);
+
+// Safe by construction: derived method name, and Criteria/Specification
+List&lt;User&gt; findByEmailAndStatus(String email, String status);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Injection_Prevention_in_Java_Cheat_Sheet.html" rel="noopener">Injection Prevention in Java Cheat Sheet — OWASP (JDBC, Hibernate and JPA specifics)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html" rel="noopener">Query Methods — Spring Data JPA reference (derived methods, @Query, named parameters, native queries)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-sql-injection-and-how-you-should-prevent-it/" rel="noopener">A beginner's guide to SQL injection and how you should prevent it — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-query" rel="noopener">Spring Data JPA @Query — Baeldung (indexed vs named parameters, native queries, sorting)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2f8FyCTJ6qo" rel="noopener">SQL Injection in Spring Boot — You're Probably Vulnerable — JOptimize</a></li>
+    </ul>
+
+    <h3>What you cannot bind: ORDER BY, identifiers, LIKE, and stored procedures</h3>
+    <p>Bind parameters occupy value positions only. You cannot bind a table name, a column name, a sort direction, or an operator, because those are parsed as part of the statement's structure — the very thing the prepare step froze. So the endpoint that accepts <code>?sort=createdAt&amp;dir=desc</code> and pastes both into an <code>ORDER BY</code> clause is the classic hole that survives an otherwise perfectly parameterised codebase, and it is a favourite interview question precisely because the reflex answer ("use a bind variable") does not work. The only correct answer is an <strong>allow-list</strong>: map the incoming token through a fixed set of permitted column names and reject anything not in the set — do not regex-validate it, do not escape it, look it up. In Spring Data, prefer passing a <code>Sort</code> or <code>Pageable</code> that you constructed from allow-listed properties; Spring Data validates sort properties against the domain model and refuses function calls in <code>Order</code> instances unless you deliberately opt in with <code>JpaSort.unsafe</code> — an API whose name is telling you something. Note also that Spring Data cannot apply dynamic sorting to native queries at all, which is exactly when people start concatenating.</p>
+    <p>Three related traps. <strong><code>LIKE</code> patterns</strong>: binding the parameter stops injection, but <code>%</code> and <code>_</code> inside the bound value are still wildcards to the pattern matcher, so a user-supplied search term can widen the match to everything and turn a lookup into a full scan; escape those two characters within the value and declare an <code>ESCAPE</code> character. <strong>Stored procedures</strong> are frequently offered as an automatic defense and are nothing of the kind — a procedure that builds a statement internally and passes it to dynamic SQL is injectable through its own parameters; a procedure is safe only if it does not concatenate, which is a property of its body, not of being a procedure. <strong>Escaping and sanitising</strong> remain the last-resort answer and keep failing: encodings that reach the parser differently than they reached your filter, engine-specific escape rules, multi-byte character sets, an operator you did not think of, and the perennial problem that a blocklist enumerates badness and reality keeps adding to the list. Use validation as defense in depth on top of parameterisation, never instead of it.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — sort column and direction are structure, so they get concatenated
+String sql = "SELECT * FROM orders ORDER BY " + sortBy + " " + direction;
+
+// FIXED — look the token up in a fixed set; anything unknown is rejected
+private static final Map&lt;String, String&gt; SORTABLE =
+    Map.of("created", "created_at", "total", "total_amount", "id", "id");
+
+String column = SORTABLE.get(sortBy);
+if (column == null) throw new BadRequestException("unknown sort field");
+String dir = "desc".equalsIgnoreCase(direction) ? "DESC" : "ASC";
+String sql = "SELECT * FROM orders ORDER BY " + column + " " + dir; // only literals now
+
+// LIKE: bound, but still escape the wildcard characters inside the value
+String term = raw.replace("!", "!!").replace("%", "!%").replace("_", "!_");
+ps.setString(1, "%" + term + "%");   // query text: ... LIKE ? ESCAPE '!'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/query-methods-details.html" rel="noopener">Defining Query Methods — Spring Data reference (Sort, Pageable, and property validation)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" rel="noopener">Input Validation Cheat Sheet — OWASP (allow-list design, and why validation is not a substitute for parameterisation)</a></li>
+      <li>[Official] <a href="https://docs.jboss.org/hibernate/orm/6.6/userguide/html_single/Hibernate_User_Guide.html" rel="noopener">Hibernate ORM 6.6 User Guide (query parameters, native queries, escaping identifiers)</a></li>
+      <li>[Official] <a href="https://github.com/spring-projects/spring-data-jpa/issues/2504" rel="noopener">Native @Query methods and Sort — spring-data-jpa issue 2504 (why dynamic sorting is refused on native queries)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/sql-injection" rel="noopener">SQL Injection and How to Prevent It? — Baeldung (Java examples including the dynamic-clause case)</a></li>
+    </ul>
+
+    <h3>OS command injection: pass an argument array, not a shell string</h3>
+    <p>The same bug, a different interpreter. <code>Runtime.getRuntime().exec("convert " + filename + " out.png")</code> hands the caller control of the shell's grammar wherever a shell is involved: separators, pipes, backgrounding, substitution, redirection. Java's <code>exec(String)</code> is doubly dangerous because it does its own naive whitespace tokenisation, so what actually gets run bears little relation to what you thought you wrote. The fix is structural, not lexical — use <code>ProcessBuilder</code> (or <code>exec(String[])</code>) and pass the program and each argument as separate array elements. The operating system then receives an argv array directly; the value with the semicolon in it is one argument, because argument boundaries were decided by your array and not by a parser reading a string.</p>
+    <p>Two escalations of that principle. First, <strong>avoid the shell entirely</strong>: never invoke <code>sh -c</code> or <code>cmd.exe /c</code> with an assembled string, because that reintroduces the parser you just eliminated. If you need a pipeline, build it with <code>ProcessBuilder.startPipeline</code> or wire the streams yourself rather than delegating to the shell. Second, ask whether you need a process at all — the overwhelming majority of <code>exec</code> calls in enterprise Java are doing something a library already does in-process (archiving, image conversion, hashing, HTTP), and no process launch means no command injection. Where a process is genuinely required, keep the executable path a fixed constant chosen from an allow-list rather than something derived from a request, validate arguments against a strict pattern as defense in depth, set an explicit working directory, and run the process as a low-privilege account so a mistake is contained.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — one string, tokenised naively, and shell metacharacters survive
+Runtime.getRuntime().exec("convert " + userFile + " -resize 200x200 out.png");
+
+// FIXED — fixed executable, one array element per argument, no shell anywhere
+List&lt;String&gt; cmd = List.of("/usr/bin/convert", userFile, "-resize", "200x200", "out.png");
+ProcessBuilder pb = new ProcessBuilder(cmd);
+pb.directory(sandboxDir);
+pb.redirectErrorStream(true);
+Process p = pb.start();   // userFile is ONE argument, whatever bytes it contains</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html" rel="noopener">OS Command Injection Defense Cheat Sheet — OWASP (the avoid / parameterise / validate ladder)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/Command_Injection" rel="noopener">Command Injection — OWASP Community</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ProcessBuilder.html" rel="noopener">ProcessBuilder — Java SE 21 API documentation (argument lists, pipelines, environment)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/os-command-injection" rel="noopener">OS command injection — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NB2z-L0uY1k" rel="noopener">OWASP Top 10 — Command Injection Attack explained with source code and prevention — Technical MotaBhai</a></li>
+    </ul>
+
+    <h3>LDAP, XPath and NoSQL: the interpreters people forget they are using</h3>
+    <p><strong>LDAP injection</strong> shows up in exactly the place that matters — the login path — because corporate authentication often ends in a directory search whose filter was built by concatenation. LDAP search filters are a small prefix grammar with their own metacharacters (parentheses, the asterisk wildcard, the backslash, the NUL byte, and the boolean operators), so a username containing filter syntax can widen the filter or short-circuit a condition and return a user record the query was never meant to match. Two distinct escaping contexts exist and are commonly confused: values inside a <em>search filter</em> and values inside a <em>distinguished name</em> follow different rules. Do not hand-roll either — use the escaping helper your API provides (Spring LDAP and the JNDI-based helpers both offer one) and build filters through a filter-construction API rather than string formatting. And prefer binding as the user over comparing a password you fetched, so the directory performs the credential check.</p>
+    <p><strong>XPath injection</strong> is the same story against an XML document: a concatenated XPath expression lets input add a predicate or terminate one, exposing nodes outside the intended subtree. Use a variable resolver and precompiled expressions so values are supplied as XPath variables rather than spliced into the expression text. <strong>NoSQL injection</strong> is the modern reincarnation and catches people who assumed "no SQL, no SQL injection". MongoDB's danger is not string syntax but <em>operator injection</em>: if a JSON request body is deserialised straight into a query document, a field whose value is an object containing a query operator turns an equality test into a comparison that matches everything — no quoting involved, purely a structural substitution. Bind request bodies to typed DTOs with declared scalar field types instead of maps or generic documents, build queries with the driver's typed builders or Spring Data repositories, and treat server-side JavaScript evaluation such as <code>$where</code> as something to keep disabled rather than something to sanitise.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — username lands in the filter grammar
+String filter = "(&amp;(objectClass=person)(uid=" + username + "))";
+
+// FIXED — escape the value for the filter context, or use a filter builder
+String filter = "(&amp;(objectClass=person)(uid={0}))";
+ctx.search(base, filter, new Object[] { username }, searchControls);
+
+// NoSQL: bind to a typed field, so a JSON object cannot become an operator
+public record LoginRequest(String username, String password) { }  // not Map&lt;String,Object&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/LDAP_Injection_Prevention_Cheat_Sheet.html" rel="noopener">LDAP Injection Prevention Cheat Sheet — OWASP (filter vs distinguished-name escaping, safe APIs)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/LDAP_Injection" rel="noopener">LDAP Injection — OWASP Community</a></li>
+      <li>[Official] <a href="https://www.mongodb.com/docs/manual/reference/operator/query/where/" rel="noopener">$where — MongoDB manual (server-side evaluation and the reasons to keep it off)</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/943.html" rel="noopener">CWE-943: Improper Neutralization of Special Elements in Data Query Logic — MITRE</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/nosql-injection" rel="noopener">NoSQL injection — PortSwigger Web Security Academy (operator injection explained)</a></li>
+    </ul>
+
+    <h3>Log injection, and the Log4Shell lesson</h3>
+    <p>Logs feel like a write-only sink, which is why <code>log.info("login failed for " + username)</code> passes review everywhere. But a log file is parsed — by humans, by a log shipper, by a dashboard, by an alerting rule. A username containing carriage return and line feed characters produces what looks like additional log lines, so an attacker can forge entries: a fake successful login, a fabricated admin action, a plausible-looking error attributed to someone else. That is <strong>CRLF log forging</strong>, and its real cost is that your incident timeline — the artifact you will rely on when something goes wrong — becomes untrustworthy evidence. Downstream, the same untrusted text can carry markup or formulas into whatever renders the logs, turning a log viewer into a delivery mechanism. Defenses: strip or encode CR and LF from any value before it enters a message, log to a structured format (JSON) where values are encoded fields rather than free text, use parameterised logging (<code>log.info("login failed for {}", username)</code>) so the layout treats the value as a value, and never log secrets or full request bodies "just in case".</p>
+    <p>Then there is the harder lesson. Log4Shell (CVE-2021-44228) was not a log-forging bug — it was the discovery that the logging framework itself contained an interpreter. Log4j's message lookup substitution evaluated <code>${...}</code> expressions found inside logged strings, including JNDI lookups that would fetch and load a remote resource, so merely logging an attacker-controlled string was remote code execution. Every application that logged a user agent or a username was affected, which is essentially every application. The generalisable takeaway, and the one worth saying in an interview: <em>a component that evaluates the data it is handed is an interpreter, and passing untrusted data to an interpreter is injection</em> — no matter how mundane the component looks. Keep logging, template and expression libraries patched, disable evaluation features you do not need, and treat "does this thing evaluate my input?" as a question you ask of every dependency.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — line breaks in the value forge new log entries
+log.info("login failed for " + username);
+
+// FIXED — parameterised logging plus a scrub of the line-break characters
+log.info("login failed for {}", username.replaceAll("[\\r\\n]", "_"));
+
+// Better still: structured logging, where the value is an encoded field
+log.atInfo().addKeyValue("event", "login_failed")
+            .addKeyValue("username", username)
+            .log("authentication rejected");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/Log_Injection" rel="noopener">Log Injection — OWASP Community (CRLF forging and downstream impact)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP (what to log, what never to log, how to encode it)</a></li>
+      <li>[Official] <a href="https://logging.apache.org/log4j/2.x/security.html" rel="noopener">Security Vulnerabilities — Apache Log4j project (the CVE-2021-44228 record and mitigations)</a></li>
+      <li>[Official] <a href="https://nvd.nist.gov/vuln/detail/CVE-2021-44228" rel="noopener">CVE-2021-44228 — NVD entry (scope, affected versions, references)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uyq8yxWO1ls" rel="noopener">Log4J Vulnerability (Log4Shell) Explained — for Java developers — Java Brains</a></li>
+    </ul>
+
+    <h3>Expression-language and template injection: the Java-specific blind spot</h3>
+    <p>The JVM ecosystem is unusually rich in string-evaluating engines, and that richness is a liability. <strong>SpEL</strong> is the obvious one: <code>parser.parseExpression(userSuppliedString).getValue()</code> against a default evaluation context gives the caller access to type references and reflection, which is remote code execution rather than a data leak. The same applies to <strong>MVEL</strong>, <strong>OGNL</strong>, Jakarta Expression Language, and any rules engine whose rules are strings. The fix is the standard shape once more: the expression is code, so the expression must be a constant your program owns, compiled once, with untrusted input supplied as a <em>variable</em> or root object rather than concatenated into the expression text. If user-authored expressions are a genuine product requirement, run them in a restricted evaluation context (<code>SimpleEvaluationContext</code> rather than <code>StandardEvaluationContext</code>) that exposes only property access on an allow-listed root, and treat that as a sandbox to defend, not a solved problem.</p>
+    <p><strong>Server-side template injection</strong> is the same defect in the view layer, and it has a distinctive Java flavour. The rule is simple: templates are code, template <em>data</em> is data. Selecting a template by a user-controlled name, or worse assembling template source from request values, hands the caller the template engine's own language — and in Thymeleaf, fragment and expression syntax reaches SpEL, so a template-level injection escalates to the same code execution as above. Keep template names fixed or allow-listed, pass everything variable through the model, never build template source at runtime, and be equally careful with the "expression fragment" features in Spring Data <code>@Query</code> and Spring Security annotations that quietly evaluate SpEL — a <code>@PreAuthorize</code> string assembled from configuration is an expression-injection sink.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE — the user's string IS the program
+Expression e = parser.parseExpression(userInput);
+Object result = e.getValue(new StandardEvaluationContext(order));
+
+// FIXED — fixed expression, user data supplied as a variable, restricted context
+Expression e = parser.parseExpression("#candidate == order.customerId");  // constant
+EvaluationContext ctx = SimpleEvaluationContext.forReadOnlyDataBinding()
+        .withRootObject(order).build();
+ctx.setVariable("candidate", userInput);
+Boolean ok = e.getValue(ctx, Boolean.class);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/expressions.html" rel="noopener">Spring Expression Language (SpEL) — Spring Framework reference (evaluation contexts and their privileges)</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/917.html" rel="noopener">CWE-917: Expression Language Injection — MITRE</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/server-side-template-injection" rel="noopener">Server-side template injection — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://portswigger.net/research/server-side-template-injection" rel="noopener">Server-Side Template Injection — PortSwigger Research (the paper that named the class)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-expression-language" rel="noopener">Spring Expression Language Guide — Baeldung</a></li>
+    </ul>
+
+    <h3>Defense summary, and what testing actually catches</h3>
+    <p>Every row below is the same instruction: move the untrusted value out of the code channel. Memorise the table as a shape rather than as a list, and when you meet an interpreter that is not on it — a GraphQL filter, a search-engine query language, a spreadsheet formula, a prompt — ask the two questions that generate the right row: <em>what grammar will parse this string, and does this API give me a way to supply values separately?</em></p>
+    <table>
+      <caption>Interpreter to parameterisation mechanism</caption>
+      <thead><tr><th>Interpreter</th><th>Vulnerable pattern</th><th>Separation mechanism</th></tr></thead>
+      <tbody>
+        <tr><td>SQL over JDBC</td><td>Concatenated <code>Statement</code> text</td><td><code>PreparedStatement</code> with typed bind parameters</td></tr>
+        <tr><td>JPQL / HQL</td><td>Concatenated <code>createQuery</code> string</td><td><code>:named</code> parameters, derived methods, Criteria / Specification</td></tr>
+        <tr><td>SQL identifiers, ORDER BY</td><td>Column or direction from the request</td><td>Allow-list lookup — binding is impossible here</td></tr>
+        <tr><td>Operating system</td><td><code>exec</code> with an assembled string, or a shell</td><td><code>ProcessBuilder</code> with an argument list, no shell</td></tr>
+        <tr><td>LDAP</td><td>Concatenated search filter or DN</td><td>Filter builder plus context-correct escaping helper</td></tr>
+        <tr><td>XPath</td><td>Concatenated expression</td><td>Compiled expression with a variable resolver</td></tr>
+        <tr><td>MongoDB</td><td>JSON body bound to a map or document</td><td>Typed DTO with scalar fields, driver query builders</td></tr>
+        <tr><td>Logging</td><td>Message built by concatenation</td><td>Parameterised or structured logging, line breaks scrubbed</td></tr>
+        <tr><td>SpEL / MVEL / OGNL</td><td>Expression text from input</td><td>Constant expression, input as a variable, restricted context</td></tr>
+        <tr><td>Templates</td><td>Template name or source from input</td><td>Fixed template, data through the model only</td></tr>
+      </tbody>
+    </table>
+    <p>On testing: a good SAST tool is genuinely effective against this class because injection is a taint-flow problem — source (request parameter) to sink (query execution) with no sanitiser in between — which static analysis models well. Expect it to find plain concatenation into <code>Statement</code>, <code>createQuery</code>, <code>exec</code> and template APIs. Expect it to <em>miss</em>: taint that travels through a database round trip (second-order injection), flows through reflection or dependency-injected indirection it cannot resolve, custom "sanitiser" methods it charitably assumes are correct, string building in configuration files or SQL held in resources, and everything about the ORDER BY allow-list problem, since the concatenation there is intentional and only the missing allow-list makes it a bug. Complement SAST with DAST or an interactive proxy against a running instance, with dependency scanning (Log4Shell was a dependency finding, not a code finding), and with a code-review habit that treats any string-built query as a defect regardless of how safe the inputs look today.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection" rel="noopener">Testing for SQL Injection — OWASP Web Security Testing Guide</a></li>
+      <li>[Official] <a href="https://owasp.org/www-community/Source_Code_Analysis_Tools" rel="noopener">Source Code Analysis Tools — OWASP Community (the SAST landscape, free and commercial)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-project-benchmark/" rel="noopener">OWASP Benchmark Project (measuring what a scanner really detects, injection included)</a></li>
+      <li>[Article] <a href="https://find-sec-bugs.github.io/" rel="noopener">Find Security Bugs — SpotBugs plugin for Java security defects (SQL, command, LDAP, EL injection detectors)</a></li>
+      <li>[Article] <a href="https://docs.semgrep.dev/" rel="noopener">Semgrep documentation — writing and running taint-mode rules in CI</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-owasp-top-10.html">← The OWASP Top 10 Tour</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="04-xss-csp.html">XSS and Content Security Policy →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Injection is the security topic Indian product and service companies ask about most, and it appears in backend rounds as often as in security rounds — the JPA questions in particular separate candidates who have shipped Spring code from candidates who have read about it:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is SQL injection, in one sentence?</summary>
+      <div class="answer"><p>Untrusted input is concatenated into a SQL string, so characters that are syntax in SQL change the structure of the query instead of being treated as a value — letting the caller alter conditions, read other tables, or modify data. The database is not malfunctioning; it is faithfully running the query your code assembled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do prepared statements prevent SQL injection?</summary>
+      <div class="answer"><p>The SQL text with <code>?</code> placeholders is sent and parsed first, so the statement's structure is fixed before any user value is involved. Values then travel separately as typed protocol fields, and there is no remaining parse step for them to influence — a quote inside a value is just a character in a string. That is why binding is a categorical fix rather than escaping, which merely tries to neutralise characters and depends on modelling the engine's grammar perfectly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Statement vs PreparedStatement — differences beyond security?</summary>
+      <div class="answer"><p>PreparedStatement is precompiled, so repeated executions reuse the parsed plan, which helps throughput in loops and batches. It is typed, so <code>setInt</code> / <code>setTimestamp</code> avoid conversion bugs and cast-induced bad plans. It handles binary and large values properly. Statement is only appropriate for fully static SQL with no external input, and even then PreparedStatement is the better habit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name three interpreters other than SQL that can be injected, and the fix for each.</summary>
+      <div class="answer"><p>The operating system shell — fixed by passing an argument array to ProcessBuilder and avoiding a shell. LDAP — fixed by a filter-building API with context-correct escaping. A logging framework or expression evaluator — fixed by parameterised or structured logging, and by keeping expressions constant with input supplied as variables. The pattern is identical in all three: separate the data channel from the code channel.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is JPA automatically safe from SQL injection?</summary>
+      <div class="answer"><p>No. JPA is safe when it generates the query — derived method names, Criteria API, Specifications, and JPQL with named parameters all bind values. It is not safe when you build the query text yourself: <code>createQuery</code> or <code>@Query</code> with concatenated strings is injectable JPQL, and <code>createNativeQuery</code> with concatenation is plain SQL injection with an ORM logo on it. The protection comes from the binding, not from the letters J-P-A.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A user picks the sort column and direction. You cannot bind either. How do you make it safe?</summary>
+      <div class="answer"><p>Allow-list. Keep a fixed map from public sort tokens to real column names, look the incoming value up, reject anything absent, and normalise the direction to exactly ASC or DESC. Never regex-validate or escape the identifier — enumerate it. In Spring Data, construct <code>Sort</code> or <code>Pageable</code> from allow-listed properties and let the framework validate them against the domain model; be aware that dynamic sorting is not supported on native queries, which is precisely the situation where people start concatenating.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Are stored procedures an automatic defense against SQL injection?</summary>
+      <div class="answer"><p>No. A stored procedure is safe only if its body does not build a statement by concatenation. Procedures that assemble dynamic SQL internally and execute it are injectable through their own parameters, and the injection is now hidden inside the database where application scanners will not see it. Calling a procedure with bound parameters from Java is fine; assuming the procedure is safe because it is a procedure is not.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is blind SQL injection, and why doesn't hiding error messages fix it?</summary>
+      <div class="answer"><p>Blind injection extracts data without the application ever displaying it: the attacker injects a condition and infers the answer from an observable difference — a different page, a different status code, or, in the time-based variant, a deliberate delay. Since the channel is the response's behaviour rather than its content, suppressing error messages removes a convenience, not the vulnerability. Hiding errors is good practice for other reasons; it is not a fix.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is <code>Runtime.exec</code> with a concatenated string worse than ProcessBuilder with a list?</summary>
+      <div class="answer"><p>A single string has to be split into a program and arguments by someone, and that someone parses metacharacters. Java's <code>exec(String)</code> tokenises naively on whitespace, and if a shell is involved the caller also gets separators, pipes, redirection and substitution. Passing a list means argument boundaries are decided by your array and delivered to the OS as argv, so a value containing a semicolon is one argument. Better still, ask whether the process is needed at all — a library call cannot be command-injected.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does binding a LIKE parameter still cause a problem, and what do you do about it?</summary>
+      <div class="answer"><p>Binding stops injection but not wildcards: <code>%</code> and <code>_</code> inside the bound value are still pattern syntax, so a user-supplied term can match far more rows than intended and turn a lookup into a full scan — a denial-of-service and a data-exposure issue rather than a code-execution one. Escape those characters within the value and declare an ESCAPE character in the query, and cap result sizes independently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is escaping considered a last-resort defense rather than a primary one?</summary>
+      <div class="answer"><p>Because it requires you to model the interpreter's grammar exactly, in every context, forever. Escape rules differ per engine and per position (a value inside a string literal, an identifier, an LDAP filter, an LDAP distinguished name); character-set and encoding differences can let a sequence reach the parser differently from how it reached your filter; and blocklists enumerate a badness set that reality keeps extending. Parameterisation removes the parsing step entirely instead of trying to win an argument with it, so escaping is reserved for the positions where binding is genuinely impossible — and there it is paired with an allow-list.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What was the Log4Shell lesson, beyond "patch Log4j"?</summary>
+      <div class="answer"><p>That a logging framework was an interpreter. Log4j evaluated substitution expressions inside logged strings, including lookups that fetched and loaded a remote resource, so merely logging an attacker-controlled header was remote code execution. The generalisation is that any component which evaluates the data you hand it is an interpreter, and untrusted data reaching an interpreter is injection — regardless of how boring the component looks. Practically: keep evaluation features disabled unless needed, keep such libraries patched, scan dependencies rather than only code, and never assume a sink is inert because it is "just logging".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain NoSQL operator injection in MongoDB, and how the fix differs from SQL.</summary>
+      <div class="answer"><p>There is no string grammar to break — the query is a document. If a JSON request body is deserialised into a map or generic document and used as the query, a field whose value is an object containing a query operator turns an equality test into a comparison that matches broadly, so no quoting or escaping is involved at all. The fix is therefore structural typing rather than parameterisation: bind the body to a DTO with declared scalar fields, build queries with typed builders or repositories, reject unexpected fields, and keep server-side evaluation such as <code>$where</code> disabled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Where does SpEL injection appear in an ordinary Spring application, and how do you make expression evaluation safe?</summary>
+      <div class="answer"><p>Anywhere an expression string is influenced by input or by mutable configuration: parsing a user-supplied rule, Thymeleaf fragments and template names, expression fragments inside Spring Data <code>@Query</code>, and <code>@PreAuthorize</code> strings assembled at runtime. Evaluating input against a StandardEvaluationContext exposes type references and reflection, which is code execution rather than a data leak. Keep the expression a compiled constant, pass input as a variable or root object, and where user-authored expressions are a real requirement use SimpleEvaluationContext with read-only data binding over an allow-listed root — and treat it as a sandbox you must defend.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is second-order injection, and why do scanners miss it?</summary>
+      <div class="answer"><p>Input is stored safely — correctly parameterised on the way in — and later read back and concatenated into a query by a different component, often a batch job, report or admin screen. The vulnerable code is nowhere near the code that accepted the value. Static analysis loses the taint at the database boundary because it cannot follow a value out through an insert and back in through a select, and dynamic testing misses it because the effect is delayed and triggered elsewhere. The defense is a rule rather than a tool: parameterise at every sink, including for data that came from your own database, since "trusted source" is not a property of a value once it has been stored.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A team says "we validate all input, so injection is handled". Critique that.</summary>
+      <div class="answer"><p>Validation and parameterisation solve different problems. Validation enforces business shape — this is an email, this is a positive integer, this is one of five statuses — and is valuable defense in depth. It does not make a concatenated query safe, because the moment a field legitimately contains free text (a name with an apostrophe, a search term, an address) the filter must either reject valid data or let syntax through. It also has to be applied at every entry point forever, whereas binding is applied at the sink where the risk actually is. Correct answer: parameterise at the sink, allow-list where binding is impossible, and validate on top of both — never instead of them.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.inj.sql — SQL injection mechanics, prepared statements, JPA and JPQL safety, dynamic query pitfalls</li>
+      <li>sec.inj.other — Command, LDAP and log injection, expression-language injection, ORM-specific traps</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

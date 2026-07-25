@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CSRF, SSRF and deserialization module: why browsers attach cookies automatically, SameSite and synchronizer tokens, Spring Security's CSRF filter, SSRF against cloud metadata and IMDSv2, safe deserialization with ObjectInputFilter and JSON schemas, and fail-open error handling — with verified resources and interview questions.">
+  <title>CSRF, SSRF and Deserialization — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: CSRF, SSRF and Deserialization</h1>
+  <p class="standfirst">Three flaw families, one root cause: the server trusts something it has no business trusting — the origin of a request, a URL somebody handed it, or a byte stream it was told to turn back into objects.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Secure Coding track → CSRF, SSRF and Deserialization</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Injection and XSS are about data that gets treated as code. This module is about a subtler mistake: <em>misplaced trust in a channel</em>. In cross-site request forgery the server trusts that a request carrying a valid session cookie was intended by the user. In server-side request forgery it trusts a URL a user supplied and then fetches it from a network position the user could never reach. In insecure deserialization it trusts a byte stream enough to let that stream decide which classes the runtime constructs.</p>
+    <p>Each section pairs the mechanism with its defense, and every code example comes as a vulnerable/fixed pair, because the fixes are small and the bugs are recurring. The module closes on the category that quietly enables all three in production — exceptional conditions: the <code>catch</code> block that swallows an authorization failure and carries on, the error handler that defaults to "allowed", and the stack trace that hands an attacker your class names, framework versions and file paths.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>CSRF: the browser as a confused deputy — and why a header token is immune</h3>
+    <p>Cross-site request forgery works because of one browser behaviour: when a request goes to <code>bank.example</code>, the browser attaches every cookie scoped to <code>bank.example</code>, and it does so regardless of which page initiated the request. An attacker-controlled page can therefore cause the victim's browser to issue an authenticated request — an auto-submitting form, an image tag pointing at a state-changing URL, a fetch with credentials — and the server sees a perfectly valid session. The attacker cannot read the response (the same-origin policy still holds), so CSRF is a <em>write</em> attack: transfer money, change an email address, add an admin, delete a record. The classic name for it is the confused deputy: the browser has authority, the attacker has intent, and the server cannot tell them apart.</p>
+    <p>The key insight, and the single most-asked follow-up in interviews: this only works when the credential is <strong>ambient</strong>. A cookie is attached by the browser automatically, so the attacker gets it for free. An <code>Authorization: Bearer &lt;token&gt;</code> header is not — some JavaScript on your origin has to read the token from memory or storage and set the header explicitly, and an attacker's page cannot run JavaScript on your origin nor read your storage. So a pure token-in-header API is structurally immune to CSRF; an API that keeps the same token in a cookie is not, no matter that the token happens to be a JWT. The vulnerability tracks the transport, not the credential format.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html" rel="noopener">Cross-Site Request Forgery Prevention Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/CSRF" rel="noopener">Cross-site request forgery (CSRF) — MDN Web Security</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/csrf" rel="noopener">Cross-site request forgery (CSRF) — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://owasp.org/www-community/attacks/csrf" rel="noopener">Cross Site Request Forgery (CSRF) — OWASP Community</a></li>
+      <li>[Article] <a href="https://cwe.mitre.org/data/definitions/352.html" rel="noopener">CWE-352: Cross-Site Request Forgery — MITRE</a></li>
+    </ul>
+
+    <h3>SameSite cookies: the strong default, and exactly what it does not cover</h3>
+    <p><code>SameSite</code> attacks the mechanism rather than the symptom: it tells the browser not to attach the cookie on cross-site requests at all. <code>SameSite=Strict</code> withholds the cookie on every cross-site request including plain top-level navigation, which means arriving at your site from a search result or an email link looks logged-out — usually unacceptable for consumer apps. <code>SameSite=Lax</code> is the practical default (and the browser default when the attribute is absent): the cookie is sent on top-level <em>safe</em> navigations — a user clicking a link — but withheld on cross-site POSTs, iframes, images and background fetches. That single line kills the overwhelming majority of classic CSRF. <code>SameSite=None</code> re-enables cross-site sending and requires <code>Secure</code>; use it only for genuine third-party embedding, and expect it to keep shrinking as browsers restrict third-party cookies.</p>
+    <p>Do not treat it as complete protection, and be ready to say why in an interview. Lax still permits cross-site <code>GET</code> navigation, so any state-changing endpoint reachable by GET remains forgeable. Some browsers apply a short "Lax-allowing-unsafe" grace window to freshly issued cookies. Sibling subdomains are <em>same-site</em> but not <em>same-origin</em>, so an XSS or a takeover on <code>promo.example.com</code> can forge requests to <code>app.example.com</code>. And schemeful same-site means <code>http://</code> and <code>https://</code> versions of a host count as different sites. SameSite is a very good default layer; the token check underneath it is what you actually rely on.</p>
+    <pre class="code-block" data-label="HTTP"><code>Set-Cookie: SESSION=abc123; Path=/; Secure; HttpOnly; SameSite=Lax
+
+# Spring Boot equivalent (application.yml)
+server.servlet.session.cookie:
+  same-site: lax
+  secure: true
+  http-only: true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie" rel="noopener">Set-Cookie — MDN HTTP reference (SameSite, Secure, HttpOnly attributes)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies" rel="noopener">Using HTTP cookies — MDN guide</a></li>
+      <li>[Article] <a href="https://web.dev/articles/samesite-cookies-explained" rel="noopener">SameSite cookies explained — web.dev (Google)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/schemeful-samesite" rel="noopener">Schemeful Same-Site — web.dev (why http and https count as different sites)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/csrf/bypassing-samesite-restrictions" rel="noopener">Bypassing SameSite cookie restrictions — PortSwigger Web Security Academy</a></li>
+    </ul>
+
+    <h3>Synchronizer tokens, double submit, origin checks — and never a state change on GET</h3>
+    <p>The canonical defense is the <strong>synchronizer token pattern</strong>: the server generates a random, per-session (or per-request) token, stores it server-side against the session, embeds it in every form or hands it to the SPA, and rejects any unsafe request whose submitted token does not match. It works because the attacker's page cannot read your response bodies and therefore cannot learn the token. Its cost is server-side state, which is exactly why the <strong>double-submit cookie</strong> exists: the server sets the token in a cookie and requires the same value in a header or form field, comparing the two without storing anything. Both arrive, but only your own JavaScript can copy the cookie into the header — an attacker's page can cause the cookie to be sent, not read.</p>
+    <p>Be honest about double submit's weaknesses, because that is the discriminating question. It leans on the same-site cookie boundary, so anything that can write a cookie for your domain breaks it: a compromised or attacker-controlled sibling subdomain, a cookie-injection bug, or an intermediary that sets cookies. The hardened variant signs or HMACs the token to the session so a planted value cannot be forged. Layer <strong>origin verification</strong> on top: on unsafe methods, compare the <code>Origin</code> header (falling back to <code>Referer</code>) against an allow-list of your own origins and reject mismatches — cheap, and it catches the cases the token pattern misses. Finally the rule that underwrites all of this: <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code> must be safe and side-effect free. A "delete" implemented as a GET is forgeable with a single image tag no matter how good your token scheme is, and it will also be triggered by prefetchers, link scanners and antivirus proxies.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Origin" rel="noopener">Origin — MDN HTTP header reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies" rel="noopener">Cookies — MDN practical implementation guide</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/csrf/preventing" rel="noopener">How to prevent CSRF — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/csrf/bypassing-token-validation" rel="noopener">Bypassing CSRF token validation — PortSwigger (how weak token checks fail)</a></li>
+      <li>[Article] <a href="https://learn.snyk.io/lesson/csrf-attack/" rel="noopener">Cross-site request forgery — Snyk Learn</a></li>
+    </ul>
+
+    <h3>Spring Security's CSRF filter: on by default, and when disabling it is actually correct</h3>
+    <p>Spring Security enables CSRF protection for you: any request with an unsafe method (anything other than GET, HEAD, TRACE, OPTIONS) must carry a valid token or it is rejected with 403. The token comes from a <code>CsrfTokenRepository</code> — session-backed by default, or <code>CookieCsrfTokenRepository.withHttpOnlyFalse()</code> when a JavaScript front end needs to read it. That cookie form is what Angular's <code>HttpClient</code> expects out of the box: it looks for a cookie named <code>XSRF-TOKEN</code> and echoes it in an <code>X-XSRF-TOKEN</code> header, which is the double-submit pattern wired end to end. On Spring Security 6 you also normally set a <code>SpaCsrfTokenRequestHandler</code> so the deferred token is materialised for single-page clients.</p>
+    <p>Now the judgement call, which is a genuine interview separator. Disabling CSRF is <em>correct</em> for a stateless API whose only credential is an <code>Authorization</code> header — no cookie, no ambient authority, nothing for a cross-site page to abuse; pair it with <code>SessionCreationPolicy.STATELESS</code> so no session cookie sneaks back in. Disabling it is <em>wrong</em> in the far more common case: a browser app with a session cookie where a form POST started returning 403, so somebody added <code>csrf.disable()</code> to make the error go away. That is not a fix, it is the removal of the control that was working. The right response to that 403 is to find out why the token is not reaching the server — a form missing the hidden field, an SPA not echoing the cookie, a proxy stripping the header, or a login that rotated the session without rotating the token.</p>
+    <pre class="code-block" data-label="Java"><code>// WRONG: switched off because a form POST returned 403 and the deadline was close
+http.csrf(csrf -&gt; csrf.disable());
+
+// RIGHT for a cookie-session browser app: keep it on, hand the SPA a readable token
+http.csrf(csrf -&gt; csrf
+        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+        .csrfTokenRequestHandler(new SpaCsrfTokenRequestHandler()));
+
+// RIGHT for a stateless API: the credential is a header, never a cookie
+http.csrf(AbstractHttpConfigurer::disable)
+    .sessionManagement(s -&gt; s.sessionCreationPolicy(SessionCreationPolicy.STATELESS));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html" rel="noopener">Cross Site Request Forgery (CSRF) for Servlet Environments — Spring Security reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/features/exploits/csrf.html" rel="noopener">CSRF — Spring Security reference (the attack, SameSite and token trade-offs)</a></li>
+      <li>[Official] <a href="https://angular.dev/best-practices/security" rel="noopener">Security best practices — Angular (the HttpClient XSRF token convention)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-csrf" rel="noopener">CSRF Protection with Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8QDORHQvdu8" rel="noopener">#31 Spring Security | CSRF Token — Telusko</a></li>
+    </ul>
+
+    <h3>SSRF: the server fetches your URL, from inside the perimeter</h3>
+    <p>Server-side request forgery is what happens when an application takes a URL (or a hostname, or anything that becomes one) from a user and then fetches it. The feature is usually innocent: render a link preview, import an image from a URL, call a customer-configured webhook, fetch an XML schema, generate a PDF from a page. The vulnerability is not the fetch — it is <em>who is doing the fetching</em>. Your server sits inside the VPC, behind the firewall, on the management network, holding an instance role. A request it makes reaches places the internet cannot: internal admin panels with no authentication because "it's internal", databases and caches bound to private addresses, service-mesh control planes, Kubernetes APIs, and other internal HTTP endpoints that were never designed to be reached by a stranger.</p>
+    <p>Two properties make SSRF nastier than it first looks. First, it is not limited to HTTP — depending on the client library, schemes like <code>file://</code>, <code>gopher://</code> or <code>ftp://</code> may be honoured, turning a URL fetch into local file disclosure. Second, it often works <em>blind</em>: the response never comes back to the attacker, but timing differences, error messages, or an out-of-band callback reveal whether the internal request succeeded, which is enough to map an internal network. And if your handler reflects the fetched body back to the caller, you have converted the server into a general-purpose proxy for your own private network.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html" rel="noopener">Server-Side Request Forgery Prevention Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/" rel="noopener">A10:2021 — Server-Side Request Forgery — OWASP Top 10</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/ssrf" rel="noopener">Server-side request forgery (SSRF) — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://cwe.mitre.org/data/definitions/918.html" rel="noopener">CWE-918: Server-Side Request Forgery — MITRE</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=87GgU-SLOc4" rel="noopener">2021 OWASP Top Ten: Server Side Request Forgery — F5 DevCentral Community</a></li>
+    </ul>
+
+    <h3>Cloud metadata: the credential-theft scenario, and IMDSv2</h3>
+    <p>The scenario every cloud interview wants to hear is the instance metadata service. Every major cloud exposes a link-local address — <code>169.254.169.254</code> on AWS, GCP and Azure — that a VM can query to learn about itself. On AWS that includes, under <code>iam/security-credentials/</code>, temporary credentials for the instance's IAM role. It is unauthenticated by design, because "only code running on this instance can reach it". SSRF breaks that assumption exactly: your application <em>is</em> code running on that instance, and an attacker who can steer its outbound fetch can ask it to retrieve the role's access key, secret and session token, then use them from anywhere until they expire. That is the mechanism behind several of the largest cloud breaches on record — an SSRF in a web tier, escalated into read access on object storage via stolen role credentials.</p>
+    <p><strong>IMDSv2</strong> is the mitigation and you should be able to explain <em>why</em> it works. It makes metadata access session-oriented: a client must first send a <code>PUT</code> to obtain a short-lived token, then present that token in an <code>X-aws-ec2-metadata-token</code> header on every subsequent request. Requests with a token hop limit above one are also refused, so the response cannot travel back through a container network hop. A typical SSRF gives the attacker control over a URL, not over the method, the headers or the multi-step flow — so the PUT-then-GET handshake is out of reach for most SSRF primitives. Set the instance metadata options to <code>http-tokens: required</code> so v1 is switched off entirely; leaving both enabled leaves the old path open. Treat this as one layer among several, not a substitute for validating the URL.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html" rel="noopener">Configure the instance metadata service (IMDSv2 options) — AWS EC2 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-metadata-transition-to-version-2.html" rel="noopener">Transition to using IMDSv2 — AWS EC2 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/security/defense-in-depth-open-firewalls-reverse-proxies-ssrf-vulnerabilities-ec2-instance-metadata-service/" rel="noopener">Defense in depth: open firewalls, reverse proxies and SSRF vulnerabilities with the EC2 instance metadata service — AWS Security Blog</a></li>
+      <li>[Article] <a href="https://owasp.org/www-community/attacks/Server_Side_Request_Forgery" rel="noopener">Server Side Request Forgery — OWASP Community</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=seaAfeNq1BI" rel="noopener">What is SSRF (server-side request forgery)? — Radware</a></li>
+    </ul>
+
+    <h3>Defending against SSRF: allow-list, resolve the IP, refuse redirects, isolate egress</h3>
+    <p>Start from the strongest position: does the user need to supply a URL at all? Very often the requirement is "fetch from one of these three partners", which becomes an identifier the user picks and a URL you construct. When a URL genuinely must come in, <strong>allow-list</strong> the destinations — scheme, host, port, and path prefix if you can — rather than block-listing internal ranges. Block-lists lose: there are too many spellings of an address (decimal, octal, hex, IPv6-mapped, shortened forms), too many redirect tricks, and the internal ranges you must cover keep growing. An allow-list of two hostnames is a rule you can read and reason about.</p>
+    <p>Then validate what the hostname actually <em>resolves to</em>, not just how it is spelled. Resolve the name, check every returned address against your policy — reject loopback, link-local, private and any-local ranges — and connect to a validated address, so a name that resolves once to a public address and again to <code>169.254.169.254</code> (DNS rebinding) cannot slip through the gap between check and use. Disable redirect following, or re-run the same validation on every hop, because a permitted host that answers with a redirect to an internal address defeats hostname-only checks in one step. Never reflect the raw upstream response, status code or error text back to the caller — that is what turns a blind SSRF into a readable one. And back all of it with network controls: run the fetching component in a subnet whose egress is restricted to the destinations it needs, or send the fetch through a dedicated forward proxy that enforces the allow-list outside your application code.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: whatever URL arrives is fetched from inside the VPC, with the instance role attached
+@GetMapping("/preview")
+String preview(@RequestParam String url) {
+    return restClient.get().uri(url).retrieve().body(String.class);   // reaches 169.254.169.254 too
+}
+
+// FIXED: allow-list the host, validate the resolved addresses, refuse redirects, hide the body
+private static final Set&lt;String&gt; ALLOWED = Set.of("images.partner.example", "cdn.partner.example");
+
+String preview(String url) throws Exception {
+    URI uri = URI.create(url);
+    if (!"https".equals(uri.getScheme()) || !ALLOWED.contains(uri.getHost())) {
+        throw new BadRequestException("destination not permitted");
+    }
+    for (InetAddress ip : InetAddress.getAllByName(uri.getHost())) {
+        if (ip.isLoopbackAddress() || ip.isLinkLocalAddress()
+                || ip.isSiteLocalAddress() || ip.isAnyLocalAddress()) {
+            throw new BadRequestException("destination not permitted");
+        }
+    }
+    HttpClient client = HttpClient.newBuilder()
+            .followRedirects(HttpClient.Redirect.NEVER)   // re-validate every hop, or allow none
+            .build();
+    return summarise(client.send(HttpRequest.newBuilder(uri).build(), ofString()).body());
+}                                                        // never return the raw upstream response</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" rel="noopener">Input Validation Cheat Sheet — OWASP (allow-list first, and validating URLs safely)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/ssrf/blind" rel="noopener">Blind SSRF vulnerabilities — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://learn.snyk.io/lesson/ssrf-server-side-request-forgery/" rel="noopener">Server-side request forgery (SSRF) — Snyk Learn</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HuQPcTKnh04" rel="noopener">Server-side Request Forgery SSRF Demo — Snyk</a></li>
+    </ul>
+
+    <h3>Insecure deserialization: a byte stream that tells the runtime what to build</h3>
+    <p>Serialization turns an object graph into bytes; deserialization turns bytes back into an object graph. The security problem is in that second sentence. A native serialized stream does not merely carry <em>data</em> — it names <em>types</em>, and the runtime obeys. Deserializing untrusted input therefore hands an outsider partial control over which classes get instantiated and which of their lifecycle hooks (<code>readObject</code>, <code>readResolve</code>, <code>readExternal</code>, and the equivalents in other languages) execute. All of this happens <em>during</em> deserialization, before your code has looked at the result and decided whether it likes it. Validating the object afterwards is far too late; the damage is done on the way in.</p>
+    <p>From there the concern is what security researchers call a <strong>gadget chain</strong>: classes already present on your classpath — in your framework, your JSON library, your collections utilities — whose ordinary construction-time behaviour can be strung together to produce an effect the authors never intended, up to and including remote code execution. You do not need a vulnerable class of your own; you need a vulnerable <em>combination</em> in the libraries you already depend on. Tooling such as ysoserial exists to demonstrate that these chains are real and plentiful, which is precisely why "we don't deserialize anything dangerous" is not an argument you can make about your own classes. It also means dependency hygiene is part of this defense: which library versions are on your classpath decides which chains exist, so this topic connects directly to <a href="09-supply-chain.html">Module 09 — Supply Chain Security</a>.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html" rel="noopener">Deserialization Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/" rel="noopener">A08:2021 — Software and Data Integrity Failures — OWASP Top 10</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/deserialization" rel="noopener">Insecure deserialization — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://cwe.mitre.org/data/definitions/502.html" rel="noopener">CWE-502: Deserialization of Untrusted Data — MITRE</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nkTBwbnfesQ" rel="noopener">OWASP Top 10: Insecure Deserialization — F5 DevCentral Community</a></li>
+    </ul>
+
+    <h3>Safe deserialization: data-only formats, ObjectInputFilter, and Jackson's polymorphic trap</h3>
+    <p>The primary defense is refusal: do not deserialize untrusted input with a format that can name types. In practice that means never accepting Java serialized bytes over an HTTP endpoint, a queue, a cookie or a cache key that a client can influence. Prefer a <strong>data-only format</strong> — JSON, or a schema-first binary format — bound to a concrete, closed target type you declared, ideally a <code>record</code>, and validated afterwards. If native serialization is genuinely unavoidable (a legacy RMI or JMX path, an old cluster protocol), put an <strong>allow-list filter</strong> in front of it. JEP 290 added <code>ObjectInputFilter</code> and process-wide filters in Java 9 and backported them to 8; JEP 415 added context-specific filter factories so different call sites can carry different policies. Write the pattern as an allow-list ending in <code>!*</code> — everything not explicitly named is rejected — and cap depth, array size and stream size while you are there.</p>
+    <p>Then the trap that catches JSON users who think they are safe: <strong>polymorphic type handling</strong>. Jackson's <code>enableDefaultTyping()</code> (and its successor <code>activateDefaultTyping()</code> with a permissive validator) writes the Java class name into the JSON and instantiates whatever it finds on the way back — which reintroduces exactly the "the input names the type" problem the JSON format was supposed to avoid. That is the root of a long tail of jackson-databind CVEs, and why default typing was deprecated in favour of validators. Do not enable global default typing on data you did not produce. When you legitimately need polymorphism, use <code>@JsonTypeInfo</code> with <code>Id.NAME</code> and an explicit <code>@JsonSubTypes</code> registry so the wire carries a short logical name you control, never a class name; a sealed interface makes the closed set explicit to the compiler as well.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: readObject() constructs whatever types the stream names
+Object o = new ObjectInputStream(request.getInputStream()).readObject();
+
+// BETTER (legacy paths only): an allow-list filter; anything not named is refused by "!*"
+ObjectInputStream in = new ObjectInputStream(request.getInputStream());
+in.setObjectInputFilter(ObjectInputFilter.Config.createFilter(
+        "maxdepth=8;maxarray=1000;com.acme.dto.*;java.util.List;java.lang.String;!*"));
+Object o = in.readObject();
+
+// BEST: take data, not objects - bind JSON into a closed type you declared
+OrderSnapshot dto = objectMapper.readValue(request.getInputStream(), OrderSnapshot.class);
+
+// VULNERABLE Jackson config: the JSON gets to name the Java class
+mapper.enableDefaultTyping();                  // removed in 2.10; the successor with a
+mapper.activateDefaultTyping(LaissezFaireSubTypeValidator.instance);  // permissive validator is no safer
+
+// FIXED: no global polymorphism; logical names you control, over a closed set
+@JsonTypeInfo(use = Id.NAME, include = As.PROPERTY, property = "kind")
+@JsonSubTypes({ @JsonSubTypes.Type(value = CardPayment.class, name = "card"),
+                @JsonSubTypes.Type(value = UpiPayment.class,  name = "upi") })
+public sealed interface Payment permits CardPayment, UpiPayment { }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/core/serialization-filtering1.html" rel="noopener">Serialization Filtering — Java Core Libraries Guide (Oracle)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/ObjectInputFilter.html" rel="noopener">ObjectInputFilter — Java SE API documentation (pattern syntax and limits)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/290" rel="noopener">JEP 290: Filter Incoming Serialization Data — OpenJDK</a></li>
+      <li>[Official] <a href="https://github.com/FasterXML/jackson-docs/wiki/JacksonPolymorphicDeserialization" rel="noopener">Jackson Polymorphic Deserialization — FasterXML jackson-docs wiki</a></li>
+      <li>[Article] <a href="https://cowtowncoder.medium.com/jackson-2-10-safe-default-typing-2d018f0ce2ba" rel="noopener">Jackson 2.10: Safe Default Typing — Tatu Saloranta (Jackson's author)</a></li>
+    </ul>
+
+    <h3>Exceptional conditions: fail-open bugs and the error path nobody reviews</h3>
+    <p>Every control in this module is a decision, and every decision has a path where the decision could not be made: the policy service timed out, the token store was unreachable, the signature verifier threw, the URL parser rejected the input in an unexpected way. What your code does on that path is a security property, and it is almost never reviewed. The recurring bug is <strong>fail-open</strong>: a <code>catch (Exception e)</code> that logs a warning and returns <code>true</code>, a default branch in a permission enum that maps unknown to "allowed", a feature flag that treats "could not evaluate" as "enabled", a JWT check whose validation error path falls through to the happy case. Under normal load these look fine; during the incident when your auth dependency is degraded, they turn an availability problem into an authorization bypass — usually for every user at once.</p>
+    <p>The rules are short. Fail closed by default: if you cannot prove access is permitted, deny it and return a 5xx or a clean 403 rather than proceeding. Never let a broad <code>catch</code> straddle a security decision — catch narrowly, and keep the decision and its failure handling in the same place so a reviewer can see both. Deny on unknown enum values instead of defaulting to permit. Separately, keep <em>internal detail out of responses</em>: stack traces, SQL fragments, framework versions, absolute file paths and library names are reconnaissance, and in Spring they leak by default unless you set the error attributes appropriately and add a <code>@RestControllerAdvice</code> that maps exceptions to a small set of generic, non-revealing responses. Log the detail with a correlation id; return the id, not the trace. Then test it: a test that asserts "when the policy service throws, access is denied" is worth more than any amount of review, and it is the artefact that proves the error path got the same scrutiny as the happy path.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: the catch swallows an authorization failure and lets the request continue
+public boolean canEdit(User user, Document doc) {
+    try {
+        return policyService.check(user, doc);        // remote policy decision
+    } catch (Exception e) {
+        log.warn("policy check failed", e);
+        return true;                                  // fail OPEN - everyone is now an editor
+    }
+}
+
+// FIXED: fail closed, log with a correlation id, surface nothing internal to the caller
+public boolean canEdit(User user, Document doc) {
+    try {
+        return policyService.check(user, doc);
+    } catch (PolicyUnavailableException e) {          // narrow catch, decision stays local
+        log.error("policy check failed user={} doc={} correlationId={}",
+                  user.id(), doc.id(), MDC.get("correlationId"), e);
+        throw new AuthorizationUnavailableException(); // -&gt; 503, access is NOT granted
+    }
+}
+
+// And the response the user sees: an id they can quote, never a stack trace
+@RestControllerAdvice
+class ErrorAdvice {
+    @ExceptionHandler(Exception.class)
+    ResponseEntity&lt;ApiError&gt; onAny(Exception e) {
+        log.error("unhandled correlationId={}", MDC.get("correlationId"), e);
+        return ResponseEntity.status(500)
+                .body(new ApiError("Something went wrong", MDC.get("correlationId")));
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html" rel="noopener">Error Handling Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP (what to record when a control fails)</a></li>
+      <li>[Article] <a href="https://cwe.mitre.org/data/definitions/636.html" rel="noopener">CWE-636: Not Failing Securely (Failing Open) — MITRE</a></li>
+      <li>[Article] <a href="https://cwe.mitre.org/data/definitions/209.html" rel="noopener">CWE-209: Generation of Error Message Containing Sensitive Information — MITRE</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hLlGAQ5NfTE" rel="noopener">Global Exception Handling in Spring Boot with ControllerAdvice — Code Decode</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-authn-authz.html">← Authentication and Authorization Failures</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="07-secrets-crypto.html">Secrets and Applied Cryptography →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>These three topics are staples of Indian product and service-company rounds — CSRF in every Spring Security screen, SSRF in every cloud-flavoured round, and deserialization plus fail-open error handling in the senior discussions:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is CSRF, in one sentence?</summary>
+      <div class="answer"><p>An attacker's page causes a victim's browser to send a state-changing request to a site the victim is logged in to, and the browser attaches the session cookie automatically, so the server executes it as the victim. The attacker cannot read the response — it is a write attack, not a read attack.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why doesn't CSRF affect an API that authenticates with an Authorization header?</summary>
+      <div class="answer"><p>Because the credential is not ambient. A cookie is attached by the browser to every request to that origin, including one initiated by an attacker's page. An <code>Authorization: Bearer</code> header has to be set explicitly by JavaScript running on your origin, and an attacker's page can neither run code on your origin nor read your storage. If you move that same token into a cookie, CSRF is back — the exposure follows the transport, not the token format.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does SameSite=Lax do, and what does it not protect?</summary>
+      <div class="answer"><p>Lax withholds the cookie on cross-site subrequests — POSTs, iframes, images, background fetches — but still sends it on top-level safe navigation, so following a link from an email still works. It does not protect a state-changing endpoint reachable by GET, does not separate sibling subdomains (same-site is broader than same-origin), and can be undermined by a browser's short grace window for newly set cookies. Treat it as a strong default layer, not the whole defense.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why must state-changing operations never use GET?</summary>
+      <div class="answer"><p>GET is defined as safe, so everything treats it as harmless: browsers prefetch it, proxies and link scanners follow it, SameSite=Lax still sends cookies with it, and an attacker can trigger it with a bare image tag. Any token scheme is irrelevant if the action can be performed by a URL alone. Use POST, PUT, PATCH or DELETE for anything with an effect.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Synchronizer token versus double-submit cookie — which is stronger and why?</summary>
+      <div class="answer"><p>The synchronizer token is stronger: the token is stored server-side against the session, so an attacker must know a secret they can never read. Double submit stores nothing server-side and just compares a cookie with a header or field, which is convenient for stateless services but leans entirely on the assumption that nobody else can write cookies for your domain — a compromised sibling subdomain or a cookie-injection bug defeats it. If you use double submit, use the signed or HMAC-bound variant so a planted cookie value cannot be forged.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Spring Security is returning 403 on your form POST. A teammate adds csrf.disable(). Critique that.</summary>
+      <div class="answer"><p>It removes the control that was doing its job. The 403 means the CSRF token did not arrive or did not match — a missing hidden field, an SPA not echoing the <code>XSRF-TOKEN</code> cookie into the <code>X-XSRF-TOKEN</code> header, a proxy stripping the header, or a session rotated at login without a fresh token. Fix the token flow. Disabling CSRF is only correct for a genuinely stateless API whose credential is an <code>Authorization</code> header and which creates no session cookie — pair it with <code>SessionCreationPolicy.STATELESS</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Angular's HttpClient participate in CSRF defense?</summary>
+      <div class="answer"><p>It implements the double-submit pattern automatically: it reads a cookie named <code>XSRF-TOKEN</code> and copies the value into an <code>X-XSRF-TOKEN</code> header on mutating same-origin requests. The server sets that cookie in a readable (non-HttpOnly) form — in Spring that is <code>CookieCsrfTokenRepository.withHttpOnlyFalse()</code> — and compares the two on arrival. It only helps for same-origin requests, and the server side is still the part that enforces anything.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is SSRF, and why is it far more dangerous on a cloud VM than on a laptop?</summary>
+      <div class="answer"><p>SSRF is the server fetching a URL that a user controls. The danger is the server's network position: inside the VPC it can reach internal admin panels, databases, mesh control planes and Kubernetes APIs that the internet cannot. On a cloud VM it can also reach the instance metadata service at <code>169.254.169.254</code>, which on AWS will hand out temporary credentials for the instance's IAM role — turning a URL-fetch bug into stolen cloud credentials that work from anywhere until they expire.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is a block-list of internal IP ranges an inadequate SSRF defense?</summary>
+      <div class="answer"><p>Because addresses have too many spellings and too many indirections: decimal, octal and hexadecimal encodings, IPv6-mapped forms, shortened notations, hostnames that resolve to internal addresses, and redirects from a permitted host to an internal one. You also have to keep the list current as your private ranges change. An allow-list of the handful of destinations the feature actually needs is small, auditable and does not degrade as the network grows.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You validate the hostname, then fetch the URL. What is still wrong?</summary>
+      <div class="answer"><p>Two gaps. First, a name check is not an address check — the name can resolve to an internal address, and it can resolve differently between your validation and the connection (DNS rebinding), so you must resolve, validate every returned address against the policy, and connect to a validated address. Second, redirects: a permitted host answering with a 302 to an internal address bypasses a hostname-only check in one hop, so disable redirect following or re-run the full validation on each hop. And never reflect the raw upstream response back to the caller.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does IMDSv2 mitigate SSRF-driven credential theft?</summary>
+      <div class="answer"><p>It makes metadata access a session flow instead of a plain GET: the client must first issue a PUT to obtain a short-lived token and then send that token in a header on every request, and responses are refused beyond a configured token hop limit. A typical SSRF gives control of a URL, not of the HTTP method, arbitrary headers or a two-step handshake, so the primitive no longer reaches the credentials. Set the metadata options to require tokens so IMDSv1 is switched off — leaving both enabled leaves the old path wide open.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is deserializing untrusted data dangerous even if you validate the resulting object?</summary>
+      <div class="answer"><p>Because the dangerous work happens during deserialization, before you ever see the object. A native serialized stream names types, so the input decides which classes are instantiated and which construction-time hooks run — <code>readObject</code>, <code>readResolve</code>, <code>readExternal</code> and their equivalents. By the time your validation code executes, those side effects have already happened. Validation after the fact is the wrong layer; the fix is to not let untrusted input choose types at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a gadget chain, conceptually, and why can't you audit your own classes to rule it out?</summary>
+      <div class="answer"><p>A gadget chain is a sequence of ordinary classes already on the classpath whose normal construction and lifecycle behaviour can be composed into an effect their authors never intended, up to remote code execution. The classes come from your framework and library dependencies, not from your code, so auditing your own domain objects proves nothing — the exposure is a property of which library versions you ship. That is why the mitigation is refusing untrusted deserialization plus dependency hygiene, and why tools like ysoserial exist as evidence that such chains are commonplace rather than theoretical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A legacy service must keep native Java deserialization. How do you make it survivable?</summary>
+      <div class="answer"><p>Put an <code>ObjectInputFilter</code> allow-list in front of it — the JEP 290 mechanism, with JEP 415 filter factories if different call sites need different policies. Write the pattern as explicit permitted types ending in <code>!*</code> so anything unnamed is rejected, and set <code>maxdepth</code>, <code>maxarray</code>, <code>maxrefs</code> and <code>maxbytes</code> so a malicious stream cannot exhaust memory. Then contain it: run the endpoint with least privilege, isolate it on the network, authenticate and integrity-check the stream before reading it, keep dependencies patched, and plan to replace the protocol with a data-only format.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You are on JSON, so deserialization attacks don't apply. True?</summary>
+      <div class="answer"><p>Not automatically. JSON is data-only <em>until</em> you enable polymorphic type handling. Jackson's <code>enableDefaultTyping()</code>, and <code>activateDefaultTyping()</code> with a permissive validator, embed Java class names in the JSON and instantiate whatever comes back — the same "input names the type" problem, which is the root of a long list of jackson-databind CVEs. Never enable global default typing on data you did not produce. Where polymorphism is genuinely needed, use <code>@JsonTypeInfo</code> with <code>Id.NAME</code> and an explicit <code>@JsonSubTypes</code> registry so the wire carries a logical name over a closed set you control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Review this: a permission check wrapped in catch (Exception e) that logs a warning and returns true.</summary>
+      <div class="answer"><p>Classic fail-open. When the policy dependency degrades — exactly the moment you are least able to notice — the system grants access to everyone, converting an availability incident into an authorization bypass. Fix it by failing closed: catch narrowly, deny or propagate an "authorization unavailable" error that becomes a 503, keep the decision and its failure handling in one place, and default unknown enum values to deny rather than permit. Then write a test that asserts access is denied when the policy service throws — that test is the proof the error path was reviewed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why do stack traces in API responses matter, and what should you return instead?</summary>
+      <div class="answer"><p>They are free reconnaissance: class and package names, framework and library versions to look up known vulnerabilities against, absolute file paths, SQL fragments and sometimes data values. Return a generic message plus a correlation id, and log the full detail server-side against that id. In Spring, keep the default error attributes from including the trace or message, and add a <code>@RestControllerAdvice</code> that maps exceptions to a small, deliberate set of responses — the error path deserves the same review as the happy path.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.req.forgery — CSRF mechanics and defenses, SameSite cookies, SSRF and cloud metadata attacks</li>
+      <li>sec.req.deser — Insecure deserialization and Java gadget chains, error-path and fail-open bugs</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

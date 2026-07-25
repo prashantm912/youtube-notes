@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Input validation and file handling module: allow-list versus block-list, syntactic versus semantic validation, canonicalization before validation, Bean Validation and its ReDoS trap, mass assignment, path traversal, upload hardening and safe archive extraction — with verified resources and interview questions.">
+  <title>Input Validation and File Handling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Input Validation and File Handling</h1>
+  <p class="standfirst">Every value that crosses into your process was written by someone else. This module is about deciding what you will accept before you do anything with it — and about files, where a sloppy decision stops being abstract and starts writing bytes to your disk.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Secure Coding track → Input Validation and File Handling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Start with the sentence that keeps this module honest: <strong>validation is not a security control on its own.</strong> It is a defense-in-depth layer that shrinks the blast radius while the real fix does the work — parameterized statements stop SQL injection, context-correct output encoding stops XSS, an authorization check stops IDOR. A validator in front of any of those is a useful second wall; a validator <em>instead of</em> any of those is a bug waiting for a payload you did not imagine.</p>
+    <p>With that framing in place, the module covers how to decide what "valid" means (allow-list over block-list), where to decide it (the trust boundary), when to decide it (after canonicalization, never before), and how to express it in Java with Jakarta Bean Validation. The second half moves to file handling — path traversal, upload hardening and archive extraction — because that is where a validation failure stops returning wrong data and starts writing attacker-chosen bytes to attacker-chosen paths.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Validation is a layer, not the fix</h3>
+    <p>The most common way validation goes wrong is not a weak regex — it is a strong regex used as a substitute for the actual defense. A team blocks quote characters in a search box and calls the SQL injection ticket closed; six months later a numeric field, a JSON body or a header takes a different route into the same string-concatenated query and the "fix" is not on that path. Validation constrains the shape of the input; parameterization removes the vulnerability entirely by ensuring data never becomes code. Those are different classes of control and only one of them is a guarantee.</p>
+    <p>So the rule to internalise: always name the primary control first, then add validation as the layer that reduces what an attacker can even attempt. Validation earns its place by rejecting nonsense early (a 400 costs you almost nothing and costs the attacker a probe), by keeping garbage out of downstream systems that have weaker defenses than you do, and by turning a silent data-corruption bug into a loud, logged rejection. What it must never do is let you skip the prepared statement, the encoder, or the authorization check.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" rel="noopener">Input Validation Cheat Sheet — OWASP Cheat Sheet Series (the canonical reference for this module)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Injection_Prevention_Cheat_Sheet.html" rel="noopener">Injection Prevention Cheat Sheet — OWASP (what the primary control actually is)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Java_Security_Cheat_Sheet.html" rel="noopener">Java Security Cheat Sheet — OWASP (JVM-specific guidance on validation and injection)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WKse40yc8XA" rel="noopener">Secure Coding: Input Validation — Security and Privacy Academy</a></li>
+    </ul>
+
+    <h3>Allow-list versus block-list: enumerate the good, not the bad</h3>
+    <p>A block-list (deny-list) tries to enumerate everything dangerous: strip <code>&lt;script&gt;</code>, reject <code>../</code>, forbid the word <code>SELECT</code>. It is a bet that you thought of every encoding, every case variation, every Unicode homoglyph, every nesting trick and every representation the downstream parser will accept — and you did not, because that set is defined by someone else's parser, not by your imagination. Every block-list in history has been bypassed by a form of the input its author never considered, and stripping a forbidden substring often creates the forbidden substring in the leftovers.</p>
+    <p>An allow-list inverts the burden. You describe the small, closed set of values that are acceptable — this field is a 10-digit mobile number, this one is one of four enum values, this one is a UUID, this one is at most 120 characters from a named character class — and everything else is rejected without further thought. The set is defined by <em>your</em> domain, which is fully known to you, so it is finite and reviewable. Where an allow-list genuinely cannot be expressed (free-text comments, rich descriptions), do not fall back to a block-list: accept the text and rely on correct handling at the sink, which is encoding on output or parameterization at the query.</p>
+    <pre class="code-block" data-label="Java"><code>// BLOCK-LIST — a bet you will lose
+if (name.contains("&lt;script&gt;") || name.contains("../")) throw new BadRequest();
+// bypassed by case, by encoding, by nesting, by anything you did not list
+
+// ALLOW-LIST — a closed set you can reason about
+private static final Pattern SKU = Pattern.compile("\\A[A-Z]{3}-[0-9]{6}\\z");
+if (!SKU.matcher(sku).matches()) throw new BadRequest("sku");
+// note \A and \z, not ^ and $: in Java, $ also matches before a trailing newline</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/20.html" rel="noopener">CWE-20: Improper Input Validation — MITRE (the taxonomy entry, with allow-list named as the mitigation)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Bean_Validation_Cheat_Sheet.html" rel="noopener">Bean Validation Cheat Sheet — OWASP (allow-list constraints expressed in Java)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html" rel="noopener">REST Security Cheat Sheet — OWASP (validating request bodies, content types and parameters)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=M9d0otsXOEg" rel="noopener">Whitelist vs Blacklist: Allow &amp; Deny Lists Explained — CodeLucky</a></li>
+    </ul>
+
+    <h3>Syntactic versus semantic validation, and the trust boundary rule</h3>
+    <p><strong>Syntactic validation</strong> asks whether the value has the right shape: correct type, length within bounds, number inside a range, string matching a format. It is cheap, stateless, and easy to declare — this is what Bean Validation annotations express. <strong>Semantic validation</strong> asks whether the value makes sense <em>for this user, in this state, right now</em>: does this account id belong to the caller's tenant, is this discount code still active, can an order in <code>SHIPPED</code> state be cancelled, is this quantity available. Semantic checks need the database, the session and the domain model, so they live in the service layer — and they are also where authorization hides. A syntactically perfect UUID belonging to another customer is the entire IDOR vulnerability class; no <code>@Pattern</code> will catch it.</p>
+    <p>The <strong>trust boundary rule</strong> tells you where to run both. Validate at the edge where untrusted data enters — the controller, the message listener, the file reader, the third-party webhook — and validate again at every boundary where the trust level changes, such as the call into a module that will build a shell command or a file path. Data does not become trustworthy by travelling; it becomes trustworthy by being checked. And validation deep inside the domain, after the value has already been concatenated into a query or resolved into a path, is not validation — it is a post-mortem. Note also that a browser-side check is a usability feature, not a control: anything a client validates, a client can skip.</p>
+    <pre class="code-block" data-label="Java"><code>@PostMapping("/orders/{id}/cancel")
+public ResponseEntity&lt;Void&gt; cancel(@PathVariable UUID id,          // syntactic: type does the work
+                                   @AuthenticationPrincipal User me) {
+    Order order = orders.findById(id).orElseThrow(NotFound::new);
+    if (!order.ownedBy(me)) throw new NotFound();      // semantic: ownership, not shape (404, not 403)
+    if (!order.isCancellable()) throw new Conflict();  // semantic: state machine
+    order.cancel();
+    return ResponseEntity.noContent().build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Abuse_Case_Cheat_Sheet.html" rel="noopener">Abuse Case Cheat Sheet — OWASP (deriving what "valid" means from how the feature will be misused)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-config/validation.html" rel="noopener">Validation in Spring MVC — Spring Framework reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/javax-validation-groups" rel="noopener">Validation Groups in Jakarta Bean Validation — Baeldung (different rules for different states)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-valid-vs-validated" rel="noopener">Spring @Valid vs @Validated — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XZRnzhYttRk" rel="noopener">Secure Coding Practices: The Art of Input Validation — TechInFive</a></li>
+    </ul>
+
+    <h3>Canonicalize first, then validate — the step everyone skips</h3>
+    <p>A string can be written many ways that mean the same thing to the component that finally consumes it: percent-encoded, doubly percent-encoded, in an alternate Unicode normalization form, with a backslash instead of a forward slash, with an overlong UTF-8 sequence, with a full-width character that a later step folds to ASCII. If you validate one representation and then transform it into another before use, you validated a different string from the one you used. That gap is the bug, and it is entirely self-inflicted.</p>
+    <p>The double-encoding illustration makes it concrete. A filter that rejects the literal sequence <code>../</code> sees nothing wrong with the doubly-encoded form <code>%252e%252e%252f</code>; the request passes the filter, and a decoding step further down turns it into <code>%2e%2e%2f</code> and then into <code>../</code>. The string that reached the file system is not the string the filter judged. The fix is ordering, not cleverness: <strong>decode and normalize to exactly one canonical form, then validate that form, then use that same value.</strong> Decode once and reject anything that still contains an encoded marker rather than looping "until it stops changing" — a decode loop is itself an attack surface. Apply Unicode NFKC normalization before comparing or matching where the field will be compared, normalize path separators before any path check, and never re-transform a value after it has been approved.</p>
+    <pre class="code-block" data-label="Java"><code>// WRONG ORDER: validate, then transform — you approved a different string
+if (raw.contains("../")) reject();
+String name = URLDecoder.decode(raw, UTF_8);      // decoding may reintroduce it
+
+// RIGHT ORDER: canonicalize once, validate the canonical form, use that value
+String decoded = URLDecoder.decode(raw, UTF_8);
+if (decoded.indexOf('%') &gt;= 0) reject("still encoded");   // no decode loops
+String canonical = Normalizer.normalize(decoded, Normalizer.Form.NFKC)
+                             .replace('\\', '/');
+if (!SAFE_NAME.matcher(canonical).matches()) reject("name");
+use(canonical);                                    // the approved value, unchanged</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/Double_Encoding" rel="noopener">Double Encoding — OWASP community (why one decode pass is not the same as the last one)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/text/Normalizer.html" rel="noopener">java.text.Normalizer — Java SE API documentation (NFC, NFD, NFKC, NFKD)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/net/URLDecoder.html" rel="noopener">java.net.URLDecoder — Java SE API documentation</a></li>
+      <li>[Article] <a href="https://unicode.org/reports/tr15/" rel="noopener">UAX #15: Unicode Normalization Forms — Unicode Consortium</a></li>
+      <li>[Article] <a href="https://www.unicode.org/reports/tr36/" rel="noopener">UTR #36: Unicode Security Considerations — Unicode Consortium (spoofing, overlong forms, normalization pitfalls)</a></li>
+    </ul>
+
+    <h3>Bean Validation in Spring, concretely</h3>
+    <p>Jakarta Bean Validation (formerly JSR-380, implemented on Spring Boot by Hibernate Validator) lets you declare the syntactic contract on the DTO itself instead of scattering <code>if</code> statements through controllers. The everyday set: <code>@NotNull</code> (present), <code>@NotBlank</code> (present and not just whitespace — the right choice for strings, where <code>@NotNull</code> happily accepts <code>""</code>), <code>@Size(min, max)</code>, <code>@Min</code>/<code>@Max</code> or <code>@Positive</code> for numbers, <code>@Email</code>, and <code>@Pattern</code> for a domain format. Put <code>@Valid</code> on the request-body parameter to trigger it, and <code>@Valid</code> again on nested object and collection fields — validation does not recurse into a nested DTO unless you ask it to, which is the single most common "but I annotated it!" bug. On path variables and request parameters you need <code>@Validated</code> on the class to activate method-level constraint validation.</p>
+    <p>Two features carry real weight beyond the basics. <strong>Validation groups</strong> let one class express different rules in different states — an id must be null on create and present on update — by tagging constraints with marker interfaces and selecting the group with <code>@Validated(OnCreate.class)</code>; that is how you express state-dependent syntax without duplicating the DTO. <strong>Custom constraints</strong> (an annotation plus a <code>ConstraintValidator</code>) let you name a domain rule once — a GSTIN, a PAN, an IFSC code, an Indian mobile number — and reuse it everywhere, which is far better than copying the same regex into fifteen classes. Register a single <code>@RestControllerAdvice</code> handler for <code>MethodArgumentNotValidException</code> and <code>ConstraintViolationException</code> so every failure returns one consistent, non-leaky error shape.</p>
+    <pre class="code-block" data-label="Java"><code>public record CreateCustomer(
+    @NotBlank @Size(max = 80) String name,
+    @NotBlank @Email @Size(max = 254) String email,
+    @NotNull @Pattern(regexp = "\\A[6-9][0-9]{9}\\z") String mobile,   // allow-list format
+    @NotNull @Valid Address address,                                   // @Valid: recurse into nested
+    @NotEmpty List&lt;@Valid OrderLine&gt; lines) {}                        // and into collection elements
+
+@PostMapping("/customers")
+public CustomerView create(@Valid @RequestBody CreateCustomer body) { ... }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://jakarta.ee/specifications/bean-validation/3.1/" rel="noopener">Jakarta Validation 3.1 — specification and API (Jakarta EE)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/validation/beanvalidation.html" rel="noopener">Java Bean Validation — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://docs.hibernate.org/stable/validator/reference/en-US/html_single/" rel="noopener">Hibernate Validator reference guide — the Bean Validation implementation Spring Boot ships</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-validation" rel="noopener">Java Bean Validation Basics — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=P5sAaFY3O2w" rel="noopener">Spring Boot — Creating a Custom Annotation for Validation — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LM6G9d6OuYU" rel="noopener">Validating Data using Bean Validator in Spring Boot (Hindi) — Learn Code With Durgesh</a></li>
+    </ul>
+
+    <h3>The @Pattern trap: ReDoS in a validator you wrote yourself</h3>
+    <p>A validation regex is untrusted-input-facing code that runs before authentication on most endpoints, and Java's <code>java.util.regex</code> engine is a backtracking engine. Give it a pattern with nested or adjacent quantifiers over overlapping character classes — the classic shapes are <code>(a+)+</code>, <code>(a|a)*</code>, <code>(\\s*,\\s*)*</code> and the "helpful" email regex someone pasted from a forum — and a moderately long non-matching string forces the engine to explore an exponential number of ways to fail. One request pins a CPU core for seconds or minutes. A handful of concurrent requests take the service down, and because it happens inside the validator it happens before any rate limit tied to a user, before any business logic, on every replica.</p>
+    <p>The defense is design, not detection. Prefer a bounded, unambiguous pattern with no nested quantifier and no alternation over overlapping branches; anchor with <code>\A</code> and <code>\z</code>; enforce <code>@Size</code> <em>alongside</em> <code>@Pattern</code> so the engine never sees a 100 KB string in the first place; and for anything structured (email, URL, date) parse with a real parser rather than matching with a regex. Compile patterns once into <code>static final Pattern</code> constants, run a linter or SAST rule that flags exponential shapes, and if you must accept a caller-supplied pattern — you should not — run it in a bounded worker with a timeout. Treat this as an availability bug of the same seriousness as an unbounded query.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: nested quantifier over an overlapping class = exponential backtracking
+@Pattern(regexp = "^([a-zA-Z0-9]+\\s?)+$")
+private String description;
+
+// FIXED: bounded length first, then a flat, unambiguous, fully anchored pattern
+@Size(max = 200)
+@Pattern(regexp = "\\A[a-zA-Z0-9]+( [a-zA-Z0-9]+)*\\z")
+private String description;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS" rel="noopener">Regular expression Denial of Service (ReDoS) — OWASP community</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/1333.html" rel="noopener">CWE-1333: Inefficient Regular Expression Complexity — MITRE</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html" rel="noopener">Denial of Service Cheat Sheet — OWASP (resource limits around untrusted input)</a></li>
+      <li>[Article] <a href="https://learn.snyk.io/lesson/redos/" rel="noopener">Regular expression denial of service (ReDoS) — Snyk Learn</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-regex-performance" rel="noopener">Regular Expression Performance in Java — Baeldung (catastrophic backtracking and how to avoid it)</a></li>
+    </ul>
+
+    <h3>Error messages, mass assignment, and why the DTO is the boundary</h3>
+    <p>Two failures live at the edge of a validation layer. The first is the <strong>error response</strong>. Never echo the raw rejected value back into an HTML or HTML-ish response unencoded — a validation error page is a reflected-XSS sink like any other, and "it failed validation so it can't be dangerous" is exactly backwards. Never leak internal detail either: a stack trace, an SQL fragment, a class name, a file path or an ORM constraint name in a 400 response hands an attacker your schema for free. Return a stable machine-readable code plus a field name and a human message that does not quote the payload; log the full detail server-side, correlated by request id, and make sure the log line itself is encoded so an attacker cannot forge log entries.</p>
+    <p>The second is <strong>mass assignment</strong> (over-posting): binding a request body straight onto a JPA entity or a domain object. The client sends fields you never intended to expose — <code>role</code>, <code>isAdmin</code>, <code>balance</code>, <code>tenantId</code>, <code>createdBy</code> — the binder happily sets them, and a "profile update" endpoint becomes a privilege escalation. Trying to fix it with an ignore list is a block-list, with all the same problems. The fix is a purpose-built DTO per operation, containing exactly the fields that operation may accept, mapped explicitly onto the entity in the service layer. Anything the DTO does not declare cannot be set, whatever the client sends, and it is enforced by the type system rather than by a configuration file someone will forget to update when a column is added.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: the entity is the binding target — every column is client-writable
+@PutMapping("/me")
+public User update(@RequestBody User user) { return repo.save(user); }  // role, tenantId, ...
+
+// FIXED: a DTO that declares exactly what this operation accepts
+public record UpdateProfile(@NotBlank @Size(max = 80) String displayName,
+                            @Size(max = 200) String bio) {}
+
+@PutMapping("/me")
+public UserView update(@Valid @RequestBody UpdateProfile in,
+                       @AuthenticationPrincipal User me) {
+    me.setDisplayName(in.displayName());     // explicit, field by field
+    me.setBio(in.bio());
+    return UserView.of(repo.save(me));       // and a view DTO on the way out
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html" rel="noopener">Mass Assignment Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/915.html" rel="noopener">CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes — MITRE</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html" rel="noopener">Error Handling Cheat Sheet — OWASP (what a rejection may and may not say)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP (logging rejected input without creating a log-injection sink)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-entity-vs-dto" rel="noopener">Differences Between Entities and DTOs — Baeldung</a></li>
+    </ul>
+
+    <h3>Path traversal: how it escapes, and the only check that holds</h3>
+    <p>Path traversal happens whenever untrusted text becomes part of a file system path. The mechanism is trivial: the path grammar has a "parent" element, <code>..</code>, so a value like <code>../../etc/passwd</code> appended to your intended base directory resolves upward and out of it. The result is arbitrary file read where the code reads, and arbitrary file write where the code writes — and arbitrary write near a web root or a class path is usually remote code execution, which is why this ranks as CWE-22 rather than as a bug report.</p>
+    <p>Textual filtering fails for the same reason every block-list fails. <code>../</code> is only one spelling: there is <code>..\\</code> on Windows, percent-encoded and doubly percent-encoded forms, alternate Unicode representations, mixed and nested sequences that survive a single strip pass, and absolute paths that never need <code>..</code> at all. The correct check does not inspect the string; it inspects the <em>result</em>. Resolve the candidate against your intended base directory, canonicalize both to real absolute paths, and verify by path elements that the resolved path is still inside the base — in Java, <code>Path.normalize().toRealPath()</code> (or <code>toAbsolutePath().normalize()</code> when the file does not exist yet) followed by <code>startsWith</code> on <code>Path</code>, never a <code>String.startsWith</code> on the rendered text, which happily accepts <code>/data/uploads-evil</code> as being inside <code>/data/uploads</code>. Best of all, avoid the problem: look the file up by an opaque id in a database and never let user text touch a path at all.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: user text concatenated into a path
+File f = new File("/data/uploads/" + request.getParameter("name"));
+
+// FIXED: resolve, canonicalize, then prove containment on path elements
+private static final Path BASE = Paths.get("/data/uploads").toAbsolutePath().normalize();
+
+Path target = BASE.resolve(userSuppliedName).normalize();   // resolve() also absorbs absolute paths
+if (!target.startsWith(BASE)) {                             // Path.startsWith, not String.startsWith
+    throw new AccessDeniedException("outside base directory");
+}
+return Files.readAllBytes(target);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/Path_Traversal" rel="noopener">Path Traversal — OWASP community</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/22.html" rel="noopener">CWE-22: Improper Limitation of a Pathname to a Restricted Directory — MITRE</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Path.html" rel="noopener">java.nio.file.Path — Java SE API documentation (resolve, normalize, toRealPath, startsWith)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/file-path-traversal" rel="noopener">Path traversal — PortSwigger Web Security Academy (with free labs)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LFBs-UpZmfU" rel="noopener">Path Traversal Lab Walkthrough using Burp Suite CE — Daniel Lowrie (Web Security Academy series)</a></li>
+    </ul>
+
+    <h3>Naming and storing what you accept</h3>
+    <p>The client-supplied filename is untrusted data that looks like metadata, and treating it as a storage name is the root of most upload incidents. Do not use it. Generate your own storage identifier — a UUID or a content hash — store the file under that name in a directory you control, and keep the original name only as a display label in the database, escaped when rendered. A generated name eliminates traversal in the write path, eliminates collisions and overwrites of existing files, eliminates dangerous extensions and double extensions, and eliminates reserved device names on Windows in one move, without you having to enumerate any of them.</p>
+    <p>Where the file lands matters just as much. Store uploads outside the web root, or better, in object storage — if the bytes are not under a directory the application server will execute or serve, an uploaded server-side script is inert. Keep the storage directory non-executable and owned by a different user from the one that serves requests, so even a successful write cannot become a running process. On the framework side, Spring Security's <code>StrictHttpFirewall</code> rejects requests whose URLs contain encoded path separators, semicolons and other normalization hazards before your controller ever sees them: keep it on and understand the <code>RequestRejectedException</code> it throws rather than reflexively loosening it — every relaxation of that firewall re-opens a normalization gap you now have to defend by hand.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/firewall.html" rel="noopener">HttpFirewall and StrictHttpFirewall — Spring Security reference documentation</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/File.html" rel="noopener">java.io.File — Java SE API documentation (getCanonicalPath and its pitfalls)</a></li>
+      <li>[Article] <a href="https://learn.snyk.io/lesson/directory-traversal/" rel="noopener">Directory traversal — Snyk Learn (mechanism and fix, with code)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/file-path-transversal-attacks" rel="noopener">What Are File Path Traversal Attacks? — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-request-rejected-exception" rel="noopener">Spring Security RequestRejectedException — Baeldung (what StrictHttpFirewall blocks and why)</a></li>
+    </ul>
+
+    <h3>Upload hardening, part one: size limits and knowing what the bytes actually are</h3>
+    <p>Enforce the size limit in two places. The framework limit (<code>spring.servlet.multipart.max-file-size</code> and <code>max-request-size</code>) protects your heap and temp directory; the reverse proxy limit (nginx's <code>client_max_body_size</code>, or the equivalent on your load balancer or ingress) rejects the request before a byte reaches the application, which is the only limit that helps when someone streams a 10 GB body at you. Cap the number of parts and the total request size too, not just the per-file size, and remember that multipart parsing writes to a temp directory — bound and monitor it, and clean it up on failure.</p>
+    <p>Then decide what the file <em>is</em>, and do it by looking at the bytes. The extension is client-supplied text. The <code>Content-Type</code> header in the multipart part is client-supplied text. Both are trivially set to anything, so neither is evidence. Detect the type by content sniffing — Apache Tika reads magic bytes and container structure and is the standard JVM answer — then check the detected type against a short allow-list of types you actually support, and check that the declared extension agrees with the detected type rather than trusting either alone. Two extra cautions: sniffing tells you the format, not that the file is safe, so a detected <code>image/svg+xml</code> is still an XML document that can carry script and usually should not be on your allow-list at all; and image-processing libraries are a real attack surface in their own right (the ImageTragick family of ImageMagick vulnerabilities turned "we resize the avatar" into remote code execution). Process images in an isolated, resource-limited worker, pin and patch those libraries, restrict enabled decoders, and re-encode uploads to a known-good format instead of storing the original bytes where the risk warrants it.</p>
+    <pre class="code-block" data-label="Java"><code>// Framework limit (application.yml) — and set client_max_body_size at the proxy too
+// spring.servlet.multipart.max-file-size: 5MB
+// spring.servlet.multipart.max-request-size: 10MB
+
+private static final Set&lt;String&gt; ALLOWED = Set.of("image/png", "image/jpeg", "application/pdf");
+
+String detected = new Tika().detect(file.getInputStream(), file.getOriginalFilename());
+if (!ALLOWED.contains(detected)) throw new BadRequest("unsupported file type");
+
+String storedName = UUID.randomUUID() + extensionFor(detected);   // never the client's name
+Path target = UPLOAD_BASE.resolve(storedName).normalize();
+if (!target.startsWith(UPLOAD_BASE)) throw new AccessDeniedException("bad target");
+try (InputStream in = file.getInputStream()) {
+    Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html" rel="noopener">File Upload Cheat Sheet — OWASP (the layered checklist this section follows)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/multipart.html" rel="noopener">Multipart resolver and limits — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/ngx_http_core_module.html" rel="noopener">ngx_http_core_module — nginx documentation (client_max_body_size at the edge)</a></li>
+      <li>[Official] <a href="https://tika.apache.org/" rel="noopener">Apache Tika — content type detection and metadata extraction for the JVM</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-file-mime-type" rel="noopener">How to Get the MIME Type of a File in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://imagetragick.com/" rel="noopener">ImageTragick — the ImageMagick vulnerabilities that made image processing a code-execution surface</a></li>
+    </ul>
+
+    <h3>Upload hardening, part two: serving files without serving an attack</h3>
+    <p>A stored file becomes dangerous at download time. If your application serves an uploaded HTML file from its own origin, the browser runs that HTML with your origin's cookies and storage — a stored XSS with full session access, delivered by your own file endpoint. So serve user content from a <strong>separate origin</strong> (a distinct domain, not just a path or a subdomain sharing cookies), which means the same-origin policy contains anything that does execute. Add <code>Content-Disposition: attachment</code> with a sanitized filename so the browser downloads rather than renders, and <code>X-Content-Type-Options: nosniff</code> so the browser honours the <code>Content-Type</code> you send instead of sniffing its own — without <code>nosniff</code>, a file you serve as <code>text/plain</code> can still be interpreted as HTML. Send an explicit, narrow <code>Content-Type</code> from your detection result, never from the value the client uploaded, and consider a restrictive <code>Content-Security-Policy</code> and a sandboxed response on the download route.</p>
+    <p>Round it out with authorization and hygiene. Every download must run the same ownership and tenancy check as any other resource — an upload endpoint guarded by login and a download endpoint guarded by an unguessable URL is an IDOR waiting to be enumerated; prefer short-lived signed URLs for object storage over long-lived public ones. Scan for malware where the risk warrants it (files shared between users, anything reaching an internal desktop, regulated data) and treat the scanner as one layer, not the control. Log uploads with the uploader, size, detected type and storage id so an incident can be reconstructed, rate-limit the endpoint, and quarantine rather than delete when a check fails, so you retain the evidence.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload" rel="noopener">Unrestricted File Upload — OWASP community (what goes wrong end to end)</a></li>
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/434.html" rel="noopener">CWE-434: Unrestricted Upload of File with Dangerous Type — MITRE</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Content-Type-Options" rel="noopener">X-Content-Type-Options — MDN HTTP reference (nosniff)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Disposition" rel="noopener">Content-Disposition — MDN HTTP reference (attachment and filename encoding)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/file-upload" rel="noopener">File upload vulnerabilities — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FARa5NHZh90" rel="noopener">Secure Your File Uploads Today with OWASP — Austin Gil (Akamai DevRel)</a></li>
+    </ul>
+
+    <h3>Archive extraction: zip slip and the decompression ratio</h3>
+    <p>Accepting an archive means accepting a list of file names and a list of sizes, both written by the uploader, and then acting on them. <strong>Zip slip</strong> is path traversal through the entry name: an archive entry called <code>../../../../opt/app/config/app.properties</code> extracted by naive code that joins the entry name onto the output directory writes wherever the process has permission — configuration, a template, a JSP under a web root, a cron file, a JAR on the class path. Snyk's 2018 research showed the pattern was endemic across ecosystems and archive formats (zip, tar, war, jar, 7z, apk), and it still turns up in new advisories every year. The defense is exactly the containment check from the traversal section, applied per entry: resolve the entry against the target directory, normalize, and verify with <code>Path.startsWith</code> before opening any output stream. Also refuse absolute entry names and symbolic-link entries, which bypass the name check entirely by pointing elsewhere after extraction.</p>
+    <p>The second archive problem is resource exhaustion. A <strong>zip bomb</strong> is a small archive with an enormous decompressed size — a few hundred kilobytes expanding to many terabytes, or a nested archive that multiplies at each layer — and the naive extraction loop happily writes until the disk or heap is gone. Do not trust the declared size in the entry header; it is attacker-controlled. Instead, count the bytes you actually write, enforce a total uncompressed budget, a per-entry budget, an entry-count cap, a maximum directory depth and a compression-ratio ceiling, and abort the whole extraction the moment any is exceeded. Never call a library helper that extracts an entire archive in one line unless you have read what it validates, and extract into a fresh temporary directory that you delete atomically on failure rather than into the live tree.</p>
+    <pre class="code-block" data-label="Java"><code>long written = 0, entries = 0;
+try (ZipInputStream zin = new ZipInputStream(Files.newInputStream(archive))) {
+    for (ZipEntry e; (e = zin.getNextEntry()) != null; ) {
+        if (++entries &gt; MAX_ENTRIES) throw new SecurityException("too many entries");
+
+        Path out = TARGET.resolve(e.getName()).normalize();      // zip slip check, per entry
+        if (!out.startsWith(TARGET)) throw new SecurityException("entry escapes target");
+        if (e.isDirectory()) { Files.createDirectories(out); continue; }
+        Files.createDirectories(out.getParent());
+
+        try (OutputStream os = Files.newOutputStream(out)) {
+            byte[] buf = new byte[8192];
+            for (int n; (n = zin.read(buf)) &gt; 0; ) {
+                written += n;                                     // count real bytes, not the header
+                if (written &gt; MAX_TOTAL_BYTES) throw new SecurityException("decompression budget");
+                os.write(buf, 0, n);
+            }
+        }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cwe.mitre.org/data/definitions/409.html" rel="noopener">CWE-409: Improper Handling of Highly Compressed Data (Data Amplification) — MITRE</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/zip/ZipInputStream.html" rel="noopener">java.util.zip.ZipInputStream — Java SE API documentation</a></li>
+      <li>[Official] <a href="https://commons.apache.org/proper/commons-compress/" rel="noopener">Apache Commons Compress — archive and compression library (tar, 7z, and friends)</a></li>
+      <li>[Article] <a href="https://security.snyk.io/research/zip-slip-vulnerability" rel="noopener">Zip Slip Vulnerability — Snyk research (the disclosure, affected ecosystems and fixes)</a></li>
+      <li>[Article] <a href="https://www.sonarsource.com/blog/openrefine-zip-slip/" rel="noopener">Unzipping Dangers: OpenRefine Zip Slip Vulnerability — Sonar</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ry_yb5Oipq0" rel="noopener">Critical .zip vulnerabilities? — Zip Slip and ZipperDown — LiveOverflow</a></li>
+    </ul>
+
+    <h3>A validation design checklist</h3>
+    <p>Run this over any endpoint that takes input from outside your trust boundary. It is short on purpose — the point is that each line is checkable in review.</p>
+    <ul>
+      <li>Name the primary control for each sink first (parameterized query, output encoding, authorization) — validation is the extra layer, never the substitute.</li>
+      <li>Every field has an allow-list: a type, a length bound, a range or a format. No field is accepted merely because nothing forbidden was found in it.</li>
+      <li>Canonicalize once — decode, normalize Unicode, normalize separators — then validate the canonical value, then use that exact value unchanged.</li>
+      <li>Syntactic rules live on the DTO as Bean Validation constraints; semantic rules (ownership, tenancy, state) run in the service against the database.</li>
+      <li>Validation happens at the edge and again at each trust-level change, server-side; client-side checks are usability only.</li>
+      <li>Request bodies bind to per-operation DTOs, never to entities, and responses go out through view DTOs.</li>
+      <li>Every <code>@Pattern</code> is anchored, quantifier-flat and paired with a <code>@Size</code> bound; structured formats are parsed, not regex-matched.</li>
+      <li>Rejections return a stable code and field name — no raw input echoed, no stack trace, no internal identifiers.</li>
+      <li>File paths are never string-concatenated: resolve against a base, normalize, and prove containment with <code>Path.startsWith</code>.</li>
+      <li>Uploads get a generated storage name, a size limit at both the framework and the proxy, a content-sniffed type checked against an allow-list, storage outside the web root, and delivery from a separate origin with <code>attachment</code> and <code>nosniff</code>.</li>
+      <li>Archives are extracted entry by entry with a containment check, an entry-count cap, a total-uncompressed-bytes budget and a ratio ceiling.</li>
+      <li>Every rejection is logged with enough context to investigate and encoded so the log itself cannot be forged.</li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-secrets-crypto.html">← Secrets and Applied Cryptography</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="09-supply-chain.html">Supply Chain Security →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Validation and file handling questions are staples of Indian product and service-company security rounds — the allow-list question opens almost every one, and the upload-endpoint design question is the standard senior-level follow-up:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between an allow-list and a block-list, and which should you use?</summary>
+      <div class="answer"><p>A block-list enumerates what is forbidden; an allow-list enumerates what is permitted and rejects everything else. Always prefer the allow-list. A block-list can only stop the attacks its author imagined, and attackers have encodings, case variants, Unicode equivalents and nesting tricks the author did not list. An allow-list is defined by your own domain, so it is finite, closed and reviewable — and anything new is rejected by default rather than accepted by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is input validation enough to prevent SQL injection?</summary>
+      <div class="answer"><p>No. Parameterized statements (or a properly used ORM) are the fix, because they keep data out of the query grammar entirely. Validation is a defense-in-depth layer that reduces what an attacker can even submit and catches nonsense early, but it makes no guarantee — the same value can reach the query by a path your validator does not cover. If an interviewer asks "how do you stop SQL injection", the first word out of your mouth should be parameterization, and validation should come second as a supporting layer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where should validation run, and is client-side validation useful?</summary>
+      <div class="answer"><p>Server-side, at the trust boundary where untrusted data enters — controller, message listener, webhook handler, file reader — and again at any boundary where the trust level changes. Client-side validation is a usability feature that gives fast feedback; it provides no security at all because anyone can send the request directly with a proxy or a shell. Never treat a value as validated because a form validated it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which Bean Validation annotations would you put on a customer registration DTO, and how do you trigger them?</summary>
+      <div class="answer"><p><code>@NotBlank</code> plus <code>@Size(max = ...)</code> on names, <code>@Email</code> plus <code>@Size</code> on the email, <code>@Pattern</code> with an anchored allow-list regex on the mobile number, <code>@NotNull</code> on required references, and <code>@Valid</code> on nested objects and collection elements. Trigger with <code>@Valid</code> on the <code>@RequestBody</code> parameter; use <code>@Validated</code> on the class for constraints on path variables and request parameters. Handle <code>MethodArgumentNotValidException</code> in a <code>@RestControllerAdvice</code> so every failure returns one consistent error shape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between @NotNull, @NotEmpty and @NotBlank?</summary>
+      <div class="answer"><p><code>@NotNull</code> only requires the reference to be present, so an empty string passes. <code>@NotEmpty</code> requires non-null and size greater than zero — it works on strings, collections, maps and arrays — so a string of spaces passes. <code>@NotBlank</code> applies to character sequences only and requires at least one non-whitespace character, which is what you almost always want for a user-entered string field.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain syntactic versus semantic validation with an example.</summary>
+      <div class="answer"><p>Syntactic validation checks shape: is this a well-formed UUID, is the amount positive, is the string under 80 characters. Semantic validation checks meaning in context: does this order id belong to the calling user's tenant, is the coupon still active, is the order in a state that allows cancellation, is there enough stock. Syntactic rules are declarative and belong on the DTO; semantic rules need the database and the session and belong in the service layer. A syntactically perfect id belonging to someone else is exactly the IDOR class of vulnerability — no annotation catches it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must canonicalization happen before validation? Give an example.</summary>
+      <div class="answer"><p>Because otherwise you validate one representation and use a different one. A filter rejecting the literal <code>../</code> passes a doubly percent-encoded form such as <code>%252e%252e%252f</code>; a decoding step downstream turns it back into <code>../</code>, so the string that reached the file system was never judged. Decode and normalize once — percent-decoding, Unicode NFKC, path separators — then validate that canonical form, then use exactly that value with no further transformation. Reject anything still containing encoding markers rather than looping decode until stable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is mass assignment, and how do you prevent it in Spring?</summary>
+      <div class="answer"><p>Mass assignment (over-posting) is binding a request body directly onto an entity or domain object, so a client can set fields the endpoint never meant to expose — <code>role</code>, <code>isAdmin</code>, <code>tenantId</code>, <code>balance</code>. A profile-update endpoint becomes privilege escalation. Prevent it with a purpose-built DTO per operation containing only the accepted fields, mapped explicitly onto the entity in the service. Ignore lists and <code>@JsonIgnore</code> sprinkled on the entity are block-lists and rot the moment someone adds a column.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you validate a file's type on upload?</summary>
+      <div class="answer"><p>By its content, not its label. The extension and the multipart <code>Content-Type</code> header are both client-supplied strings and prove nothing. Sniff the actual bytes — Apache Tika on the JVM — check the detected type against a short allow-list of types you support, and require the extension to agree with the detected type. Remember that detection tells you the format, not that it is safe: SVG is a valid image type and also an XML document that can carry script, so it usually should not be on the list.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is path traversal, and why does filtering "../" fail?</summary>
+      <div class="answer"><p>Path traversal is untrusted text becoming part of a file system path, letting <code>..</code> elements resolve outside the intended directory — arbitrary read where you read, arbitrary write (often remote code execution) where you write. Textual filtering fails because <code>../</code> is only one spelling: backslash variants, percent-encoded and double-encoded forms, alternate Unicode representations, sequences that reassemble after a single strip pass, and absolute paths that need no <code>..</code> at all. The fix inspects the result, not the string: resolve against the base directory, normalize to a real absolute path, and verify with <code>Path.startsWith</code> — never <code>String.startsWith</code>, which accepts <code>/data/uploads-evil</code> as inside <code>/data/uploads</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design a secure file upload endpoint. Walk through every layer.</summary>
+      <div class="answer"><p>Authenticate and authorize first, and rate-limit the endpoint. Enforce a size limit twice — at the reverse proxy or ingress so oversized bodies never reach the app, and in the framework's multipart settings — plus caps on part count and total request size. Discard the client filename and generate your own storage name (UUID or content hash), keeping the original only as an escaped display label. Detect the content type by sniffing the bytes and check it against a narrow allow-list, requiring the extension to agree. Write into a base directory resolved and containment-checked, outside the web root or straight to object storage, non-executable and owned by a different user. Scan for malware where risk warrants and quarantine rather than delete on failure. On download, authorize per file, serve from a separate origin with <code>Content-Disposition: attachment</code>, <code>X-Content-Type-Options: nosniff</code> and an explicit narrow <code>Content-Type</code>, preferring short-lived signed URLs. Log uploader, size, detected type and storage id throughout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is zip slip, and how do you extract an archive safely?</summary>
+      <div class="answer"><p>Zip slip is path traversal through archive entry names: an entry named with <code>..</code> segments, extracted by code that joins the entry name onto the output directory, writes outside it — over configuration, templates, a file under a web root or a JAR on the class path. It affects zip, tar, jar, war, 7z, apk and more. Extract entry by entry: resolve each name against the target, normalize, and verify with <code>Path.startsWith</code> before opening an output stream; refuse absolute names and symlink entries; extract into a fresh temp directory you can discard atomically. Never call a one-line "extract everything" helper without knowing what it validates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you defend against a zip bomb?</summary>
+      <div class="answer"><p>Never trust the declared uncompressed size in the entry header — it is attacker-controlled. Count the bytes you actually write and enforce a total uncompressed budget, a per-entry budget, an entry-count cap, a maximum nesting depth and a compression-ratio ceiling, aborting the whole extraction the instant any threshold is crossed. Extract in a resource-limited context (bounded temp space, a worker with its own memory and time budget) so a failure degrades one job rather than the node, and clean up partial output on abort.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A code review shows @Pattern(regexp = "^([a-zA-Z0-9]+\\s?)+$"). What is wrong with it?</summary>
+      <div class="answer"><p>It is a ReDoS risk: a quantified group containing a quantifier over an overlapping character class, so a moderately long non-matching input drives Java's backtracking engine through an exponential number of failure paths and pins a CPU core. Because validation runs before business logic and often before rate limiting, a few requests can take the service down. Fix it by bounding length with <code>@Size</code> first, flattening the pattern so no quantifier nests, anchoring with <code>\A</code> and <code>\z</code> rather than <code>^</code> and <code>$</code>, compiling it once as a static constant, and parsing structured formats with a real parser instead of a regex.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does an uploaded HTML file served from your own domain matter, and how do you neutralise it?</summary>
+      <div class="answer"><p>Because the browser executes it in your origin: it can read your cookies and storage and call your APIs as the victim — stored XSS delivered by your own download endpoint. Neutralise it by serving user content from a genuinely separate origin (a different domain, not a cookie-sharing subdomain), sending <code>Content-Disposition: attachment</code> so it downloads rather than renders, sending <code>X-Content-Type-Options: nosniff</code> so the browser does not second-guess your <code>Content-Type</code>, sending a narrow explicit type from your own detection rather than the client's, and keeping the storage location outside the web root so the server never interprets it either.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.val.input — Allow-list validation, canonicalization, Bean Validation, validating at the trust boundary</li>
+      <li>sec.val.files — Path traversal, upload hardening (type, size, content sniffing), safe archive extraction</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
