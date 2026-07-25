@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="System Design module on consistency and availability: CAP stated precisely and PACELC's else branch, linearizability, sequential and causal consistency, client-centric session guarantees, eventual consistency, quorums and read repair, the redundancy maths behind the nines, failure domains, multi-region DR with RTO and RPO, degradation, backpressure, retry storms and chaos engineering — with verified resources and interview questions.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Consistency and Availability — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Consistency and Availability</h1>
+  <p class="standfirst">Two words that every candidate uses and almost nobody defines. This double-weight module fixes the definitions first — CAP as it was actually proved, consistency as a spectrum rather than a switch — and then turns to the engineering that keeps a system up when the machines underneath it are not.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">System Design track</a> → Consistency and Availability</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The first half is about correctness under replication. CAP is the most misquoted theorem in our industry, so we state it precisely, retire the "pick two" slogan, and then replace the binary of "strong versus eventual" with the real spectrum: linearizability, sequential consistency, causal consistency, and the client-centric session guarantees that users actually notice when they are missing. Quorums close it out — <code>R + W &gt; N</code>, sloppy quorums, hinted handoff and read repair.</p>
+    <p>The second half is availability engineering: the arithmetic of the nines, why serial dependencies drag availability downward, why redundancy only pays when failures are independent, how failure domains create correlated failure (and why most large outages are a bad deploy rather than dead hardware), multi-region and disaster recovery framed as an RTO/RPO decision the business must make, and then the runtime behaviours — graceful degradation, backpressure, load shedding, timeout budgets, retry budgets — that decide whether an overloaded system sheds a little or collapses entirely. Chaos engineering is the practice that verifies all of it before an incident does.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>CAP stated precisely — and why "pick two" is wrong</h3>
+    <p>The theorem says one thing: <em>when a network partition occurs</em>, a distributed system must choose between consistency (linearizable reads) and availability (every non-failing node answers every request). That is it. It is a statement about behaviour during partitions, not a menu of three features from which you tick two at design time. Partition tolerance is not a property you choose — networks drop packets whether or not you have signed off on it — so a distributed system has exactly two options once the partition starts: refuse some requests to stay correct, or answer them and risk divergence.</p>
+    <p>Two consequences follow. First, "CA" is not a meaningful choice for anything running across more than one machine: opting out of partition tolerance means opting out of the network, and a single-node database is not a distributed system. Second, because partitions are rare, CAP says nothing at all about the other 99% of the time — a system that never partitions is not thereby "consistent and available", it simply has not been asked the question yet. Brewer's own retrospective is emphatic that the theorem was always narrower than the folklore version, and Kleppmann's critique goes further: the labels CP and AP are so coarse that most real databases fit neither cleanly.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/" rel="noopener">CAP Twelve Years Later: How the "Rules" Have Changed — Eric Brewer, InfoQ (the author walking back the slogan)</a></li>
+      <li>[Article] <a href="https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" rel="noopener">Please stop calling databases CP or AP — Martin Kleppmann</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/CAP_theorem" rel="noopener">CAP theorem — Wikipedia (the Gilbert–Lynch formalisation and its exact definitions)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/brewers-cap-theorem" rel="noopener">Brewer's CAP Theorem — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=--YbYCfMnxc" rel="noopener">CAP Theorem — From the First Principles — Arpit Bhayani (Asli Engineering)</a></li>
+    </ul>
+
+    <h3>PACELC: the tradeoff during the other 99% of the time</h3>
+    <p>Daniel Abadi's PACELC completes the picture. Read it as two clauses: <strong>if P</strong>artition, then <strong>A</strong>vailability or <strong>C</strong>onsistency — that is CAP — <strong>E</strong>lse, <strong>L</strong>atency or <strong>C</strong>onsistency. The else branch is the one you live with every day. Keeping replicas linearizable means coordinating before you answer: a write must reach a quorum, a read must confirm it is not stale, and every such round trip adds latency, especially across regions where the speed of light sets a floor of tens of milliseconds per hop.</p>
+    <p>PACELC gives you a compact vocabulary for classifying systems and for defending a design in an interview. DynamoDB and Cassandra in their default settings are PA/EL — they stay up during a partition and they favour low latency over strict freshness in normal operation. A system built on consensus, such as a Spanner-style database or an etcd-backed control plane, is PC/EC: it will refuse writes on the minority side of a partition and it pays coordination latency even when the network is perfectly healthy. Both are legitimate; the interview answer is naming which one your design is and why the business can live with the consequence.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf" rel="noopener">Consistency Tradeoffs in Modern Distributed Database System Design — Daniel Abadi (the PACELC paper, PDF)</a></li>
+      <li>[Official] <a href="http://dbmsmusings.blogspot.com/2010/04/problems-with-cap-and-yahoos-little.html" rel="noopener">Problems with CAP, and Yahoo's little known NoSQL system — Daniel Abadi, DBMS Musings (where PACELC was first proposed)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/PACELC_design_principle" rel="noopener">PACELC design principle — Wikipedia (with the classification table for real databases)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/cap-pacelc-acid-base-essential-concepts" rel="noopener">CAP, PACELC, ACID, BASE — Essential Concepts for an Architect's Toolkit — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rVF0Oi_R84Q" rel="noopener">PACELC Theorem — Beyond CAP Theorem — Tech Primers</a></li>
+    </ul>
+
+    <h3>Linearizability and sequential consistency: the strong end of the spectrum</h3>
+    <p>Linearizability — the "C" in CAP, and what most people mean by strong consistency — is the guarantee that the replicated system <em>behaves as if there were a single copy</em>. Every operation appears to take effect instantaneously at some point between its invocation and its response, and once a write returns, no subsequent read anywhere may return an older value. It is a recency guarantee about single objects, and it is what makes a distributed lock, a leader election or a uniqueness constraint safe to build on.</p>
+    <p>The cost is coordination: a linearizable read cannot be served from whatever replica happens to be nearest, because that replica cannot know on its own whether it is current. Sequential consistency is the weaker cousin — all nodes agree on one total order of operations, but that order need not respect real time, so a read may legally return a stale value as long as everyone stays stale in the same order. Distinguishing the two is a favourite senior-level probe, and Jepsen's model map is the reference chart worth memorising: it shows which models are achievable in a partition and which are not.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jepsen.io/consistency" rel="noopener">Consistency Models — jepsen.io (the map of every model and how they relate)</a></li>
+      <li>[Official] <a href="https://jepsen.io/consistency/models/linearizable" rel="noopener">Linearizability — jepsen.io</a></li>
+      <li>[Official] <a href="https://jepsen.io/consistency/models/sequential" rel="noopener">Sequential consistency — jepsen.io</a></li>
+      <li>[Article] <a href="https://aphyr.com/posts/313-strong-consistency-models" rel="noopener">Strong consistency models — Kyle Kingsbury (aphyr)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=noUNH3jDLC0" rel="noopener">Distributed Systems 7.2: Linearizability — Martin Kleppmann (Cambridge lecture series)</a></li>
+    </ul>
+
+    <h3>Causal consistency: the sweet spot most systems actually target</h3>
+    <p>Causal consistency says that operations which are <em>causally related</em> must be seen by everyone in that order, while concurrent operations may be seen in any order. If a reply happens after the comment it replies to, nobody may ever see the reply before the comment; but two unrelated posts may land in different orders on different replicas without breaking anything. It is the strongest model that remains available during a network partition, which is precisely why it is the sweet spot: you keep the ordering that users can perceive and you give up the ordering they cannot.</p>
+    <p>In practice you meet it under commercial names. Azure Cosmos DB's five levels run from strong through bounded staleness, session and consistent prefix to eventual, and "session" is causal consistency scoped to one client's session. Many social and messaging systems implement it with per-key version vectors or a Lamport-style logical clock so that a causally later write can never be overwritten by an earlier one arriving late. When a design review asks "is eventual consistency acceptable here?", the more useful counter-question is usually "is causal enough, and can we implement it?"</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jepsen.io/consistency/models/causal" rel="noopener">Causal consistency — jepsen.io</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/cosmos-db/consistency-levels" rel="noopener">Consistency levels in Azure Cosmos DB — Microsoft Learn (five named levels with their guarantees and costs)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/latency-and-consistency-tradeoffs" rel="noopener">Latency and consistency tradeoffs for data replication — ByteByteGo</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/distributed-systems-guide" rel="noopener">Fundamentals of Distributed Systems — Baeldung on Computer Science</a></li>
+    </ul>
+
+    <h3>Client-centric guarantees: read-your-writes, monotonic reads, monotonic writes, writes-follow-reads</h3>
+    <p>Global models describe the whole system; session guarantees describe what one client experiences, and they are what product teams actually need. Four of them recur, and each has a symptom you can name when it is absent. <strong>Read-your-writes</strong>: you edit your profile, the read goes to a lagging replica, and your own change has vanished — the single most common "the site lost my data" support ticket. <strong>Monotonic reads</strong>: you refresh and an item that was there is gone, refresh again and it is back, because successive reads hit replicas at different points in the log — time appears to run backwards. <strong>Monotonic writes</strong>: you upload a photo and then delete it, the two writes are reordered on a replica, and the deleted photo is resurrected. <strong>Writes-follow-reads</strong>: you read a comment and reply to it, but the reply propagates faster than the comment, so other users see an answer to a question nobody asked.</p>
+    <p>Interviewers like these because they convert an abstract model into a bug you can describe. They are also cheap to obtain: pinning a session to one replica, routing reads to the primary for a short window after a write, or carrying the client's last-seen version token with each request will buy read-your-writes and monotonic reads without making the whole system linearizable. DynamoDB frames the same choice as eventually consistent versus strongly consistent reads at the API level — twice the read cost, no cross-region reads — which is a good example to quote.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://jepsen.io/consistency/models/read-your-writes" rel="noopener">Read your writes — jepsen.io</a></li>
+      <li>[Official] <a href="https://jepsen.io/consistency/models/monotonic-reads" rel="noopener">Monotonic reads — jepsen.io</a></li>
+      <li>[Official] <a href="https://jepsen.io/consistency/models/monotonic-writes" rel="noopener">Monotonic writes — jepsen.io</a></li>
+      <li>[Official] <a href="https://jepsen.io/consistency/models/writes-follow-reads" rel="noopener">Writes follow reads — jepsen.io</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html" rel="noopener">Read consistency — Amazon DynamoDB Developer Guide (eventually vs strongly consistent reads)</a></li>
+    </ul>
+
+    <h3>Eventual consistency, and what "eventually" means operationally</h3>
+    <p>Eventual consistency is the weakest useful promise: if writes stop, all replicas converge on the same value. Note what it does not say — it puts no bound on how long convergence takes, it says nothing about what you read in the meantime, and it is trivially satisfied by a system that returns the correct answer only after the last write in history. That is why "eventually consistent" alone is not a design; the design is the operational bound you attach to it.</p>
+    <p>So make it measurable. What is the replication lag at p99, and do you alert on it? What happens to a read that arrives during the lag window — is it merely stale, or can it be wrong in a way that costs money? How do conflicting concurrent writes get resolved: last-writer-wins on a timestamp (simple, and silently loses data when clocks skew), version vectors with an application-level merge, or a CRDT that converges by construction? Sit those questions next to the business rule. A social feed can be seconds stale without anyone caring; a seat inventory or a wallet balance cannot, and that is where you spend the coordination budget.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://queue.acm.org/detail.cfm?id=1466448" rel="noopener">Eventually Consistent — Werner Vogels, ACM Queue (the canonical statement, including the session guarantees)</a></li>
+      <li>[Article] <a href="https://www.allthingsdistributed.com/2008/12/eventually_consistent.html" rel="noopener">Eventually Consistent — Revisited — Werner Vogels, All Things Distributed</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/eventual-consistency/" rel="noopener">Why Eventual Consistency is Preferred in Distributed Systems — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/eventual-consistency-vs-strong-eventual-consistency-vs-strong-consistency" rel="noopener">Eventual Consistency vs. Strong Eventual Consistency vs. Strong Consistency — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9uCP3qHNbWw" rel="noopener">Distributed Systems 7.3: Eventual consistency — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Quorums: R + W &gt; N, sloppy quorums, hinted handoff and read repair</h3>
+    <p>Leaderless replication turns consistency into arithmetic. With <code>N</code> replicas per key, a write is acknowledged after <code>W</code> replicas confirm it and a read gathers responses from <code>R</code> replicas. If <code>R + W &gt; N</code> then the read set and the write set must overlap in at least one replica, so any successful read touches at least one node holding the newest value — provided the read can pick it out, which is what version numbers or vector clocks are for. Tuning within that constraint is a latency decision: <code>W = N</code> with <code>R = 1</code> gives cheap reads and expensive writes, <code>W = 1</code> with <code>R = N</code> does the reverse, and the common default <code>N = 3, R = 2, W = 2</code> balances both while tolerating one node down.</p>
+    <p>Two refinements matter in interviews. A <em>sloppy quorum</em> keeps the system writable during a partition by accepting writes on any <code>W</code> reachable nodes, not necessarily the <code>W</code> nodes that own the key; the stand-ins keep a <em>hinted handoff</em> record and forward the data to the rightful owners once they return. This buys availability and gives up the overlap guarantee, so <code>R + W &gt; N</code> no longer implies freshness — a point candidates almost always miss. Convergence is then maintained by anti-entropy in the background and by <em>read repair</em> in the foreground: when a read sees replicas disagree, the coordinator writes the newest value back to the stale ones, which is why frequently read keys are self-healing while cold keys rely on the repair process you hopefully scheduled.</p>
+    <pre class="code-block" data-label="Quorum sizing"><code>N = 3 replicas per key
+W = 2, R = 2   ->   R + W = 4 &gt; 3   overlap guaranteed, survives 1 node down
+W = 3, R = 1   ->   fast reads, writes fail if any replica is down
+W = 1, R = 1   ->   R + W = 2, NOT &gt; 3: no overlap, eventual only
+
+Strict quorum   : the W acks must come from the N nodes that own the key
+Sloppy quorum   : any W reachable nodes may ack; overlap guarantee is lost
+Hinted handoff  : stand-in node stores a hint and replays it to the owner later
+Read repair     : a read that sees divergence writes the newest value back</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" rel="noopener">Dynamo: Amazon's Highly Available Key-value Store — SOSP 2007 paper (the source of sloppy quorums and hinted handoff, PDF)</a></li>
+      <li>[Official] <a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html" rel="noopener">Dynamo — Apache Cassandra architecture documentation (tunable consistency levels and read repair in a shipping database)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/leaderless-replication/" rel="noopener">Leaderless Replication — Arpit Bhayani (the R + W &gt; N derivation)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/cassandra-writes/" rel="noopener">How Writes Work in Apache Cassandra — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dCu5q875PFs" rel="noopener">Consistency (Quorum Consensus) — System Design Fundamentals — Software Interviews Prep</a></li>
+    </ul>
+
+    <h3>The redundancy maths: what a nine costs, and why serial dependencies destroy it</h3>
+    <p>Start with the budget, because every availability conversation is really a budget conversation. Roughly: 99% allows about 3.65 days of downtime per year, 99.9% about 8.8 hours, 99.99% about 53 minutes, and 99.999% about 5.3 minutes. Each extra nine costs an order of magnitude more engineering, so the number belongs to the business, not to the architect — and it should be attached to a specific user journey, not to "the system", because checkout and the recommendations carousel do not deserve the same budget.</p>
+    <p>Then the arithmetic that catches people out. Components in <em>series</em> multiply: a request that must traverse five independent services at 99.9% each yields 0.999<sup>5</sup> ≈ 99.5%, or about 43 hours a year — five times worse than any single component, and this is the default shape of a microservice call chain. Components in <em>parallel</em> multiply their failure probabilities instead: two independent replicas at 99% each give 1 − 0.01<sup>2</sup> = 99.99%. That word <em>independent</em> is where the maths meets reality: two replicas of the same buggy binary, in the same rack, behind the same config push, do not fail independently, so the parallel formula quietly overstates your availability. Redundancy multiplies reliability only to the degree that the failures are uncorrelated.</p>
+    <pre class="code-block" data-label="Availability arithmetic"><code>Downtime per year
+  99%      ~ 3.65 days      99.9%    ~ 8.8 hours
+  99.99%   ~ 53 minutes     99.999%  ~ 5.3 minutes
+
+Series (all must work):     A_total = A1 x A2 x ... x An
+  5 hops at 99.9%        -> 0.999^5  = 0.995   -> ~43 h/year
+
+Parallel (any one works):   A_total = 1 - (1-A1) x (1-A2)
+  2 replicas at 99%      -> 1 - 0.01^2 = 0.9999 -> ~53 min/year
+  ...only if the two failure probabilities are independent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/availability-table/" rel="noopener">Availability Table — Google SRE Book (nines mapped to downtime per year, quarter and week)</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/embracing-risk/" rel="noopener">Embracing Risk — Google SRE Book (error budgets, and why 100% is the wrong target)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html" rel="noopener">Reliability Pillar — AWS Well-Architected Framework (availability calculations for series and parallel dependencies)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/High_availability" rel="noopener">High availability — Wikipedia (the nines table and its measurement caveats)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/how-do-we-design-for-high-availability" rel="noopener">How do We Design for High Availability? — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Failure domains and correlated failure — where the big outages actually come from</h3>
+    <p>A failure domain is the blast radius of one fault: a process, a host, a rack and its top-of-rack switch, an availability zone with its own power and network, a region, a cloud provider. Good architecture spreads replicas across domains so that no single fault takes out a majority, and this is exactly what "three replicas across three AZs" buys you. Shuffle sharding pushes the idea further: assign each customer a random subset of workers so that one poisonous tenant degrades a small, mostly-distinct slice of users rather than everyone at once.</p>
+    <p>The uncomfortable observation is that the domains people diagram are usually the physical ones, while the domains that cause large outages are logical. A bad deploy rolled out to every zone in eleven minutes is a single failure domain. So is a global config push, a shared control plane, a certificate that expires everywhere at once, a DNS change, a common library upgrade, and a cache that all regions stampede after a shared eviction. Public post-mortems from the major providers overwhelmingly describe correlated software and configuration failures rather than dead hardware. The practical countermeasures are unglamorous and effective: stagger deployments by cell and region with bake time between waves, make config a versioned, rolled-out artefact rather than a live switch, and keep the data plane <em>statically stable</em> so it continues serving on last-known-good state when the control plane is unavailable.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/minimizing-correlated-failures-in-distributed-systems/" rel="noopener">Minimizing correlated failures in distributed systems — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/aws-fault-isolation-boundaries/abstract-and-introduction.html" rel="noopener">AWS Fault Isolation Boundaries — AWS whitepaper (zones, regions, control vs data plane)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/reliability/availability-zones-overview" rel="noopener">What are availability zones? — Azure reliability documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/workload-isolation-using-shuffle-sharding/" rel="noopener">Workload isolation using shuffle-sharding — Amazon Builders' Library</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=x-IAS4_XdPQ" rel="noopener">Resilience of AWS Cloud: Design patterns for availability (ARC310) — AWS re:Invent 2025</a></li>
+    </ul>
+
+    <h3>Multi-region and disaster recovery: RTO, RPO, active-passive, active-active</h3>
+    <p>Multi-region is where consistency and availability stop being separate chapters. Active-passive is the simpler shape: one region serves, another is warmed and replicated to, failover is a deliberate action. It is cheap to reason about, but the passive side is untested by definition unless you rehearse failover, and the failover itself takes minutes. Active-active serves from both regions concurrently — better latency, no failover step, no idle capacity — and it hands you the hard problem: two regions accepting writes for the same data are asking for cross-region consensus (correct, slow) or conflict resolution (fast, and now your application must define what a merge means). The usual middle path is to partition write ownership by key or by geography so that each record has exactly one home region, and to replicate asynchronously everywhere else.</p>
+    <p>Disaster recovery gives the business two numbers to choose, and they are the two numbers to raise in any interview about DR. <strong>RPO</strong> (recovery point objective) is how much data you may lose, measured in time — it is set by your replication method: synchronous replication approaches zero at the cost of write latency, hourly snapshots mean an hour of writes can vanish. <strong>RTO</strong> (recovery time objective) is how long recovery may take, and it is set by your strategy: backup-and-restore takes hours, pilot light tens of minutes, warm standby minutes, hot multi-site near zero. Each step down costs real money, which is why the choice is the business's and not yours. And the rule that outranks all of them: a DR plan that has never been executed is a hypothesis, so schedule the failover drill and make one region's loss a routine, boring event.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html" rel="noopener">Disaster recovery options in the cloud — AWS whitepaper (backup and restore, pilot light, warm standby, multi-site active-active with RTO/RPO for each)</a></li>
+      <li>[Official] <a href="https://cloud.google.com/architecture/dr-scenarios-planning-guide" rel="noopener">Disaster recovery planning guide — Google Cloud Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/reliability/concept-business-continuity-high-availability-disaster-recovery" rel="noopener">Business continuity, high availability and disaster recovery — Azure reliability documentation</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/sovereign-fault-domains-cloud-resilience/" rel="noopener">When a Cloud Region Fails: Rethinking High Availability — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CbkqQznZS9Y" rel="noopener">Best practices for creating multi-Region architectures on AWS (ARC323) — AWS re:Invent 2024</a></li>
+    </ul>
+
+    <h3>Graceful degradation, backpressure and load shedding</h3>
+    <p>Availability is rarely binary in practice, and the systems that survive spikes are the ones that were designed to get worse gracefully instead of failing entirely. Decide the degradation ladder in advance, per feature: serve <em>stale</em> (a cached response with a slightly older timestamp beats an error), serve <em>partial</em> (render the product page without the personalised recommendations block), or <em>shed the expensive feature</em> (turn off search suggestions and heavyweight analytics while keeping checkout intact). Write these down as feature flags that can be flipped under load, because an incident is a bad time to invent a policy.</p>
+    <p>Underneath sits flow control. <strong>Backpressure</strong> means a saturated component tells its upstream to slow down instead of silently accumulating work — a bounded queue that blocks or rejects, a reactive stream that only requests what it can process, a connection pool that refuses rather than queues. The failure mode it prevents is the unbounded queue: latency grows without limit, every request eventually times out on the client while the server dutifully works through requests nobody is waiting for any more, and throughput collapses to zero useful work. <strong>Load shedding</strong> is the deliberate version — when the arrival rate exceeds capacity, reject the excess immediately and cheaply, prioritising by request cost, tenant tier, or health-check versus user traffic. Rejecting 20% of requests in a millisecond is vastly better than accepting 100% and answering none of them in time.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/handling-overload/" rel="noopener">Handling Overload — Google SRE Book (criticality, adaptive throttling, graceful degradation)</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/" rel="noopener">Using load shedding to avoid overload — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/static-stability-using-availability-zones/" rel="noopener">Static stability using Availability Zones — Amazon Builders' Library (keep serving on last-known-good state)</a></li>
+      <li>[Article] <a href="https://ferd.ca/queues-don-t-fix-overload.html" rel="noopener">Queues Don't Fix Overload — Fred Hébert (why buffering is not backpressure)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=qV9ZHUAw7po" rel="noopener">Building Strong Microservices: Rate Limiting, Load Shedding &amp; Hedging — Krish Dinesh</a></li>
+    </ul>
+
+    <h3>Timeout budgets, retry storms and retry budgets</h3>
+    <p>Every call in a chain needs a timeout, and the timeouts must be arranged as a <em>budget</em> rather than picked per service. If the browser gives up after 3 seconds, an inner service configured with a 10-second timeout is doing pure waste work: it holds a thread, a connection and a database cursor for a caller that stopped listening 7 seconds ago, and under load that waste is what fills the pools. The fix is to propagate a deadline with the request — gRPC does this natively, and an <code>X-Deadline</code>-style header does it for HTTP — so each hop knows how much time actually remains, subtracts its own work, and passes the remainder downstream, cancelling immediately when the budget is exhausted.</p>
+    <p>Retries are the other half, and they are an outage amplifier when applied naively. A dependency wobbles, every caller retries three times, the offered load triples exactly when the dependency has least capacity, and the retry traffic keeps it down — a <em>retry storm</em>, and worse still it multiplies through a call chain, so three retries at each of three layers is 27 attempts for one user request. Three disciplines contain it: exponential backoff with <em>jitter</em> so callers do not re-synchronise into waves; a <em>retry budget</em> (retries capped as a percentage of successful traffic, as gRPC's throttling design specifies) so retries can never dominate the load; and a <em>circuit breaker</em> so callers stop retrying a dependency already judged dead — see <a href="../microservices/08-resilience.html">Microservices module 08, Resilience</a> for the state machine and Resilience4j configuration. One more rule: never retry a non-idempotent write, because a timeout cannot tell you whether the write committed.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" rel="noopener">Timeouts, retries and backoff with jitter — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/addressing-cascading-failures/" rel="noopener">Addressing Cascading Failures — Google SRE Book (retry amplification, deadline propagation, restarting a collapsed system)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/throttling" rel="noopener">Throttling pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://github.com/grpc/proposal/blob/master/A6-client-retries.md" rel="noopener">gRPC A6: Client Retries — the retry-throttling budget design, gRPC proposal</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/avoiding-fallback-in-distributed-systems/" rel="noopener">Avoiding fallback in distributed systems — Amazon Builders' Library (why the untested recovery path is the dangerous one)</a></li>
+    </ul>
+
+    <h3>Chaos engineering: proving the design before an incident does</h3>
+    <p>Everything above is a hypothesis until it is tested under failure. Chaos engineering is the discipline of running that test deliberately: form a hypothesis about steady-state behaviour expressed in user-visible metrics, inject a realistic fault — kill an instance, add 300 milliseconds of latency to a dependency, blackhole traffic to one availability zone, fail a region — and see whether the steady state actually holds. Run it in production, or as close to it as you can bear, because the failure modes you care about live in the interaction of real traffic, real data volumes and real dependencies. Keep the blast radius small and automate the abort.</p>
+    <p>It is not "break things randomly and hope". The Principles of Chaos state it as an empirical method with a hypothesis, a control and a stopping condition; Netflix's Chaos Monkey and the managed services that followed it (AWS Fault Injection Service, Azure Chaos Studio) are just the injection mechanism. The point is that the experiment surfaces the assumptions nobody wrote down: that the fallback path still compiles, that the retry budget is configured, that the standby region has current capacity, that the alert actually pages someone. A failover you have rehearsed monthly is an operation; one you have never rehearsed is an outage waiting for a Friday evening.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://principlesofchaos.org/" rel="noopener">Principles of Chaos Engineering — principlesofchaos.org (the definition and the advanced practices)</a></li>
+      <li>[Official] <a href="https://netflix.github.io/chaosmonkey/" rel="noopener">Chaos Monkey — Netflix (documentation for the original instance-terminating tool)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/fis/latest/userguide/what-is.html" rel="noopener">What is AWS Fault Injection Service — AWS documentation (managed experiments with stop conditions)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/reliable-systems-chaos-engineering/" rel="noopener">Building Reliable Software Systems with Chaos Engineering — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q4nniyAarbs" rel="noopener">Chaos &amp; Intuition Engineering at Netflix — Casey Rosenthal, GOTO 2016</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-coordination.html">← Distributed Coordination</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="09-api-design.html">API Design at Scale →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>CAP is close to guaranteed in Indian product and service-company system design rounds, and the follow-ups are where the level is decided — the availability half of this module is what separates a candidate who has read a blog from one who has been on call:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Explain the CAP theorem.</summary>
+      <div class="answer"><p>In a distributed system that is subject to network partitions, when a partition occurs you must choose between consistency and availability. Consistency here means linearizability — every read returns the most recent write. Availability means every request to a non-failing node gets a non-error response. Partition tolerance is not optional: networks fail, so the real choice is what your system does during the failure — reject requests to stay correct (CP) or answer them and risk divergence (AP).</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> "CAP means pick any two of the three." What is wrong with that statement?</summary>
+      <div class="answer"><p>It is the standard misstatement. CAP is not a menu you choose from at design time; it is a constraint that only binds during a partition. Partition tolerance cannot be traded away — you do not control whether the network drops packets — so "CA" is not a meaningful option for anything distributed. And because partitions are rare, CAP says nothing about system behaviour the rest of the time. That gap is exactly what PACELC fills.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is eventual consistency, and what does it not promise?</summary>
+      <div class="answer"><p>If writes stop, all replicas eventually converge on the same value. It promises nothing about how long that takes, nothing about what a read returns in the meantime, and nothing about the order in which updates become visible. Making it usable means attaching operational numbers: measured replication lag at p99, an alert on that lag, and a defined conflict-resolution rule.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What do RTO and RPO mean, and which one does replication frequency control?</summary>
+      <div class="answer"><p>RPO is how much data you can afford to lose, expressed in time; RTO is how long you can afford to be down. Replication and backup frequency set RPO — hourly snapshots mean up to an hour of writes can be lost, synchronous replication approaches zero RPO at the cost of write latency. RTO is set by the recovery strategy: backup-and-restore takes hours, pilot light tens of minutes, warm standby minutes, active-active near zero. Both numbers are business decisions, because each improvement costs money.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> State PACELC and classify DynamoDB and a consensus-backed database with it.</summary>
+      <div class="answer"><p>If Partition, choose Availability or Consistency; Else, choose Latency or Consistency. DynamoDB and Cassandra in their default configuration are PA/EL — available during a partition, favouring low latency over freshness in normal operation. A Spanner-style or etcd-backed system is PC/EC — it refuses writes on the minority side of a partition and pays coordination latency even when the network is healthy. The else clause matters more day to day, because partitions are rare and latency is constant.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between linearizability and causal consistency, and why do many systems target causal?</summary>
+      <div class="answer"><p>Linearizability makes the whole replicated system behave like a single copy: every operation appears to take effect at one instant in real time, so a read never returns a value older than a completed write. Causal consistency only orders operations that are causally related; concurrent operations may be seen in different orders on different replicas. Causal is the strongest model that remains available during a partition, and it preserves exactly the ordering users can perceive (a reply never appears before its parent), so it is the pragmatic sweet spot.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A user updates their profile and the change disappears on the next page load. Name the guarantee that is missing and two cheap fixes.</summary>
+      <div class="answer"><p>Read-your-writes (read-your-own-writes) consistency. The read went to a replica that had not yet received the write. Cheap fixes: route reads for that user to the primary for a short window after a write; pin the session to one replica; or carry the client's last-written version token with the request and have the replica wait for or forward to a version at least that new. None of these require making the whole system linearizable.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain R + W &gt; N. With N = 3, what would you set and why?</summary>
+      <div class="answer"><p>With N replicas, if the read set size R plus the write set size W exceeds N, the two sets must overlap in at least one replica, so any successful read touches a node with the newest value — as long as version metadata lets the reader pick the newest. With N = 3 the usual choice is R = 2, W = 2: overlap is guaranteed, one node can be down for both reads and writes, and neither operation waits on all three. R = 1, W = 3 gives fast reads but writes fail whenever any replica is unavailable; R = 3, W = 1 is the reverse.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Five services, each 99.9% available, in a serial call chain. What is end-to-end availability?</summary>
+      <div class="answer"><p>Series availability multiplies: 0.999<sup>5</sup> ≈ 0.995, so about 99.5%, or roughly 43 hours of downtime a year — five times worse than any individual service. This is why deep synchronous call chains are an availability problem in themselves, and why the fixes are structural: remove hops, make non-critical dependencies asynchronous or optional, and cache so a failing dependency degrades rather than fails the request.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Active-passive versus active-active multi-region — how do you choose?</summary>
+      <div class="answer"><p>Active-passive is simpler and cheaper to reason about, but you carry idle capacity, failover takes minutes, and the passive path is untested unless you drill it. Active-active gives lower latency, no failover step and no idle capacity, but you must solve concurrent writes across regions: either cross-region consensus (correct, slow) or conflict resolution the application defines. The common compromise is to partition write ownership so each record has one home region and replicate asynchronously elsewhere. Choose from the RTO the business will pay for and from whether your data model tolerates merges.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A sloppy quorum satisfies R + W &gt; N. Is the read guaranteed to be fresh?</summary>
+      <div class="answer"><p>No, and this is the trap in the question. A sloppy quorum accepts W acknowledgements from any reachable nodes, not necessarily from the N nodes that own the key, so the read set and the write set may not intersect at all. It buys durability and write availability during a partition and explicitly gives up the overlap guarantee. Hinted handoff later forwards the data to the rightful owners, and read repair plus anti-entropy restore convergence — but during the window, R + W &gt; N proves nothing about freshness.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> You have three replicas across three availability zones. Which failures does that not protect you from?</summary>
+      <div class="answer"><p>Every correlated failure that is not physical. A bad deploy rolled to all three zones, a global configuration push, a shared control plane, a certificate expiring everywhere at once, a DNS or routing change, a common library bug, a cache stampede after a synchronised eviction, a schema migration, or exhaustion of a resource shared across zones. Physical redundancy only helps when failures are independent, and most large outages are software and configuration changes applied uniformly. Mitigations are staged rollouts by cell and region with bake time, versioned config artefacts, and static stability so the data plane survives control-plane loss.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your service is overloaded. Why is adding a bigger queue usually the wrong response?</summary>
+      <div class="answer"><p>A queue converts an overload problem into a latency problem without adding capacity. If arrival rate exceeds service rate, the queue grows without bound, queueing delay grows with it, and eventually every request is answered after its client has already timed out — the server spends 100% of its capacity producing results nobody is waiting for, so useful throughput goes to zero. The correct responses are backpressure (a bounded queue that rejects or blocks the producer) and load shedding (reject the excess immediately and cheaply, prioritising by criticality), plus dropping work whose deadline has already expired.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> An inner service has a 10-second timeout; the caller's caller times out at 3 seconds. What is wrong, and what is the fix?</summary>
+      <div class="answer"><p>The inner timeout is longer than the outer one, so for 7 seconds the inner service holds a thread, a connection and possibly a database cursor doing work whose result can never be delivered. Under load that waste is what exhausts the pools and turns a slow dependency into an outage. The fix is a timeout budget rather than per-service constants: propagate a deadline with the request (gRPC deadlines, or an explicit remaining-time header), have each hop subtract its own work and pass the remainder down, and cancel immediately when the budget is exhausted. Inner timeouts must always be strictly smaller than the enclosing one, with room left for retries.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is a retry storm, and how do you prevent one?</summary>
+      <div class="answer"><p>A dependency wobbles, every caller retries, the offered load multiplies exactly when the dependency has least capacity, and the retry traffic prevents recovery. It compounds through a call chain: three attempts at each of three layers is 27 requests for one user action. Prevent it with exponential backoff plus jitter so callers do not re-synchronise into waves; a retry budget that caps retries as a percentage of successful traffic, so retries can never dominate load; a circuit breaker so callers stop calling a dependency already judged unhealthy; retries only at one layer of the stack, not every layer; and never retrying non-idempotent writes, since a timeout does not tell you whether the write committed.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How would you convince a sceptical manager to fund chaos engineering?</summary>
+      <div class="answer"><p>Frame it as verification, not vandalism. Every resilience mechanism you have paid for — failover, retries, fallbacks, standby capacity, alerting — is an untested assumption until it fires under real conditions, and untested recovery paths are the ones that fail during real incidents. A chaos experiment is a hypothesis about a user-visible steady state, a small injected fault, an automated abort and a measured result; it is cheaper to discover on a Tuesday morning with a blast radius of one percent of traffic than on a Friday evening with all of it. Start with a game day in a pre-production environment, publish what it found, and let the findings buy the next step.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.cap.models — CAP stated precisely and PACELC's else branch, linearizability and sequential consistency, causal consistency, client-centric session guarantees (read-your-writes, monotonic reads, monotonic writes, writes-follow-reads), eventual consistency, quorums with R + W &gt; N, sloppy quorums, hinted handoff and read repair</li>
+      <li>sd.ha.resilience — the nines and their downtime budgets, series and parallel availability maths, independence of failures, failure domains and correlated failure, multi-region active-passive vs active-active, DR with RTO and RPO, graceful degradation, backpressure and load shedding, timeout budgets, retry storms and retry budgets, chaos engineering</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

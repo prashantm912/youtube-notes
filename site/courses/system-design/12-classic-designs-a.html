@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Classic system design walkthroughs: URL shortener, distributed rate limiter, distributed key-value store, notification system, chat system and search autocomplete — requirements, key decisions, data model sketches and the tradeoffs interviewers probe, with verified resources and interview questions.">
+  <title>Classic Designs A — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Classic Designs A</h1>
+  <p class="standfirst">Six designs that come up again and again — and the handful of moves they all share. Memorise the answers and you pass one interview; learn the moves and you pass the ones nobody warned you about.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Classic Designs A</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is a set of worked walkthroughs rather than a concept explainer. Each design below gets its requirements and scale assumptions, the one or two decisions that actually shape the architecture, a sketch of the data model, and the tradeoff an interviewer will push on. The depth lives in the linked resources — several of them are the original papers and engineering posts from the teams that built these systems at scale.</p>
+    <p>Read them looking for the repeats, because there are only a few. <strong>Precompute at write time</strong> whenever reads outnumber writes by orders of magnitude — the shortener's key, the trie's top-k list, the group conversation's fan-out. <strong>Shard by the entity that appears in the dominant query</strong>, so the common request touches one partition: short code, user id, conversation id, prefix. <strong>Cache the head of the Zipf distribution</strong>, because in every one of these systems a tiny fraction of keys, users, groups or prefixes carries most of the traffic. And <strong>push anything the caller does not need to wait for onto a queue</strong>, so the synchronous path stays short and the slow, flaky, third-party work retries out of band.</p>
+    <p>The estimation method used throughout — daily volumes to per-second rates to storage — is module 01; the rate-limiting algorithms themselves are module 05; consistent hashing as a technique is module 03; sharding and ID generation are module 06. This module assembles those parts into whole systems.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>URL shortener</h3>
+    <p>Requirements: turn a long URL into a short one, redirect on lookup, optionally accept a custom alias and an expiry, and report click analytics. The number that dictates everything is the read-to-write ratio — assume something like a hundred redirects per shortened link, so at 100 million new links a day you are writing about 1,200 rows per second and serving roughly 120,000 redirects per second. Storage is trivial (a few hundred bytes per row, a few TB a year); the redirect path is the whole engineering problem, and it needs to be a single cache hit.</p>
+    <p>The key decision is key generation, and there are three defensible answers. A <em>base62 encoding of a global counter</em> is compact and collision-free by construction, but it needs a distributed counter and it leaks volume (sequential codes are enumerable). A <em>hash of the long URL</em> (MD5 or SHA-1, truncated to seven base62 characters) is stateless and naturally deduplicates identical URLs, but truncation creates collisions you must detect and resolve — insert with a uniqueness constraint and, on conflict, rehash with a salt or take the next slice of the digest. A <em>pre-generated key range per server</em> is the answer that scales best: a key-generation service hands each application node a block of a few thousand unused codes from a keys table, the node serves them from memory with no coordination, and collisions cannot occur because each block is issued once. The cost is that codes are lost when a node dies mid-block, which nobody cares about in a 62<sup>7</sup> keyspace.</p>
+    <p>The tradeoff interviewers reliably probe is <strong>301 versus 302</strong>. A 301 Moved Permanently lets browsers and proxies cache the redirect, so subsequent clicks never reach your servers — cheapest possible read path, but you lose the click analytics you were asked to provide, and you can never repoint or expire that link for users who cached it. A 302 Found keeps every click on your infrastructure: analytics stay accurate and edits and expiry work, at the cost of serving the whole load. Most real shorteners choose 302 precisely because analytics is the product. Say that out loud, and mention the middle path of a 301 with a short cache lifetime if link edits are rare.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Dominant query is one point read by short_code: shard on it, cache it.
+CREATE TABLE link (
+  short_code   VARCHAR(10) PRIMARY KEY,   -- base62; partition key
+  long_url     TEXT NOT NULL,
+  owner_id     BIGINT,
+  created_at   TIMESTAMPTZ NOT NULL,
+  expires_at   TIMESTAMPTZ                -- null = never; TTL sweep or lazy check
+);
+CREATE UNIQUE INDEX link_alias ON link (short_code);  -- custom aliases share the keyspace
+
+-- Key blocks handed out to app nodes; no coordination on the hot path.
+CREATE TABLE key_block (block_start BIGINT PRIMARY KEY, assigned_to TEXT, assigned_at TIMESTAMPTZ);
+
+-- Analytics are append-only and asynchronous, never in the redirect's critical path.
+-- click_event(short_code, ts, country, referrer, ua) -> queue -> columnar store</code></pre>
+    <p>Two more things worth saying without being asked: custom aliases must be reserved in the same keyspace as generated codes (otherwise a generated code eventually collides with someone's alias), and expiry is best handled lazily — check <code>expires_at</code> on read and let a background sweep reclaim rows, rather than running a giant scheduled delete.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/301" rel="noopener">301 Moved Permanently — MDN HTTP reference (why clients cache it)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/302" rel="noopener">302 Found — MDN HTTP reference</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/incr/" rel="noopener">INCR — Redis command reference (the atomic counter behind base62 keys, and its rate-limiter pattern)</a></li>
+      <li>[Article] <a href="https://systemdesign.one/url-shortening-system-design/" rel="noopener">URL Shortening System Design — systemdesign.one (Neo Kim)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HHUi8F_qAXM" rel="noopener">How Does a URL Shortener Work? — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JQDHz72OA3c" rel="noopener">URL shortener system design | tinyurl system design | bitly system design — Tech Dummies Narendra Lakshmana Gowda</a></li>
+    </ul>
+
+    <h3>Distributed rate limiter</h3>
+    <p>The algorithms — token bucket, leaky bucket, fixed window, sliding window log, sliding window counter — are module 05's material and you should be able to compare them cold. What this design question actually tests is the <em>system shape</em>: where the limiter sits, what stores the counter, what latency it adds, and what happens when that store is unavailable.</p>
+    <p>Placement first. A limiter inside the application process is trivially fast but per-instance, so ten pods permitting 100 requests per second each is 1,000 requests per second at the door. Putting it in the API gateway or a sidecar/service-mesh filter is the usual answer: one enforcement point, consistent policy, and the bad traffic is rejected before it consumes application threads or a database connection. Envoy's global rate-limiting design is the reference implementation — a local filter calls out to a shared rate-limit service holding the counters. Above that sits the edge/CDN layer, which is where you stop volumetric abuse that must never reach your origin at all.</p>
+    <p>The shared counter store is the second decision. Redis is the default: an <code>INCR</code> plus <code>EXPIRE</code> per window, or a sorted set for a sliding window log, scripted into a single Lua round trip so the read-modify-write is atomic. Now the tradeoffs bite. Every request pays one network hop, so the limiter must fit inside a latency budget of roughly one to two milliseconds and be co-located with the gateway; a cross-region call to a central Redis is not a rate limiter, it is a latency tax. Exactness is negotiable — many systems keep per-node counters and reconcile asynchronously, accepting a small overshoot in exchange for zero hot-path coordination. And the sliding-window-counter approximation exists precisely because a per-request log is accurate but memory-hungry at scale.</p>
+    <p>The gotcha to raise before the interviewer does: <strong>what do you do when the counter store is down?</strong> Failing <em>open</em> keeps the product working and loses your protection at exactly the moment a Redis outage may be causing the traffic surge. Failing <em>closed</em> preserves protection but converts a cache outage into a total outage. The defensible answer is per-purpose: fail open for fairness/quota limiting on ordinary API traffic (with a conservative local in-process limit as a fallback), fail closed for security-critical limits like login attempts, OTP sends or payment retries where the limit is the control. Also specify the response contract — HTTP 429 with <code>Retry-After</code> and <code>X-RateLimit-*</code> headers, so well-behaved clients back off instead of retrying into the wall.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/rate-limiting-pattern" rel="noopener">Rate Limiting pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/other_features/global_rate_limiting" rel="noopener">Global rate limiting — Envoy proxy architecture documentation</a></li>
+      <li>[Article] <a href="https://stripe.com/blog/rate-limiters" rel="noopener">Scaling your API with rate limiters — Stripe engineering blog</a></li>
+      <li>[Article] <a href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/" rel="noopener">Counting things, a lot of different things — Cloudflare blog (approximate counting at edge scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FU4WlwfS3G0" rel="noopener">System Design Interview — Rate Limiting (local and distributed) — System Design Interview</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Oxy-6MAiYPw" rel="noopener">Inside Stripe's Rate Limiter Architecture — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Distributed key-value store</h3>
+    <p>Requirements: <code>get(key)</code> and <code>put(key, value)</code> over a cluster of commodity nodes, always writeable, no single point of failure, incremental scale-out, and tunable consistency. This is the Dynamo shape, and naming it as such — then walking its components — is the fastest way to demonstrate you have read the literature rather than a blog summary. Every component exists to answer one question: where does data live, how many copies, who decides a read or write succeeded, what happens when copies disagree, who knows which nodes exist, and how do we heal after a failure.</p>
+    <p><strong>Placement</strong> is consistent hashing: nodes and keys map onto the same ring, a key belongs to the first node clockwise, and adding or removing a node moves only <em>K/N</em> keys instead of rehashing everything. Virtual nodes (each physical node claims many ring positions) fix the load skew a naive ring produces and let heterogeneous hardware take proportional share. <strong>Replication</strong> stores each key on the next <em>N</em> distinct physical nodes clockwise — the preference list — spread across racks and availability zones. <strong>Quorums</strong> make consistency a per-request dial: with <em>N</em> replicas, a write waits for <em>W</em> acknowledgements and a read for <em>R</em> responses, and <em>R + W &gt; N</em> guarantees the read set overlaps the write set, so you see the latest write. Typical <em>N</em>=3, <em>W</em>=2, <em>R</em>=2 is balanced; <em>W</em>=1 gives fast writes and stale reads; <em>W</em>=N gives durable writes that stall whenever one replica is slow.</p>
+    <p><strong>Conflict resolution</strong> is where candidates get separated. Leaderless writes mean two clients can update the same key concurrently on different replicas. Last-write-wins keyed on a timestamp is simple and is what Cassandra does, but it silently discards one of the two updates and depends on clock skew you do not control. Vector clocks (Dynamo's choice) capture causality instead: they can tell "B descends from A, keep B" apart from "A and B are genuinely concurrent", and hand the concurrent case to the application to merge — which is exactly right for a shopping cart, where the union of two carts loses nothing. The price is client complexity and vector clocks that grow, needing truncation. Say which one you would pick and why the data type decides it.</p>
+    <p><strong>Membership and healing</strong> close the design. A gossip protocol spreads node liveness and ring state without a central registry, each node periodically exchanging state with a random peer until knowledge converges. When a replica is down at write time, <em>hinted handoff</em> lets a healthy node accept the write with a hint recording its true owner and deliver it when the owner returns — this is what "always writeable" actually costs. For divergence gossip cannot fix, Merkle-tree anti-entropy compares per-range hash trees between replicas and transfers only the subtrees that differ, so repair costs are proportional to the disagreement, not to the dataset.</p>
+    <pre class="code-block" data-label="Text"><code>put(k, v):  coordinator = first node clockwise of hash(k)
+            preference list = next N distinct physical nodes (rack/AZ aware)
+            send to all N, return OK after W acks     (down replica -> hinted handoff)
+
+get(k):     ask N, wait for R responses
+            reconcile by vector clock: descendant wins, siblings -> app merge
+            read-repair any replica found stale
+
+background: gossip -> membership + ring state
+            Merkle trees per key range -> anti-entropy repair of divergent ranges</code></pre>
+    <p>The gotcha: <em>R + W &gt; N</em> is often described as strong consistency, and it is not. It guarantees overlap between the read and write quorums, not linearizability — sloppy quorums and hinted handoff mean the node that acknowledged your write may not be in the preference list at all, so a later quorum read can miss it. Dynamo-family stores are eventually consistent by design; if the interviewer wants linearizable operations, that is a consensus problem (module 07), not a quorum-tuning problem.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" rel="noopener">Dynamo: Amazon's Highly Available Key-value Store — SOSP 2007 paper (the source for all of the above)</a></li>
+      <li>[Official] <a href="https://www.usenix.org/system/files/atc22-elhemali.pdf" rel="noopener">Amazon DynamoDB: A Scalable, Predictably Performant, and Fully Managed NoSQL Database Service — USENIX ATC 2022 paper (what fifteen years of production changed)</a></li>
+      <li>[Official] <a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html" rel="noopener">Dynamo — Apache Cassandra architecture documentation (ring, vnodes, gossip, hinted handoff, tunable consistency)</a></li>
+      <li>[Official] <a href="https://cassandra.apache.org/doc/latest/cassandra/managing/operating/repair.html" rel="noopener">Repair — Apache Cassandra operating documentation (Merkle-tree anti-entropy in practice)</a></li>
+      <li>[Article] <a href="https://github.com/donnemartin/system-design-primer" rel="noopener">The System Design Primer — donnemartin on GitHub (the community reference index)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/leaderless-replication/" rel="noopener">Leaderless Replication — Arpit Bhayani (quorums, read repair, anti-entropy)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LnqKfLcszEg" rel="noopener">Amazon DynamoDB — Paper Explained — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zaRkONvyGr8" rel="noopener">What is CONSISTENT HASHING and Where is it used? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Notification system</h3>
+    <p>Requirements: one internal API that any service can call to notify a user, delivering over push (APNs, FCM), SMS, email and in-app, honouring per-user preferences, at a scale where a single marketing campaign or a cricket-match event fans out to tens of millions of recipients in minutes. Two properties dominate the design: every delivery channel is a <em>third party you do not control</em>, and the traffic is spiky by nature. Both point the same way — accept the request, persist it, acknowledge, and do the actual sending asynchronously off a queue.</p>
+    <p>The core decision is a <strong>provider abstraction</strong>. Define one internal <code>send(channel, recipient, payload)</code> contract and put an adapter behind it per vendor, so an SMS gateway that starts timing out in one Indian circle can be failed over to a second vendor by configuration rather than a deploy. Wrap each adapter in its own circuit breaker, rate limiter (your vendor contract has a quota, and being the client that gets banned is a real outage) and retry policy, and track per-provider success rate so failover can be automatic. The same abstraction is what lets you route by cost — cheapest SMS vendor for transactional one-time passwords, most reliable for payment alerts.</p>
+    <p>Fan-out runs as a pipeline: an ingestion API writes the notification request and returns immediately; a fan-out worker expands audience to recipients; a preferences service filters — channel opt-outs, category opt-outs, quiet hours in the user's own timezone (queue rather than drop, so a 2 a.m. promotional push is delivered at 9 a.m. while a fraud alert bypasses quiet hours as a critical-priority notification); and per-channel workers do the sending. Deduplication needs a client-supplied idempotency key and a short-TTL seen-key set, because a retried upstream call, an at-least-once queue and a retrying worker will otherwise each produce a duplicate — and duplicate push notifications are the single most common production complaint about these systems.</p>
+    <pre class="code-block" data-label="Text"><code>producer -> [notification API]  persist request, return 202 + notification_id
+                  |
+             [fan-out worker]   audience -> recipients (batched, checkpointed)
+                  |
+          [preference filter]   opt-outs, category, quiet hours, dedup key
+                  |
+   push q | sms q | email q      per-channel, per-priority queues
+                  |
+      [channel workers] -> provider adapter (breaker + limiter + retry w/ jitter)
+                  |
+        delivery events (sent, delivered, opened, bounced, failed) -> tracking store
+        exhausted retries -> dead-letter queue -> alert + manual replay</code></pre>
+    <p>Delivery tracking is a state machine per notification — queued, sent to provider, provider-acknowledged, delivered, opened, failed — fed by provider webhooks, because "we called FCM successfully" is not delivery. The retry path must distinguish permanent from transient failures: an invalid device token or a hard email bounce should mark the token dead and never retry, while a 503 from the provider retries with exponential backoff and jitter. After the retry budget is exhausted the message goes to a dead-letter queue with its failure reason, and the DLQ depth is a first-class alert — a silently filling DLQ is how notification systems fail invisibly for days.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber" rel="noopener">Publisher-Subscriber pattern — Azure Architecture Center (the fan-out backbone)</a></li>
+      <li>[Official] <a href="https://firebase.google.com/docs/cloud-messaging" rel="noopener">Firebase Cloud Messaging — Google official documentation (tokens, topics, priority, TTL)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html" rel="noopener">Amazon SQS dead-letter queues — AWS developer guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/avoiding-insurmountable-queue-backlogs/" rel="noopener">Avoiding insurmountable queue backlogs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2018/07/zuul-push-messaging/" rel="noopener">Scaling Push Messaging for Millions of Devices at Netflix — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bBTPZ9NdSk8" rel="noopener">System Design Interview — Notification Service — System Design Interview</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DQwlmTvs6xA" rel="noopener">How Razorpay Designed and Scaled their Notification System — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Chat system</h3>
+    <p>Requirements: one-to-one and group messaging, delivery to online users in well under a second, offline delivery when they reconnect, presence, read receipts, and message history. Assume tens of millions of concurrent connections. The defining constraint is that a chat server is <em>stateful in a way most services are not</em> — a user is not "on a server", their open socket is, and every design decision follows from that.</p>
+    <p>The key decision is the <strong>connection-server / session-service split</strong>. Connection servers do one job: hold WebSocket connections and push bytes. They are dumb, horizontally scaled, and sized by socket count and memory rather than CPU. A separate session or routing service holds the mapping from user id to the connection server currently holding that user's socket, in Redis with a TTL refreshed by heartbeat. To deliver a message the API writes it to storage, looks up the recipient's connection server, and forwards it there over an internal channel; if there is no live entry the message is stored for offline pickup and a push notification is triggered. Keeping this mapping outside the connection servers is what lets you kill and replace a connection server without losing correctness — clients reconnect, re-register and resync. It also means load balancing must be connection-aware: least-connections rather than round-robin, and a graceful-drain path, because rolling a fleet of long-lived sockets stampedes every client into reconnecting at once (stagger it with jittered reconnect backoff).</p>
+    <p><strong>Ordering</strong> is the classic trap. Wall-clock timestamps from client devices are unusable and even server timestamps collide, so assign a <em>per-conversation monotonic sequence number</em> at the point the message is persisted, and let clients sort and gap-detect on it. Ordering only needs to be total within one conversation, which is precisely why sharding by conversation id works: one shard owns the sequence, so no cross-partition coordination is needed. Message ids are usually Snowflake-style (timestamp-prefixed) so they sort roughly by time globally while remaining unique and generated without a central service.</p>
+    <p>Storage differs by conversation type. One-to-one and small groups are cheapest with a single copy per conversation — partition by conversation id, cluster by sequence number descending, and every client reads the same rows; a per-user "last read sequence" pointer then gives you read receipts and unread counts for free without duplicating messages. A per-recipient inbox (write fan-out) makes reads trivially fast but multiplies write volume by group size, which is untenable for a 100,000-member community. Hence the standard hybrid: <em>fan-out on write</em> for small conversations, <em>fan-out on read</em> for large ones, where members pull from the shared conversation log when they open it. Say the threshold is a tuned constant, not a principle.</p>
+    <pre class="code-block" data-label="Text"><code>client --WSS--> [connection server]        (stateful: holds the socket)
+                      |                     registers user_id -> node in session store
+             [session/routing service]      Redis, TTL refreshed by heartbeat
+                      |
+                 [chat service]  persist message, assign per-conversation seq
+                      |
+        online?  yes -> route to recipient's connection server -> push down socket
+                 no  -> offline queue + push notification (see notification design)
+
+message(conversation_id, seq, message_id, sender_id, body, sent_at)
+   partition key = conversation_id ; clustering key = seq DESC
+read_state(conversation_id, user_id, last_read_seq)   -> receipts + unread counts</code></pre>
+    <p>Two things to volunteer. Presence is a firehose of low-value writes: heartbeat into a TTL key, and only broadcast a status change to users who are actually looking at that contact, with a debounce — naive presence fan-out in a large group is O(members squared) traffic and has taken real systems down. And a delivered/read receipt is itself a message, so a 1,000-member group where everyone reads generates 1,000 receipt events per message; batch and aggregate them rather than delivering each one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc6455" rel="noopener">RFC 6455 — The WebSocket Protocol (handshake, framing, ping/pong keepalive)</a></li>
+      <li>[Official] <a href="https://discord.com/blog/how-discord-stores-trillions-of-messages" rel="noopener">How Discord Stores Trillions of Messages — Discord engineering blog</a></li>
+      <li>[Official] <a href="https://discord.com/blog/how-discord-scaled-elixir-to-5-000-000-concurrent-users" rel="noopener">How Discord Scaled Elixir to 5,000,000 Concurrent Users — Discord engineering blog (presence fan-out and the sessions layer)</a></li>
+      <li>[Official] <a href="https://slack.engineering/real-time-messaging/" rel="noopener">Real-time Messaging — Slack Engineering (edge regions, connection setup, resync)</a></li>
+      <li>[Article] <a href="https://highscalability.com/the-whatsapp-architecture-facebook-bought-for-19-billion/" rel="noopener">The WhatsApp Architecture Facebook Bought For $19 Billion — High Scalability</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vvhC64hQZMk" rel="noopener">WHATSAPP System Design: Chat Messaging Systems for Interviews — Gaurav Sen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=okrR1KXNLtA" rel="noopener">FAANG System Design Interview: Design A Chat System — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gzIcGhJC8hA" rel="noopener">Scaling Websockets with Redis, HAProxy and Node JS — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Search autocomplete</h3>
+    <p>Requirements: as a user types, return the top five to ten completions for the current prefix, in under about 100 milliseconds end to end so suggestions keep pace with typing. Assume billions of searches a day and a query distribution that is savagely Zipfian — a small set of prefixes accounts for most of the traffic. Note what is <em>not</em> required: freshness within seconds, or completeness. That slack is what makes the design possible.</p>
+    <p>The structure is a <strong>trie</strong> over historical queries, one character per edge, and the single most important decision is to <strong>precompute the top-k list at every node</strong> rather than walking the subtree at query time. Without precomputation, answering "what are the best completions of <code>ba</code>?" means traversing every descendant and sorting by frequency — unbounded work on a hot prefix. With each node caching its own top-k (query string plus score), a lookup is a walk of length equal to the prefix, typically two to six pointer hops, then return a stored array. This is the module's central move: the read path does no aggregation, because the write path already did it.</p>
+    <p>Which forces the second decision: <strong>updates never run on the write path</strong>. Rebuilding top-k lists on every search would mean writing to every ancestor node for every query — billions of writes a day against a structure you are also reading from at enormous rate. Instead, searches are logged, an aggregator batches them into (query, count) pairs over some window, a builder constructs a fresh trie or applies a delta, and the new snapshot is published and swapped in atomically. Suggestions being minutes or hours stale is invisible to users, and this is exactly the tradeoff the interviewer wants you to name. The one exception is trending or breaking-news terms, which justify a separate faster path merged at query time.</p>
+    <p><strong>Sharding by prefix</strong> keeps each shard's query self-contained: route on the first one or two characters so a lookup touches exactly one shard, and split by traffic rather than alphabetically, because a range like <code>a*</code> carries far more load than <code>z*</code>. Above the shards sits the cache that does most of the real work — the head of the distribution is small enough that an in-memory cache of the hottest prefixes, plus a browser/CDN cache for the very top queries, absorbs a large share of requests before they reach a trie node at all. Interviewers will also probe personalisation and filtering: a global trie cannot express per-user history or safe-search rules, so the usual answer is over-fetch (retrieve top 20-30 from the trie) and re-rank or filter in the serving layer with user context.</p>
+    <table>
+      <caption>Where the work happens in autocomplete</caption>
+      <thead><tr><th>Stage</th><th>Frequency</th><th>Cost paid</th></tr></thead>
+      <tbody>
+        <tr><td>Log a search query</td><td>Every search</td><td>One append to a log stream</td></tr>
+        <tr><td>Aggregate to (query, count)</td><td>Batched window</td><td>Offline job, no user waiting</td></tr>
+        <tr><td>Rebuild trie, precompute top-k per node</td><td>Periodic</td><td>Offline job, atomic snapshot swap</td></tr>
+        <tr><td>Serve a prefix</td><td>Every keystroke</td><td>Cache hit, or a walk of prefix length</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/elasticsearch/rest-apis/search-suggesters" rel="noopener">Suggesters — Elasticsearch official reference (completion suggester and its FST-based index)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/ai/search-and-query/advanced-concepts/autocomplete/" rel="noopener">Autocomplete — Redis documentation (trie-backed suggestion dictionary with scores)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/search-labs/blog/elasticsearch-autocomplete-search" rel="noopener">Elasticsearch autocomplete: search as you type, query time and more — Elastic Search Labs</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/ep150-12-algorithms-for-system-design" rel="noopener">12 Algorithms for System Design Interviews — ByteByteGo blog (trie and top-k among them)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xrYTjaK5QVM" rel="noopener">Amazon interview question: System design for auto suggestions / type ahead — Tech Dummies Narendra Lakshmana Gowda</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RfEkhl3eDjA" rel="noopener">Mock System Design Interview: Typeahead search with highlights — System Design Interview</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NcNCty7_3kc" rel="noopener">How Flipkart made their type ahead search hyper personalized — Arpit Bhayani</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-storage-systems.html">← Storage Systems</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="13-classic-designs-b.html">Classic Designs B →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>These six designs <em>are</em> the questions in Indian product and service-company rounds — so the discriminating follow-ups are about the tradeoffs inside them, not the box diagram:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> For a URL shortener, why does the read-to-write ratio drive the design?</summary>
+      <div class="answer"><p>Because it tells you which path to optimise. Roughly a hundred redirects per created link means the write path can be a plain database insert, while the redirect path must be a single cache lookup with no joins and no computation. It also sizes the cache (the hot links are a tiny fraction of rows) and tells you the analytics write must be asynchronous — you cannot afford a second synchronous write on the hottest path in the system.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Compare the three ways to generate short codes.</summary>
+      <div class="answer"><p>Base62 of a global counter: compact, collision-free, but needs a distributed counter and leaks volume through enumerable codes. Truncated hash of the long URL: stateless and deduplicates identical URLs, but truncation collides, so you need a uniqueness constraint plus rehash-with-salt on conflict. Pre-generated key blocks handed to each app server: no coordination on the hot path and collisions are structurally impossible, at the cost of losing a block's unused keys when a node dies — irrelevant in a keyspace of 62 to the seventh power.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where should a rate limiter live, and why not inside the application?</summary>
+      <div class="answer"><p>At the API gateway, a sidecar, or the edge — one enforcement point with consistent policy, rejecting bad traffic before it consumes application threads, connections or database capacity. An in-process limiter is per-instance, so ten replicas each permitting 100 requests per second admit 1,000; it also cannot protect the resources consumed before your code runs. In-process limiting is still useful as a conservative local fallback when the shared counter store is unreachable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> 301 or 302 for the redirect? Argue both sides.</summary>
+      <div class="answer"><p>301 Moved Permanently is cacheable by browsers and proxies, so most clicks never reach your servers — minimum cost and latency, but you lose click analytics and you can never repoint or expire a link for clients that cached it. 302 Found sends every click through you, preserving analytics, edits, expiry and abuse takedown, at the cost of serving full load. Most shorteners pick 302 because analytics is the product; a 301 with a short max-age is a reasonable middle path when links are effectively immutable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your rate limiter's Redis goes down. Fail open or fail closed?</summary>
+      <div class="answer"><p>It depends on what the limit protects. Fail open for fairness and quota limiting on ordinary API traffic — the product keeps working, and you fall back to a conservative per-instance limit so you are not completely unprotected. Fail closed for security-critical limits: login attempts, one-time-password sends, payment retries — there the limit is the control, and losing it is worse than rejecting traffic. Whichever you choose, make it explicit configuration per policy rather than an accident of the client library's default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In a quorum store with N=3, what do W=1/R=1, W=2/R=2 and W=3/R=1 each buy you?</summary>
+      <div class="answer"><p>W=1, R=1: fastest possible reads and writes, no overlap guarantee, freely stale. W=2, R=2: R + W is greater than N, so the read set overlaps the write set and you see the latest acknowledged write; the balanced default. W=3, R=1: reads are one hop and always current, but a write stalls or fails if any single replica is slow or down — you have traded availability for read latency. The dial is per-request, so a shopping cart write and an analytics read can sit at different points.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why did Dynamo choose vector clocks over last-write-wins?</summary>
+      <div class="answer"><p>Because last-write-wins silently discards one of two concurrent updates and depends on clock synchronisation you cannot trust across a cluster. Vector clocks record causality, so the system can distinguish "B is a descendant of A, keep B" from "A and B are genuinely concurrent" and surface the second case to the application. For a shopping cart, merging is the union of items, which loses no customer intent — exactly the case where dropping a write is unacceptable. The cost is client-side complexity and clocks that grow and need truncation, which is why simpler stores like Cassandra took last-write-wins.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you deduplicate notifications when every layer retries?</summary>
+      <div class="answer"><p>Require a caller-supplied idempotency key on the ingestion API, and keep a short-TTL set of already-processed keys that the channel worker checks before sending; combine it with a natural key of recipient plus template plus content hash to catch genuinely repeated content. This matters because the retrying upstream call, the at-least-once queue and the retrying worker each independently produce duplicates, and users experience three identical push notifications as a bug in the product, not in the queue.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a message reach a user whose socket is on a different server?</summary>
+      <div class="answer"><p>Connection servers register user id to node id in a shared session store, typically Redis with a heartbeat-refreshed TTL. The chat service persists the message, looks up the recipient's current connection server, and forwards it there over an internal channel; that server writes it down the open socket. If no live entry exists, the message goes to the offline store and a push notification is triggered instead. Keeping the mapping outside the connection servers is what lets you replace them without losing correctness.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why not sort chat messages by timestamp?</summary>
+      <div class="answer"><p>Client clocks are wrong and adversarial, and even server clocks skew across nodes and collide at millisecond resolution. Assign a monotonic per-conversation sequence number when the message is persisted; clients sort on it and can detect gaps to trigger a resync. Ordering only has to be total within a conversation, which is why sharding by conversation id costs nothing — a single shard owns the counter, so there is no cross-partition coordination.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is autocomplete's top-k precomputed at each trie node, and what does that cost?</summary>
+      <div class="answer"><p>Because computing it at query time means traversing every descendant of the prefix and ranking them — unbounded work on exactly the hottest prefixes, and impossible inside a 100-millisecond typing budget. Storing top-k at each node turns a lookup into a walk of prefix length plus an array read. The cost is paid at build time and in memory (k entries per node), and it means updates cannot happen inline: a single new search would have to update every ancestor. That is why the update pipeline is an offline job over a query log with an atomic snapshot swap, and why suggestions are minutes or hours stale — a tradeoff users cannot perceive.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Fan-out on write or fan-out on read for a 100,000-member group chat?</summary>
+      <div class="answer"><p>On read. Fan-out on write copies each message into 100,000 inboxes, so one send becomes 100,000 writes — the write amplification dominates the cluster and most copies are never read. Store one copy per conversation partitioned by conversation id, and let members pull the log when they open the conversation, with a per-user last-read pointer giving unread counts. Keep fan-out on write for small conversations where reads are simplest and the multiplier is negligible, and treat the crossover as a tuned constant. The same hybrid logic reappears in news-feed design.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Rolling restart of your chat fleet takes the whole service down. Diagnose.</summary>
+      <div class="answer"><p>Every connection dropped by a restarting node reconnects immediately, and because the whole fleet is rolled in sequence the reconnect waves synchronise into a thundering herd — a stampede of handshakes, auth calls and session-store writes that the remaining nodes cannot absorb, which then drops more connections. Fixes: jittered exponential reconnect backoff in the client, graceful drain that migrates connections gradually rather than closing them all, connection-count-aware load balancing so restarted nodes actually receive share, and rate-limiting the resync/session-registration path so recovery cannot self-amplify.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is a quorum store with R + W &gt; N strongly consistent?</summary>
+      <div class="answer"><p>No. The inequality guarantees the read quorum overlaps the write quorum for a specific key under normal conditions; it does not give linearizability. Sloppy quorums and hinted handoff mean a write may be acknowledged by nodes outside the key's preference list, so a later quorum read can miss it; concurrent writes can still produce siblings; and there is no ordering guarantee across keys. Dynamo-family stores are eventually consistent by design. If you need linearizable reads and writes, that is a consensus problem — Raft, Paxos, or a single-leader partition — not a quorum-tuning problem.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Name the reusable moves that appear in more than one of these designs.</summary>
+      <div class="answer"><p>Precompute at write time when reads dominate: the shortener's key blocks, the trie's per-node top-k, small-group message fan-out. Shard by the entity in the dominant query so the common request is single-partition: short code, conversation id, prefix, key hash. Cache the head of a Zipf distribution, since a tiny fraction of links, prefixes, groups and keys carries most of the traffic. Push everything the caller need not wait for onto a queue with retries, backoff and a dead-letter path: analytics, notification delivery, trie rebuilds. And make the consistency requirement explicit per operation rather than global — stale suggestions are fine, a lost payment notification is not.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.cd.a1 — URL shortener, distributed rate limiter, distributed key-value store</li>
+      <li>sd.cd.a2 — Notification system, chat system, search autocomplete</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

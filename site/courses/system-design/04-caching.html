@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System design caching module: caching at every layer from browser and CDN through gateway, application and database; read and write patterns; TTL; invalidation strategies; stampede, penetration and avalanche defenses; coherence across replicas; bloom filters and HyperLogLog — with verified resources and interview questions.">
+  <title>Caching Strategy — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Caching Strategy</h1>
+  <p class="standfirst">A cache is the cheapest performance win in the entire design toolkit and the most reliable source of subtle, hard-to-reproduce bugs. This module walks the layers from the user inward and then spends its second half on the hazards that separate a designed cache from a hopeful one.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Caching Strategy</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Caching buys you latency and capacity at the same time, for a fraction of what more servers or a bigger database would cost. Nothing else in system design has that return. The catch is that every cache is a second copy of the truth, and second copies go stale, diverge between replicas, and vanish all at once at exactly the wrong moment.</p>
+    <p>The first half of this module is the layer stack: browser and HTTP caching semantics, CDN and edge, the API gateway, in-process and distributed caches, materialized views and the database buffer pool — plus the read and write patterns that connect a cache to its source of truth. The second half is hazards: invalidation, the three named failure modes (stampede, penetration, avalanche), coherence across replicas, and the probabilistic structures that make some of those problems cheap to solve.</p>
+    <p>This is vendor-neutral design theory. The Cloud AWS track covers managed cache and CDN mechanics separately at <a href="../aws/09-caching-dns-cdn.html">Caching, DNS and CDN</a>.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why caching pays, and the layer stack from the user inward</h3>
+    <p>Caching works because access is skewed, not uniform. A small fraction of keys carries most of the traffic, so a cache holding a few percent of the data can serve most of the requests. The value of a hit is easy to reason about with the average-latency identity: effective latency is the hit rate times the cache latency plus the miss rate times the origin latency, so pushing a hit rate from 90 to 99 percent removes ninety percent of the remaining origin load. That last figure is the one that matters — the origin is sized for the misses, not for the requests.</p>
+    <p>The key design point is that a hit is worth more the further out it happens. A browser hit costs nothing at all: no network, no server, no bandwidth bill. A CDN edge hit costs one short-haul round trip. A gateway hit avoids your service. An in-process hit avoids the network. A distributed-cache hit avoids the database. A buffer-pool hit merely avoids the disk. Each layer inward is cheaper to control and easier to invalidate, but each one outward saves more. Design deliberately: decide at which layer each class of data should be cached, and accept that layers you do not control (the browser, an intermediary proxy) are the ones whose staleness you cannot fix after the fact.</p>
+    <pre class="code-block" data-label="Text"><code>user -> browser cache      no network at all; you cannot purge it
+     -> CDN / edge         short-haul hit; purgeable, seconds to propagate
+     -> API gateway        shields the service; per-route policy
+     -> in-process cache    nanoseconds; per-replica, therefore inconsistent
+     -> distributed cache   ~1 network hop; shared, consistent across replicas
+     -> materialized view   precomputed answer inside the database
+     -> buffer pool         avoids the disk, not the query
+     -> disk                the source of truth</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/caching-challenges-and-strategies/" rel="noopener">Caching challenges and strategies — Amazon Builders' Library (the layer-by-layer treatment plus the failure modes)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching" rel="noopener">Caching guidance — Azure Architecture Center best practices</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/a-crash-course-in-caching-part-1" rel="noopener">A Crash Course in Caching, Part 1 — ByteByteGo (Alex Xu)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Cache_replacement_policies" rel="noopener">Cache replacement policies — Wikipedia (LRU, LFU, ARC, 2Q and the rest, compared)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zw7VwIlkPPc" rel="noopener">Caching in distributed systems: A friendly introduction — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Browser and HTTP caching: freshness, Cache-Control and immutable versioned assets</h3>
+    <p>HTTP has a real caching specification and most teams use about ten percent of it. The core is <code>Cache-Control</code> on the response: <code>max-age</code> sets how many seconds the response stays fresh in any cache, <code>s-maxage</code> overrides that for shared caches only, <code>private</code> restricts storage to the browser (use it for anything user-specific), <code>public</code> allows shared caches to store it, <code>no-cache</code> means "store it but revalidate before every use" and <code>no-store</code> means "never write this down" — the two that candidates most often swap in interviews.</p>
+    <p>The pattern worth internalising is <em>immutable versioned assets</em>. Give every build artifact a content hash in its filename, serve it with a one-year <code>max-age</code> plus <code>immutable</code>, and make the HTML that references it uncacheable or short-lived. Now the expensive bytes are cached forever and never need invalidating, because a new deploy produces a new URL; only the small HTML document has to be refetched. That combination — a long-lived hashed asset behind a short-lived pointer — is the general trick behind versioned keys at every other layer too, and it sidesteps invalidation entirely rather than solving it.</p>
+    <pre class="code-block" data-label="HTTP"><code># the pointer: short-lived, always revalidated
+Cache-Control: no-cache
+
+# the payload: /static/app.9f2c1ab4.js — the hash IS the version
+Cache-Control: public, max-age=31536000, immutable
+
+# user-specific response: never let a shared cache keep it
+Cache-Control: private, max-age=0, must-revalidate</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching" rel="noopener">HTTP caching — MDN Web Docs (freshness, heuristics, the full directive set)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control" rel="noopener">Cache-Control — MDN reference (every directive, request and response side)</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9111.html" rel="noopener">RFC 9111: HTTP Caching — IETF (the normative rules browsers and proxies actually implement)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/http-cache" rel="noopener">Prevent unnecessary network requests with the HTTP Cache — web.dev (Google)</a></li>
+      <li>[Article] <a href="https://jakearchibald.com/2016/caching-best-practices/" rel="noopener">Caching best practices and max-age gotchas — Jake Archibald</a></li>
+    </ul>
+
+    <h3>Validation: ETag, conditional requests and stale-while-revalidate</h3>
+    <p>Freshness answers "may I use this without asking?". Validation answers the next question: "it has expired — has it actually changed?" The server sends an <code>ETag</code> (an opaque version token, strong or weak) or a <code>Last-Modified</code> date; the client sends it back as <code>If-None-Match</code> or <code>If-Modified-Since</code>, and the server replies <code>304 Not Modified</code> with no body when nothing changed. You still pay a round trip, but not the bytes — which matters enormously for large responses on mobile networks. The same conditional machinery does double duty for optimistic concurrency on writes via <code>If-Match</code>, which is how you get compare-and-set semantics over HTTP.</p>
+    <p>Two directives are worth knowing beyond the basics. <code>stale-while-revalidate</code> lets a cache serve the stale copy immediately and refresh it in the background, so the user never waits for the revalidation — this is a first-class stampede defense at the HTTP layer, and its sibling <code>stale-if-error</code> keeps you serving during an origin outage. And <code>Vary</code> tells shared caches which request headers change the response; get it wrong and you either serve one user's content to another (missing <code>Vary: Cookie</code>) or shred your hit rate into unusable fragments (<code>Vary: User-Agent</code>, which is close to a per-device cache key).</p>
+    <pre class="code-block" data-label="HTTP"><code>-- response --
+ETag: "v3-9f2c1ab4"
+Cache-Control: max-age=60, stale-while-revalidate=600, stale-if-error=86400
+Vary: Accept-Encoding
+
+-- next request after it goes stale --
+If-None-Match: "v3-9f2c1ab4"     ->  304 Not Modified   (headers only, no body)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Conditional_requests" rel="noopener">HTTP conditional requests — MDN Web Docs</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/ETag" rel="noopener">ETag — MDN reference (strong vs weak validators)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Vary" rel="noopener">Vary — MDN reference (how shared caches key their entries)</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc5861.html" rel="noopener">RFC 5861: HTTP Cache-Control Extensions for Stale Content — IETF</a></li>
+      <li>[Article] <a href="https://web.dev/articles/stale-while-revalidate" rel="noopener">Keeping things fresh with stale-while-revalidate — web.dev (Google)</a></li>
+    </ul>
+
+    <h3>CDN and edge caching</h3>
+    <p>A CDN is a fleet of reverse proxies close to users that terminates the connection early and serves cached bytes from the edge. Two wins compound: the geographic one (a round trip to a nearby city instead of across an ocean) and the offload one (your origin sees only misses). A well-tuned CDN in front of a content-heavy service routinely absorbs the large majority of requests, which is why it is usually the highest-leverage single change available to a slow global product.</p>
+    <p>The design decisions are the cache key and the purge strategy. The cache key defaults to the URL, so query strings, cookies and headers that vary the response must be added deliberately — and every dimension you add multiplies the number of stored objects and divides your hit rate. Purging is the hard part: a global purge has to reach every edge, takes seconds to propagate, and momentarily turns every edge into a miss, so a purge of a hot object is itself a stampede against your origin. Prefer versioned URLs where you can, short TTLs plus <code>stale-while-revalidate</code> where you cannot, and reserve explicit purge for correctness emergencies. Remember also that the <code>Age</code> header tells you how long an intermediary has been holding a response — the first thing to check when a user swears they are seeing yesterday's page.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developers.cloudflare.com/cache/concepts/default-cache-behavior/" rel="noopener">Default cache behavior — Cloudflare Cache documentation (what an edge caches without being told)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Age" rel="noopener">Age — MDN reference (how long a shared cache has held the response)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/cdn-content-replication/" rel="noopener">How does a CDN handle content replication — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://netflixtechblog.com/caching-for-a-global-netflix-7bcc457012f1" rel="noopener">Caching for a Global Netflix — Netflix Technology Blog (EVCache at continental scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RCdAGvtTYI0" rel="noopener">The Ultimate Guide to Caching and CDNs — Hayk Simonyan</a></li>
+    </ul>
+
+    <h3>Gateway and reverse-proxy caching</h3>
+    <p>Between the edge and your services sits a proxy you fully control — nginx, Varnish, Envoy, or a managed API gateway. Caching here is underrated because it protects the service itself, not just the network: a response served from the gateway never becomes a thread, a database connection, or a downstream call. It is also the natural home for <em>microcaching</em>, the technique of caching even highly dynamic responses for a second or two. A one-second TTL on an endpoint doing a thousand requests per second collapses those thousand origin calls into one, and one second of staleness is invisible to users on almost every read path.</p>
+    <p>The gateway is also where request coalescing lives. nginx's <code>proxy_cache_lock</code> and Varnish's built-in request coalescing let exactly one request through to the origin on a miss while the rest wait for that single response — the same single-flight idea you will meet again as a stampede defense at the application layer. Pair it with <code>proxy_cache_use_stale</code> so the proxy keeps serving the expired copy while the origin is updating or unhealthy.</p>
+    <pre class="code-block" data-label="nginx"><code>proxy_cache_path /var/cache/nginx keys_zone=api:100m inactive=10m;
+
+location /api/catalogue/ {
+    proxy_cache            api;
+    proxy_cache_key        "$scheme$request_method$host$request_uri";
+    proxy_cache_valid      200 1s;                  # microcache
+    proxy_cache_lock       on;                      # one origin request per key
+    proxy_cache_use_stale  updating error timeout http_500 http_503;
+    add_header             X-Cache-Status $upstream_cache_status;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html" rel="noopener">ngx_http_proxy_module — nginx documentation (proxy_cache, proxy_cache_lock, use_stale)</a></li>
+      <li>[Official] <a href="https://developer.konghq.com/plugins/proxy-cache/" rel="noopener">Proxy Cache plugin — Kong Gateway documentation (gateway-level response caching)</a></li>
+      <li>[Article] <a href="https://blog.nginx.org/blog/nginx-caching-guide" rel="noopener">A guide to caching with NGINX — NGINX blog</a></li>
+      <li>[Article] <a href="https://www.varnish.org/docs/users-guide/increasing-your-hitrate.html" rel="noopener">Increasing your hit rate — Varnish Cache users' guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8FfP4oPtP70" rel="noopener">Cache Invalidation: What it is and How to Implement It — Varnish Software</a></li>
+    </ul>
+
+    <h3>Application caches: in-process versus distributed</h3>
+    <p>An in-process cache (Caffeine, Guava, a plain map with an eviction policy) is the fastest thing you will ever build: no serialization, no network, nanosecond reads, and it survives a cache-server outage. Its defect is structural and you must say it out loud in an interview — <strong>it is per-instance</strong>. Ten replicas hold ten independent copies that drift apart the moment the underlying data changes, so a user refreshing the page can see the new value, then the old one, then the new one again depending on which pod answers. Local caches are therefore right for data that is small, hot, and either immutable or tolerant of a few seconds of divergence: reference data, feature flags, compiled configuration, denormalized lookup tables.</p>
+    <p>A distributed cache (Redis, Memcached) trades a network hop for a single shared copy that every replica agrees on, plus capacity far beyond one process's heap and survival across deploys. The price is that it is now a distributed system of its own: it can be slow, it can partition, it can fail over, and your service must keep working when it does — a cache outage should degrade latency, never correctness. Set an eviction policy deliberately (<code>allkeys-lru</code> for a pure cache; <code>noeviction</code> turns a full cache into write errors), keep values small, and remember that a cache with no eviction policy and no TTL is a database with no durability. Many mature systems run both tiers: a small local cache in front of the shared one, which is exactly the near-cache pattern and exactly where coherence bugs come from.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/reference/eviction/" rel="noopener">Key eviction — Redis documentation (maxmemory policies, LRU and LFU approximations)</a></li>
+      <li>[Official] <a href="https://memcached.org/" rel="noopener">Memcached — official site and wiki (the deliberately minimal distributed cache)</a></li>
+      <li>[Official] <a href="https://github.com/ben-manes/caffeine/wiki" rel="noopener">Caffeine wiki — the reference in-process cache on the JVM (W-TinyLFU eviction, refresh vs expiry)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/trends-caches/" rel="noopener">Ubiquitous Caching: building distributed and in-process caches at Twitter — InfoQ (Juncheng Yang)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U3RkDLtS7uY" rel="noopener">What are Distributed CACHES and how do they manage DATA CONSISTENCY? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>The last two layers: materialized views and the database buffer pool</h3>
+    <p>Two caches live inside the database and are routinely forgotten in design discussions. A <em>materialized view</em> caches the result of a query as a real, queryable table — the answer is computed once at refresh time rather than on every read. It is the right tool when the expensive part is aggregation over a lot of rows (dashboards, leaderboards, monthly rollups) and a refresh interval measured in minutes is acceptable. The design questions are refresh strategy (full versus incremental, scheduled versus triggered) and whether readers may block during the refresh; PostgreSQL's <code>REFRESH MATERIALIZED VIEW CONCURRENTLY</code> exists precisely because the naive version takes an exclusive lock.</p>
+    <p>Below that is the <em>buffer pool</em> — the database's own memory cache of pages read from disk. It is why the second execution of a query is often an order of magnitude faster than the first, and why benchmark numbers from a cold database are meaningless. Understanding it changes how you read a slow query: a buffer-pool hit avoids the disk but not the work, so a query scanning millions of cached rows is still a slow query, and no amount of extra memory fixes a missing index. Sizing it is the single highest-impact database configuration knob (PostgreSQL's <code>shared_buffers</code>, InnoDB's buffer pool), and knowing that this layer exists is what stops a candidate proposing Redis in front of a query that simply needed an index.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/rules-materializedviews.html" rel="noopener">Materialized Views — PostgreSQL documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-creatematerializedview.html" rel="noopener">CREATE MATERIALIZED VIEW — PostgreSQL SQL reference (and the CONCURRENTLY refresh)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/runtime-config-resource.html" rel="noopener">Resource Consumption: shared_buffers and friends — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view" rel="noopener">Materialized View pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/distributed-caching-lessons/" rel="noopener">Distributed Caching: Essential Lessons — InfoQ (Cameron Purdy)</a></li>
+    </ul>
+
+    <h3>Read patterns: cache-aside and read-through</h3>
+    <p><strong>Cache-aside</strong> (lazy loading) puts the application in charge: look in the cache, and on a miss read the source, write the value into the cache, and return it. It is the default for good reasons — only requested data ever occupies memory, the cache being down means slow rather than broken, and it works with any store because no integration is required. Its costs are equally standard interview material: every miss pays three trips instead of one, cold starts are painful, and the read-modify-write dance leaves a race window in which a concurrent write can be overwritten by a slower reader's stale fill.</p>
+    <p><strong>Read-through</strong> moves that logic behind the cache: the application only ever talks to the cache, which loads from the source itself on a miss. The application code gets simpler and the loader is a single place to add coalescing, metrics and retries — but you need a cache that supports it (a library like Caffeine's <code>LoadingCache</code>, or a caching layer you build), and the cache becomes a hard dependency: if it cannot load, the request fails. In both patterns, use the cache for reads that are expensive and repeated; caching a cheap primary-key lookup often costs more in complexity and memory than it saves.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>// cache-aside read
+value = cache.get(key)
+if (value == null) {                 // miss
+    value = db.load(key)             // source of truth
+    cache.set(key, value, ttl)       // populate for next time
+}
+return value
+
+// the race: reader R loads v1, writer W commits v2 and deletes the key,
+// then R writes v1 back — the cache now holds a value the DB never had.
+// Mitigations: set-if-absent on the fill, short TTL, or versioned keys.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside" rel="noopener">Cache-Aside pattern — Azure Architecture Center (including the consistency caveats)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/expire/" rel="noopener">EXPIRE — Redis command reference (TTL semantics and how expiry actually happens)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/top-caching-strategies" rel="noopener">Top caching strategies — ByteByteGo (Alex Xu), with diagrams for each pattern</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/a-crash-course-in-caching-part-2" rel="noopener">A Crash Course in Caching, Part 2 — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Gdfj-544AkA" rel="noopener">Distributed Caching for System Design Interviews — ByteMonk</a></li>
+    </ul>
+
+    <h3>Write patterns: write-through, write-behind, write-around — and TTL as the safety net</h3>
+    <p>Every write pattern is a different answer to "when does the cache learn about the change?" <strong>Write-through</strong> writes cache and database together and acknowledges only when both are done: the cache is never stale, at the cost of write latency and of caching data nobody may ever read. <strong>Write-behind</strong> (write-back) writes the cache and acknowledges immediately, flushing to the database asynchronously — the fastest writes available and the only pattern that can absorb a write spike, but a cache node failure loses acknowledged data, so it belongs to metrics, counters and session activity rather than to orders and payments. <strong>Write-around</strong> writes only to the database and lets the cache learn on the next read miss, which keeps write-once-read-never data out of memory and pairs naturally with cache-aside.</p>
+    <p>One rule cuts through most interview follow-ups: on a write, prefer to <em>delete</em> the cache entry rather than update it. Updating means computing the new cached representation in two places and creates a lost-update race between concurrent writers; deleting means the next reader refills from the truth. And whatever pattern you choose, always set a TTL. A TTL is crude — it guarantees staleness up to its length and gives you nothing between expiries — but it is the safety net that bounds the damage from every invalidation you forget, every event you drop, and every bug that leaves a key wrong. An entry with no TTL is a bug waiting for a long weekend.</p>
+    <pre class="code-block" data-label="Text"><code>write-through   app -> cache -> db -> ack     never stale; slowest writes
+write-behind    app -> cache -> ack (-> db)   fastest; can lose acked data
+write-around    app -> db -> ack              cache learns on next read miss
+
+on update, prefer:  db.write(v2); cache.delete(key)      (invalidate)
+rather than:        db.write(v2); cache.set(key, v2)     (racy dual write)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/memory-optimization/" rel="noopener">Memory optimization — Redis documentation (what your keys and values really cost)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/cache-write-policy" rel="noopener">Cache Write Policy — Baeldung on Computer Science (write-through, write-back, write-around compared)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/a-guide-to-top-caching-strategies" rel="noopener">A Guide to Top Caching Strategies — ByteByteGo</a></li>
+      <li>[Article] <a href="https://bytebytego.com/guides/things-to-consider-when-using-cache/" rel="noopener">Things to Consider When Using Cache — ByteByteGo guides</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dGAgxozNWFE" rel="noopener">Cache Systems Every Developer Should Know — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Invalidation: TTL, explicit, event-driven and versioned keys</h3>
+    <p>Phil Karlton's line about there being only two hard things in computer science — cache invalidation and naming things — is repeated as a joke, but the first half is a real engineering observation. Invalidation is hard because it is a distributed correctness problem disguised as a housekeeping task: you must reach every copy, in every layer, before anyone reads it, and you must do it even when the process that made the change has already returned to the user and moved on.</p>
+    <p>There are four strategies and mature systems use several at once. <strong>TTL expiry</strong> is passive: cheap, self-healing, and guarantees only that staleness is bounded — appropriate when "wrong for thirty seconds" is acceptable. <strong>Explicit invalidation</strong> deletes the key in the same code path as the write: immediate and precise, but every write site must remember every key that derives from that data, and it fails silently the moment someone adds a new derived key or writes through a path that bypasses your service (a migration script, an admin tool, a replication stream). <strong>Event-driven invalidation</strong> fixes that by making the database the source of the signal — change data capture or an outbox publishes change events and a consumer invalidates, so any writer anywhere is covered; the cost is a new pipeline and eventual, not immediate, invalidation. <strong>Versioned keys</strong> avoid the problem instead of solving it: embed a version or generation number in the cache key so a change produces a new key and the old entries simply age out. Bumping a single generation counter for a whole namespace invalidates a million keys atomically — the same trick as content-hashed asset filenames, one layer down.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>// versioned key: no delete is ever needed
+gen = cache.get("gen:catalogue") ?? bump()          // e.g. 42
+key = "catalogue:v" + gen + ":sku:" + sku           // catalogue:v42:sku:8891
+
+// invalidate the entire namespace atomically:
+cache.incr("gen:catalogue")     // -> 43; every v42 key is now unreachable
+                                // and evicted naturally by LRU / TTL</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/reference/client-side-caching/" rel="noopener">Client-side caching with tracking and invalidation — Redis documentation (server-assisted invalidation of local caches)</a></li>
+      <li>[Official] <a href="https://developers.cloudflare.com/cache/" rel="noopener">Cache — Cloudflare developer documentation (purge by URL, tag and prefix)</a></li>
+      <li>[Article] <a href="https://engineering.fb.com/2013/06/25/core-infra/tao-the-power-of-the-graph/" rel="noopener">TAO: The power of the graph — Meta Engineering (a cache built so invalidation is the database's job)</a></li>
+      <li>[Article] <a href="https://highscalability.com/more-troubles-with-caching/" rel="noopener">More Troubles with Caching — High Scalability</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ROfrHShYKLQ" rel="noopener">The hardest problem in computer science: cache invalidation — Syntax</a></li>
+    </ul>
+
+    <h3>Stampede, penetration and avalanche: three failure modes with named defenses</h3>
+    <p><strong>Cache stampede</strong> (thundering herd, dog-piling) is the classic. One very hot key expires; in the microseconds before anyone can refill it, a thousand concurrent requests all miss and all hit the database with the same expensive query. The database, sized for one such query per TTL period, now gets a thousand — and if it falls over, the cache never refills and the stampede repeats forever. Three defenses, in increasing order of elegance. <em>Request coalescing / single-flight</em>: the first miss for a key takes a local lock and does the load; everyone else waits on that same in-flight result. <em>Locking with stale fallback</em>: one caller takes a distributed lock to recompute while the others serve the expired-but-still-present value, so nobody waits at all. <em>Probabilistic early expiration</em>: each reader independently decides, with probability rising as the expiry approaches and scaled by how expensive the recompute is, to refresh the value early — so a single lucky request refreshes the key before it ever expires, with no locks and no coordination.</p>
+    <p><strong>Cache penetration</strong> is the opposite shape: requests for keys that do not exist anywhere. The cache misses (correctly — there is nothing to cache), so every single request reaches the database, and the cache provides zero protection. Sometimes it is a bug; sometimes it is an attacker enumerating random identifiers. Two defenses: <em>negative caching</em> — store an explicit "not found" marker with a short TTL, so the second lookup for a nonexistent key is served from memory — and a <em>bloom filter</em> in front of the cache holding every key that does exist, so a definitive "no" is answered in memory without touching either cache or database.</p>
+    <p><strong>Cache avalanche</strong> is a stampede at scale: a large number of keys expire at the same instant and the origin is hit by all of them at once. It happens naturally whenever you warm a cache in a loop with a fixed TTL, or restart a cache node and refill it uniformly. The defense is trivial and almost always omitted: <em>jitter the TTLs</em>, so a nominal ten-minute TTL becomes a random value between about eight and twelve minutes and expiries smear across time instead of arriving as a wave. The related case — the cache cluster itself failing and every request falling through — is handled at a different level, with circuit breakers and load shedding at the origin so the database survives running naked.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>// 1. jittered TTL — the one-line fix for avalanche
+ttl = base * (0.8 + random() * 0.4)          // 600s -> 480..720s
+
+// 2. probabilistic early expiration (XFetch) — stampede without locks
+//    delta = how long the recompute took; beta ~ 1.0
+if (now - delta * beta * ln(random()) >= expiry) { recompute(); }
+
+// 3. negative caching — penetration
+value = db.load(key)
+cache.set(key, value ?? NOT_FOUND, value == null ? 30 : 600)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://pkg.go.dev/golang.org/x/sync/singleflight" rel="noopener">singleflight — Go package documentation (duplicate function-call suppression, the reference implementation of request coalescing)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Cache_stampede" rel="noopener">Cache stampede — Wikipedia (locking, external recomputation and probabilistic early expiration)</a></li>
+      <li>[Article] <a href="https://cseweb.ucsd.edu/~avattani/papers/cache_stampede.pdf" rel="noopener">Optimal Probabilistic Cache Stampede Prevention — Vattani, Chierichetti and Lowenstein (the XFetch paper, PDF)</a></li>
+      <li>[Article] <a href="https://highscalability.com/strategy-break-up-the-memcache-dog-pile/" rel="noopener">Strategy: Break Up the Memcache Dog Pile — High Scalability</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8sTuCPh3s0s" rel="noopener">Thundering Herd Problem and how not to do API retries — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Coherence: replicas that disagree, and the compromise you are choosing</h3>
+    <p>Coherence is the question of whether all the copies of a value agree. It is a design problem the instant you have more than one cache, and you almost always do: ten application replicas with local caches, plus a shared cache, plus a CDN, plus every user's browser. A write updates the database and invalidates the shared cache — and the ten local copies keep serving the old value until their TTLs run out. Worse, they run out at different moments, so the same user refreshing sees the value flip back and forth. Read replicas add a second axis: a reader that fills the cache from a lagging replica can write pre-write data into the cache <em>after</em> the invalidation, permanently poisoning the entry until its TTL expires.</p>
+    <p>The mitigations are all partial, and saying so is the mark of a senior answer. Keep local-cache TTLs short (seconds) and accept bounded divergence. Broadcast invalidations over a pub/sub channel so local caches purge on write — best-effort, since a missed message means a stale replica, which is why the TTL stays as the backstop. Use server-assisted invalidation where the cache tracks which client holds which key and notifies them (Redis client-side caching does exactly this). Read your own writes by pinning a user to the primary, or to a specific replica, for a short window after they write. Version the payload so a stale value is detectable rather than merely wrong. But none of these gives you a coherent cache — they give you a bounded incoherent one.</p>
+    <p>The honest conclusion, and the one interviewers are listening for: <em>a cache is a consistency compromise you are choosing deliberately.</em> The right question is never "how do I make the cache always correct?" but "how stale may this data be, for this use case, and what happens to the business when it is?" Thirty seconds of stale product description is fine; thirty seconds of stale account balance or stale permissions is not, and the second class of data does not belong behind a naive cache at all.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170.pdf" rel="noopener">Scaling Memcache at Facebook — USENIX NSDI '13 (leases, invalidation pipelines and cross-region coherence, PDF)</a></li>
+      <li>[Article] <a href="https://highscalability.com/a-bunch-of-great-strategies-for-using-memcached-and-mysql-be/" rel="noopener">Strategies for using Memcached and MySQL better together — High Scalability</a></li>
+      <li>[Article] <a href="https://highscalability.com/facebooks-memcached-multiget-hole-more-machines-more-capacit/" rel="noopener">Facebook's memcached multiget hole: more machines is not more capacity — High Scalability</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/Scaling-Your-Cache/" rel="noopener">Scaling Your Cache and Caching at Scale — InfoQ (Alex Miller)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=iuqZvajTOyA" rel="noopener">System Design Interview: Distributed Cache — System Design Interview</a></li>
+    </ul>
+
+    <h3>Bloom filters: membership without the memory</h3>
+    <p>A bloom filter is a bit array plus k independent hash functions. To add an element, hash it k ways and set those k bits. To test membership, hash it k ways and check those bits: if any bit is zero the element is <em>definitely absent</em>; if all are set it is <em>probably present</em>. That asymmetry is the whole structure — <strong>false positives are possible, false negatives are not</strong> — and it is exactly the guarantee a cache needs, because "definitely not here" lets you skip the expensive lookup with total confidence while "probably here" only costs you a lookup you would have done anyway.</p>
+    <p>The memory arithmetic is what makes it worth the trouble. A bloom filter needs roughly 1.44 times log-base-2 of the inverse false-positive rate, in bits, per element — about ten bits per element for a one-percent false-positive rate, regardless of how large the elements themselves are. A hundred million user identifiers, which would occupy gigabytes in a hash set, fit in roughly 120 megabytes of bloom filter and answer in constant time. That is why it sits in front of caches to stop penetration, inside LSM-tree storage engines (Cassandra, RocksDB, HBase) to avoid reading SSTables that cannot contain the key, and in CDNs to avoid caching one-hit-wonder URLs. The limitations are equally important: you cannot enumerate the contents, you cannot delete (unsetting a bit would break other elements that share it), and you must size it up front because the false-positive rate degrades as it fills. <em>Counting bloom filters</em> replace each bit with a small counter so deletion becomes decrement, at roughly four times the memory; cuckoo filters achieve deletion with better space efficiency and are the modern alternative.</p>
+    <pre class="code-block" data-label="Text"><code>add(x):    for i in 1..k: bits[ h_i(x) mod m ] = 1
+test(x):   for i in 1..k: if bits[ h_i(x) mod m ] == 0 -> DEFINITELY NOT PRESENT
+           all bits set -> probably present (may be a false positive)
+
+sizing:    m/n ~= 1.44 * log2(1/p)      bits per element
+           p = 1%   -> ~10 bits/element,  k = 7
+           p = 0.1% -> ~15 bits/element,  k = 10
+           100M keys at p = 1%  ->  ~120 MB, independent of key size</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/probabilistic/bloom-filter/" rel="noopener">Bloom filter — Redis documentation (BF.ADD, BF.EXISTS, sizing and scaling filters)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Bloom_filter" rel="noopener">Bloom filter — Wikipedia (the probability derivation, counting variants and real deployments)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/bloom-filter" rel="noopener">Introduction to Bloom Filter — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://samwho.dev/bloom-filters/" rel="noopener">Bloom Filters — Sam Rose (an interactive, build-it-yourself explainer)</a></li>
+      <li>[Article] <a href="https://llimllib.github.io/bloomfilter-tutorial/" rel="noopener">Bloom Filters by Example — Bill Mill (watch the bits get set)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V3pzxngeLqw" rel="noopener">Bloom Filters — Algorithms You Should Know #2 — ByteByteGo</a></li>
+    </ul>
+
+    <h3>HyperLogLog: counting distinct things in twelve kilobytes</h3>
+    <p>Counting <em>how many distinct</em> items you have seen is deceptively expensive: an exact answer requires remembering every item, so unique visitors per day across a large site means a set holding hundreds of millions of identifiers, per day, per dimension you want to slice by. HyperLogLog answers the same question from a fixed, tiny amount of memory by exploiting a property of hashes: in a stream of uniformly random hash values, seeing one that begins with a long run of leading zeros is evidence that you have seen many distinct values. Keep many independent buckets, record the longest run observed in each, and combine them with a harmonic mean to get a cardinality estimate.</p>
+    <p>The practical numbers are what to quote in an interview: a standard implementation uses about twelve kilobytes per counter for a standard error near 0.8 percent, and it estimates cardinalities up to the order of a quintillion. Crucially the registers are <em>mergeable</em> — the union of two HyperLogLogs is the element-wise maximum of their registers — so you can keep one counter per hour, per shard or per campaign and combine them after the fact to get any rollup you want without re-reading the raw data. That mergeability is the property that makes it the standard tool for unique-visitor counts, distinct-search-term counts, per-tenant usage metering and cardinality estimation in query planners. Its limits: it estimates, it cannot tell you <em>which</em> items were distinct, and it is the wrong tool when an exact count matters (billing that customers can audit). It sits alongside the count-min sketch, which estimates frequency rather than cardinality, in the same family of small-memory approximations.</p>
+    <pre class="code-block" data-label="Text"><code>PFADD   visitors:2026-07-25  user:8891  user:4412  user:8891
+PFCOUNT visitors:2026-07-25             -> 2   (estimate, ~0.8% error)
+
+PFMERGE visitors:week  visitors:2026-07-19 ... visitors:2026-07-25
+PFCOUNT visitors:week                   -> distinct across the whole week
+
+memory: ~12 KB per counter, whatever the cardinality
+        an exact set for 100M ids would need gigabytes</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/" rel="noopener">HyperLogLog — Redis documentation (PFADD, PFCOUNT, PFMERGE and the error bound)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/probabilistic/" rel="noopener">Probabilistic data types — Redis documentation (bloom, cuckoo, count-min sketch, top-k, t-digest)</a></li>
+      <li>[Article] <a href="https://antirez.com/news/75" rel="noopener">Redis new data structure: the HyperLogLog — Salvatore Sanfilippo (antirez), the implementer's own explanation</a></li>
+      <li>[Article] <a href="https://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf" rel="noopener">HyperLogLog: the analysis of a near-optimal cardinality estimation algorithm — Flajolet, Fusy, Gandouet and Meunier (the original paper, PDF)</a></li>
+      <li>[Article] <a href="https://research.google/pubs/hyperloglog-in-practice-algorithmic-engineering-of-a-state-of-the-art-cardinality-estimation-algorithm/" rel="noopener">HyperLogLog in Practice — Google Research (the HLL++ improvements everyone actually ships)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tOsb-tFoPCg" rel="noopener">HyperLogLog and cardinality estimation — Arpit Bhayani</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-load-balancing.html">← Load Balancing</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="05-rate-limiting.html">Rate Limiting →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Caching is asked in essentially every backend and system design round in India, from service-company screens through product-company design loops — the pattern questions early, the stampede and coherence questions when they want to separate candidates:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why cache at all, and where can you cache in a typical web request?</summary>
+      <div class="answer"><p>To cut latency and to shed load from an expensive origin, both at once and cheaply. The layers, from the user inward: the browser's HTTP cache, a CDN or edge POP, an API gateway or reverse proxy, an in-process cache inside the service, a shared distributed cache such as Redis or Memcached, materialized views inside the database, and the database's own buffer pool. A hit further out is worth more, because it avoids everything behind it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain cache-aside. What are its drawbacks?</summary>
+      <div class="answer"><p>The application checks the cache; on a miss it reads the source, writes the value back into the cache, and returns it. Advantages: only requested data is cached, it works with any store, and a cache outage degrades latency rather than correctness. Drawbacks: every miss costs three operations instead of one, cold starts are slow, and there is a race window where a slow reader can write a stale value back after a concurrent write has already invalidated the key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a TTL and why should every cache entry have one?</summary>
+      <div class="answer"><p>Time to live: how long an entry may be used before it expires. It bounds staleness without any coordination, and it is the safety net that limits the damage from every invalidation you forgot to write, every event your pipeline dropped, and every bug that left a key wrong. It is crude — it gives you nothing between expiries — but an entry with no TTL can stay wrong forever.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between Cache-Control no-cache and no-store?</summary>
+      <div class="answer"><p><code>no-cache</code> means the response may be stored but must be revalidated with the origin before every reuse — you still get 304 responses and save bandwidth. <code>no-store</code> means it must never be written to any cache at all, which is what you want for sensitive data. Candidates routinely swap these; <code>no-cache</code> does not mean "do not cache".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Cache-aside versus write-through — which would you pick and why?</summary>
+      <div class="answer"><p>Cache-aside for read-heavy workloads with an acceptable staleness window and where the cache must not be a hard dependency; it caches only what is actually read. Write-through when reads must never see a stale value and write latency has room to spare — it keeps the cache authoritative but caches data that may never be read and makes every write pay two hops. In practice most systems run cache-aside for reads plus delete-on-write, which gets most of write-through's freshness at cache-aside's cost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> On a write, do you update the cache entry or delete it? Justify.</summary>
+      <div class="answer"><p>Delete it. Updating means building the cached representation in two places, and two concurrent writers can interleave so the cache ends up holding the older value while the database holds the newer one. Deleting makes the next reader refill from the source of truth, so the worst case is one extra miss rather than a silently wrong entry. Update-in-place is only reasonable for very hot keys where the extra miss genuinely hurts, and then you need a version guard.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is an in-process cache dangerous across multiple replicas?</summary>
+      <div class="answer"><p>Because each replica holds an independent copy with an independent expiry. After a write, one pod may serve the new value and another the old one, so a user refreshing sees the value flip back and forth — non-monotonic reads that are almost impossible to reproduce in testing. Local caches are fine for small, hot, immutable or staleness-tolerant data with short TTLs; anything a user can notice changing belongs in the shared cache, or needs pub/sub invalidation with the TTL as a backstop.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a cache stampede, and how do you prevent it?</summary>
+      <div class="answer"><p>A very hot key expires and every concurrent request misses simultaneously, so a thousand identical expensive queries hit the database at once — and if the database buckles, the cache never refills and it repeats. Three defenses: request coalescing (single-flight), where only the first miss loads and the rest wait on that in-flight result; a distributed lock so one caller recomputes while the others serve the stale-but-present value; and probabilistic early expiration, where each reader may refresh the key slightly before it expires with a probability that rises near expiry, so it is refreshed without ever going cold. Serving stale while revalidating in the background is the cheapest version of the idea.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is cache penetration and how is it different from a stampede?</summary>
+      <div class="answer"><p>Penetration is repeated requests for keys that do not exist anywhere, so the cache correctly misses every time and every request reaches the database — often an enumeration attack or a client bug. A stampede is about one key that does exist and has just expired. Defenses for penetration are negative caching (store an explicit not-found marker with a short TTL) and a bloom filter of all existing keys, which answers "definitely absent" from memory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain a bloom filter and where you would use one in a caching design.</summary>
+      <div class="answer"><p>A bit array with k hash functions: adding sets k bits, testing checks them. If any bit is zero the element is definitely absent; if all are set it is probably present. False positives yes, false negatives never. Roughly ten bits per element gives a one-percent false-positive rate regardless of element size, so a hundred million identifiers fit in about 120 MB. In a caching design you put it in front of the cache to kill penetration; LSM-tree engines like Cassandra and RocksDB use one per SSTable to avoid reading files that cannot contain the key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A thousand keys were warmed in a loop with the same TTL and the database spiked exactly ten minutes later. Diagnose and fix.</summary>
+      <div class="answer"><p>Cache avalanche: identical TTLs set at the same instant expire at the same instant, so every key misses together and the origin gets the entire working set as one wave. Fix by jittering the TTL — multiply the base by a random factor, say 0.8 to 1.2, so expiries smear across a window. Add request coalescing so duplicate misses for the same key collapse, refresh proactively in the background ahead of expiry for the hottest keys, and put a concurrency limit or circuit breaker at the origin so a future wave is shed rather than absorbed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Compare TTL, explicit, event-driven and versioned-key invalidation.</summary>
+      <div class="answer"><p>TTL is passive and self-healing but guarantees only bounded staleness. Explicit invalidation in the write path is immediate and precise but fails silently whenever a writer bypasses your service — a migration script, an admin tool, a replication stream — or when someone adds a derived key and forgets a delete site. Event-driven invalidation from change data capture or an outbox catches every writer because the signal comes from the database, at the cost of a pipeline and eventual rather than immediate invalidation. Versioned keys sidestep invalidation altogether: put a generation number in the key so a change creates a new key and old ones age out; incrementing one namespace counter invalidates a million keys atomically. Real systems combine event-driven or explicit invalidation with a TTL backstop.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your cache and database have diverged. Walk through how that happens and what you would change.</summary>
+      <div class="answer"><p>Common causes: the cache-aside fill race, where a reader loads v1, a writer commits v2 and deletes the key, and the reader then writes v1 back; a fill from a lagging read replica landing after the invalidation; a dual write where the database write succeeds and the cache update fails, or the reverse; and local caches on replicas that never received the invalidation. Changes: delete rather than update, fill with set-if-absent and a version guard, always fill from the primary or a version-checked read, drive invalidation from change data capture so no writer can bypass it, keep every entry on a TTL so divergence is bounded, and emit a staleness metric by sampling cache against source so you find out before a customer does.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design a unique-visitor counter for a hundred million daily users, sliceable by hour and by country.</summary>
+      <div class="answer"><p>Exact counting means storing every identifier per slice — gigabytes per day and unusable across dimensions. Use HyperLogLog: one register set per hour, per country, roughly twelve kilobytes each with about 0.8 percent standard error. Registers merge by element-wise maximum, so any rollup — a day, a week, all countries — is a merge of the finer counters rather than a re-read of raw events, and the storage cost is independent of traffic volume. Call out the tradeoffs: it estimates rather than counts, it cannot tell you which visitors were distinct, and if the number is billed to customers or reported to a regulator you need an exact pipeline instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Redis cluster fails completely at peak. What happens to your service, and what should you have built?</summary>
+      <div class="answer"><p>Every request becomes a miss and the full production load lands on a database sized for the miss rate, so the database saturates and the outage becomes total — the cache failed open into a self-inflicted denial of service. What should exist: a small in-process cache as a second tier so the hottest keys still hit; a concurrency limiter or circuit breaker on the database path so excess traffic is shed rather than queued; load shedding and degraded responses on non-critical read paths; timeouts on cache calls so a slow cache does not become a slow service; and a documented decision about which endpoints may serve stale or partial data during a cache outage. Rehearse it — a cache that has never been switched off in a game day is a cache whose failure mode is unknown.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> "There are only two hard things in computer science: cache invalidation and naming things." Is that a joke or an observation?</summary>
+      <div class="answer"><p>Both, and the first half is a real engineering claim. Invalidation is a distributed correctness problem wearing a housekeeping costume: you must reach every copy in every layer — browser, CDN, gateway, per-replica local caches, the shared cache — before anyone reads it, from a process that has already returned to the user. There is no acknowledgement, no ordering guarantee against concurrent readers, and no way to reach the copies you do not control. That is why the mature answers avoid invalidation rather than perfect it: versioned or content-hashed keys, short TTLs, and serving stale deliberately. The framing to give an interviewer is that a cache is a consistency compromise you are choosing on purpose, so the question is never "how do I make it always correct" but "how stale may this be, and what does the business lose when it is?"</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.cache.layers — Caching at every layer (browser, CDN, gateway, application, database), read and write patterns</li>
+      <li>sd.cache.hazards — Invalidation strategies, stampede protection, coherence problems, bloom filters and HyperLogLog</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

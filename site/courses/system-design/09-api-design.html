@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="API design at scale: the Richardson maturity model as vocabulary, status codes and RFC 9457 problem details, idempotency keys for safe retries, offset versus cursor pagination, filtering and sparse fieldsets, versioning and expand-contract, rate limits, plus gRPC, GraphQL, webhooks and the real-time transports — with verified resources and interview questions.">
+  <title>API Design at Scale — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: API Design at Scale</h1>
+  <p class="standfirst">An API is the hardest thing in a system to change, because you do not control the clients. Databases can be migrated overnight and services rewritten in a quarter, but a published contract is held hostage by every mobile app on a phone you will never see.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → API Design at Scale</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every other design decision in this track is reversible under pressure. You can shard a table, swap a cache, move a service to another region — all painful, all internal. An API is different: the moment a partner integrates or an app ships to a store, your contract is frozen for as long as those clients live, and "just update the callers" stops being an option. That asymmetry is the reason API design deserves its own module rather than a paragraph inside a framework tutorial.</p>
+    <p>This module is deliberately about <em>strategy</em>, not syntax. The Spring Boot track owns controllers, serialization and the annotations; the Microservices track owns choosing how two of <em>your own</em> services talk to each other. Here we cover the decisions that outlive whichever framework you are using this year: resource and error modelling, idempotency, pagination, filtering, versioning and deprecation, and then the protocol survey — gRPC, GraphQL, webhooks and the real-time transports — with the tradeoffs that decide which one belongs in a design.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>REST maturity: the Richardson model as vocabulary, not a scorecard</h3>
+    <p>Leonard Richardson's maturity model describes four rungs. Level 0 is a single endpoint that tunnels every operation through <code>POST</code> — the "swamp of plain old XML", and the shape most legacy SOAP-over-HTTP services take. Level 1 introduces <em>resources</em>: many URIs, one per thing, though still with verbs hidden in the payload. Level 2 introduces <em>HTTP verbs and status codes</em> used as the protocol intends — <code>GET</code> reads and is cacheable, <code>PUT</code> replaces, <code>DELETE</code> removes, and a 404 means what the RFC says it means. Level 3 adds <em>hypermedia controls</em>: responses carry links telling the client what it may do next, so state transitions are discovered rather than hard-coded.</p>
+    <p>The honest note interviewers respect: almost nobody reaches level 3, and that is usually fine. Roy Fielding's thesis makes hypermedia a defining constraint of REST, so most "REST APIs" in production — including Stripe's, GitHub's and Google's — are strictly level 2 and are none the worse for it. Hypermedia earns its cost in long-lived, multi-client, evolving contracts where the server genuinely wants to move clients around without redeploying them; it is dead weight on an internal CRUD service. Treat the model as a shared vocabulary for saying "we are at level 2 and deliberately so", not as a ladder you owe someone a climb up. What you should <em>not</em> skip from level 2 is the discipline underneath: model nouns rather than actions (<code>/orders/1234/refunds</code>, not <code>/doRefund</code>), keep collection and item URIs consistent and plural, and never invent a verb where an HTTP method already exists.</p>
+    <pre class="code-block" data-label="HTTP"><code># Level 0 — one endpoint, verb in the body
+POST /api          {"op":"cancelOrder","id":1234}
+
+# Level 1 — resources, verb still in the payload
+POST /orders/1234  {"op":"cancel"}
+
+# Level 2 — resources + HTTP semantics (where most good APIs live)
+POST   /orders/1234/cancellations      201 Created
+GET    /orders/1234                    200 OK, cacheable
+DELETE /orders/1234/reservations/9     204 No Content
+
+# Level 3 — the response tells the client what it may do next
+GET /orders/1234
+{ "status":"placed",
+  "_links":{ "cancel":{"href":"/orders/1234/cancellations","method":"POST"} } }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9110.html" rel="noopener">RFC 9110: HTTP Semantics — IETF (methods, status codes, safe and idempotent definitions)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods" rel="noopener">HTTP request methods — MDN (the safe/idempotent/cacheable table)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/richardsonMaturityModel.html" rel="noopener">Richardson Maturity Model — Martin Fowler (the canonical write-up of levels 0–3)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/apis/design" rel="noopener">API Design Guide — Google Cloud (resource-oriented design, the most rigorous public style guide)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/webber-rest-workflow/" rel="noopener">How to GET a Cup of Coffee — InfoQ (Webber, Parastatidis, Robinson: what level 3 actually buys you)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_gQaygjm_hg" rel="noopener">Good APIs Vs Bad APIs: 7 Tips for API Design — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Status codes and error bodies a machine can act on</h3>
+    <p>Status codes are the only part of your contract that intermediaries — proxies, CDNs, client libraries, retry middleware — understand without reading your documentation. Getting them right is therefore not pedantry, it is interoperability. The distinctions that matter in review: 200 versus 201 with a <code>Location</code> header for creation; 202 when you accepted work you have not finished (the correct answer for an async command); 204 for a successful write with nothing to say; 400 for a malformed request versus 422 for a well-formed one that violates business rules; 401 (who are you?) versus 403 (I know who you are and no); 409 for a conflict such as a version clash; 429 for throttling; and the hard rule that 5xx means <em>you</em> failed, so a validation error returned as 500 will make every client's retry logic hammer you for nothing.</p>
+    <p>The status code alone is never enough — clients need to distinguish "card declined" from "card expired", and a human-readable sentence in a <code>message</code> field cannot be branched on. Standardise on a machine-readable error body, and prefer the one that already has an RFC: RFC 9457 <em>Problem Details for HTTP APIs</em> (which obsoletes RFC 7807) defines <code>type</code>, <code>title</code>, <code>status</code>, <code>detail</code> and <code>instance</code>, served as <code>application/problem+json</code>, with extension members for your own fields. The critical piece is <code>type</code>: a stable URI that identifies the error class and never changes, so clients switch on it rather than string-matching your prose. Two rules complete the design — return <em>all</em> validation failures at once rather than one per round trip, and put a correlation id in every error so a support ticket maps to a trace.</p>
+    <pre class="code-block" data-label="JSON"><code>HTTP/1.1 422 Unprocessable Content
+Content-Type: application/problem+json
+
+{
+  "type":     "https://api.example.com/problems/insufficient-funds",
+  "title":    "Insufficient funds",
+  "status":   422,
+  "detail":   "Wallet balance 240.00 is below the 999.00 charge.",
+  "instance": "/payments/98f1",
+  "balance":  240.00,
+  "traceId":  "0af7651916cd43dd8448eb211c80319c"
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9457.html" rel="noopener">RFC 9457: Problem Details for HTTP APIs — IETF (the standard error body; obsoletes RFC 7807)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status" rel="noopener">HTTP response status codes — MDN (every code with its intended meaning)</a></li>
+      <li>[Official] <a href="https://cloud.google.com/apis/design/errors" rel="noopener">Errors — Google Cloud API Design Guide (canonical error codes and error model)</a></li>
+      <li>[Article] <a href="https://github.com/microsoft/api-guidelines" rel="noopener">microsoft/api-guidelines — GitHub (Microsoft REST API guidelines, error and header conventions)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7nm1pYuKAhY" rel="noopener">Deep Dive into REST API Design and Implementation Best Practices — Software Developer Diaries</a></li>
+    </ul>
+
+    <h3>Idempotency: which methods have it, and why POST does not</h3>
+    <p>An operation is <em>idempotent</em> when performing it many times has the same effect on server state as performing it once. HTTP fixes this per method: <code>GET</code>, <code>HEAD</code> and <code>OPTIONS</code> are safe (no state change at all, therefore trivially idempotent); <code>PUT</code> and <code>DELETE</code> are idempotent by definition — writing the same representation twice leaves the same resource, and deleting twice leaves it deleted (the second call returning 404 does not break idempotency, because the <em>state</em> is unchanged). <code>POST</code> and <code>PATCH</code> are not idempotent: <code>POST /orders</code> twice means two orders, and a <code>PATCH</code> of <code>{"balance": "-100"}</code> applied twice deducts twice.</p>
+    <p>This matters because of a fact you cannot engineer away: a network timeout is ambiguous. When a client's call to <code>POST /payments</code> times out, it does not know whether the request never arrived, or arrived and committed while the response was lost on the way back. There are only two safe responses to that ambiguity — never retry (and leave the user staring at "did my money go?"), or make the operation idempotent so retrying is free. Every serious payment, order and inventory API in the world chooses the second. That is why the resilience patterns from the Microservices track — retry with backoff and jitter, at-least-once message delivery, a queue redelivering after a consumer crash — are all quietly dependent on idempotent write endpoints. Retry without idempotency is not resilience, it is a duplicate-charge generator.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Glossary/Idempotent" rel="noopener">Idempotent — MDN glossary (the precise definition and per-method table)</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/" rel="noopener">The Idempotency-Key HTTP Header Field — IETF httpapi working group draft</a></li>
+      <li>[Article] <a href="https://stripe.com/blog/idempotency" rel="noopener">Designing robust and predictable APIs with idempotency — Stripe engineering blog</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design" rel="noopener">Web API design best practices — Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m6DtqSb1BDM" rel="noopener">Build a robust Payments service using Idempotency Keys — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Idempotency keys: storing the response and replaying it</h3>
+    <p>The mechanism is simple to state and easy to get subtly wrong. The <em>client</em> generates a unique key per logical operation — a UUID, generated once and reused across every retry of that same intent — and sends it as an <code>Idempotency-Key</code> request header. The server, before doing any work, atomically inserts the key into a store with a unique constraint. If the insert succeeds it is the first attempt: process the request, then persist the final status code and response body <em>against that key</em> in the same transaction as the business write. If the insert fails because the key exists, do not process anything — look up the stored response and replay it byte for byte, so the client's retry gets the identical 201 and the identical order id it would have got the first time.</p>
+    <p>The details that separate a working implementation from a broken one. <strong>Concurrency:</strong> two retries can arrive simultaneously, so the key record needs a state machine — <code>in-flight</code>, <code>completed</code> — and a concurrent request that finds <code>in-flight</code> must return 409 (or 425) rather than proceed; relying on "check then insert" without a unique index or lock is a race that will duplicate payments under exactly the load where it matters. <strong>Scoping:</strong> keys must be scoped per API key or account, or one tenant can collide with — and read the response of — another. <strong>Request fingerprinting:</strong> store a hash of the request body with the key and reject a reused key carrying a <em>different</em> payload with 422, otherwise a client bug silently returns the wrong resource. <strong>Expiry:</strong> keys are retained for a bounded window (Stripe uses 24 hours) because storing them forever is unbounded growth; document the window, because a retry after it expires will create a second order. <strong>Failures:</strong> only cache <em>final</em> outcomes — replaying a cached 500 forever would make a transient fault permanent, so 5xx results should release the key for a genuine retry.</p>
+    <pre class="code-block" data-label="HTTP"><code>POST /v1/payments
+Idempotency-Key: 3f1a9c72-8e04-4a1f-9a3d-2b7c5e6d1f80
+{ "amount": 49900, "currency": "inr", "order_id": "ord_8812" }
+
+# First call  -> 201 Created  { "id": "pay_77Kd", "status": "captured" }
+# Any retry with the same key and the same body
+#              -> 201 Created  { "id": "pay_77Kd", ... }   replayed, no second charge
+# Same key, DIFFERENT body     -> 422 Unprocessable Content (fingerprint mismatch)
+# Same key, still processing   -> 409 Conflict (request in flight)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/api/idempotent_requests" rel="noopener">Idempotent requests — Stripe API reference (key scoping, replay rules, retention window)</a></li>
+      <li>[Official] <a href="https://google.aip.dev/155" rel="noopener">AIP-155: Request identification — Google API Improvement Proposals (request_id deduplication)</a></li>
+      <li>[Article] <a href="https://opensource.zalando.com/restful-api-guidelines/" rel="noopener">RESTful API Guidelines — Zalando (idempotency, conventions and evolution rules in one document)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=J2IcD9FZvZU" rel="noopener">Designing Idempotent API Endpoints for Payments at Stripe — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Pagination: offset versus cursor, and why the default is wrong</h3>
+    <p>Offset pagination — <code>?page=3&amp;size=20</code>, compiled to <code>LIMIT 20 OFFSET 40</code> — is the default in every framework and is wrong for most real datasets, for two independent reasons. <strong>It is unstable.</strong> The offset is computed against the table as it exists at the moment of <em>each</em> request, so if rows are inserted at the head of the ordering between page 1 and page 2, every item shifts down and the reader sees a record twice; a deletion makes a record vanish unseen. On a feed sorted by newest-first with concurrent writes, duplicates and skips are not an edge case, they are the normal outcome. <strong>It is slow at depth.</strong> The database cannot jump to row 100,000 — it must scan and discard the first 100,000, so cost grows linearly with the offset and page 5,000 is thousands of times more expensive than page 1. This is the classic production incident where an integration partner "just downloads everything by paging" and takes the database down.</p>
+    <p>Cursor (keyset) pagination fixes both. Instead of "skip 40 rows", it says "give me rows after this exact position": <code>WHERE (created_at, id) &lt; (:last_created_at, :last_id) ORDER BY created_at DESC, id DESC LIMIT 20</code>. The tuple comparison is answered directly from the index, so page 5,000 costs the same as page 1, and because the cursor names a row rather than a count, concurrent inserts cannot shift the window. Note the tiebreaker column: sorting on a non-unique key alone will skip or repeat rows at page boundaries, so always append a unique id to both the sort and the cursor. The cost is real — you cannot jump to page 50, you cannot show "page 7 of 412" without a separate (often approximate) count, and the cursor should be opaque (base64 the tuple) so clients do not build on its internals and you can change the sort later.</p>
+    <p>The recommendation: <strong>make cursor pagination the default for anything that grows or is sorted by time</strong> — feeds, event logs, transaction histories, sync and export endpoints. Keep offset only where a human is browsing a small, mostly-static, numbered result set and genuinely wants to click "page 5". Whichever you choose, make the page size a server-enforced part of the contract: a default, a hard maximum, and a clamped rather than rejected over-large request.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Offset: unstable under concurrent inserts, and scans 100k rows to discard them
+SELECT id, created_at FROM orders
+ORDER BY created_at DESC, id DESC
+LIMIT 20 OFFSET 100000;
+
+-- Keyset: index seek straight to the cursor position, constant cost at any depth
+SELECT id, created_at FROM orders
+WHERE (created_at, id) &lt; (:last_created_at, :last_id)   -- unique tiebreaker matters
+ORDER BY created_at DESC, id DESC
+LIMIT 20;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://google.aip.dev/158" rel="noopener">AIP-158: Pagination — Google API Improvement Proposals (page_token/next_page_token contract)</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/no-offset" rel="noopener">We need tool support for keyset pagination — Use The Index, Luke! (Markus Winand, the definitive case against OFFSET)</a></li>
+      <li>[Article] <a href="https://slack.engineering/evolving-api-pagination-at-slack/" rel="noopener">Evolving API Pagination at Slack — Slack Engineering (a real migration from offset to cursor)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/fast-and-efficient-pagination-in-mongodb/" rel="noopener">Fast and efficient pagination — Arpit Bhayani (the two approaches, with the cost model)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-pagination-in-spring" rel="noopener">REST Pagination in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=14K_a2kKTxU" rel="noopener">API Pagination: Making Billions of Products Scrolling Possible — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Filtering, sorting, sparse fieldsets — and the over-fetching problem</h3>
+    <p>Once a collection endpoint exists, clients will want subsets of it, and if you do not design the convention they will invent one per endpoint. Settle three things once and apply them everywhere. <strong>Filtering:</strong> either simple field equality in the query string (<code>?status=shipped&amp;region=south</code>), which is easy to cache and easy to validate but cannot express ranges or disjunction, or a small documented expression language in a single <code>filter</code> parameter (Google's AIP-160 style, <code>?filter=status="shipped" AND total&gt;5000</code>), which is far more expressive and correspondingly more work to parse safely. Pick one and never accept raw SQL fragments from a client. <strong>Sorting:</strong> one parameter, a documented allow-list of sortable fields (each of which needs an index), and a stable syntax such as <code>?sort=-created_at,id</code>. <strong>Sparse fieldsets:</strong> <code>?fields=id,total,status</code> lets a client that needs three columns avoid pulling forty.</p>
+    <p>That last one exists because of <em>over-fetching</em>: a REST resource has one fixed representation, so the mobile list screen that needs a name and a thumbnail receives the entire user object with addresses and preferences, wasting bandwidth on exactly the connections least able to afford it. Its twin is <em>under-fetching</em>, better known as the client-side N+1: the list endpoint returns 50 orders, each carrying a customer id, so the client fires 50 more requests to render customer names. The usual REST answers are an <code>expand</code>/<code>include</code> parameter for controlled embedding, and purpose-built composite endpoints for the two or three screens that matter — the backend-for-frontend pattern. These are pragmatic, but they multiply endpoints and they are the exact itch GraphQL was invented to scratch, which is where the second half of this module begins.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloud.google.com/apis/design/design_patterns" rel="noopener">Design patterns — Google Cloud API Design Guide (field masks, partial responses, list conventions)</a></li>
+      <li>[Official] <a href="https://google.aip.dev/160" rel="noopener">AIP-160: Filtering — Google API Improvement Proposals (a documented filter expression grammar)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/graph/best-practices-concept" rel="noopener">Best practices for working with Microsoft Graph — Microsoft Learn ($select, $filter, $expand in a real large API)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/api-management/restful-api-design-can-your-api-give-developers-just-what-they-need" rel="noopener">Can your API give developers just what they need? — Google Cloud blog (partial response and pagination design)</a></li>
+    </ul>
+
+    <h3>Versioning strategy, expand-contract, and how to retire an endpoint</h3>
+    <p>Four mechanisms, and you should be able to argue all four. <strong>URI path</strong> (<code>/v1/orders</code>): ugly to purists because the same entity now has two URIs, but overwhelmingly the most common in practice — visible in logs, trivially routable at the gateway, testable from a browser, and instantly understood by every consumer. <strong>Query parameter</strong> (<code>/orders?version=1</code>): easy to add and easy to default, but easy to lose in a copy-paste and it pollutes cache keys. <strong>Custom header</strong> (<code>X-API-Version: 1</code>): keeps URIs clean, but is invisible in a browser, awkward in curl and easy for intermediaries to strip. <strong>Media-type negotiation</strong> (<code>Accept: application/vnd.acme.order.v2+json</code>): the most correct answer by HTTP's own design and the one Fielding endorses, and the least used, because tooling support is thin and most client developers have never done it. <strong>Recommendation:</strong> major version in the URI path, one number only (<code>v1</code>, never <code>v1.2.3</code>), a small number of live versions, and every version pinned to a documented lifetime.</p>
+    <p>The better move, though, is to version as rarely as possible. Most changes are additive, and additive changes need no version at all if you have agreed <em>tolerant reader</em> semantics up front: clients must ignore unknown fields, must not depend on field order, and must treat unrecognised enum values as a documented fallback rather than crashing. With that contract, adding a field or a new optional parameter is a non-event. For the changes that genuinely break, use <strong>expand-contract</strong> (parallel change): <em>expand</em> by adding the new field or endpoint alongside the old, writing to both; <em>migrate</em> consumers while both work, using per-client telemetry to see who is still on the old path; <em>contract</em> by removing the old one only once that telemetry reads zero. Deprecation itself is a design artefact, not an email: announce a date, return the <code>Deprecation</code> and <code>Sunset</code> headers (RFC 8594) with a <code>Link</code> to the migration guide, monitor usage per consumer, and — if you can — run brownouts, short deliberate outages of the old path, so integrators discover the deadline while there is still time to act rather than on the day it disappears.</p>
+    <pre class="code-block" data-label="HTTP"><code>GET /v1/orders/1234
+HTTP/1.1 200 OK
+Deprecation: Sun, 01 Feb 2026 00 00 00 GMT
+Sunset: Wed, 01 Jul 2026 00 00 00 GMT
+Link: &lt;https://developer.example.com/guides/v2-migration&gt;; rel="deprecation"; type="text/html"
+Warning: 299 - "v1 of this endpoint is deprecated; migrate to /v2/orders"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloud.google.com/apis/design/versioning" rel="noopener">Versioning — Google Cloud API Design Guide (major versions, stability channels, backwards-compatibility rules)</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc8594.html" rel="noopener">RFC 8594: The Sunset HTTP Header Field — IETF</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/roy-fielding-on-versioning/" rel="noopener">Roy Fielding on Versioning, Hypermedia, and REST — InfoQ (the "don't version" argument from the source)</a></li>
+      <li>[Article] <a href="https://apisyouwonthate.com/blog/api-versioning-has-no-right-way/" rel="noopener">API Versioning Has No "Right Way" — APIs You Won't Hate (all four mechanisms, honestly compared)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lBfDthGBHGI" rel="noopener">API Versioning Strategies for System Evolution — SystemDR</a></li>
+    </ul>
+
+    <h3>Limits are part of the contract: rate limits, page caps and payload size</h3>
+    <p>An API without published limits has an implicit limit anyway — the point at which it falls over — and clients will find it. Make the limits explicit and machine-readable so a well-behaved client can be well-behaved. Return 429 when a caller exceeds its quota, always with <code>Retry-After</code> so the client waits the right amount instead of guessing, and advertise remaining budget on every response through the emerging <code>RateLimit</code> header fields (the IETF draft standardises the <code>limit</code>, <code>remaining</code> and <code>reset</code> triplet that GitHub, Twitter and others each invented separately). Distinguish 429 (slow down, you may retry) from 403 (you are not entitled to this at all) — conflating them makes clients retry something that will never succeed.</p>
+    <p>The same logic applies to every other bound. Cap and document maximum page size, maximum request body size, maximum array lengths in a batch endpoint, and maximum query depth or cost for GraphQL. Publish quotas per plan or per tenant rather than one global number, so a single noisy integrator cannot consume the capacity of everyone else — the fairness argument from the Rate Limiting module applies directly here, and this is the point where that mechanism becomes visible in your public contract. Two designs earn goodwill: return a <code>429</code> that names <em>which</em> limit was hit, and offer a sandbox or a higher burst allowance so integrators discover their limits during development rather than during their launch.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/" rel="noopener">RateLimit header fields for HTTP — IETF httpapi working group draft</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Retry-After" rel="noopener">Retry-After — MDN header reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/429" rel="noopener">429 Too Many Requests — MDN</a></li>
+      <li>[Article] <a href="https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api" rel="noopener">Best practices for using the REST API — GitHub Docs (secondary rate limits and what they expect of clients)</a></li>
+    </ul>
+
+    <h3>gRPC: strong contracts, HTTP/2 and streaming for service-to-service</h3>
+    <p>gRPC is a contract-first RPC framework: you write a <code>.proto</code> file describing services and messages, and the compiler generates client stubs and server skeletons in a dozen languages. Two properties make it the default for internal, high-volume, low-latency paths. First, <strong>Protocol Buffers</strong> — a compact binary encoding with field <em>numbers</em> rather than names on the wire, so payloads are several times smaller than JSON and parsing costs far less CPU; the numbering also gives you clean evolution rules (add fields freely, never reuse a retired field number, reserve what you remove). Second, <strong>HTTP/2</strong> — one long-lived multiplexed connection carries many concurrent calls without head-of-line blocking at the request level, with header compression and full-duplex framing. On top of that sit four call types: unary, server streaming, client streaming and bidirectional streaming, plus deadlines, cancellation propagation and pluggable interceptors as first-class parts of the model rather than bolt-ons.</p>
+    <p>The tradeoffs are equally clear. It is <strong>awkward from browsers</strong>: browser JavaScript cannot control HTTP/2 frames, so the web story requires gRPC-Web plus a proxy (Envoy or a language-specific translator) and, until recently, no client streaming. The binary payload is not human-readable, so debugging needs tooling — you cannot curl an endpoint and read the answer, and generic HTTP caching, browser dev-tools and many API gateways understand nothing of what is inside. The build gains a code-generation step, and the whole estate needs a schema registry and review discipline or the contracts drift. The design rule that survives interviews: <strong>gRPC inside, REST or GraphQL at the edge</strong> — internal service-to-service calls where both ends are yours and performance matters, HTTP/JSON where third parties, browsers and long-lived public contracts live.</p>
+    <pre class="code-block" data-label="Protobuf"><code>syntax = "proto3";
+package orders.v1;
+
+service OrderService {
+  rpc GetOrder    (GetOrderRequest) returns (Order);              // unary
+  rpc WatchOrders (WatchRequest)    returns (stream OrderEvent);  // server streaming
+}
+
+message Order {
+  string id     = 1;   // field NUMBERS are the wire contract, not the names
+  int64  amount = 2;
+  reserved 3;          // retired field: never reuse the number
+  string currency = 4; // additive change — old clients simply ignore it
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://grpc.io/docs/what-is-grpc/introduction/" rel="noopener">Introduction to gRPC — grpc.io (what it is and when it fits)</a></li>
+      <li>[Official] <a href="https://grpc.io/docs/what-is-grpc/core-concepts/" rel="noopener">Core concepts, architecture and lifecycle — grpc.io (the four call types, deadlines, cancellation)</a></li>
+      <li>[Official] <a href="https://protobuf.dev/overview/" rel="noopener">Protocol Buffers Overview — protobuf.dev (encoding and schema-evolution rules)</a></li>
+      <li>[Official] <a href="https://grpc.io/docs/platforms/web/basics/" rel="noopener">gRPC-Web basics — grpc.io (why browsers need a proxy)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-vs-graphql-vs-grpc" rel="noopener">REST vs. GraphQL vs. gRPC — Which API to Choose? — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1yjAUY1ifUg" rel="noopener">gRPC for Beginners — What, Why and How — Java Techie</a></li>
+    </ul>
+
+    <h3>GraphQL: the client writes the query, and the costs that follow</h3>
+    <p>GraphQL inverts who decides the response shape. The server publishes a typed schema of everything available; the client sends a query naming exactly the fields it wants, across as many related entities as it likes, and gets back one response with precisely that shape. Over-fetching disappears because nobody asks for fields they will not render; under-fetching disappears because one round trip can traverse orders to customers to addresses. For a product with several very different clients — an Android app, an iOS app, a web console and a partner integration — each evolving at its own pace, that is a genuine and large win, and it removes the endless proliferation of near-duplicate REST endpoints and backend-for-frontend layers.</p>
+    <p>The costs are equally structural, and interviews probe them. <strong>Caching is harder:</strong> queries are typically <code>POST</code>ed to a single <code>/graphql</code> URL, so HTTP caching, CDNs and browser caches — the free, enormously effective layer REST gets by default — no longer apply, and you must replace them with persisted queries plus per-field client and server caches. <strong>Resolvers reintroduce N+1:</strong> a query for 50 orders each with a customer will naively execute 1 query for orders and 50 for customers, because each resolver runs independently; the standard fix is a dataloader that batches and de-duplicates the per-field loads within a single request tick, and no serious GraphQL service runs without it. <strong>A malicious or careless query can be a denial of service:</strong> deeply nested or recursive selections can ask for a combinatorial amount of work in a single small request, so a public GraphQL endpoint needs depth limiting, complexity/cost analysis with a per-caller budget, pagination enforced on every list field, and normally an allow-list of persisted queries. Add to that harder rate limiting (requests are not equal in cost, so you meter cost, not calls) and coarser observability, since every call is one <code>POST /graphql</code> in the access log until you instrument operation names.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://graphql.org/learn/" rel="noopener">Introduction to GraphQL — graphql.org (schema, queries, resolvers)</a></li>
+      <li>[Official] <a href="https://graphql.org/learn/security/" rel="noopener">Security — graphql.org (depth limiting, cost analysis, persisted queries)</a></li>
+      <li>[Official] <a href="https://github.com/graphql/dataloader" rel="noopener">graphql/dataloader — GitHub (the batching-and-caching layer that fixes resolver N+1)</a></li>
+      <li>[Article] <a href="https://www.apollographql.com/docs/graphos/routing/security/demand-control" rel="noopener">Demand control — Apollo GraphOS docs (query cost scoring and per-client budgets)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/graphql-101-api-approach-beyond-rest" rel="noopener">GraphQL 101: API Approach Beyond REST — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uCbFMZYQbxE" rel="noopener">GraphQL N+1 Problem — Ben Awad</a></li>
+    </ul>
+
+    <h3>Webhooks: server-to-server push, and the delivery contract behind it</h3>
+    <p>A webhook inverts the direction of a normal API call: instead of the integrator polling you every minute for "has this payment settled yet?", you <code>POST</code> the event to a URL they registered. It is the standard mechanism for third-party notification — payment gateways, CI systems, messaging providers — and it removes an enormous amount of wasted polling traffic. But it makes <em>you</em> an HTTP client calling an endpoint you do not operate, which imports every distributed-systems problem in this course into your outbound path.</p>
+    <p>Design it as a delivery system, not a fire-and-forget call. <strong>Guarantees:</strong> webhooks are at-least-once, not exactly-once — a receiver may be slow, respond after you time out, or fail after processing — so every event carries a stable <code>event_id</code> and receivers must deduplicate on it. Ordering is not guaranteed either: include a sequence number or timestamp and tell receivers to handle out-of-order arrival. <strong>Retry:</strong> exponential backoff with jitter over hours or days, a bounded attempt count, then a dead-letter queue plus a UI where the integrator can inspect and replay failures; disable or throttle endpoints that fail persistently so one dead consumer does not consume your delivery workers. <strong>Signing:</strong> HMAC the raw request body with a shared secret and send it in a signature header so the receiver can verify authenticity — this is essential, because the endpoint is public and anyone can post to it. <strong>Replay protection:</strong> include the timestamp <em>inside</em> the signed payload, reject anything outside a small tolerance window, and require constant-time comparison of the signature. <strong>Receiver etiquette</strong> to document: respond 2xx immediately and process asynchronously, because doing work before responding turns your timeout into their retry storm. The Standard Webhooks specification encodes most of this if you would rather adopt than invent.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/webhooks" rel="noopener">Webhooks — Stripe docs (signature verification, retries, event ordering, replay)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks" rel="noopener">Best practices for using webhooks — GitHub Docs</a></li>
+      <li>[Official] <a href="https://github.com/standard-webhooks/standard-webhooks" rel="noopener">standard-webhooks/standard-webhooks — GitHub (an open specification for payloads and signing)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/ep100-polling-vs-webhooks" rel="noopener">Polling vs. Webhooks — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=f7KgDNZU3-Y" rel="noopener">gRPC, WebSocket and WebHook — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Real-time transports: long polling, server-sent events, WebSocket</h3>
+    <p><strong>Short polling</strong> is the baseline — ask every few seconds — and it is wasteful in exact proportion to how fresh you want the data: most responses are empty, and latency is bounded below by the interval. <strong>Long polling</strong> improves on it by having the server hold the request open until there is something to say (or a timeout fires), then the client immediately re-requests. It is plain HTTP, works through every proxy ever built, and needs no special client support, but it costs one held connection and one server-side wait per client, and every message pays the cost of tearing down and re-establishing a request.</p>
+    <p><strong>Server-sent events</strong> is the underrated middle option: a single long-lived HTTP response streaming <code>text/event-stream</code> frames, one-way from server to client, consumed by the browser's built-in <code>EventSource</code>. Because it is ordinary HTTP it passes through proxies, gateways and existing auth unchanged, and the standard gives you automatic reconnection with a <code>Last-Event-ID</code> header for free — resumability without you writing any of it. Its limits: one direction only (client-to-server still needs normal requests), text frames rather than binary, and a per-domain connection cap on HTTP/1.1 that HTTP/2 multiplexing removes. <strong>WebSocket</strong> is the full-duplex option: an HTTP request is <em>upgraded</em> to a persistent bidirectional socket over which either side sends text or binary frames with almost no per-message overhead. That power costs you a stateful, non-HTTP protocol — separate authentication and authorization design, no HTTP caching or standard status codes, extra work in load balancers and gateways, and you must implement your own heartbeats, reconnection and message-resumption logic.</p>
+    <p><strong>The decision rule:</strong> if updates flow only server-to-client — live scores, order status, notifications, a progress bar, streaming tokens from a model — use SSE; if both sides send messages frequently and latency matters — chat, collaborative editing, multiplayer, trading — use WebSocket; if you must traverse hostile infrastructure or support an ancient client, fall back to long polling. Do not reach for WebSocket by default: teams routinely pay its operational cost for a feed that only ever flows one way.</p>
+    <p><strong>At scale, the problem changes shape.</strong> Persistent connections make your servers stateful, and that breaks the assumptions of the Scaling Basics module. Each connection consumes a file descriptor and memory for its lifetime, so capacity is measured in <em>concurrent connections</em>, not requests per second, and a million users means a connection-management tier sized independently from your business logic. Load balancers must be configured for long-lived connections (generous idle timeouts, connection-aware rather than request-aware balancing), and a deploy that restarts a node disconnects every client on it — which then all reconnect at once, so reconnection needs jittered backoff or your own rollout becomes a thundering herd. Because a message for user X must reach whichever node holds X's socket, you need either sticky routing plus a registry of connection-to-node, or a pub/sub backplane (Redis, Kafka, NATS) that fans every message out to all nodes. Scaling out is therefore not "add a pod": it is a design decision made at the same time you choose the transport.</p>
+    <pre class="code-block" data-label="HTTP"><code># Server-sent events: one long-lived HTTP response, plain text frames
+GET /orders/1234/events            Accept: text/event-stream
+HTTP/1.1 200 OK                    Content-Type: text/event-stream
+
+id: 42
+event: status
+data: {"status":"packed"}
+          &lt;- browser EventSource reconnects automatically and
+             resends Last-Event-ID: 42 so nothing is missed
+
+# WebSocket: an upgrade handshake, then a bidirectional frame stream
+GET /chat  HTTP/1.1
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+HTTP/1.1 101 Switching Protocols   # no more HTTP semantics after this line</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events" rel="noopener">Using server-sent events — MDN (event stream format, reconnection, Last-Event-ID)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API" rel="noopener">The WebSockets API — MDN</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc6455.html" rel="noopener">RFC 6455: The WebSocket Protocol — IETF (the upgrade handshake and framing)</a></li>
+      <li>[Official] <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" rel="noopener">Server-sent events — HTML Living Standard (WHATWG)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/api-protocols-101-a-guide-to-choose" rel="noopener">API Protocols 101: A Guide to Choose the Right One — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1cFyfT0m3bA" rel="noopener">HTTP Long Polling vs Server Sent Events vs Websockets — Tech Primers</a></li>
+    </ul>
+
+    <h3>Choosing between the styles in a design round</h3>
+    <p>Interviewers rarely ask "what is GraphQL?" — they ask you to choose, and then defend it. A defensible order of reasoning: start from the <em>consumer</em> (browser, mobile app, partner integration, or your own service), then the <em>direction and frequency</em> of data flow (request-response, one-way push, or genuinely bidirectional), then the <em>coupling you can afford</em> (a public contract you can never break, versus an internal one you can redeploy on both sides in an afternoon). That usually lands you on: REST over HTTP/JSON for public and browser-facing APIs, gRPC for internal service-to-service hot paths, GraphQL where many heterogeneous clients need different slices of a rich graph, webhooks for third-party event notification, and SSE or WebSocket for live updates according to the direction rule above.</p>
+    <p>Two closing points worth making out loud in an interview. First, these are not exclusive — a healthy estate runs REST at the edge, gRPC inside, a webhook fleet for partners and an SSE endpoint for live status, all in the same product, chosen per boundary rather than per company. Second, whichever you pick, the design work in the first half of this module does not go away: idempotency, pagination, error taxonomy, limits and a deprecation policy are needed just as much in a gRPC or GraphQL contract as in a REST one — the protocol changes the syntax of the answer, not the questions.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/EventSource" rel="noopener">EventSource — MDN (the client half of SSE, including automatic reconnection)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/ep49-api-architectural-styles" rel="noopener">API Architectural Styles — ByteByteGo (SOAP, REST, GraphQL, gRPC, WebSocket, webhook side by side)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-server-sent-events" rel="noopener">Server-Sent Events in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=X_DdIXrmWOo" rel="noopener">Server-Sent Events vs WebSockets — System Design School</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ZBM28ZPlin8" rel="noopener">Short Polling vs Long Polling vs WebSockets — Be A Better Dev</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-consistency-availability.html">← Consistency and Availability</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="10-async-architectures.html">Asynchronous Architectures →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>API design is one of the few system design topics that appears in <em>both</em> the design round and the backend round, so Indian product and service companies ask it at every level — from "what does PUT versus PATCH mean" in a screening call to idempotency-key concurrency in a senior loop:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Which HTTP methods are idempotent, and which are safe?</summary>
+      <div class="answer"><p>Safe (no state change): GET, HEAD, OPTIONS — and anything safe is automatically idempotent. Idempotent but not safe: PUT and DELETE. Not idempotent: POST and PATCH. PUT is idempotent because sending the same representation twice leaves the resource in the same state; DELETE is idempotent because the resource is gone either way (the second call returning 404 does not break it — idempotency is about server state, not the response code). POST creates a new resource each time, and a PATCH such as "decrement by 100" applies twice.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> PUT vs PATCH vs POST — when do you use each?</summary>
+      <div class="answer"><p>POST creates a subordinate resource (or triggers a process) and is not idempotent; the server assigns the identifier and returns 201 with a Location header. PUT replaces the resource at a known URI in full — send every field, because omitted fields are removed — and is idempotent. PATCH applies a partial modification, and whether it is idempotent depends on the patch: setting a field is, incrementing one is not. Use PUT when the client owns the identifier and sends the whole object, PATCH for partial updates, POST for creation and for operations that do not map to a resource replacement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain the Richardson maturity model. What level are most real APIs at?</summary>
+      <div class="answer"><p>Level 0: one endpoint, one verb, operation named in the payload. Level 1: many resource URIs. Level 2: correct use of HTTP verbs and status codes. Level 3: hypermedia controls (HATEOAS) — responses carry links describing available transitions. Most production APIs, including Stripe's and GitHub's, are level 2, and deliberately so: hypermedia pays off mainly for long-lived contracts with many independent clients you want to steer without redeploying them. Fielding's definition makes level 3 the only "true" REST, which is worth knowing but not worth arguing about in a design round.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> A client sends a well-formed request that violates a business rule. Which status code?</summary>
+      <div class="answer"><p>422 Unprocessable Content — the syntax parsed fine, the semantics failed. Reserve 400 for genuinely malformed requests (bad JSON, missing required parameter, wrong type). Do not return 500 for validation failures: 5xx tells every retry layer in the chain that the problem is yours and transient, so they will retry a request that can never succeed. And do not return 200 with an error field in the body — intermediaries and generated clients cannot see it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Design an idempotency key mechanism for POST /payments. Walk through the storage and the concurrent case.</summary>
+      <div class="answer"><p>The client generates a UUID per logical payment attempt and sends it as Idempotency-Key, reusing it on every retry. The server inserts the key into a table with a unique constraint before doing any work, scoped by API key or account so tenants cannot collide. If the insert wins, mark it in-flight, process the payment, then persist the final status code and response body against the key in the same transaction as the business write, and mark it completed. If the insert loses because the key exists: completed means replay the stored response verbatim (same 201, same payment id, no second charge); in-flight means a concurrent duplicate is being processed, so return 409 rather than proceeding. Also store a hash of the request body and return 422 if the same key arrives with different content, expire keys after a documented window such as 24 hours, and release the key on 5xx so a genuinely failed attempt can be retried rather than replaying a cached failure forever.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Offset vs cursor pagination — which would you choose for a social feed and why?</summary>
+      <div class="answer"><p>Cursor (keyset). Offset pagination has two fatal properties on a feed: it is unstable, because new posts inserted between requests shift every row down so page 2 repeats items from page 1 (and deletions skip items); and it degrades linearly, because LIMIT 20 OFFSET 100000 makes the database scan and discard 100,000 rows. Keyset pagination asks for "rows after this position" using an indexed tuple comparison on (sort_key, unique_id), so cost is constant at any depth and concurrent inserts cannot shift the window. The tradeoffs to state: no jumping to page 50, no cheap total count, and the cursor should be opaque so clients cannot depend on its structure. Offset stays acceptable for small, static, numbered admin tables.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do you need a unique tiebreaker column in a cursor?</summary>
+      <div class="answer"><p>Because the sort key is usually not unique. If ten orders share the same created_at value and your cursor says "created_at less than X", the page boundary falls in the middle of that group and you will either skip rows or return them twice, depending on the comparison. Sorting and cursoring on the tuple (created_at, id) with a strict tuple comparison makes the ordering total, so every row has exactly one position and the boundary is unambiguous. The index must cover the same tuple in the same order, or you lose the seek and go back to scanning.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you version a public API, and how do you avoid versioning most of the time?</summary>
+      <div class="answer"><p>Major version in the URI path (/v1/orders) — least elegant, most practical: visible in logs, routable at the gateway, understood by everyone. Alternatives are a query parameter (easy to lose, pollutes cache keys), a custom header (clean URIs, invisible in a browser, strippable by proxies), and media-type negotiation via Accept (most correct per HTTP, poorest tooling). Avoid versioning by making additive changes non-breaking: publish tolerant-reader rules (ignore unknown fields, do not depend on order, handle unknown enum values), so adding a field needs no new version. For real breaking changes use expand-contract — add the new shape alongside the old, migrate consumers while both work, and remove the old only when per-client telemetry shows zero use.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> WebSocket or SSE for a live order-tracking screen? Justify it.</summary>
+      <div class="answer"><p>SSE. The data flows one way — the server pushes status changes and the client sends nothing back over that channel — and SSE is plain HTTP, so it passes through existing proxies, gateways, auth and TLS termination unchanged, and gives automatic reconnection with Last-Event-ID resumption for free. WebSocket would add a stateful non-HTTP protocol, its own auth design, load-balancer configuration, and hand-written heartbeat and reconnect logic, for capability the feature does not use. Choose WebSocket when both directions carry frequent messages — chat, collaborative editing, multiplayer, trading. Choose long polling only when infrastructure or an old client forces it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you pick gRPC over REST, and what do you give up?</summary>
+      <div class="answer"><p>Pick gRPC for internal service-to-service calls where both ends are yours, volume is high and latency matters: Protobuf's binary encoding is compact and cheap to parse, HTTP/2 multiplexes many concurrent calls over one connection, the generated stubs give a strongly typed contract in every language, and streaming plus deadlines and cancellation are built in. You give up browser friendliness (gRPC-Web needs a proxy), human readability and easy debugging, standard HTTP caching and gateway/tooling support, and you take on a code-generation step and schema governance. The usual architecture is gRPC inside, REST or GraphQL at the edge.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> GraphQL solves over-fetching. What does it cost you, and how do you run it safely in public?</summary>
+      <div class="answer"><p>Three costs. Caching: queries POST to one URL, so HTTP/CDN/browser caching stops working and must be replaced with persisted queries and per-field caches. Resolver N+1: each field resolves independently, so 50 orders each needing a customer becomes 51 queries unless a dataloader batches and de-duplicates loads within the request. Denial of service: a small deeply nested or recursive query can request combinatorial work, so a public endpoint needs depth limits, query cost analysis with a per-caller budget, mandatory pagination on list fields, timeouts, and ideally an allow-list of persisted operations. Add cost-based rather than call-based rate limiting, and instrument operation names or your access logs are one undifferentiated POST /graphql.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the delivery guarantees for a webhook system. What do you promise consumers?</summary>
+      <div class="answer"><p>Promise at-least-once delivery, not exactly-once, and not ordering. Every event carries a stable event_id and a sequence number or timestamp so receivers can deduplicate and detect out-of-order arrival. Retry with exponential backoff and jitter over hours, bounded attempts, then a dead-letter store with a self-service replay UI; throttle or auto-disable endpoints that fail persistently so one dead consumer cannot starve the delivery workers. Sign the raw body with an HMAC over a shared secret, include the timestamp inside the signed payload, reject anything outside a tolerance window, and require constant-time signature comparison — the endpoint is public, so authenticity and replay protection are not optional. Document that receivers should return 2xx immediately and process asynchronously, since doing work before responding turns your timeout into their duplicate delivery.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You must remove a field from a public API used by a mobile app you cannot force-update. What is your plan?</summary>
+      <div class="answer"><p>Accept that the old clients never change, and use expand-contract. Expand: add the replacement field or endpoint alongside the old one and dual-write, so both are correct simultaneously. Announce deprecation with a date, and return Deprecation and Sunset headers (RFC 8594) plus a Link to the migration guide on every response from the old path. Instrument usage per API key and per app version so it is clear exactly who is still calling it, and contact those consumers directly rather than relying on a blog post. Consider scheduled brownouts — short deliberate failures of the old path — so integrators discover the deadline while they still have time. Contract only when telemetry reads zero, or when the remaining traffic is from app versions you have formally end-of-lifed; if a long tail cannot migrate, pin them to a frozen major version behind the gateway instead of breaking them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service holds a million WebSocket connections. What breaks first, and how do you scale it?</summary>
+      <div class="answer"><p>Capacity stops being requests per second and becomes concurrent connections: file descriptors, per-connection memory and kernel socket buffers, so you size and scale a connection tier separately from business logic. Load balancers need long idle timeouts and connection-aware balancing, since a request-level round robin means nothing when one connection lives for hours. Routing breaks next: a message for user X must reach the exact node holding X's socket, so you need either sticky routing plus a connection registry, or a pub/sub backplane (Redis, Kafka, NATS) fanning every message to all nodes and letting each drop what it does not own. Deploys are the third problem — restarting a node disconnects everyone on it and they all reconnect at once, so reconnection must use jittered backoff and rollouts must drain gradually. If the traffic is really one-way, SSE removes most of this by staying inside plain HTTP.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A partner's retry logic is duplicating orders through your API. Diagnose it and design the fix on both sides.</summary>
+      <div class="answer"><p>The cause is almost always an ambiguous timeout on a non-idempotent POST: the request committed, the response was lost, and their retry created a second order. Server side, add an idempotency key contract as described above, and additionally enforce a business-level uniqueness constraint — a unique index on (customer, external_order_ref) or on a client-supplied request id — so even a client that ignores the header cannot double-book. Return the existing resource with the original status code rather than an error, so a duplicate looks like success. Client side, they must generate the key once per intent and hold it across retries — generating a fresh UUID inside the retry loop is the single most common bug and defeats the whole mechanism. Then reconcile: deduplicate the existing damage on the natural key, and add an alert on duplicate-key rates so the next occurrence is detected by you rather than by the customer.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.api.rest — REST maturity, idempotency, pagination, filtering and versioning strategy</li>
+      <li>sd.api.protocols — gRPC and GraphQL survey, webhooks, real-time transports (WebSocket, SSE, long polling)</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

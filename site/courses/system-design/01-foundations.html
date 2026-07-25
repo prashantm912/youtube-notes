@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System Design foundations module: the latency numbers and ratios every engineer should know, throughput versus latency and Little's Law, percentiles and tail amplification, the back-of-envelope estimation method with a worked example, and functional versus non-functional requirements gathering — with verified resources and interview questions.">
+  <title>Foundations and Estimation — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Foundations and Estimation</h1>
+  <p class="standfirst">Before any diagram, a designer needs a feel for magnitudes: what a memory read costs against a disk seek, what a datacentre hop costs against a trip to another continent, and what a hundred million users a day actually works out to per second. This module builds that feel.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Foundations and Estimation</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>System design is mostly arithmetic performed under uncertainty. Every later module in this track — caching, sharding, load balancing, consensus — is an answer to a question that only makes sense once you know the numbers: how slow is the thing we are avoiding, how much traffic are we actually expecting, and how bad is bad when it goes wrong. Getting the magnitudes right is what separates a design that survives contact with production from a plausible-sounding drawing.</p>
+    <p>Two halves. First, the measurement vocabulary: the latency ladder from L1 cache to a cross-continent round trip and the ratios between its rungs, why throughput and latency are independent properties tied together only by Little's Law, and percentiles — the topic where most engineers are weakest, because averages conceal exactly the behaviour users complain about. Second, method: back-of-the-envelope estimation as a repeatable four-step procedure with a worked example, and requirements gathering that separates what the system does from how well it must do it. The second half is also, bluntly, the part that scores points in an interview.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The latency ladder, and the ratios that outlive the hardware</h3>
+    <p>Jeff Dean's "numbers everyone should know" is a table of typical operation costs — roughly half a nanosecond for an L1 cache reference, a hundred nanoseconds for a main-memory reference, a hundred microseconds or so for a random SSD read, half a millisecond for a round trip inside one datacentre, ten milliseconds for a spinning-disk seek, and something near 150 milliseconds for a packet from California to the Netherlands and back. The absolute figures drift with each hardware generation and the SSD line has improved dramatically since the list was written. What does not drift is the shape: each rung is one to three orders of magnitude above the last, and the gaps are set by physics and topology rather than by vendors.</p>
+    <p>Memorise the ratios rather than the digits. Main memory is around two hundred times slower than L1, a random SSD read is roughly a thousand times slower than main memory, and a disk seek is around a hundred thousand times slower than a memory reference — at a few gigahertz, one seek is tens of millions of CPU cycles the processor spends doing nothing. Two consequences drive most design decisions you will ever make. First, sequential access beats random access at every level of the hierarchy, which is why log-structured storage, batching and column layouts exist. Second, distance is not negotiable: light travels about 200,000 km per second in fibre, so Mumbai to Northern Virginia is roughly 65 ms one way no matter what you buy. That is why a chatty API is fatal across a WAN — thirty sequential round trips at 150 ms each is four and a half seconds of pure waiting, and no amount of server tuning touches it. The fix is always structural: fewer round trips, batched calls, an edge cache, or move the computation to the data.</p>
+    <pre class="code-block" data-label="Latency ladder (order of magnitude)"><code>L1 cache reference                  ~0.5 ns      1x
+main memory reference               ~100  ns    ~200x   L1
+random read, 4 KB from SSD          ~100  us   ~1,000x  memory
+round trip within same datacentre   ~500  us   ~5,000x  memory
+disk seek (spinning platter)         ~10  ms  ~100,000x memory
+round trip across a continent       ~150  ms  ~300x     same-datacentre RTT</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://research.google.com/people/jeff/stanford-295-talk.pdf" rel="noopener">Software Engineering Advice from Building Large-Scale Distributed Systems — Jeff Dean, Stanford CS295 slides (the original "Numbers Everyone Should Know")</a></li>
+      <li>[Official] <a href="https://colin-scott.github.io/personal_website/research/interactive_latency.html" rel="noopener">Latency Numbers Every Programmer Should Know, interactive by year — Colin Scott (watch the ratios move as hardware improves)</a></li>
+      <li>[Article] <a href="https://gist.github.com/jboner/2841832" rel="noopener">Latency Numbers Every Programmer Should Know — Jonas Bonér's gist (the widely-circulated table)</a></li>
+      <li>[Article] <a href="https://bytebytego.com/guides/which-latency-numbers-should-you-know/" rel="noopener">Which Latency Numbers Should You Know? — ByteByteGo guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4JSN0VpEv2I" rel="noopener">Latency Numbers Every Programmer Should Know — 1000x slow-down — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Throughput and latency are independent — and Little's Law joins them</h3>
+    <p>Latency is how long one request takes; throughput is how many requests complete per unit time. They are genuinely separate properties and neither implies the other. A batch pipeline can move terabytes an hour while any individual record takes twenty minutes to emerge; a trading gateway can answer in forty microseconds while handling only a few thousand messages a second. The classic illustration is a truck full of hard drives driven across a country: enormous throughput, appalling latency. Bandwidth is a third thing again — the capacity of the pipe, of which throughput is the fraction you actually achieve.</p>
+    <p>The bridge between them is Little's Law, <code>L = &lambda; &times; W</code>: the average number of requests in the system equals arrival rate multiplied by the average time each spends there. Rewritten for servers, concurrency equals throughput multiplied by latency. At 2,000 requests per second with 50 ms average latency you have 100 requests in flight at any moment, so 100 is the floor for your thread pool, connection pool and downstream permit count. The law also explains the single most misunderstood scaling result: adding servers raises throughput but does nothing for per-request latency. A second identical server doubles capacity while every individual request still takes exactly as long as before — and if the system is already saturated, queueing means the added capacity <em>appears</em> to reduce latency, but what you actually removed was queueing delay, not service time. Reducing real latency requires a different intervention: less work, closer data, fewer hops, or a faster algorithm.</p>
+    <pre class="code-block" data-label="Little's Law in practice"><code>concurrency = throughput x latency
+
+  2,000 req/s  x  0.050 s  =  100 requests in flight
+    -> pool sizes, semaphore permits and bulkheads start from 100, not a round number
+
+  target 10,000 req/s at 20 ms  =  200 concurrent
+    -> if each request holds one DB connection, a 50-connection pool caps you at 2,500 req/s</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/" rel="noopener">Using load shedding to avoid overload — Amazon Builders' Library (what happens to latency when throughput exceeds capacity)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Little%27s_law" rel="noopener">Little's law — Wikipedia (statement, proof sketch and the assumptions it needs)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/ep186-latency-vs-throughput" rel="noopener">Latency vs. Throughput — ByteByteGo Newsletter</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/bandwidth-vs-data-rate-vs-throughput" rel="noopener">Bandwidth vs. Data Rate vs. Throughput — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=X0bnN8oBxeI" rel="noopener">Latency versus Throughput — System Design Interview Basics — ByteMonk</a></li>
+    </ul>
+
+    <h3>Percentiles: the average hides everything</h3>
+    <p>Response times are not normally distributed. They are heavily right-skewed — a dense cluster of fast responses with a long tail of slow ones caused by garbage collection pauses, cold caches, lock contention, retries, noisy neighbours and the occasional unlucky disk. An arithmetic mean over that shape is close to meaningless: it is dragged upward by outliers yet still reports a value that almost no user experienced, and it cannot distinguish a service where everyone waits 200 ms from one where ninety-nine percent wait 20 ms and one percent waits eighteen seconds. Report percentiles instead. Sort every response time and read off positions: p50 is the median, the typical experience; p95 and p99 describe the unhappy minority; p99.9 describes the shape of the disaster.</p>
+    <p>Tail latency is what users actually feel, and the reason is counter-intuitive: the customers landing in your p99 are disproportionately your best ones. They have the most data, the longest follower lists, the fullest carts, the most orders to page through — exactly the accounts whose requests do the most work. Google's SRE practice makes the point operationally: a service level objective is written against a percentile ("99% of reads complete under 300 ms over a rolling 28 days"), never against a mean, because the mean cannot be violated in a way anyone notices. When you set targets, set them per percentile and accept that p99.9 will cost you far more engineering than p50 — the last nine is usually where the architecture has to change rather than the code.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/service-level-objectives/" rel="noopener">Service Level Objectives — Google SRE Book, chapter 4 (why targets are expressed as percentiles)</a></li>
+      <li>[Official] <a href="https://research.google/pubs/the-tail-at-scale/" rel="noopener">The Tail at Scale — Dean &amp; Barroso, Google Research (the foundational paper on tail latency)</a></li>
+      <li>[Article] <a href="https://robertovitillo.com/why-you-should-measure-tail-latencies/" rel="noopener">Why You Should Measure Tail Latencies — Roberto Vitillo</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/adaptive-hedged-requests-p99-latency/" rel="noopener">Stragglers, Not Failures: How Adaptive Hedged Requests Reduce p99 Latency — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3JdQOExKtUY" rel="noopener">Percentile Tail Latency Explained (95%, 99%) — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Tail amplification, and the percentile arithmetic that does not work</h3>
+    <p>Fan-out turns a rare event into a common one. If a request must call one hundred backend services and each independently serves its p99 slowly, the chance that <em>all</em> hundred respond quickly is 0.99 raised to the hundredth power, about 0.366. In other words roughly sixty-three percent of user requests wait for at least one service's worst-case behaviour: your p50 has become everyone else's p99. This is the central result of Dean and Barroso's <em>Tail at Scale</em>, and it is why tail latency is an architectural concern rather than a tuning detail. The countermeasures are structural — reduce fan-out width, hedge requests to a second replica after a short delay, return partial results on a deadline, or shed the slowest shard — and every one of them costs something you must be willing to pay.</p>
+    <p>The other rule, and the one that catches experienced engineers in interviews: you cannot average percentiles. If instance A reports p99 of 200 ms and instance B reports p99 of 800 ms, the fleet p99 is not 500 ms — it is not derivable from those two numbers at all, because percentiles are not additive and carry no information about the distribution behind them. The same applies over time: averaging five one-minute p99 values does not give you the five-minute p99. The correct method is to export a distribution rather than a summary — Prometheus histogram buckets, HdrHistogram, t-digest or DDSketch — merge the distributions across instances and time windows, and compute the percentile once at query time from the merged data. A dashboard that shows <code>avg(p99)</code> across pods is quietly lying to you, and it lies in the reassuring direction.</p>
+    <pre class="code-block" data-label="Tail amplification"><code>P(all N subcalls fast) = (1 - 0.01)^N        # each service slow for 1 percent of calls
+
+  N =   1   -> 99.0 percent of requests fast
+  N =  10   -> 90.4 percent
+  N = 100   -> 36.6 percent   <-- 63 percent of users hit someone's p99
+
+WRONG:  fleet_p99 = avg(p99 per pod)         # percentiles are not additive
+RIGHT:  merge histograms across pods, then read the quantile once</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book, chapter 6 (distributions, not averages)</a></li>
+      <li>[Article] <a href="https://redis.io/blog/p99-latency/" rel="noopener">P99 Latency: What It Means and How to Fix It — Redis engineering blog (histogram aggregation done right)</a></li>
+      <li>[Article] <a href="https://www.somethingsimilar.com/2013/01/14/notes-on-distributed-systems-for-young-bloods/" rel="noopener">Notes on Distributed Systems for Young Bloods — Jeff Hodges (the classic field guide, including metrics discipline)</a></li>
+      <li>[Video] <a href="https://www.infoq.com/presentations/latency-response-time/" rel="noopener">How NOT to Measure Latency — Gil Tene, InfoQ presentation (coordinated omission and why your load test lies)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lJ4NEMNBeS4" rel="noopener">Mastering Latency Metrics: P90, P95, P99 — ByteMonk</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9rlGSahksLQ" rel="noopener">What are P50, P95, P99? Backend Performance 101 — Kamran Ahmed</a></li>
+    </ul>
+
+    <h3>Back-of-the-envelope estimation as a repeatable procedure</h3>
+    <p>Estimation is not guessing; it is a four-step procedure you can run identically on every problem. One, clarify the requirement until it has a number attached — "how many daily active users, and is that today's figure or the two-year target?" Two, state your assumptions out loud and write them down, because an interviewer cannot mark arithmetic they cannot see, and a colleague cannot challenge a premise you kept in your head. Three, compute in round powers of ten: a hundred million users, one kilobyte per record, ten reads per write. Precision is a trap — you are choosing between a single database and a sharded cluster, and that decision never turns on whether the answer is 8,000 or 12,000 requests per second. Four, sanity-check the result against a quantity you already trust.</p>
+    <p>That last step is what makes the technique useful rather than decorative. Anchor points worth carrying: one commodity server serves roughly tens of thousands of simple HTTP requests per second, a single relational instance handles a few thousand writes per second before you think about sharding, a gigabit link carries about 125 MB per second, an NVMe drive streams hundreds of megabytes to a few gigabytes per second, and a large in-memory cache node holds tens to a few hundred gigabytes. If your estimate says one machine will do and the anchors agree, stop designing. If it says you need four hundred machines, the interesting conversation has just started — and if it says you need four hundred thousand, you have made an arithmetic error, which is precisely what the sanity check is for.</p>
+    <pre class="code-block" data-label="Numbers worth memorising"><code>seconds in a day        ~86,400   -> round to 1e5
+seconds in a year       ~31.5 million -> round to 3e7
+1 million events/day    ~12 per second
+1 billion events/day    ~12,000 per second
+1 KB = 1e3 bytes, 1 MB = 1e6, 1 GB = 1e9, 1 TB = 1e12
+UUID 16 bytes | timestamp 8 bytes | short text row ~1 KB
+thumbnail ~20 KB | photo ~500 KB | minute of 1080p video ~50 MB
+1 Gbps link  ~125 MB per second</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/donnemartin/system-design-primer" rel="noopener">The System Design Primer — Donne Martin (see the back-of-the-envelope and appendix "powers of two / latency numbers" sections)</a></li>
+      <li>[Article] <a href="https://highscalability.com/google-pro-tip-use-back-of-the-envelope-calculations-to-choo/" rel="noopener">Google Pro Tip: Use Back-of-the-Envelope Calculations to Choose the Best Design — High Scalability</a></li>
+      <li>[Article] <a href="https://bytebytego.com/courses/system-design-interview/back-of-the-envelope-estimation" rel="noopener">Back-of-the-envelope Estimation — ByteByteGo System Design Interview course</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UC5xf8FbdJc" rel="noopener">Back-Of-The-Envelope Estimation / Capacity Planning — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0myM0k1mjZw" rel="noopener">Capacity Planning and Estimation: How much data does YouTube store daily? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>A worked example: from daily users to servers, storage and bandwidth</h3>
+    <p>Take a social feed with 100 million daily active users. Writes: assume two posts per user per day, so 200 million writes per day; divide by 10<sup>5</sup> seconds and you get about 2,000 writes per second average. Traffic is never flat, so apply a peak factor of three for the busy hour — call it 6,000 writes per second. Reads: assume each user opens the feed twenty times a day, giving 2 billion reads per day, about 20,000 per second average and 60,000 at peak. The read-to-write ratio is roughly ten to one, and that single ratio has already told you the shape of the system: a read-optimised design with aggressive caching and probably a fan-out-on-write feed, because the reads are where the money goes.</p>
+    <p>Storage: a post at roughly 1 KB including metadata gives 200 GB per day, about 73 TB per year, and with three-way replication a little over 200 TB per year — large but entirely ordinary, and cheap enough that you would not delete old posts to save money. Bandwidth is the punchline. The write path is 200 GB spread over a day, about 2.3 MB per second, which is nothing. The read path, at 20,000 requests per second returning fifty posts of 1 KB each, is around 1 GB per second — three orders of magnitude larger, and the number that decides your caching layer, your CDN and your egress bill. Notice that the design conclusion came from the ratios between the numbers, not from the numbers themselves, and that changing any assumption by a factor of two would not have changed a single decision.</p>
+    <pre class="code-block" data-label="Worked estimate"><code>ASSUMPTIONS (state these out loud)
+  DAU 100 million | 2 posts/user/day | 20 feed opens/user/day
+  post ~1 KB with metadata | 50 posts per feed page | peak = 3x average
+  replication factor 3 | retention: forever
+
+WRITES   200e6 / day  / 1e5 s  =  2,000 per second   -> peak  6,000
+READS      2e9 / day  / 1e5 s  = 20,000 per second   -> peak 60,000
+           read-to-write is about ten to one -> read-optimised design
+
+STORAGE  200e6 x 1 KB = 200 GB/day -> 73 TB/year -> ~220 TB/year replicated
+EGRESS   write path  200 GB/day  =  2.3 MB/s      (negligible)
+         read  path  20,000/s x 50 x 1 KB = ~1 GB/s   (the real constraint)
+
+SANITY   1 GB/s of feed reads cannot come off one database
+         -> cache tier + CDN, sized from this line, not from intuition</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/workbook/implementing-slos/" rel="noopener">Implementing SLOs — The Site Reliability Workbook (turning estimates into measurable targets)</a></li>
+      <li>[Article] <a href="https://bytebytego.com/courses/system-design-interview/scale-from-zero-to-millions-of-users" rel="noopener">Scale From Zero To Millions Of Users — ByteByteGo (each estimate mapped to the next architectural step)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/system-design-for-beginners/" rel="noopener">System Design for Beginners — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WZjSFNPS9Lo" rel="noopener">Back-Of-The-Envelope Estimation for System Design Interview: Capacity Planning of Facebook — Concept &amp;&amp; Coding (Shrayansh)</a></li>
+    </ul>
+
+    <h3>Requirements: functional, non-functional, and the numbers attached to each</h3>
+    <p>Functional requirements state what the system does — a user can post, follow, search, receive a notification, refund an order. They are verbs, they are enumerable, and in an interview you should agree on a deliberately small set of them within the first few minutes so the rest of the discussion has a scope. Non-functional requirements state how well it must do those things, and they are the ones that actually determine the architecture. Six are worth asking about every single time: scale (users, requests per second, data volume, growth), latency (a target per percentile, not a single number), availability (99.9% is about 43 minutes of downtime a month; 99.99% is about 52 minutes a <em>year</em>, and the difference between them is a multi-region deployment), consistency (does a follower have to see the post immediately, or is a few seconds of staleness fine), durability (how many copies, how far apart, and what recovery point are you promising), and cost — including the egress bill, which is invisible on a whiteboard and enormous on an invoice.</p>
+    <p>The discipline is to attach a number to each one, because an unquantified non-functional requirement cannot be designed for or tested. "The system should be fast" is not a requirement; "p99 read latency under 200 ms measured at the load balancer" is. "Highly available" is not a requirement; "99.95% monthly, single-region failure tolerated, region loss recovered within 30 minutes" is. In enterprise settings these are the same quality characteristics that ISO/IEC 25010 formalises and that reliability practice re-expresses as service level objectives and error budgets. Two more belong on the list for Indian enterprise and fintech work specifically: security and compliance, and data residency — RBI and similar rules on where payment data may physically live have redrawn more than one architecture diagram.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/embracing-risk/" rel="noopener">Embracing Risk — Google SRE Book, chapter 3 (availability targets, error budgets, and why 100% is the wrong goal)</a></li>
+      <li>[Official] <a href="https://iso25000.com/index.php/en/iso-25000-standards/iso-25010" rel="noopener">ISO/IEC 25010 product quality model — the standard taxonomy of non-functional characteristics</a></li>
+      <li>[Article] <a href="https://martinfowler.com/architecture/" rel="noopener">Software Architecture Guide — Martin Fowler (what architecture is for, and how quality attributes drive it)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/requirements-functional-vs-non-functional" rel="noopener">Requirements: Functional vs. Non-functional — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xRdjEd-VQTU" rel="noopener">Foundation of System Design Interview: Functional vs Non Functional Requirements — sudoCODE</a></li>
+    </ul>
+
+    <h3>Clarifying questions: the highest-scoring behaviour in a design interview</h3>
+    <p>System design questions are deliberately underspecified. "Design a URL shortener" omits the read-to-write ratio, the custom-alias requirement, the analytics expectation, the retention policy and the traffic volume — every one of which changes the answer. A candidate who starts drawing immediately has, in the interviewer's notes, already failed the first signal being measured: whether you gather requirements before committing to a design. Spending the first five to eight minutes on questions and writing the answers on the board is not a delay, it is the highest-value part of the session, and it also protects you — a design that is wrong for the requirements you agreed is a legitimate design, while a design that is wrong for requirements you invented is just wrong.</p>
+    <p>Have a standard opening sequence so you never freeze: who uses this and for what; which two or three features are in scope for today; how many users and how much traffic, now and in two years; what is the read-to-write ratio; what latency does the user-facing path need at p99; how available must it be and what is the cost of downtime; how fresh must the data be; how long is it retained and where may it live. Then restate the whole thing back — "so: 100 million daily users, ten reads per write, p99 under 200 ms, 99.9% availability, seconds of staleness acceptable" — and only then start drawing. The estimates from the previous section drop straight into that summary, which is why estimation and requirements gathering are one skill rather than two.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://blog.bytebytego.com/p/ep22-latency-numbers-you-should-know" rel="noopener">Latency numbers you should know — ByteByteGo Newsletter (the cheat sheet to have in your head walking in)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/hld-lld" rel="noopener">High-Level Design vs. Low-Level Design — Baeldung on Computer Science (knowing which one you are being asked for)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/masterclass/" rel="noopener">The System Design Masterclass — Arpit Bhayani (syllabus and free companion material for the interview method)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pWO07iEpjO4" rel="noopener">Watch this before your System design interview — Tech Dummies, Narendra Lakshmana Gowda</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YueZhOofC1E" rel="noopener">Understanding and Clarifying Requirements in System Design Interviews — Software Interviews Prep</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All System Design modules</a>
+    <a href="02-scaling-basics.html">Scaling Basics →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Foundations questions open almost every system design round in Indian product and service companies — and because they are "warm-up" questions, weak answers are unusually damaging:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between latency and throughput?</summary>
+      <div class="answer"><p>Latency is the time one request takes end to end; throughput is how many requests complete per unit time. They are independent: a batch job can have huge throughput and terrible latency, a trading gateway the reverse. Bandwidth is a third quantity — the pipe's capacity, of which throughput is the portion actually used. Optimising one does not automatically improve the other, and they often trade against each other (batching raises throughput and raises latency).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Roughly how much slower is a disk seek than a main-memory reference, and why does it matter?</summary>
+      <div class="answer"><p>Memory is around 100 nanoseconds, a spinning-disk seek around 10 milliseconds — about five orders of magnitude, tens of millions of CPU cycles the processor spends idle. It matters because it justifies almost every caching, indexing and sequential-layout decision in the stack: avoiding one random seek is worth an enormous amount of extra CPU work. SSDs narrow the gap to roughly a thousandfold, which changes the constant but not the conclusion.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does p99 latency mean, and why not just use the average?</summary>
+      <div class="answer"><p>p99 is the value below which 99 percent of requests complete — one request in a hundred is slower. Averages fail because response-time distributions are right-skewed: the mean is pulled up by outliers yet still describes an experience almost nobody had, and it cannot distinguish "everyone waits 200 ms" from "99 percent wait 20 ms and one percent waits 18 seconds". Percentiles describe the distribution's shape, which is what users perceive and what SLOs are written against.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Give an example of a functional and a non-functional requirement for a ride-hailing app.</summary>
+      <div class="answer"><p>Functional: a rider can request a ride, a driver can accept it, both see live location, fare is computed at drop-off. Non-functional: match a rider to a driver within 5 seconds at p95; support 500,000 concurrent riders in the peak hour; 99.95% monthly availability; location updates may be up to 3 seconds stale; trip and payment records durable across a datacentre loss. Functional requirements say what it does, non-functional say how well — and the non-functional ones decide the architecture.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Estimate the storage and bandwidth for a photo-sharing service with 50 million daily active users.</summary>
+      <div class="answer"><p>State assumptions: 50M DAU, 20 percent upload one photo per day, average 500 KB after compression, three thumbnails adding roughly 60 KB, each user views 100 photos per day, replication factor 3. Uploads: 10 million per day, about 100 per second average and 300 at peak. Storage: 10M × 560 KB ≈ 5.6 TB per day, about 2 PB per year, roughly 6 PB replicated. Reads: 5 billion views per day, about 50,000 per second, and at even 50 KB per rendered thumbnail that is around 2.5 GB per second of egress — which is the number that tells you this is a CDN problem, not a database problem. Then sanity-check: petabytes per year is object storage, not a relational database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> State Little's Law and use it to size a thread pool.</summary>
+      <div class="answer"><p>L = λ × W: average number of items in a system equals arrival rate times average time in system. For a service, concurrency equals throughput multiplied by latency. At 5,000 requests per second with 40 ms average service time, 200 requests are in flight, so a blocking thread pool needs at least 200 threads (plus headroom for latency spikes) and the downstream connection pool must support the same. Run it the other way to find limits: a 50-connection pool with 20 ms queries caps you at 2,500 requests per second no matter how many application servers you add.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You add servers behind the load balancer. Does per-request latency improve?</summary>
+      <div class="answer"><p>Not the service time. Extra servers add capacity, so throughput rises, but one request still executes the same code against the same data and takes the same time. What can improve is queueing delay: if the system was saturated, requests were waiting for a server, and removing that wait lowers observed end-to-end latency. Once you are below saturation, more servers change nothing for latency — you then need less work per request, data closer to the user, fewer network hops or a better algorithm.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your service is at 99.9% availability and the business wants 99.99%. What actually changes?</summary>
+      <div class="answer"><p>The downtime budget drops from about 43 minutes a month to about 4 minutes a month (roughly 52 minutes a year), which is less than most human response times — so the difference must be automated. Practically: remove every single point of failure, multi-AZ and usually multi-region with automated failover, health-check-driven traffic shifting, zero-downtime deploys with automated rollback, and dependency budgets (a chain of five components at 99.99% each cannot deliver 99.99% overall). Cost typically multiplies, so the right follow-up question is what an outage minute actually costs the business.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is a chatty API across regions a fatal design, and how do you fix it?</summary>
+      <div class="answer"><p>Cross-continent round trips are 100 to 250 ms and are bounded by the speed of light in fibre — no hardware purchase removes them. Thirty sequential calls means four to seven seconds of pure waiting before any processing. Fixes are structural: batch or coalesce calls into one round trip, use a coarse-grained API or a backend-for-frontend that does the chatter locally, parallelise independent calls so you pay one round trip rather than thirty, cache at the edge, or relocate the computation next to the data.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Each of your 100 microservices meets its p99. Why do most user requests still feel slow?</summary>
+      <div class="answer"><p>Tail amplification. If a request fans out to 100 independent services and each is slow for one percent of calls, the probability that all 100 are fast is 0.99<sup>100</sup> ≈ 0.366 — so about 63 percent of user requests wait on at least one service's worst case. Your service p50 becomes the user's p99. Remedies: reduce fan-out width, hedge requests to a second replica after a short delay, enforce a deadline and return partial results, use tied requests that cancel the loser, and isolate the slowest components. This is the core result of Dean and Barroso's <em>Tail at Scale</em>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Ten pods report their p99 to your dashboard. How do you compute the fleet p99?</summary>
+      <div class="answer"><p>Not by averaging them — percentiles are not additive, and a fleet p99 is simply not derivable from ten p99 values. The same applies over time: five one-minute p99s do not average to a five-minute p99. Export distributions instead of summaries: Prometheus histogram buckets, HdrHistogram, t-digest or DDSketch. Merge the distributions across pods and windows, then compute the quantile once at query time. Any dashboard showing avg(p99) is understating the tail, which is the dangerous direction to be wrong in.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is coordinated omission and why does it make load-test results optimistic?</summary>
+      <div class="answer"><p>A load generator that issues the next request only after the previous one returns stops sending during a stall, so the requests that would have been slowest are never issued or timed. The measured distribution therefore omits precisely the events you care about and reports a flattering tail. The fix is to measure against the intended send schedule — record the delay a request should have experienced from its scheduled start, not from when the harness got around to it — which is what HdrHistogram's corrected recording and open-model load generators do. Gil Tene's talk is the canonical treatment.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk me through the first five minutes of a "design WhatsApp" question.</summary>
+      <div class="answer"><p>Do not draw. Scope it: one-to-one messaging, group chat up to 256 members, delivery receipts, media out of scope today. Quantify it: daily active users, messages per user per day, peak factor, average message size, media share, read-to-write ratio, retention. Set non-functional targets: p99 delivery under a second for an online recipient, 99.99% availability, ordering guaranteed per conversation, messages durable once acknowledged, offline delivery within a retention window. Ask about constraints: mobile networks, multiple devices, end-to-end encryption, data residency. Then compute the envelope — 50 billion messages a day is about 600,000 per second, which immediately says persistent connections and a partitioned message store — restate the agreed requirements, and only then draw.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you decide a latency SLO for a new checkout API, and what happens when it is breached?</summary>
+      <div class="answer"><p>Work backwards from user impact and the enclosing budget, not from what the service currently does: if the page must render in a second and the API is one of three sequential calls, the budget is a few hundred milliseconds. Express it as a percentile over a window with a measurement point — "99% of POST /checkout under 300 ms at the edge over a rolling 28 days" — and set the target below what customers would notice but above what you can hold cheaply, because the last nine costs disproportionately. Breach consumes the error budget; when the budget is exhausted the response is a policy, not a panic: freeze risky releases, redirect engineering to reliability work, and revisit whether the target or the architecture is wrong. Also define the exclusions up front — client-side network time, planned maintenance, requests rejected by rate limiting.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.fnd.numbers — latency numbers and ratios, throughput vs latency, Little's Law, percentiles, tail amplification, percentile aggregation</li>
+      <li>sd.fnd.estimate — back-of-envelope method, worked estimate, numbers worth memorising, functional and non-functional requirements, clarifying questions</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

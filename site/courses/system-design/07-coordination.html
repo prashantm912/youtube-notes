@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Distributed coordination module: FLP and the crash-versus-slow problem, consensus and majority quorums, Raft explained for intuition, Paxos, etcd/ZooKeeper/Consul/KRaft, leader election and split-brain, R + W &gt; N, wall versus monotonic clocks, Lamport and vector clocks, distributed locks and fencing tokens, the Redlock debate, heartbeats, phi-accrual detectors and gossip — with verified resources and interview questions.">
+  <title>Distributed Coordination — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Distributed Coordination</h1>
+  <p class="standfirst">This is the theory chapter, taught for intuition rather than proofs. You will almost certainly never implement Raft — but you will absolutely have to reason about what your datastore's consensus layer promises, and why the lock you took in Redis did not protect anything.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Distributed Coordination</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Coordination is the set of problems that appear the moment two machines have to agree on something: who is the leader, which write happened first, who currently holds the lock, which nodes are still alive. Every one of those questions is trivial inside a single process and genuinely hard across a network, and the reason is the same in each case — messages can be delayed arbitrarily and you cannot look inside another machine.</p>
+    <p>The first half is consensus: what agreement actually means, why a majority quorum is the magic number, Raft explained as the readable algorithm, Paxos as its older and harder equivalent, and where consensus really lives in the systems you already run. The second half is time and locks, which is where the production bugs are: untrustworthy clocks, logical ordering, distributed locks that quietly fail, fencing tokens, and how a cluster decides that a node is dead.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The core difficulty: you cannot tell a crashed node from a slow one</h3>
+    <p>Start here, because everything else in this module is a consequence. In an asynchronous network there is no bound on message delay and no shared clock. You send a request to a peer and hear nothing back. Has it crashed? Is it garbage-collecting for eight seconds? Did your request arrive and the reply get dropped? Did a switch fail and partition you away from a node that is happily serving other clients? From your side, all of those look identical: silence. The only tool you have is a timeout, and a timeout is a guess, not a measurement. Set it short and you declare healthy nodes dead; set it long and you take minutes to react to a real failure.</p>
+    <p>The formal statement of this is the FLP impossibility result (Fischer, Lynch and Paterson, 1985): in a fully asynchronous system, no deterministic algorithm can guarantee consensus if even one process may fail. At intuition level it says exactly what the paragraph above says — with no way to distinguish dead from slow, an algorithm can always be forced to wait forever rather than risk an incorrect decision. Real systems escape it not by beating the proof but by relaxing the model: they assume <em>partial synchrony</em> (the network is usually well behaved), use timeouts and randomisation to break ties, and settle for guaranteed safety with only probabilistic liveness. That is the deal every consensus system you will ever run has made: it will never give a wrong answer, but under a bad enough partition it may give no answer at all.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf" rel="noopener">Impossibility of Distributed Consensus with One Faulty Process — Fischer, Lynch, Paterson (the FLP paper, JACM 1985)</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/challenges-with-distributed-systems/" rel="noopener">Challenges with distributed systems — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://www.cl.cam.ac.uk/teaching/2122/ConcDisSys/dist-sys-notes.pdf" rel="noopener">Distributed Systems — lecture notes, Martin Kleppmann (University of Cambridge)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/distributed-systems-guide" rel="noopener">A Guide to Distributed Systems — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UEAMfLPZZhE" rel="noopener">Distributed Systems 1.1: Introduction — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Consensus: what agreement means, and why a majority is the magic number</h3>
+    <p>Consensus is a group of nodes deciding on one value such that four properties hold: every correct node eventually decides (termination), no node decides twice (integrity), all deciding nodes decide the <em>same</em> value (agreement), and the decided value was actually proposed by someone (validity). That sounds abstract until you notice that almost every coordination problem reduces to it — electing a leader is agreeing on a name, committing a transaction across shards is agreeing on commit-or-abort, and appending to a replicated log is agreeing on the entry at each position. Solve consensus once and you get atomic broadcast, leader election, distributed locks and consistent membership for free.</p>
+    <p>The mechanism that makes it work is the majority quorum: a decision requires acknowledgement from more than half the nodes. The property that buys you correctness is set overlap — any two majorities of the same cluster must share at least one node, so a new decision can never be made in ignorance of a previous one. That single node in the intersection carries the history forward. This is also why an even-numbered cluster gains you nothing: a cluster of four needs three votes to form a majority, exactly like a cluster of three, so it still tolerates only one failure while giving you one more machine that can fail and one more round-trip of latency. Cluster sizes go 3, 5, 7 — tolerating 1, 2 and 3 failures respectively — and beyond seven the write latency cost usually outweighs the extra durability.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/managing-critical-state/" rel="noopener">Managing Critical State: Distributed Consensus for Reliability — Google SRE Book, chapter 23</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/replicated-log.html" rel="noopener">Replicated Log — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/consensus-algorithms-distributed-systems" rel="noopener">Consensus Algorithms in Distributed Systems — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/why-consensus/" rel="noopener">Why Distributed Systems Need Consensus Algorithms Like Raft — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rN6ma561tak" rel="noopener">Distributed Systems 6.1: Consensus — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Raft: the one you should actually be able to explain</h3>
+    <p>Raft was designed for understandability, and it is the algorithm to hold in your head. Time is divided into <em>terms</em>, numbered monotonically — a term is a logical epoch with at most one leader, and every message carries its term so that a node hearing a higher term immediately steps down and becomes a follower. Each node is a follower, a candidate or the leader. Followers expect periodic heartbeats from the leader; when a follower's election timeout expires with no heartbeat, it increments the term, votes for itself and becomes a candidate soliciting votes. Winning requires a majority, so at most one candidate can win a given term. The elegant trick is that election timeouts are <em>randomised</em> over a range — that is what stops every follower from campaigning simultaneously and splitting the vote forever, and it is the practical answer to the liveness half of FLP.</p>
+    <p>Once elected, the leader owns all writes. It appends a client command to its own log and sends <code>AppendEntries</code> to followers; once a majority have persisted the entry, the leader advances its <em>commit index</em> and only then applies the entry to the state machine and answers the client. Safety comes from the up-to-date-log rule: a voter refuses its vote to any candidate whose log is behind its own (compared by last entry's term, then by index), which guarantees the winner already holds every committed entry — so a leader never has to receive missing history, it only ever overwrites followers' uncommitted tails. Everything else you might worry about is a corollary. An old leader that was partitioned away and returns still thinks it leads, but its term is stale, so its writes are rejected by the majority and it steps down harmlessly.</p>
+    <pre class="code-block" data-label="Raft"><code>Follower  --election timeout (randomised, e.g. 150-300 ms)--&gt;  Candidate
+Candidate --majority of votes in term N--&gt;                     Leader
+Candidate --sees AppendEntries with term &gt;= N--&gt;                Follower
+Leader    --sees any message with term &gt; N--&gt;                   Follower
+
+Commit rule: entry at index i is committed once stored on a majority
+             AND its term == the current leader's term.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://raft.github.io/" rel="noopener">The Raft Consensus Algorithm — official site, with the interactive visualisation and implementation list</a></li>
+      <li>[Official] <a href="https://raft.github.io/raft.pdf" rel="noopener">In Search of an Understandable Consensus Algorithm — Ongaro and Ousterhout (the Raft paper)</a></li>
+      <li>[Article] <a href="https://thesecretlivesofdata.com/raft/" rel="noopener">Raft: Understandable Distributed Consensus — The Secret Lives of Data (animated walkthrough)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/raft-consensus-algorithm" rel="noopener">Raft Consensus Algorithm — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uXEYuDwm7e4" rel="noopener">Distributed Systems 6.2: Raft — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Paxos: the older, harder equivalent — and why readability mattered</h3>
+    <p>Paxos came first and solves the same problem. A proposer picks a ballot number and asks acceptors to promise not to accept anything older; if a majority promise, and any of them report a previously accepted value, the proposer is obliged to re-propose <em>that</em> value rather than its own; then it asks the majority to accept. The overlap argument is identical to Raft's — two majorities share a node, so no earlier decision can be lost. Single-decree Paxos agrees on one value; real systems need a stream of decisions, which is Multi-Paxos: elect a stable distinguished proposer and skip the promise phase for subsequent entries, at which point it looks remarkably like Raft with a leader and a log.</p>
+    <p>The interesting history is that Paxos was notoriously difficult to teach and, worse, under-specified for implementation — the paper describes how to agree on one value and leaves the log, membership changes and leader election as exercises, so every production Paxos ended up being a different, unverified variant. Raft's contribution was arguably not new correctness but new <em>clarity</em>: the authors ran a user study showing students learned Raft better than Paxos, and decomposed the problem into leader election, log replication and safety so that an implementation follows the paper. In an interview, knowing that Paxos exists, that it is majority-based like Raft, and why the industry standardised on Raft-style protocols is generally enough — nobody will make you derive a ballot.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://lamport.azurewebsites.net/pubs/paxos-simple.pdf" rel="noopener">Paxos Made Simple — Leslie Lamport (the readable restatement of the original)</a></li>
+      <li>[Official] <a href="https://static.googleusercontent.com/media/research.google.com/en//archive/chubby-osdi06.pdf" rel="noopener">The Chubby lock service for loosely-coupled distributed systems — Burrows, Google (Paxos in production)</a></li>
+      <li>[Official] <a href="https://raft.github.io/slides/raftuserstudy2013.pdf" rel="noopener">Raft user study — Ongaro (the experiment comparing comprehension of Raft and Paxos)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/multi-paxos/" rel="noopener">Multi-Paxos: Consensus in Distributed Databases — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.infoq.com/presentations/raft-consensus-algorithm/" rel="noopener">The Raft Consensus Algorithm — Diego Ongaro, InfoQ presentation</a></li>
+    </ul>
+
+    <h3>Where consensus actually lives: etcd, ZooKeeper, Consul, KRaft</h3>
+    <p>The single most useful piece of practical advice in this module: do not write your own consensus implementation, and be suspicious of any design document that proposes to. Use a system that has one. etcd (Raft) is the key-value store behind every Kubernetes cluster's state. Apache ZooKeeper (ZAB, a Paxos-family atomic broadcast protocol) has been the coordination service of the Hadoop and Kafka world for over a decade. HashiCorp Consul uses Raft for its service catalogue and key-value store. Apache Kafka replaced its ZooKeeper dependency with KRaft, an internal Raft quorum of controllers that holds cluster metadata — which is why modern Kafka deployments no longer ship a separate ZooKeeper ensemble.</p>
+    <p>What you buy from these systems is not just agreement but the primitives built on top of it: linearizable reads and compare-and-swap on keys, ephemeral nodes and sessions that vanish when a client dies, watches that notify you when a key changes, leases with TTLs, and monotonic revision numbers you can use as fencing tokens. Those primitives are what you build leader election, membership and locking from. The cost is real and worth stating in a design discussion: every write is a majority round-trip, so a coordination store handles thousands of writes per second, not millions, and you should keep small amounts of critical metadata in it rather than application data.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://etcd.io/docs/v3.5/learning/why/" rel="noopener">Why etcd — etcd documentation (comparison with ZooKeeper and Consul)</a></li>
+      <li>[Official] <a href="https://zookeeper.apache.org/doc/current/zookeeperOver.html" rel="noopener">ZooKeeper Overview — Apache ZooKeeper documentation (znodes, sessions, guarantees)</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/concept/consensus" rel="noopener">Consensus protocol — HashiCorp Consul documentation (Raft, peers, quorum sizing table)</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-500%3A+Replace+ZooKeeper+with+a+Self-Managed+Metadata+Quorum" rel="noopener">KIP-500: Replace ZooKeeper with a Self-Managed Metadata Quorum — Apache Kafka wiki</a></li>
+      <li>[Article] <a href="https://www.infoq.com/interviews/fournier-consensus/" rel="noopener">Camille Fournier on Consensus Systems: ZooKeeper, etcd, Consul — InfoQ interview</a></li>
+    </ul>
+
+    <h3>Leader election, leases, and the split-brain failure</h3>
+    <p>A great many systems are simpler if exactly one node is doing a job: one writer per shard, one scheduler running the nightly batch, one compaction process per table. Leader election is how you get that. The pattern is always the same underneath — candidates race to create a single key in a coordination store with a compare-and-set, and the winner holds it for a bounded lease that it must keep renewing. ZooKeeper's version uses an ephemeral sequential znode with each candidate watching its immediate predecessor (which avoids the herd effect of everyone watching the same key); etcd's uses a lease-bound key and a campaign API; Kubernetes controllers do it with a lease object in the API server. The leadership is always time-bounded, never permanent.</p>
+    <p>Split-brain is what happens when that goes wrong: a network partition leaves two nodes each believing they are the leader, both accepting writes, and the two histories diverge irreconcilably. Majority quorum is the structural defence — a leader that cannot reach a majority must stop acting as leader — which is why a partitioned minority side has to go read-only rather than elect its own leader. The subtler defence matters just as much: a leader must never assume its lease is still valid simply because its own clock says so. It should re-verify before each critical action, and every action it takes should be rejected downstream if a newer leader has since taken over. That downstream check is fencing, and it is the topic two sections below.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/leader-election-in-distributed-systems/" rel="noopener">Leader election in distributed systems — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/leader-follower.html" rel="noopener">Leader and Followers — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/lease.html" rel="noopener">Lease — Patterns of Distributed Systems (time-bound leadership and ownership)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2022/10/apache-kafka-kraft/" rel="noopener">Apache Kafka 3.3 Replaces ZooKeeper with the New KRaft Consensus Protocol — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3SnPwhKvNZ0" rel="noopener">What is Leader Election and why is it needed? (Bully Algorithm) — sudoCODE</a></li>
+    </ul>
+
+    <h3>Quorum arithmetic: R + W &gt; N as the general reading</h3>
+    <p>Majority voting is the special case of a more general rule you should be able to reason with on a whiteboard. With N replicas, a write acknowledged by W of them and a read served from R of them, the read is guaranteed to see the latest write whenever R + W &gt; N — because the read set and the write set must then overlap in at least one replica that holds the newer value. Set N = 3, W = 2, R = 2 and you have the classic Dynamo-style tunable configuration: overlap guaranteed, one node may be down for either operation. Set W = N and reads can be served by a single replica, but any node failure blocks writes. Set W = 1, R = 1 and you have maximum availability and no guarantee at all.</p>
+    <p>Two caveats matter in interviews. First, quorum overlap gives you recency, not linearizability — leaderless quorum systems still need read repair, and concurrent writes to disjoint quorums can leave conflicting versions that someone has to reconcile. Second, this is why odd cluster sizes are the rule for consensus systems: with N = 5 a majority is 3, tolerating two failures; with N = 6 a majority is 4, still tolerating only two. The even node adds cost and latency without adding fault tolerance, and it makes an exactly-even network split unable to elect anyone. If you ever need an even number of machines for capacity reasons, tools offer voter/non-voter roles precisely so the voting quorum stays odd.</p>
+    <pre class="code-block" data-label="Quorum"><code>N = replicas, W = write acks required, R = replicas read
+overlap guaranteed  &lt;=&gt;  R + W &gt; N
+consensus majority  =  floor(N / 2) + 1
+
+N=3 -&gt; majority 2, tolerates 1 failure
+N=4 -&gt; majority 3, tolerates 1 failure   (no gain, extra latency)
+N=5 -&gt; majority 3, tolerates 2 failures</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/majority-quorum.html" rel="noopener">Majority Quorum — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Official] <a href="https://etcd.io/docs/v3.5/faq/" rel="noopener">etcd FAQ — why an odd-sized cluster, and how many failures each size tolerates</a></li>
+      <li>[Official] <a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html" rel="noopener">Dynamo architecture — Apache Cassandra documentation (tunable consistency, quorum reads and writes)</a></li>
+      <li>[Article] <a href="https://jepsen.io/consistency" rel="noopener">Consistency models — Jepsen (what each guarantee actually promises)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mBUCF1WGI_I" rel="noopener">Distributed Systems 5.1: Replication — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Clocks: why wall-clock time across machines is untrustworthy</h3>
+    <p>The instinctive way to order events across machines is to compare timestamps, and it is wrong. Quartz oscillators drift — a few tens of parts per million, which is seconds of error per week if left alone. NTP corrects that by <em>stepping</em> the clock, so wall time can jump forward or, worse, jump backward, making an interval measured across the step negative. Leap seconds have historically caused correlated outages across the internet when a repeated second confused software that assumed monotonicity. Virtual machines get paused and resumed with their clocks stale. And NTP synchronisation itself is only as accurate as the network path, typically tens of milliseconds on the public internet — which is an eternity when you are ordering writes.</p>
+    <p>The practical discipline is simple. Use the wall clock (<code>System.currentTimeMillis</code>, <code>time.time</code>) only for displaying and recording human-meaningful timestamps. Use a monotonic clock (<code>System.nanoTime</code>, <code>time.monotonic</code>, <code>CLOCK_MONOTONIC</code>) for measuring elapsed time, timeouts and lease expiry, because it never jumps or goes backwards — but note its values are meaningless across machines and across restarts. Never use "latest timestamp wins" as a correctness mechanism across nodes unless you genuinely accept silent data loss when a clock is skewed. The high-end escape hatch is to make the uncertainty explicit rather than pretend it is zero: Google Spanner's TrueTime returns an interval rather than an instant and deliberately waits out the uncertainty before committing, using GPS and atomic clocks in every datacentre to keep that interval down to a handful of milliseconds.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/System.html" rel="noopener">java.lang.System — Java API docs (nanoTime versus currentTimeMillis, and what each guarantees)</a></li>
+      <li>[Official] <a href="https://cloud.google.com/spanner/docs/true-time-external-consistency" rel="noopener">TrueTime and external consistency — Google Cloud Spanner documentation</a></li>
+      <li>[Article] <a href="https://blog.cloudflare.com/how-and-why-the-leap-second-affected-cloudflare-dns/" rel="noopener">How and why the leap second affected Cloudflare DNS — Cloudflare blog (a real clock-goes-backwards outage)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/clock-sync-nightmare/" rel="noopener">Clock Synchronization Is a Nightmare — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FQ_2N3AQu0M" rel="noopener">Distributed Systems 3.1: Physical time — Martin Kleppmann</a></li>
+    </ul>
+
+    <h3>Logical clocks: Lamport timestamps, vector clocks, and hybrid clocks</h3>
+    <p>If physical time cannot order events, order them by causality instead. A Lamport timestamp is a counter per node: increment it on every local event, attach it to every message sent, and on receipt set your counter to <code>max(local, received) + 1</code>. Ties are broken by node id, which yields a total order over all events. The property it gives you is one-directional and worth memorising precisely: if event A causally happened-before event B, then <code>ts(A) &lt; ts(B)</code>. The converse does not hold — a smaller timestamp does <em>not</em> prove causality, because two entirely unrelated events on different nodes also get ordered. Lamport clocks give you a consistent total order; they cannot tell you whether two events were concurrent.</p>
+    <p>Vector clocks fix exactly that. Each node carries a vector with one counter per node, increments its own entry on each event, and merges element-wise on receipt. Now comparison is three-way: A happened-before B if every element of A's vector is less than or equal to B's and at least one is strictly less; B happened-before A in the mirror case; and if neither dominates, the events are genuinely <em>concurrent</em> — which is precisely the signal a Dynamo-style store uses to say "these two writes conflict, here are both versions, application please reconcile". The cost is that vectors grow with the number of writers, so real systems prune them or use version vectors keyed by replica rather than by client. Hybrid logical clocks (HLC) are the modern compromise, packing a physical timestamp and a logical counter into one value so that timestamps stay close to real time and remain readable to humans, while still never violating causality — CockroachDB, MongoDB and YugabyteDB all use this family.</p>
+    <pre class="code-block" data-label="Vector clock"><code>A = [2, 1, 0]   B = [2, 3, 0]   ->  A happened-before B (A &lt;= B elementwise, one strictly less)
+A = [2, 1, 0]   C = [1, 2, 0]   ->  concurrent: neither dominates, this is a conflict
+
+on local event      : v[self] += 1
+on receive(msg, vm) : v = elementwise_max(v, vm); v[self] += 1</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://lamport.azurewebsites.net/pubs/time-clocks.pdf" rel="noopener">Time, Clocks, and the Ordering of Events in a Distributed System — Leslie Lamport (the original paper)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/lamport-clock.html" rel="noopener">Lamport Clock — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/version-vector.html" rel="noopener">Version Vector — Patterns of Distributed Systems (detecting concurrent updates)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/hybrid-clock.html" rel="noopener">Hybrid Clock — Patterns of Distributed Systems (physical time plus a logical counter)</a></li>
+      <li>[Article] <a href="https://cse.buffalo.edu/tech-reports/2014-04.pdf" rel="noopener">Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases — Kulkarni et al. (the HLC paper)</a></li>
+    </ul>
+
+    <h3>Distributed locks: the naive lock and the pause that breaks it</h3>
+    <p>The textbook distributed lock is a single Redis command: <code>SET lock:resource &lt;random-token&gt; NX PX 30000</code> — set the key only if absent, with a 30-second expiry, and release it with a small Lua script that deletes the key only if its value still matches your token. The expiry is not optional: without it, a client that crashes while holding the lock blocks the resource forever. The check-value-before-delete is not optional either, or you will happily delete a lock that has already expired and been acquired by somebody else.</p>
+    <p>And yet this lock cannot make a correctness guarantee, for a reason that has nothing to do with Redis. Suppose client A acquires the lock, then its process stops the world for 40 seconds — a full garbage-collection pause, a hypervisor descheduling the VM, a page fault storm, or simply a very slow disk. The lock expires at 30 seconds and client B legitimately acquires it. Client A then resumes, entirely unaware that any time has passed, and writes to the resource believing it still holds the lock. Two writers, simultaneously, with no error reported anywhere. Making the expiry longer only lengthens the outage when a holder really does crash; it never removes the window. The lesson to carry into an interview is that a lock plus a timeout is not mutual exclusion in an asynchronous system, and the fix must live at the resource, not in the lock service.</p>
+    <pre class="code-block" data-label="Redis"><code>SET lock:order-42 9f3ac1 NX PX 30000        -- acquire: only if absent, auto-expiring
+
+-- release: delete only if the token is still mine (atomic, via EVAL)
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/" rel="noopener">Distributed locks with Redis — Redis documentation (the single-instance lock and the Redlock algorithm)</a></li>
+      <li>[Official] <a href="https://zookeeper.apache.org/doc/current/recipes.html" rel="noopener">ZooKeeper Recipes — locks, shared locks and leader election with ephemeral sequential znodes</a></li>
+      <li>[Article] <a href="https://bytebytego.com/guides/why-do-we-need-to-use-a-distributed-lock/" rel="noopener">Why Use a Distributed Lock? — ByteByteGo guides</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=v7x75aN9liM" rel="noopener">Distributed Locks — system design basics — Tech Dummies, Narendra Lakshmana Gowda</a></li>
+    </ul>
+
+    <h3>Fencing tokens, and the Redlock debate</h3>
+    <p>The only real fix for the paused-holder problem is a fencing token: the lock service hands out a strictly increasing number with every grant, the client passes that number along with every write, and <em>the resource itself</em> remembers the highest number it has seen and rejects anything lower. Now the paused client A arrives with token 33 after client B has already written with token 34, and the storage layer refuses it. Notice what this requires — participation from the resource. If your object store or database will not check a token, you cannot fence, and you should stop describing the lock as a correctness mechanism. Coordination stores give you the token for free: ZooKeeper's <code>zxid</code> or znode version, etcd's revision number, and the term number in any Raft-based system are all monotonic counters intended for exactly this. Raft calls the same idea a term; Martin Fowler's pattern catalogue calls it a generation clock. Same trick, three names.</p>
+    <p>This is the setting for the industry's most instructive public disagreement. Redis's Redlock algorithm acquires the lock on a majority of independent Redis masters to survive the loss of any one. Martin Kleppmann argued in 2016 that Redlock is unsafe for correctness because it depends on bounded clock drift and bounded process pauses — neither of which the asynchronous model gives you — and that with fencing tokens you would not need Redlock anyway. Salvatore Sanfilippo (antirez) replied that the analysis assumed unrealistic failure modes and that Redlock's guarantees are reasonable for the environments it targets. Read both; the honest conclusion most practitioners reached is the useful one: a distributed lock used for <em>efficiency</em> (don't send the same email twice, don't recompute the same report on two workers) is fine with an expiring lock and no fencing, because the worst case is duplicated work. A lock used for <em>correctness</em> (don't corrupt this file, don't double-debit this account) needs fencing tokens or a resource-level idempotency check — or a design that does not need the lock at all, such as a single-writer partition or a conditional update guarded by a version.</p>
+    <pre class="code-block" data-label="Fencing"><code>client A: acquire() -&gt; token 33   ... long GC pause, lease expires ...
+client B: acquire() -&gt; token 34   write(data, token=34)   -&gt; storage accepts, high-water = 34
+client A: resumes                 write(data, token=33)   -&gt; storage REJECTS (33 &lt; 34)
+
+Rule: the resource, not the lock service, enforces the token.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/generation-clock.html" rel="noopener">Generation Clock — Patterns of Distributed Systems (the fencing token as a numbered epoch)</a></li>
+      <li>[Official] <a href="https://etcd.io/docs/v3.5/tutorials/how-to-create-locks/" rel="noopener">How to create locks — etcd tutorials (lease-bound locks and revision numbers)</a></li>
+      <li>[Article] <a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html" rel="noopener">How to do distributed locking — Martin Kleppmann (the fencing-token argument against Redlock)</a></li>
+      <li>[Article] <a href="https://antirez.com/news/101" rel="noopener">Is Redlock safe? — Salvatore Sanfilippo, antirez (the reply, and the other half of the debate)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Lp8oITg0MiI" rel="noopener">Distributed Locking — Systems Design Interview Questions (Jordan has no life)</a></li>
+    </ul>
+
+    <h3>Failure detection: heartbeats, phi-accrual and gossip</h3>
+    <p>Everything above assumed the cluster knows who is alive. That knowledge comes from failure detection, and since the first section told you a perfect detector is impossible, the engineering question is what kind of imperfection you prefer. The baseline is heartbeats: each node pings its peers on a fixed interval, and a peer that misses some number of consecutive beats is suspected dead. The timeout is the whole design. Too aggressive and a brief GC pause triggers a needless leader election and a few seconds of unavailability; too lax and a genuinely dead primary keeps taking traffic. A useful refinement is to separate <em>suspicion</em> from <em>failure</em> — suspect quickly and cheaply, but require confirmation (from another node, or a second probe path) before acting destructively.</p>
+    <p>The phi-accrual detector, used by Cassandra and Akka, replaces the binary alive/dead verdict with a continuously computed suspicion level: it models the recent distribution of heartbeat inter-arrival times and outputs phi, roughly the negative log of the probability that a heartbeat this late is normal. Different subsystems can then act at different thresholds, and the detector adapts automatically to a network that is simply slower today. For membership at scale, all-to-all heartbeating is quadratic and stops working past a few dozen nodes, so large clusters use gossip: each node periodically exchanges state with a few random peers, and information — including suspicions and confirmed deaths — spreads epidemically in logarithmic time with constant per-node load. SWIM is the canonical protocol (separating a randomised probe from the dissemination path, with indirect probes through peers to rule out one-off network blips); Consul's serf layer, Cassandra and Redis Cluster all use gossip-based membership.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/heartbeat.html" rel="noopener">HeartBeat — Patterns of Distributed Systems (interval and timeout selection)</a></li>
+      <li>[Official] <a href="https://doc.akka.io/libraries/akka-core/current/typed/failure-detector.html" rel="noopener">Phi Accrual Failure Detector — Akka documentation (threshold tuning explained with numbers)</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/concept/gossip" rel="noopener">Gossip protocol — HashiCorp Consul documentation (SWIM in production, LAN and WAN pools)</a></li>
+      <li>[Article] <a href="https://www.cs.cornell.edu/projects/Quicksilver/public_pdfs/SWIM.pdf" rel="noopener">SWIM: Scalable Weakly-consistent Infection-style Process Group Membership Protocol — Das, Gupta, Motivala</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/heartbeats-in-distributed-systems/" rel="noopener">Heartbeats in Distributed Systems — Arpit Bhayani</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-database-scaling.html">← Database Scaling</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="08-consistency-availability.html">Consistency and Availability →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Coordination is the topic that separates candidates who have read a system design playlist from candidates who have debugged a production cluster — expect it in senior rounds at Indian product companies and in the architecture round at the larger service companies:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is it hard to know whether a remote node has failed?</summary>
+      <div class="answer"><p>Because in an asynchronous network a crashed node and a slow node look identical from outside: both produce silence. There is no bound on message delay, so no amount of waiting proves death. The only instrument available is a timeout, which is a guess — short timeouts declare healthy nodes dead, long timeouts delay reaction to real failures. This is the difficulty that FLP formalises and that every consensus protocol works around with partial-synchrony assumptions and randomisation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is consensus, and name three problems that reduce to it.</summary>
+      <div class="answer"><p>Consensus is a set of nodes agreeing on a single value with termination, integrity, agreement and validity. Leader election (agree on which node leads), atomic commit across shards (agree on commit or abort), and appending to a replicated log (agree on the entry at each index) all reduce to it — as do distributed locks and consistent cluster membership.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why do consensus clusters use an odd number of nodes?</summary>
+      <div class="answer"><p>Because fault tolerance is determined by the majority threshold, and going from an odd size to the next even size does not lower it. Three nodes need two votes and tolerate one failure; four nodes need three votes and still tolerate only one. Five need three and tolerate two; six need four and still tolerate two. The even node adds cost, an extra machine that can fail, and latency, without buying tolerance — and it makes an exactly-even split unable to elect anyone. Hence 3, 5, 7.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain Raft leader election in your own words.</summary>
+      <div class="answer"><p>Time is divided into numbered terms. Followers expect heartbeats from the leader; when a follower's randomised election timeout elapses without one, it increments the term, votes for itself and requests votes from the others. A candidate that collects a majority becomes the leader for that term and starts heartbeating. Randomised timeouts prevent everyone campaigning at once and splitting the vote. Any node seeing a higher term immediately steps down to follower, so a stale leader that rejoins after a partition demotes itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In Raft, when is a log entry considered committed, and what guarantees a new leader has all committed entries?</summary>
+      <div class="answer"><p>An entry is committed once the leader has replicated it to a majority and the entry belongs to the leader's current term; the leader then advances its commit index, applies the entry to the state machine and answers the client. Safety comes from the voting restriction: a node refuses its vote to a candidate whose log is less up to date than its own, comparing the last entry's term first, then its index. Since a committed entry is on a majority, and any election needs a majority, the winner necessarily holds every committed entry.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does R + W &gt; N give you, and what does it not give you?</summary>
+      <div class="answer"><p>It guarantees that the read set and the write set overlap in at least one replica, so a read sees the most recent acknowledged write — recency. It does not give linearizability: concurrent writes may reach disjoint quorums and produce conflicting versions, reads can observe values that are later rolled back during failures, and stale replicas still need read repair or anti-entropy. Quorum overlap is a necessary condition, not a complete consistency model.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is split-brain and how do you prevent it?</summary>
+      <div class="answer"><p>A partition leaves two nodes each believing they are the leader, both accepting writes, and the histories diverge with no correct merge. Prevention is majority quorum: a leader that cannot reach a majority must step down, so the minority side goes read-only rather than electing its own leader. Layer on time-bounded leases that must be renewed, and fencing tokens checked at the resource so writes from a demoted leader are rejected even if it has not noticed yet.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Lamport timestamps versus vector clocks — what does each tell you?</summary>
+      <div class="answer"><p>A Lamport timestamp is one counter per node, merged with max-plus-one on receive, and gives a total order consistent with causality in one direction only: if A happened-before B then ts(A) is less than ts(B), but a smaller timestamp does not prove causality. Vector clocks keep one counter per node in a vector; comparing elementwise distinguishes happened-before from its mirror and, when neither vector dominates, identifies genuinely concurrent events — which is how Dynamo-style stores detect conflicting writes. The cost is that vectors grow with the number of participants.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should you not use wall-clock timestamps to order events across servers?</summary>
+      <div class="answer"><p>Clocks drift, NTP steps them forward and backward, leap seconds and VM pauses distort them, and synchronisation is only accurate to tens of milliseconds on a normal network. Last-write-wins on wall clocks therefore discards writes silently when one machine's clock is skewed. Use monotonic clocks for measuring elapsed time and timeouts, wall clocks only for human-facing timestamps, and logical or hybrid logical clocks for ordering. Where physical time is genuinely needed, make the uncertainty explicit as Spanner's TrueTime does.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service takes a Redis lock with SET NX PX before writing to a file. Is that safe? Explain the failure and the fix.</summary>
+      <div class="answer"><p>It is not safe for correctness. The holder can experience a stop-the-world GC pause, a hypervisor deschedule or a page-fault storm that lasts longer than the lock TTL. The lock expires, another client legitimately acquires it, and the paused client then wakes up and writes while believing it still holds the lock — two writers, no error raised. Lengthening the TTL only lengthens the outage after a genuine crash. The fix is a fencing token: the lock service issues a monotonically increasing number with each grant, the client sends it with every write, and the storage layer rejects any token lower than the highest it has seen. That requires cooperation from the resource; if the resource cannot check a token, the lock is an efficiency optimisation, not a correctness guarantee.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Summarise the Redlock debate and tell us where you land.</summary>
+      <div class="answer"><p>Redlock acquires a lock on a majority of independent Redis masters so no single instance is a point of failure. Martin Kleppmann argued it is unsafe for correctness because its guarantees depend on bounded clock drift and bounded process pauses, which the asynchronous model does not provide — and that if you have fencing tokens you no longer need Redlock's complexity. Antirez replied that the assumed failure modes are unrealistic for its target environments and that the algorithm's guarantees are reasonable in practice. The defensible position: use an expiring lock freely when the lock is for efficiency and duplicated work is the worst outcome; when the lock is for correctness, demand fencing tokens enforced at the resource, or redesign so the lock is unnecessary — single-writer partitioning, idempotency keys, or a conditional update guarded by a version.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Would you implement Raft yourself for a new service that needs a leader? Justify.</summary>
+      <div class="answer"><p>No. Consensus implementations are notoriously hard to get right in the failure cases that matter — membership changes, log compaction, snapshot transfer, restart recovery — and those cases are exactly the ones that never appear in testing and always appear in incidents. Use a system that already has one: etcd, ZooKeeper or Consul for coordination, or the leader election built into the platform such as a Kubernetes lease. Model the cost honestly in the design: every write is a majority round-trip, so keep only small critical metadata there, and be explicit about what the service does when the coordination store is unreachable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does a phi-accrual failure detector improve on a fixed heartbeat timeout, and when does gossip become necessary?</summary>
+      <div class="answer"><p>A fixed timeout forces one global tradeoff between false positives during GC pauses and slow detection of real failures. Phi-accrual instead models the recent distribution of heartbeat inter-arrival times and emits a continuous suspicion level, so different subsystems can act at different thresholds and the detector adapts as network conditions change. Gossip becomes necessary when all-to-all heartbeating stops scaling — its message load is quadratic in cluster size. With gossip each node exchanges state with a few random peers, spreading membership and suspicion information in logarithmic time at constant per-node cost; SWIM is the canonical protocol, and Consul, Cassandra and Redis Cluster all use this approach.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A partitioned old leader keeps serving reads. What is wrong, and how do you fix it without hurting read latency?</summary>
+      <div class="answer"><p>A leader that has lost contact with the majority may already have been superseded, so its reads can be arbitrarily stale — it is serving a snapshot of a history that has since moved on. The strict fix is to confirm leadership with a quorum round-trip before every read, which is correct but costs a round-trip per read. The usual compromises are leader leases (the leader may serve reads locally only while a lease granted by the majority is valid, and it stops the moment the lease cannot be renewed), or read-index style checks that batch the confirmation across many reads. If the application can accept bounded staleness, follower reads with an explicit staleness bound are cheaper still — but that must be a documented product decision, not an accident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Where does Paxos differ from Raft, and does the difference matter for your design?</summary>
+      <div class="answer"><p>Both are majority-quorum protocols with the same overlap argument and the same safety guarantee. Paxos agrees on a single value per instance with a two-phase prepare and accept exchange and no built-in notion of a stable leader; Multi-Paxos adds a distinguished proposer to skip the prepare phase, at which point it closely resembles Raft. Raft prescribes strong leadership, a contiguous log and an explicit membership-change procedure, so a correct implementation follows the paper — which is why most modern systems are Raft-based. For a design discussion the difference rarely matters: what matters is that both need a majority, both make writes cost a quorum round-trip, and neither can make progress on the minority side of a partition.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.coord.consensus — Consensus intuition (Raft and Paxos), leader election, quorum membership</li>
+      <li>sd.coord.time — Distributed locks and fencing tokens, clocks and ordering, gossip and failure detection</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

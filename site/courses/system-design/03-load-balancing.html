@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System Design load balancing module: L4 versus L7, reverse proxies and client-side balancing, active and passive health checks, outlier detection and ejection caps, round robin, least connections, power of two random choices, consistent hashing with virtual nodes, and global load balancing with geo-DNS and anycast — verified resources and interview questions.">
+  <title>Load Balancing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Load Balancing</h1>
+  <p class="standfirst">A load balancer is the component that turns N unreliable machines into one reliable-looking endpoint. Every design decision in it reduces to two questions: what can it see, and how does it decide?</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Load Balancing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Horizontal scaling only pays off if something in front of the fleet distributes work and notices when a machine stops being useful. That something is the load balancer, and it sits on the critical path of every request you serve — which makes its visibility (layer 4 or layer 7), its failure detection (health checks and ejection) and its selection algorithm three of the highest-leverage choices in a system design.</p>
+    <p>This module is deliberately vendor-neutral: the theory, the tradeoffs and the failure behaviour, illustrated with nginx, HAProxy and Envoy because their documentation is the clearest public specification of how these things actually work. Managed-cloud specifics live elsewhere in the course — the AWS track covers ALB and NLB configuration in <a href="../aws/07-load-balancing-scaling.html">Load Balancing and Scaling</a>. Here you learn the concepts that let you evaluate any of them.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>What a load balancer actually buys you (and what it cannot)</h3>
+    <p>Clients want one address. Operations wants many machines: to add capacity, to survive a dead instance, to deploy without downtime. The load balancer reconciles those by publishing a single virtual endpoint and spreading requests across a pool of backends behind it, removing failed members and adding new ones without the client noticing. Everything else it does — TLS termination, routing, retries, rate limiting, header rewriting — is opportunistic, because it is already the one place every request passes through.</p>
+    <p>Be honest about its limits in an interview. A load balancer distributes load, it does not create capacity: if the fleet is saturated, perfect distribution just spreads the overload evenly, and the correct response is shedding or queueing, not a better algorithm. It also becomes a single point of failure the moment you have exactly one, so real deployments run a redundant pair sharing a virtual IP, or push the decision to DNS or anycast so no single box is on every path. And it can only balance what it is allowed to see: a long-lived connection (WebSocket, gRPC stream, database pool) is assigned once and then stays put, so a connection-level balancer in front of persistent connections will drift into imbalance no matter how good its algorithm is.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cloudflare.com/learning/performance/what-is-load-balancing/" rel="noopener">What is load balancing? How load balancers work — Cloudflare Learning Center</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/load_balancing.html" rel="noopener">Using nginx as an HTTP load balancer — nginx.org documentation</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/a-crash-course-on-load-balancers" rel="noopener">A Crash Course on Load Balancers for Scaling — ByteByteGo</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/" rel="noopener">Using load shedding to avoid overload — Amazon Builders' Library (why distribution is not capacity)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=K0Ta65OqQkY" rel="noopener">What is Load Balancing? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Reverse proxies, and where the balancing decision lives</h3>
+    <p>A reverse proxy accepts a client connection, decides what to do with it, and opens its own connection to a backend on the client's behalf. Load balancing is one thing a reverse proxy can do; caching, compression, TLS termination, authentication and request rewriting are others. nginx, HAProxy and Envoy are the three reference implementations you should be able to name and distinguish: nginx grew from a web server into a proxy, HAProxy was purpose-built for proxying and load balancing, and Envoy was designed for dynamic environments where the backend set changes constantly and is pushed in over an API rather than written into a config file. An API gateway is the same machinery again with product concerns bolted on (keys, quotas, request transformation, developer portal) — in an interview, say that a gateway is a superset of a reverse proxy, not a different thing.</p>
+    <p>The more interesting question is <em>where</em> the decision is made. A middle proxy is easy to reason about and easy to operate, but it adds a network hop and concentrates every request into one tier. Client-side load balancing moves the decision into the caller's library — the client learns the backend list from service discovery and picks a member itself, which removes the hop entirely and is the normal arrangement for gRPC and for Spring Cloud LoadBalancer. Its costs are that every client language needs the logic, and that rolling out a policy change means redeploying every caller. A service mesh splits the difference: the sidecar proxy next to each pod does exactly what the client-side library would do, so the load balancing is per-caller and hop-free-ish, but the policy is configured centrally and updated without touching application code.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cloudflare.com/learning/cdn/glossary/reverse-proxy/" rel="noopener">What is a reverse proxy? — Cloudflare Learning Center</a></li>
+      <li>[Official] <a href="https://grpc.io/blog/grpc-load-balancing/" rel="noopener">gRPC Load Balancing — grpc.io blog (proxy versus client-side, and why per-connection balancing fails for gRPC)</a></li>
+      <li>[Official] <a href="https://istio.io/latest/docs/concepts/traffic-management/" rel="noopener">Traffic Management concepts — Istio documentation (sidecar-side load balancing policy)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/proxy-vs-reverse-proxy" rel="noopener">Proxy Server vs. Reverse Proxy Server — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/api-gateway-vs-reverse-proxy" rel="noopener">API Gateway vs. Reverse Proxy — Baeldung on Computer Science</a></li>
+    </ul>
+
+    <h3>Layer 4 versus layer 7: what the balancer is allowed to see</h3>
+    <p>A layer 4 balancer works with transport-level information only: source and destination IP addresses, ports, and the state of the TCP connection. It picks a backend when the connection is established and then forwards packets for the life of that connection without ever looking inside them. Because it never parses the payload it is fast, cheap in CPU and memory, and completely protocol-agnostic — the same box balances HTTP, MQTT, SMTP, a Postgres port or a game protocol. The price is that it is blind: it cannot route on a URL path, cannot read a header, cannot retry a failed request (it only knows connections, and the request is already gone), and cannot terminate TLS.</p>
+    <p>A layer 7 balancer terminates the client connection, parses the application protocol, and makes a per-request decision. That unlocks the features people actually want: route <code>/api</code> to one pool and <code>/static</code> to another, split traffic by header or cookie for canary releases, retry an idempotent request on a different backend when the first one fails, terminate TLS once at the edge, compress, cache, inject request ids for tracing, and multiplex many client requests over a small pool of keep-alive connections to the backends. All of that costs CPU per request and memory per buffered request, and it means the balancer must understand your protocol — an L7 proxy that speaks HTTP/1.1 and HTTP/2 does nothing useful for a binary protocol it has never heard of.</p>
+    <p>Two forwarding mechanics are worth naming. Ordinary L4 proxying is connection-oriented: the balancer keeps a connection-tracking table so every packet of a flow lands on the same backend, and both request and response traverse the balancer, which means return traffic consumes its bandwidth. Direct server return sends the client's packets through the balancer but lets the backend answer the client directly, bypassing the balancer on the response path — a large win when responses dwarf requests (video, file downloads), at the cost of fiddly network setup and no visibility into responses. Google's Maglev and Cloudflare's Unimog are production L4 balancers built on exactly these ideas, and both are excellent reading precisely because they are honest about the constraints.</p>
+    <pre class="code-block" data-label="NGINX"><code># L4: forward TCP, know nothing about the payload
+stream {
+  upstream db { server 10.0.1.10:5432; server 10.0.1.11:5432; }
+  server { listen 5432; proxy_pass db; }
+}
+
+# L7: parse HTTP, so path routing and per-request retries become possible
+http {
+  upstream api    { server 10.0.2.10:8080; server 10.0.2.11:8080; }
+  upstream static { server 10.0.3.10:8080; }
+  server {
+    listen 443 ssl;                       # TLS terminated here
+    location /api/   { proxy_pass http://api; }
+    location /static/ { proxy_pass http://static; }
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.nginx.com/nginx/admin-guide/load-balancer/tcp-udp-load-balancer/" rel="noopener">TCP and UDP Load Balancing — NGINX documentation (the layer 4 stream module)</a></li>
+      <li>[Official] <a href="https://www.haproxy.com/documentation/haproxy-configuration-tutorials/load-balancing/http/" rel="noopener">HTTP load balancing — HAProxy configuration tutorials (layer 7 mode)</a></li>
+      <li>[Official] <a href="https://research.google/pubs/maglev-a-fast-and-reliable-software-network-load-balancer/" rel="noopener">Maglev: A Fast and Reliable Software Network Load Balancer — Google Research (NSDI paper)</a></li>
+      <li>[Article] <a href="https://blog.cloudflare.com/unimog-cloudflares-edge-load-balancer/" rel="noopener">Unimog — Cloudflare's edge load balancer (layer 4 forwarding at scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RcarDmgWezY" rel="noopener">What are L4 Load Balancers and how do they work? — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Health checks: active, passive, and what a good check actually tests</h3>
+    <p>A load balancer's second job is knowing which backends are worth sending traffic to, and this is where load balancers most often cause the outage rather than prevent it. Active checks are the balancer probing each backend on a schedule — a TCP connect, or an HTTP request to a known path, with a required status code and optionally a required body. They detect a dead backend even when no user traffic is flowing, at the cost of probe load and a detection delay bounded by the interval multiplied by the unhealthy threshold. Passive checks watch real traffic instead: nginx open source does this with <code>max_fails</code> and <code>fail_timeout</code> on each upstream server, and it costs nothing extra, but it can only learn from requests that have already failed for a user. Serious deployments run both.</p>
+    <p>Design the check itself with care, because the two obvious choices are both wrong. A check that only opens a TCP socket, or returns a static <code>200 OK</code> from the web framework, will happily report health while the process cannot reach its database — a liveness check so shallow it detects almost nothing. The opposite mistake is worse: a deep check that verifies every dependency means one shared dependency wobbling marks every backend unhealthy simultaneously, and the balancer removes the entire pool for a fault that was degrading, not fatal. The usual resolution is layered checks — a shallow local check drives whether the process should be restarted, a slightly deeper check drives whether this instance should receive traffic, and dependency failures are reported as degraded rather than down. Add a fail-open rule so that when zero backends pass, the balancer sends traffic to all of them anyway: a partially working service beats a guaranteed total outage. Also give backends a graceful drain (the "lame duck" state) so a shutting-down instance fails its check and finishes in-flight requests before the process exits.</p>
+    <pre class="code-block" data-label="NGINX"><code>upstream api {
+  server 10.0.2.10:8080 max_fails=3 fail_timeout=10s;   # passive: learn from real traffic
+  server 10.0.2.11:8080 max_fails=3 fail_timeout=10s;
+  server 10.0.2.12:8080 backup;                          # only used if the others are out
+}
+server {
+  location / {
+    proxy_pass http://api;
+    health_check uri=/healthz interval=5s fails=3 passes=2;   # active probe (NGINX Plus)
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.nginx.com/nginx/admin-guide/load-balancer/http-health-check/" rel="noopener">HTTP Health Checks — NGINX documentation (active and passive checks, slow start)</a></li>
+      <li>[Official] <a href="https://www.haproxy.com/documentation/haproxy-configuration-tutorials/service-reliability/health-checks/" rel="noopener">Health checks — HAProxy configuration tutorials (rise, fall, agent checks)</a></li>
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/health_checking" rel="noopener">Health checking — Envoy architecture overview</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/implementing-health-checks/" rel="noopener">Implementing health checks — Amazon Builders' Library (the definitive treatment of check depth and fail-open)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/health-endpoint-monitoring" rel="noopener">Health Endpoint Monitoring pattern — Azure Architecture Center</a></li>
+    </ul>
+
+    <h3>Outlier detection and ejection: removing the sick, not the pool</h3>
+    <p>Health checks answer a binary question, but the machine that ruins your latency is rarely down — it is the one node with a failing disk, a stuck garbage collector, a noisy neighbour or a half-broken network path that still answers every probe. Outlier detection is passive statistics over live traffic: the proxy counts consecutive 5xx responses, consecutive gateway failures (connection errors and timeouts), or compares each host's success rate against the fleet mean, and temporarily <em>ejects</em> any host that stands out. Ejection is time-boxed with exponential extension — a first ejection lasts a base interval, and a host that misbehaves again on return is ejected for longer — so a transiently sick node heals itself back into the pool without human intervention.</p>
+    <p>The safety valve is the part people forget, and it is the part interviewers probe. Ejection must be capped: Envoy's <code>max_ejection_percent</code> limits what fraction of the pool may be ejected at once (the default is deliberately conservative), because a correlated fault — a bad deploy, a poisoned config, a downstream dependency failing — makes every host look like an outlier, and uncapped ejection would remove the whole fleet in seconds. The complementary guard is the panic threshold: if the healthy fraction of hosts falls below a configured percentage, the balancer stops respecting health status altogether and load balances across all hosts, on the reasoning that the health signal has probably become the unreliable component. Both mechanisms encode the same principle — degraded service beats a self-inflicted total outage — and both are what you should reach for when an interviewer asks how you would stop your own load balancer from causing an incident.</p>
+    <pre class="code-block" data-label="YAML"><code>outlier_detection:                       # Envoy cluster config
+  consecutive_5xx: 5                     # eject after five consecutive 5xx
+  consecutive_gateway_failure: 5         # connect errors / timeouts
+  interval: 10s                          # analysis sweep
+  base_ejection_time: 30s                # multiplied by the ejection count
+  max_ejection_percent: 10               # NEVER eject more than a tenth of the pool
+  success_rate_minimum_hosts: 5          # need a fleet before comparing to its mean
+
+common_lb_config:
+  healthy_panic_threshold: { value: 50 } # below 50% healthy, ignore health and use everyone</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier" rel="noopener">Outlier detection — Envoy architecture overview (ejection algorithms and every threshold)</a></li>
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/faq/load_balancing/lb_panic_threshold" rel="noopener">Load balancer panic threshold — Envoy FAQ</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/ngx_http_upstream_module.html" rel="noopener">Module ngx_http_upstream_module — nginx.org (max_fails, fail_timeout, slow_start, drain)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/load-balancing-datacenter/" rel="noopener">Load Balancing in the Datacenter — Google SRE Book (lame duck state, subsetting, flow control)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KwGyA6B7qrI" rel="noopener">Load Balancers are not Magic — Dissecting the Atlassian Outage — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Selection algorithms: round robin, weighted, least connections, least time</h3>
+    <p>Round robin walks the backend list in order. It is stateless, trivially cheap, and correct whenever two assumptions hold: every request costs roughly the same, and every server is roughly the same size. Break either assumption and it degrades — send a mix of 5 ms cache reads and 3-second report generations round robin and the servers that drew the expensive requests fall behind while their neighbours idle. Weighted round robin patches the second assumption by giving bigger machines a larger share, which is how you run a heterogeneous fleet or shift traffic gradually during a migration; it does nothing about variable request cost.</p>
+    <p>Least connections attacks the first assumption directly. Instead of predicting cost, it observes it: whichever backend currently has the fewest in-flight connections gets the next request, so a server stuck on slow work naturally stops receiving new work. This is the sensible default for anything with variable request cost or long-lived connections, and weighted variants exist for mixed fleets. Least response time (Envoy and NGINX Plus call it least time, HAProxy has similar behaviour) goes further and ranks by a blend of active connections and observed latency, which catches the node that is answering but answering slowly. The catch with all of these is state: the balancer must maintain accurate per-backend counters, which is fine in one process and increasingly wrong when you run several independent balancer instances that each see only their own share of the traffic. Finally, hash-based selection (source IP hash, or a hash of a cookie, header or URL) is not about balance at all — it is about affinity, deliberately sending the same key to the same backend so a local cache or in-memory session keeps working.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.nginx.com/nginx/admin-guide/load-balancer/http-load-balancer/" rel="noopener">HTTP Load Balancing — NGINX documentation (round robin, least_conn, hash, random, weights)</a></li>
+      <li>[Official] <a href="https://www.haproxy.com/glossary/what-are-load-balancing-algorithms" rel="noopener">What are load-balancing algorithms? — HAProxy glossary</a></li>
+      <li>[Official] <a href="https://www.cloudflare.com/learning/performance/types-of-load-balancing-algorithms/" rel="noopener">Types of load balancing algorithms — Cloudflare Learning Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/load-balancer" rel="noopener">How Does a Load Balancer Work? — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dBmxNsS3BGE" rel="noopener">Top 6 Load Balancing Algorithms Every Developer Should Know — ByteByteGo</a></li>
+    </ul>
+
+    <h3>The power of two random choices</h3>
+    <p>Least connections needs global state, and global state is exactly what you lose when you scale the load balancer tier out. Worse, several balancers each independently picking "the least loaded server" all pick the <em>same</em> server at the same instant and stampede it — the herd behaviour that makes naive least-connections dangerous in a distributed front end. Pure random selection has the opposite problem: no coordination needed, but the imbalance between the busiest and the average server grows as the fleet grows.</p>
+    <p>The fix is a classical result from Michael Mitzenmacher's work in the 1990s and it is beautifully cheap: pick two backends at random, compare only those two, and send the request to whichever has fewer in-flight requests. Choosing between two samples rather than one collapses the expected maximum load from something that grows roughly logarithmically in the fleet size to something that grows about as fast as the logarithm of a logarithm — in practical terms, almost all of the benefit of true least-connections, with no global view and no stampede, because two balancers rarely draw the same pair. That is why it is the default or recommended algorithm in modern distributed proxies: nginx ships it as <code>random two least_conn</code>, HAProxy has benchmarked it against its alternatives, and Envoy and Linkerd use variants of it as their standard policy. It is a very strong answer to "how would you load balance without a central coordinator?".</p>
+    <pre class="code-block" data-label="NGINX"><code>upstream api {
+  random two least_conn;       # sample two backends, take the less busy one
+  server 10.0.2.10:8080;
+  server 10.0.2.11:8080;
+  server 10.0.2.12:8080;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.f5.com/company/blog/nginx/nginx-power-of-two-choices-load-balancing-algorithm" rel="noopener">NGINX and the "Power of Two Choices" Load-Balancing Algorithm — NGINX blog (F5)</a></li>
+      <li>[Official] <a href="https://www.f5.com/company/blog/nginx/choosing-nginx-plus-load-balancing-techniques" rel="noopener">Choosing an NGINX Plus Load-Balancing Technique — NGINX blog (F5)</a></li>
+      <li>[Article] <a href="https://www.haproxy.com/blog/power-of-two-load-balancing" rel="noopener">Test driving "power of two random choices" load balancing — HAProxy blog (measured comparison)</a></li>
+      <li>[Article] <a href="https://brooker.co.za/blog/2012/01/17/two-random.html" rel="noopener">The power of two random choices — Marc Brooker (why the maths works)</a></li>
+      <li>[Article] <a href="https://linkerd.io/2016/03/16/beyond-round-robin-load-balancing-for-latency/" rel="noopener">Beyond Round Robin: Load Balancing for Latency — Linkerd</a></li>
+    </ul>
+
+    <h3>Consistent hashing: affinity that survives a changing fleet</h3>
+    <p>Sometimes you do not want balance, you want stability: the same cache key on the same cache node, the same user's session on the same server, the same shard key on the same database. The obvious implementation is <code>hash(key) % N</code>, and it is a trap. Change N — one node dies, one node is added — and nearly every key maps somewhere new: going from 4 nodes to 5 remaps around 80% of the key space. For a cache that is a mass eviction event and a thundering herd onto the origin at the worst possible moment; for a shard map it is a data migration you did not schedule.</p>
+    <p>Consistent hashing fixes the remapping. Hash the output space into a fixed ring (say, the integers modulo 2 to the power 32, wrapped into a circle), place each node at one or more positions on that ring by hashing its identity, and map each key to the first node encountered walking clockwise from the key's own hash. Now removing a node only moves the keys that sat between it and its predecessor — about 1/N of the key space — and adding a node only steals a comparable slice from its clockwise neighbour. Everything else stays exactly where it was. The refinement that makes it usable is virtual nodes: one position per node produces wildly uneven arc lengths, so each physical node is placed at a hundred or more hashed positions, which smooths the distribution and, as a bonus, lets a bigger machine claim proportionally more positions. Variants go further — Google's bounded-load version caps how much any one node may receive before overflow spills to the next, and Maglev's table-based scheme trades a little disruption for very fast lookup.</p>
+    <p>Know where it shows up, because it recurs across this whole track: memcached and Redis client-side sharding, Dynamo-style partitioning and its descendants (Cassandra, Riak), sticky routing to a stateful backend, and consistent-hash load balancing policies in Envoy and nginx (<code>hash ... consistent</code>). And know the failure mode: consistent hashing distributes <em>key space</em> evenly, not <em>load</em> — a single hot key still lands on exactly one node, which is why bounded loads, key splitting or a small local cache in front are the standard follow-up answers.</p>
+    <pre class="code-block" data-label="Text"><code>Naive modulo:  node = hash(key) % N        # N changes -> nearly every key moves
+
+Ring (clockwise walk), each node placed at many virtual positions:
+
+   0 ......... A1 ... B1 ... A2 ... C1 ... B2 ... A3 ... C2 ......... 2^32
+                ^      ^
+                |      key k hashes here -> walks clockwise -> lands on B1
+
+   Remove node B  ->  only keys in B's arcs move, to the next node clockwise
+   Add node D     ->  D takes one slice per virtual position, nothing else moves</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/load_balancers" rel="noopener">Supported load balancers — Envoy architecture overview (ring hash and Maglev policies compared)</a></li>
+      <li>[Official] <a href="https://research.google/blog/consistent-hashing-with-bounded-loads/" rel="noopener">Consistent Hashing with Bounded Loads — Google Research blog (the hot-key fix)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/consistent-hashing/" rel="noopener">Consistent Hashing: what it is and how to implement it — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://highscalability.com/consistent-hashing-algorithm/" rel="noopener">Consistent hashing algorithm — High Scalability</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zaRkONvyGr8" rel="noopener">What is Consistent Hashing and where is it used? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Global load balancing: geo-DNS, anycast and cross-region failover</h3>
+    <p>Everything above balances within one location. Across regions the problem changes, because you are now choosing which data centre a user should reach before a connection exists — and the only levers available that early are DNS and IP routing. DNS-based global balancing answers the same hostname with different addresses depending on the resolver's location or an explicit policy: geo-steering by continent or country, latency-based steering using measured round-trip times rather than raw geography (nearest on a map is not always fastest on a network), weighted steering for gradual regional migrations, and failover steering that stops handing out a region's address once its health checks fail.</p>
+    <p>Anycast takes the other route: announce the same IP prefix from many locations over BGP and let internet routing deliver each packet to the topologically closest announcement. It is how public DNS resolvers and CDN edges work, and failover is nearly instantaneous because withdrawing a route reroutes traffic without any client-side change. Its limitation is that BGP is not application-aware — routing can shift mid-session, which is a real issue for long TCP connections, and you cannot express "send 10% of traffic to the new region" the way you can with weighted DNS.</p>
+    <p>The honest caveat that earns marks in an interview: DNS-level balancing is coarse. Answers are cached by resolvers, operating systems and browsers for the length of the TTL and often longer, because plenty of clients ignore short TTLs entirely; you are steering resolvers, not users, so a single corporate or ISP resolver can represent a huge population; and DNS has no idea how loaded a backend is. Shortening the TTL to seconds increases query volume and still does not guarantee prompt failover. The workable pattern is layered: DNS or anycast chooses the region, a regional layer 4 or layer 7 balancer chooses the machine, and the fast, precise failure handling happens at that second layer rather than in DNS.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cloudflare.com/learning/performance/what-is-dns-load-balancing/" rel="noopener">What is DNS-based load balancing? — Cloudflare Learning Center</a></li>
+      <li>[Official] <a href="https://www.cloudflare.com/learning/cdn/glossary/anycast-network/" rel="noopener">What is Anycast? How does an Anycast network work? — Cloudflare Learning Center</a></li>
+      <li>[Official] <a href="https://developers.cloudflare.com/load-balancing/understand-basics/traffic-steering/steering-policies/geo-steering/" rel="noopener">Geo steering — Cloudflare Load Balancing documentation (a concrete steering-policy model)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/load-balancing-frontend/" rel="noopener">Load Balancing at the Frontend — Google SRE Book (DNS limits, virtual IPs, why layering wins)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-2WnHiKPrgE" rel="noopener">Anycast vs Global Server Load Balancing — F5 DevCentral Community</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-scaling-basics.html">← Scaling Basics</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="04-caching.html">Caching Strategy →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Load balancing is asked in almost every Indian system design round, from service-company screening to product-company design loops. L4-versus-L7 and consistent hashing are effectively guaranteed; the rest separate candidates who have operated a balancer from candidates who have only drawn one on a whiteboard:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does a load balancer do, and why do you need one?</summary>
+      <div class="answer"><p>It presents one endpoint to clients and spreads requests across a pool of backend instances, removing failed members and admitting new ones without the client knowing. That gives you horizontal scale, tolerance of individual machine failure, and zero-downtime deploys. It does not create capacity — if the whole fleet is saturated, the answer is more capacity or load shedding, not a smarter algorithm.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between a load balancer and a reverse proxy?</summary>
+      <div class="answer"><p>They overlap rather than compete. A reverse proxy is any server that accepts client connections and forwards them to backends on the client's behalf; load balancing is one of the jobs it can do, alongside TLS termination, caching, compression and authentication. Every layer 7 load balancer is a reverse proxy; a reverse proxy in front of a single backend is not load balancing anything. An API gateway is the same machinery with product concerns (keys, quotas, transformations) added.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain L4 versus L7 load balancing.</summary>
+      <div class="answer"><p>L4 works at the transport layer: it sees IPs, ports and TCP state, picks a backend when the connection opens, and forwards packets without inspecting them — fast, cheap, protocol-agnostic, but blind. L7 terminates the connection and parses the application protocol, so it can route on path, header or cookie, terminate TLS, retry an individual request on another backend, compress and cache — at a real CPU and memory cost per request, and only for protocols it understands. Rule of thumb: L4 for raw throughput and non-HTTP protocols, L7 when routing decisions depend on request content.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When would round robin be the wrong choice?</summary>
+      <div class="answer"><p>When requests are not uniform in cost, or servers are not uniform in capacity, or connections are long-lived. Round robin assumes each turn costs the same; mix cheap reads with expensive report generation and some backends fall behind while others idle. Weighted round robin handles heterogeneous servers; least connections or power-of-two-choices handles variable request cost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Active versus passive health checks — what does each miss?</summary>
+      <div class="answer"><p>Active checks probe on a schedule, so they detect a dead backend even with no user traffic, but they cost probe load and detect only after interval multiplied by the unhealthy threshold. Passive checks observe real traffic (nginx max_fails and fail_timeout), which is free and reflects what users actually experience, but it only learns from requests that already failed, and an idle backend is never evaluated. Production deployments run both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your health check verifies the database connection, and one database blip takes every backend out of the pool. What went wrong?</summary>
+      <div class="answer"><p>The check was too deep for the decision it drives. A shared dependency makes the check fail on every instance simultaneously, so a degradation becomes a total outage caused by your own balancer. Fix it by layering: a shallow local check for "is this process alive", a slightly deeper one for "should this instance take traffic", and report dependency problems as degraded rather than down. Add fail-open behaviour so that when no backend passes, traffic goes to all of them anyway — and cap how much of the pool may be removed at once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is outlier detection, and why is there a cap on ejection?</summary>
+      <div class="answer"><p>Outlier detection ejects hosts that look statistically worse than their peers — consecutive 5xx, consecutive gateway failures, or a success rate far below the fleet mean — for a base ejection time that extends on repeat offences. The cap (Envoy's max_ejection_percent) exists because a correlated fault such as a bad deploy or a failing dependency makes every host an outlier, and uncapped ejection would drain the entire pool in seconds. The panic threshold is the same idea from the other side: below a configured healthy fraction, the balancer ignores health status and uses every host, on the basis that the health signal is now the untrustworthy part.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you keep a user pinned to one server, and what does it cost you?</summary>
+      <div class="answer"><p>Session affinity: hash the source IP, or issue and hash a sticky cookie (an L7 balancer can do the cookie; an L4 balancer only has the IP, which breaks behind carrier-grade NAT and corporate proxies where thousands of users share an address). The cost is that the fleet is no longer interchangeable — that server's failure loses those sessions, scaling out does not rebalance existing users, and deployments become disruptive. The better answer in most designs is to make the service stateless and push session state to Redis or a signed token, keeping affinity only as a cache-hit optimisation where losing it is harmless.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does naive modulo hashing break when you add or remove a node?</summary>
+      <div class="answer"><p>Because the node index is a function of N. With hash(key) % N, changing N reshuffles almost the entire key space — moving from four nodes to five relocates roughly 80% of keys. For a cache that is a mass eviction plus a stampede onto the origin exactly when a node has just failed; for a shard map it is an unplanned data migration. Consistent hashing bounds the movement to roughly 1/N of keys.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain consistent hashing and the role of virtual nodes.</summary>
+      <div class="answer"><p>Map the hash output onto a ring, place each node at hashed positions on that ring, and assign each key to the first node clockwise from the key's hash. Removing a node moves only the keys in its arcs to the next node clockwise; adding one takes a slice from its neighbour. Everything else is untouched. With one position per node the arcs are very uneven, so each physical node is given many virtual positions (typically 100 to 200) — that smooths distribution and lets a larger machine claim proportionally more positions. Uses: cache sharding, Dynamo-style partitioning, sticky routing, and consistent-hash policies in Envoy and nginx.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain the power of two random choices and why it beats least connections in a distributed front end.</summary>
+      <div class="answer"><p>Pick two backends at random, compare only those two, and send the request to the less busy one. Sampling two instead of one drops the expected maximum load from roughly logarithmic in the fleet size to roughly log-log — nearly all the benefit of true least connections with no global state. It wins in a distributed front end precisely because several balancer instances cannot each maintain an accurate global view, and if they each pick "the least loaded server" they all pick the same one and stampede it. Two independent balancers rarely draw the same pair, so the herd behaviour disappears. nginx exposes it as random two least_conn; Envoy and Linkerd use variants as their default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Consistent hashing distributes keys evenly, yet one node is at 90% CPU. Explain and fix.</summary>
+      <div class="answer"><p>It distributes key space, not load. One extremely hot key — a celebrity profile, a flash-sale product — deterministically lands on one node, and by design consistent hashing keeps sending it there. Fixes: consistent hashing with bounded loads, which caps a node's share and spills overflow to the next node clockwise; splitting the hot key into several suffixed sub-keys replicated across nodes; a small local cache in front of the ring so hot reads never reach it; or replicating hot entries to several nodes and reading from any. Also verify it is genuinely a hot key and not a bad virtual-node count producing lopsided arcs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design failover for a service running in Mumbai and Singapore. What are the limits of DNS-based balancing?</summary>
+      <div class="answer"><p>Layer it. DNS or anycast picks the region — geo or latency steering for normal traffic, health-check-driven failover steering to stop advertising a sick region — and a regional L4 or L7 balancer picks the machine, where fast and precise failure handling lives. DNS is coarse because answers are cached by resolvers, operating systems and browsers, often past the TTL, so failover is not prompt; you steer resolvers rather than users, so one ISP resolver can represent a huge population; and DNS knows nothing about backend load. Shortening the TTL raises query volume without guaranteeing timely failover. Anycast fails over faster because withdrawing a BGP route reroutes packets, but routing is not application-aware and can shift mid-session, which hurts long-lived TCP connections. Then answer the harder half: data replication lag, whether the second region is active-active or warm standby, and what your RPO and RTO actually are.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service uses gRPC and one backend is taking almost all the traffic despite round robin. Why?</summary>
+      <div class="answer"><p>gRPC runs over HTTP/2 and multiplexes many requests onto one long-lived connection. A connection-level (L4) balancer assigns that connection once and then never revisits the decision, so all subsequent requests ride the same backend — and a client that opens one connection at startup pins itself for its lifetime. Fixes: use an L7 proxy that understands HTTP/2 and balances per request, or do client-side load balancing where the client resolves the backend list and spreads calls itself (the standard gRPC approach), or run a sidecar proxy that does the same. The same reasoning explains imbalance with WebSockets and database connection pools.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.lb.layers — L4 vs L7 load balancing, reverse proxies, health checks and outlier detection</li>
+      <li>sd.lb.algorithms — Round robin, least connections, consistent hashing, global load balancing and geo-DNS</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

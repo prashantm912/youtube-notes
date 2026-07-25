@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Scaling Basics module: vertical versus horizontal scaling and when each is right, the Art of Scalability scale cube (X, Y and Z axes), statelessness and everything that breaks on replica two, session externalization with sticky sessions, Redis or signed tokens, the twelve-factor app as design guidance, shared-nothing architecture, and Amdahl's law and the Universal Scalability Law — with verified resources and interview questions.">
+  <title>Scaling Basics — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Scaling Basics</h1>
+  <p class="standfirst">Scaling is rarely about adding capacity. It is about removing the things that stop you adding another machine — and almost all of those things are state living somewhere it should not.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Scaling Basics</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every scaling conversation starts with the same two words — up or out — and most candidates answer it as a slogan ("horizontal is better") rather than a tradeoff. This module takes both seriously: a single large instance is simpler, faster per unit of work and free of the distributed-systems tax, but it has a ceiling and it is a single point of failure; a fleet is elastic and fault tolerant, but every problem you had becomes a distributed problem.</p>
+    <p>It then gives you the vocabulary to say <em>which</em> kind of scaling you mean — the scale cube's X, Y and Z axes — and spends the second half on the property that makes any of it possible: statelessness, where the state actually goes when you evict it from the process, the twelve-factor app read as design guidance, and the two laws (Amdahl and the Universal Scalability Law) that explain why the tenth machine helps less than the second and the hundredth can make you slower.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Vertical scaling: the option people abandon too early</h3>
+    <p>Vertical scaling means giving the same process a bigger machine — more cores, more memory, faster storage. Its virtues are all the ones you stop noticing until you lose them: no network hop between your data and your code, no partial failure, no eventual consistency, no distributed transaction, no cache coherency protocol you wrote yourself, and the ability to debug production by attaching to one process. Every line of application code stays the same. In cloud terms it is often a one-line instance-type change and a restart.</p>
+    <p>It is also badly underrated. Modern instance families go to hundreds of vCPUs and multiple terabytes of RAM; a well-indexed relational database on one large instance comfortably serves workloads that entire teams have rebuilt as distributed systems out of reflex. The honest limits are real though, and you should name them precisely: a hard ceiling (you eventually run out of instance sizes), a step-function cost curve (the top of a family is priced far above linear), downtime or at least a failover to resize, and — the one that actually decides it — the fact that one machine is one failure domain. If the box dies, the service is down. Vertical scaling buys you time and simplicity; it does not buy you availability.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/performance-efficiency-pillar/compute-and-hardware.html" rel="noopener">Compute and hardware — AWS Well-Architected, Performance Efficiency pillar</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/ec2/instance-types/" rel="noopener">Amazon EC2 instance types — AWS (how far a single instance actually goes today)</a></li>
+      <li>[Article] <a href="https://blog.codinghorror.com/scaling-up-vs-scaling-out-hidden-costs/" rel="noopener">Scaling Up vs. Scaling Out: Hidden Costs — Jeff Atwood, Coding Horror</a></li>
+      <li>[Article] <a href="https://www.usenix.org/system/files/conference/hotos15/hotos15-paper-mcsherry.pdf" rel="noopener">Scalability! But at what COST? — McSherry, Isard and Murray (HotOS XV, USENIX)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xpDnVSmNFX0" rel="noopener">System Design BASICS: Horizontal vs. Vertical Scaling — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Horizontal scaling and the distributed-systems tax</h3>
+    <p>Horizontal scaling means running many copies of the service behind a load balancer and adding copies as demand grows. Two properties make it the default for anything user-facing: capacity becomes elastic (add replicas on a schedule or a metric, remove them at night) and the failure domain shrinks (losing one of twenty replicas costs you five percent of capacity, not the service). It also lets you buy commodity instances instead of the most expensive box in the family, and it is what autoscaling groups, Kubernetes deployments and serverless platforms are all built to do.</p>
+    <p>The bill arrives as a tax on everything else. Every request now crosses a network that can drop, duplicate, delay and reorder it. Deploys become rolling, so two versions of your code run at once and your database schema must be compatible with both. Caches multiply, so invalidation gets harder. Logs are scattered, so you need aggregation and tracing to answer a question you used to answer with one grep. Locking becomes distributed locking. Cron becomes a leader election. Test setups that worked against one process become flaky. None of this is a reason not to scale out — it is a reason to scale out deliberately, and to keep the fleet as boring as possible so the tax stays small.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/design-principles/scale-out" rel="noopener">Design to scale out — Azure Architecture Center design principles</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/auto-scaling" rel="noopener">Autoscaling guidance — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html" rel="noopener">What is Amazon EC2 Auto Scaling — AWS documentation</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/a-crash-course-on-architectural-scalability" rel="noopener">A Crash Course on Architectural Scalability — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=OyTEd9h_CVQ" rel="noopener">Distributed Systems Introduction: horizontal scaling vs vertical scaling — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>The scale cube: X, Y and Z axes</h3>
+    <p>"We scaled the service" is ambiguous. The scale cube, from Abbott and Fisher's <em>The Art of Scalability</em> and popularised for services by Chris Richardson, gives three named directions instead. <strong>X-axis</strong> is cloning: run N identical copies behind a load balancer, each able to serve any request. It is the cheapest axis and usually the first — but it scales the whole application uniformly, and every clone still talks to the same database, so it moves the bottleneck rather than removing it. <strong>Y-axis</strong> is functional decomposition: split by verb or noun, so search, checkout and recommendations become separate deployables with separate resource profiles and separate teams. This is exactly what microservice decomposition is, viewed as a scaling move. <strong>Z-axis</strong> is data partitioning: every instance runs the same code but is responsible for a subset of the data, routed by a partition key — sharding, cell-based architecture, and (in its more careful form) shuffle sharding.</p>
+    <p>The value of the vocabulary is that it forces you to say what your bottleneck is. If the CPU on the web tier is saturated, that is an X-axis problem and more replicas fix it. If one endpoint's traffic is drowning nine others that share its thread pool, that is a Y-axis problem and cloning just buys everything you did not need. If a single database is the ceiling — write throughput, working-set size, lock contention — no amount of X or Y helps and you are looking at Z. Real systems use all three at once, and being able to say "we are X-scaled behind an L7 balancer, Y-split into six services, and the ledger is Z-sharded by customer id" is a much stronger interview answer than "we scaled horizontally".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/articles/scalecube.html" rel="noopener">The scale cube — microservices.io (Chris Richardson, the canonical write-up)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/decomposition/decompose-by-business-capability.html" rel="noopener">Pattern: Decompose by business capability — microservices.io (the Y axis in practice)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding" rel="noopener">Sharding pattern — Azure Architecture Center (the Z axis in practice)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/workload-isolation-using-shuffle-sharding/" rel="noopener">Workload isolation using shuffle sharding — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/data-partitioning/" rel="noopener">Partitioning strategies for distributed databases — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Statelessness: the property that makes cloning legal</h3>
+    <p>A stateless service is one where any replica can serve any request, and where killing a replica mid-life loses nothing that mattered. It does not mean the system has no state — it means the state lives in a backing service (database, cache, object store, queue) rather than in the process's own memory or local disk. That single property is what makes the X axis work: replicas become interchangeable, so you can add them, drain them, roll them, autoscale them, move them between availability zones and let the orchestrator restart them without ceremony.</p>
+    <p>The practical value of this topic is the failure list, because in-process state does not announce itself — everything works perfectly on one replica and breaks subtly on the second. The usual suspects: <em>in-memory HTTP sessions</em> (a user logs in on replica A, the next request lands on replica B, they are logged out); <em>local file caches and uploads</em> (a file written to <code>/tmp</code> on one pod is invisible to the others and gone when the pod is replaced); <em>in-memory counters, rate limiters and circuit breaker state</em> (each replica enforces the limit independently, so ten pods permitting a hundred requests per second allow a thousand); <em>in-memory caches</em> (each replica has a different, independently stale view, so a cache-clear endpoint clears exactly one of them); <em>scheduled jobs</em> (a nightly report written as a plain <code>@Scheduled</code> method runs once per replica, so the invoice is emailed twenty times); <em>WebSocket and SSE connections</em> (a push targeted at a user only reaches them if it is published on the replica holding their socket); <em>in-memory locks</em> (<code>synchronized</code> guards one JVM, not the cluster); and <em>ephemeral ids and sequence numbers</em> generated per process, which start colliding the moment a second process exists.</p>
+    <pre class="code-block" data-label="Java"><code>// Breaks on replica two — all of this state is process-local
+private final Map&lt;String, Cart&gt; carts = new ConcurrentHashMap&lt;&gt;();  // lost on restart
+private final AtomicInteger orderSeq = new AtomicInteger();          // collides across pods
+
+@Scheduled(cron = "0 0 2 * * *")   // runs once PER REPLICA, not once per cluster
+public void emailInvoices() { ... }
+
+// Stateless equivalent: state in a backing service, work claimed by exactly one replica
+private final CartRepository carts;              // shared store
+private final IdGenerator ids;                   // database sequence / Snowflake-style id
+@SchedulerLock(name = "emailInvoices")           // distributed lock: one winner per run
+public void emailInvoices() { ... }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" rel="noopener">Deployments — Kubernetes documentation (the interchangeable-replica model)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/" rel="noopener">StatefulSets — Kubernetes documentation (what you need when replicas are not interchangeable)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/stateful-stateless-system" rel="noopener">Stateful vs. Stateless in Programming — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/stateless-architecture-the-key-to" rel="noopener">Stateless Architecture: The Key to Building Scalable and Resilient Systems — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nFPzI_Qg3FU" rel="noopener">Stateful vs Stateless Applications (Explained by Example) — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Session externalization: sticky sessions, or a shared store</h3>
+    <p>Sessions are the state that breaks first, so they get their own treatment. The path of least resistance is <em>session affinity</em> — sticky sessions — where the load balancer pins a client to the replica that first served it, using a cookie (AWS ALB's <code>AWSALB</code>, nginx's <code>sticky</code> directive) or a hash of the source address (<code>ip_hash</code>). It works, it needs no application change, and it is a crutch. Affinity re-couples the client to one machine, which means you lose the session on deploy, on autoscale-in, on any crash, and on a health-check blip; load skews because long-lived sessions do not rebalance when you add capacity; draining a node for maintenance now hurts users instead of being invisible; and the whole point of interchangeable replicas is gone. Treat stickiness as a temporary measure during a migration, or as an optimisation for a local cache you can afford to lose — never as the design.</p>
+    <p>The real fix is to move the session out of the process into a shared store: Redis is the usual choice (fast, has native expiry that matches session semantics, and clusters), a relational table works fine at moderate scale and gives you durability, and Spring Session makes the swap almost transparent on the JVM — you keep the <code>HttpSession</code> API and change where it is persisted. The costs to state honestly: a network round trip on every request that touches the session, a new dependency that is now on the critical path (a Redis outage becomes a logout storm, so plan replication and a degraded mode), and serialization concerns — keep sessions small, store an id and a few claims rather than a whole shopping cart object graph.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/sticky-sessions.html" rel="noopener">Sticky sessions for your Application Load Balancer — AWS Elastic Load Balancing documentation</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/ngx_http_upstream_module.html" rel="noopener">ngx_http_upstream_module — nginx documentation (ip_hash, hash and sticky)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/eaaCatalog/serverSessionState.html" rel="noopener">Server Session State — Martin Fowler, Patterns of Enterprise Application Architecture catalog</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-session/reference/" rel="noopener">Spring Session — reference documentation (Redis and JDBC session stores)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KStr5ZspNvM" rel="noopener">Session Management using Spring Session Redis in Spring Boot — Tech Primers</a></li>
+    </ul>
+
+    <h3>Going fully stateless with signed tokens — and the revocation bill</h3>
+    <p>The third option removes the server-side session entirely: put the state in the client, signed so it cannot be tampered with. A JWT carrying a subject, a few claims, an expiry and a signature lets any replica authenticate a request with a signature check and no lookup at all — no shared store, no round trip, no affinity, and it scales across services and regions for free. This is Fowler's Client Session State pattern with modern cryptography, and it is why token auth dominates API and mobile back ends.</p>
+    <p>The bill is revocation, and interviewers reach for it every time. A signed token is valid until it expires because validation is offline by construction — so "log this user out everywhere", "this account was compromised", "this admin was demoted five minutes ago" have no clean answer. The mitigations all reintroduce a bit of state: short access-token lifetimes (minutes) paired with a longer refresh token that <em>is</em> checked against a store, a denylist of revoked token ids in Redis, or a per-user token version stamped in the claims and compared against the database. Notice that each of these puts a lookup back on some requests — which is the honest summary of the whole topic. Also mind the secondary traps: tokens are signed, not encrypted, so anything inside them is readable by the client; every claim you embed is a cache of data that can go stale; and a fat token is sent on every single request, so size matters.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc7519" rel="noopener">RFC 7519: JSON Web Token (JWT) — IETF</a></li>
+      <li>[Official] <a href="https://martinfowler.com/eaaCatalog/clientSessionState.html" rel="noopener">Client Session State — Martin Fowler, Patterns of Enterprise Application Architecture catalog</a></li>
+      <li>[Official] <a href="https://auth0.com/docs/secure/tokens/token-best-practices" rel="noopener">Token best practices — Auth0 documentation (lifetimes, storage, revocation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/rest-sessions" rel="noopener">Do Sessions Violate RESTfulness? — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z_0oBOpsY5k" rel="noopener">Stateful vs Stateless Architecture: how to manage HTTP sessions — Prabhat Ranjan</a></li>
+    </ul>
+
+    <h3>The twelve-factor app, read as design guidance</h3>
+    <p>The twelve-factor manifesto is usually recited as a list; it is more useful read as a set of answers to "what stops this app from being cloned?" <strong>Config in the environment</strong> (factor III) means anything that varies between deploys — credentials, endpoints, feature flags — comes from environment variables rather than a <code>prod.properties</code> baked into the artifact, so the identical image runs in staging and production and you never ship a build with someone's laptop database URL in it. The litmus test is blunt: could you open-source the repository right now without leaking a credential?</p>
+    <p><strong>Backing services as attached resources</strong> (factor IV) says the database, cache, broker and mail service are all just URLs in config, with no code distinction between a local Postgres and a managed one. That is what lets you swap a failed cache cluster for a fresh one without a redeploy, and it is the same discipline that makes tests runnable against containers. <strong>Processes are stateless and share-nothing</strong> (factor VI) is the factor this whole module is about — memory and local disk are a single-transaction scratchpad, never a store — and <strong>concurrency</strong> (factor VIII) follows from it: you scale by running more processes, not by making one process cleverer with threads.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/" rel="noopener">The Twelve-Factor App — Adam Wiggins (the full methodology)</a></li>
+      <li>[Official] <a href="https://12factor.net/config" rel="noopener">III. Config — store config in the environment (12factor.net)</a></li>
+      <li>[Official] <a href="https://12factor.net/backing-services" rel="noopener">IV. Backing services — treat backing services as attached resources (12factor.net)</a></li>
+      <li>[Official] <a href="https://12factor.net/processes" rel="noopener">VI. Processes — execute the app as stateless processes (12factor.net)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-12-factor" rel="noopener">The 12-Factor App Methodology with Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1OhmRmMsGdQ" rel="noopener">What is a 12-Factor App? Twelve-Factor App methodology explained — KodeKloud</a></li>
+    </ul>
+
+    <h3>Disposability, parity and logs: the factors that make replicas cheap</h3>
+    <p><strong>Disposability</strong> (factor IX) is the operational half of statelessness: processes should start in seconds and shut down gracefully on <code>SIGTERM</code>. Fast startup is what makes autoscaling responsive and rollbacks quick — a service that needs ninety seconds to warm caches before it can serve cannot be scaled reactively. Graceful shutdown is what makes deploys invisible: on the signal, stop accepting new requests, finish in-flight ones inside a bounded grace period, return unacknowledged queue messages so another worker picks them up, then exit. In Kubernetes this pairs with a <code>preStop</code> hook and readiness probe so the endpoint is removed from the load balancer <em>before</em> the process starts refusing connections, which is the difference between a clean rollout and a burst of 502s. And because a replica can be killed at any moment, every job must be crash-safe — which in practice means idempotent, because "at least once" is the only delivery guarantee you get.</p>
+    <p><strong>Dev/prod parity</strong> (factor X) keeps the gap between environments small in time, personnel and tooling — same backing service types everywhere, so an in-memory H2 in tests and Postgres in production is a parity violation waiting to produce a bug you cannot reproduce. <strong>Logs as event streams</strong> (factor XI) says the app writes unbuffered to stdout and never manages log files or rotation; the platform routes the stream to the aggregator. That is not a stylistic preference — a replica that owns a log file on local disk has state, and you lose the file when the pod dies.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/disposability" rel="noopener">IX. Disposability — fast startup and graceful shutdown (12factor.net)</a></li>
+      <li>[Official] <a href="https://12factor.net/dev-prod-parity" rel="noopener">X. Dev/prod parity — keep environments as similar as possible (12factor.net)</a></li>
+      <li>[Official] <a href="https://12factor.net/logs" rel="noopener">XI. Logs — treat logs as event streams (12factor.net)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/" rel="noopener">Container lifecycle hooks — Kubernetes documentation (preStop and termination)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-graceful-shutdown" rel="noopener">Graceful Shutdown of a Spring Boot Application — Baeldung</a></li>
+    </ul>
+
+    <h3>Shared-nothing as the general principle</h3>
+    <p>Statelessness is one instance of a broader rule that predates it: shared-nothing architecture, Michael Stonebraker's term for a design where each node has its own CPU, memory and storage and coordinates only by passing messages. Anything shared — a shared disk, a shared session store, a shared lock table, a shared sequence generator, a shared leader — is a coordination point, and coordination points are simultaneously your scaling ceiling and your correlated failure. The design question to keep asking is not "is this service stateless?" but "what do all my replicas have to agree on, and how often?" Every answer you can delete makes the fleet cheaper to grow.</p>
+    <p>Applied, this looks like: partition data so each request touches one shard rather than fanning out; prefer per-request idempotent work over cross-request coordination; make failure handling constant-work (do the same amount of work whether things are healthy or broken, so recovery does not add load exactly when you cannot afford it); and isolate blast radius into cells or bulkheads so one hot tenant cannot exhaust the shared resource everyone depends on. The counter-current is worth knowing too — deliberately stateful services (in-memory caches, stream processors with local state, databases themselves) are sometimes the right answer for latency, and modern orchestrators support them properly. The point is that stateful should be a decision you argued for, not the accident of leaving a <code>HashMap</code> in a field.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/reliability-and-constant-work/" rel="noopener">Reliability, constant work, and a good cup of coffee — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_fault_isolation_use_bulkhead.html" rel="noopener">REL10-BP03 Use bulkhead architectures to limit scope of impact — AWS Well-Architected, Reliability pillar</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Shared-nothing_architecture" rel="noopener">Shared-nothing architecture — Wikipedia (origins and the Stonebraker lineage)</a></li>
+      <li>[Article] <a href="https://highscalability.com/making-the-case-for-building-scalable-stateful-services-in-t/" rel="noopener">Making the Case for Building Scalable Stateful Services in the Modern Era — High Scalability</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes-deployment-vs-statefulsets" rel="noopener">Kubernetes Deployment vs. StatefulSets — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>Why the tenth machine helps less: Amdahl and the Universal Scalability Law</h3>
+    <p>Adding replicas does not add capacity linearly, and two results explain why. <strong>Amdahl's law</strong> says the speedup of a system is capped by the fraction of work that cannot be parallelised: if five percent of every request is serialised — a single write master, a global lock, a shared sequence, a leader that must approve — then no number of machines gets you past twenty times the single-machine throughput. The practical reading is that you should hunt for the serialised fraction before you buy hardware, because shrinking it from five percent to one percent raises the ceiling far more than doubling the fleet does.</p>
+    <p><strong>The Universal Scalability Law</strong> (Neil Gunther) adds the term Amdahl leaves out: coherency, the cost of nodes keeping each other consistent. That cost grows quadratically with node count while throughput grows linearly, so the curve does not merely flatten — it peaks and then bends downward. Past a certain size, adding machines makes the system <em>slower</em>. Anyone who has watched a database get worse after adding connections, or a cache cluster degrade as it grew, has met retrograde scalability in person. Two takeaways for an interview: know that the model has three terms (linear work, contention, coherency), and be able to name the practical consequence — measure the curve on your own system, find the peak, and do not scale past it without removing a coordination point first.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://arxiv.org/abs/0808.1431" rel="noopener">A General Theory of Computational Scalability Based on Rational Functions — Neil J. Gunther (arXiv, the USL paper)</a></li>
+      <li>[Official] <a href="https://www.perfdynamics.com/Manifesto/USLscalability.html" rel="noopener">Universal Scalability Law — Performance Dynamics (Gunther's own summary of the model)</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Amdahl%27s_law" rel="noopener">Amdahl's law — Wikipedia (statement, derivation and worked limits)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/handling-overload/" rel="noopener">Handling Overload — Google SRE Book (what happens past the peak of the curve)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lZU6RK0oazM" rel="noopener">Scalability Is Quantifiable: The Universal Scalability Law — Baron Schwartz at LISA17 (USENIX)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-foundations.html">← Foundations and Estimation</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="03-load-balancing.html">Load Balancing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Scaling basics is the opening round of almost every Indian system-design interview — service companies stay on the definitions and the session question, product companies push into the scale cube, revocation and the limits of adding machines:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Vertical vs horizontal scaling — define both and give one advantage each.</summary>
+      <div class="answer"><p>Vertical (scale up) means a bigger machine for the same process: more cores, memory, faster disk. Advantage — no code change and no distributed-systems complexity. Horizontal (scale out) means more machines behind a load balancer. Advantage — elastic capacity and fault tolerance, since losing one of many replicas is a partial capacity loss rather than an outage. Vertical has a hard ceiling and remains a single failure domain; horizontal makes every problem a distributed one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does it mean for a service to be stateless?</summary>
+      <div class="answer"><p>Any replica can serve any request, and killing a replica loses nothing important. The service keeps no client-specific data in its own memory or local disk between requests — state lives in a backing service such as a database, cache or object store. It does not mean the system is stateless; it means the state has been moved somewhere shared.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you make an existing service stateless?</summary>
+      <div class="answer"><p>Inventory the process-local state and relocate each item. Sessions move to Redis or a database (or become signed tokens). Uploaded files and local caches move to object storage or a shared cache. In-memory counters and rate limiters move to a shared counter. Scheduled jobs get a distributed lock or move to a dedicated scheduler so only one replica runs them. In-memory locks become distributed locks. Process-generated ids become database sequences or Snowflake-style ids. Then verify by running two replicas behind a load balancer with no affinity and killing one under load.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name three things that silently break when you deploy a second replica.</summary>
+      <div class="answer"><p>Any three of: in-memory HTTP sessions (users get logged out at random), a nightly scheduled job now running once per replica (duplicate emails, double-counted reports), local file uploads or caches invisible to the other replica and lost on restart, an in-memory rate limiter now permitting N times the intended rate, an in-memory cache with a clear-cache endpoint that clears only one replica, WebSocket pushes reaching only clients connected to the publishing replica, and process-local id generators that start colliding.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are sticky sessions and how does a load balancer implement them?</summary>
+      <div class="answer"><p>Session affinity pins a client to the replica that first served it, so in-memory session state keeps working. Implementations: a load-balancer-generated cookie (AWS ALB's AWSALB cookie), an application cookie the balancer honours, nginx's sticky directive, or a hash of the client address (ip_hash) which needs no cookie but breaks behind shared NAT or a mobile carrier.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why are sticky sessions considered a crutch rather than a design?</summary>
+      <div class="answer"><p>They re-couple the client to one machine and undo the property that made replicas useful. You lose sessions on every deploy, crash, autoscale-in and health-check blip; load skews because existing sessions never rebalance onto newly added replicas; draining a node for maintenance becomes user-visible; and blue-green or rolling deploys stop being invisible. Acceptable as a temporary bridge during a migration or for a purely optional local cache — not as the answer to "how do you scale this service".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the scale cube and give a real example of each axis.</summary>
+      <div class="answer"><p>X-axis: clone the whole application behind a load balancer — twenty identical API pods. Y-axis: split by function or service — extract search and checkout into their own deployables with their own scaling profiles. Z-axis: split by data — shard the ledger by customer id so each instance owns a subset of rows. X is cheapest and moves the bottleneck downstream; Y targets a specific hot capability and aligns with team boundaries; Z is what you reach for when a single database is the ceiling. Production systems combine all three.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Sessions in Redis versus JWTs — how do you choose?</summary>
+      <div class="answer"><p>Redis-backed sessions keep state server-side: revocation is instant, the cookie is an opaque id so nothing leaks, and you can store more data — at the cost of a network round trip per request and a new critical dependency whose outage logs everyone out. JWTs validate offline with a signature check, so they scale across services and regions with zero lookups — at the cost of revocation being effectively impossible before expiry, claims going stale, and the token being readable by anyone holding it. Server-side sessions suit a single trust boundary needing immediate revocation (banking, admin consoles); tokens suit distributed APIs and mobile clients. The common middle ground is a short-lived access token plus a refresh token that is checked against a store.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which twelve-factor factors matter most for horizontal scaling, and why?</summary>
+      <div class="answer"><p>VI (stateless, share-nothing processes) is the enabling one. III (config in the environment) lets the identical artifact run in every environment, so replicas are truly identical. IV (backing services as attached resources) lets you swap or repoint a database or cache without a rebuild. IX (disposability — fast startup, graceful shutdown on SIGTERM) is what makes autoscaling and rolling deploys safe. VIII (concurrency via the process model) says you scale by adding processes. XI (logs as event streams to stdout) removes the last piece of local disk state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You have a nightly job in a service running on six pods. How do you run it exactly once?</summary>
+      <div class="answer"><p>Options in rough order of preference: move it out of the service into a platform scheduler (a Kubernetes CronJob, or a managed scheduler triggering one execution); or keep it in-process but guard it with a distributed lock backed by a shared store (ShedLock, a Redis lock with a fencing token, or a database row lock) so exactly one replica wins each run; or elect a leader and let only the leader schedule. Whichever you choose, make the job idempotent and safe to re-run, because a lock holder can die mid-job.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Argue the case for vertical scaling. When would you deliberately choose it?</summary>
+      <div class="answer"><p>When the workload is coordination-heavy and the team is small. A single large instance removes the entire distributed-systems tax: no network partitions, no eventual consistency, no distributed transactions or locks, no cross-node cache coherency, one process to profile. Modern instances reach hundreds of vCPUs and terabytes of memory, so a well-indexed relational database on one box serves far more traffic than most teams assume — and engineer time saved is real money. Choose it for the primary write database, for latency-sensitive single-tenant workloads, and as the deliberate first move while product-market fit is still uncertain. Accept the limits explicitly: a hard ceiling, superlinear cost near the top of the family, resize downtime, and one failure domain — so pair it with a replica for availability even when you are not scaling out for capacity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you revoke a JWT, and what does each approach cost?</summary>
+      <div class="answer"><p>Strictly you cannot — offline validation is the point. Practical approaches: keep access tokens short-lived (a few minutes) and revoke at refresh time, which bounds exposure but does not eliminate it; keep a denylist of revoked token ids in Redis and check it on every request, which restores instant revocation but reintroduces the lookup and the shared dependency you were avoiding; stamp a per-user token version in the claims and compare it against the user record, which is cheaper if you were reading the user anyway; or rotate the signing key, which revokes everyone at once and is a blunt incident tool. Each buys revocation by giving back some statelessness — say that tradeoff out loud.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service is X-scaled to forty replicas and throughput has stopped improving. How do you diagnose it?</summary>
+      <div class="answer"><p>Assume a serialised fraction or a coordination point rather than a capacity shortfall. Find the shared resource everything queues on — a single write master, a global lock, a hot partition, a shared sequence generator, a connection pool at the database, an external dependency with its own limit. Measure throughput against replica count to see whether the curve is flattening (Amdahl-style contention) or actually bending downward (coherency cost, the USL's retrograde region). If it is bending down, adding replicas is making things worse and the answer is fewer, better-behaved clients — connection pooling, batching, caching — not more machines. Then attack the serialised fraction: shard the hot data (Z axis), split the hot capability out (Y axis), or make the coordination unnecessary.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is shared-nothing architecture, and where do real systems knowingly violate it?</summary>
+      <div class="answer"><p>Each node owns its own CPU, memory and storage and coordinates only by message passing; nothing is shared, so nodes can be added without contending for a common resource. Real systems violate it deliberately where the alternative is worse: a shared session or token-denylist store, a shared metadata or config service, a leader for scheduling and cluster membership, a shared object store, and the database itself. The discipline is to keep the shared thing small, keep it off the hot path where possible, and know the blast radius when it fails — which is exactly why cell-based and bulkhead architectures partition even the shared components.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A service is stateless but still cannot be safely restarted mid-request. What is missing?</summary>
+      <div class="answer"><p>Disposability. Statelessness makes replicas interchangeable, but you also need a clean shutdown path: on SIGTERM stop accepting new work, fail readiness so the load balancer removes the endpoint before connections are refused (a preStop hook plus a short delay in Kubernetes), finish in-flight requests inside a bounded grace period, negatively acknowledge or return unprocessed queue messages so another worker claims them, and flush what must be flushed. Anything still in flight past the grace period will be killed, so the work must be idempotent and re-runnable — at-least-once is the only guarantee available.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.scale.axes — vertical vs horizontal scaling, the scale cube, stateless services</li>
+      <li>sd.scale.state — session externalization, the twelve-factor app, shared-nothing design</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

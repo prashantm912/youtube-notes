@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System Design storage systems module: choosing a store per access pattern, blob storage and metadata/content separation, presigned direct upload, chunking and deduplication, time-series and search stores, geohash and quadtree geo-indexing, CDC pipelines, OLTP versus OLAP, and the data lake, warehouse and lakehouse — with verified resources and interview questions.">
+  <title>Storage Systems — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Storage Systems</h1>
+  <p class="standfirst">Picking the wrong engine costs you more than any amount of tuning can win back. A mature system runs several stores on purpose — object storage for bytes, a time-series database for metrics, a search index for text, a warehouse for analytics — and keeps them honest with a pipeline from the source of truth.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Storage Systems</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything before this module assumed "the database". This one takes that assumption apart. Different kinds of data have genuinely different access patterns — a 40 MB video, a metric sampled every ten seconds, a paragraph of free text, a latitude/longitude pair, a year of orders being aggregated — and each of those defeats a general-purpose relational engine in its own way. Choosing the right storage engine for each shape of data is a far bigger performance lever than tuning the wrong one.</p>
+    <p>You will work through blob storage and the metadata-and-content separation pattern, direct transfer with presigned URLs, chunking and deduplication, time-series stores, search stores and inverted indexes, geo-indexing with geohash and quadtrees, CDC pipelines that keep derived stores in sync, the OLTP-versus-OLAP split, and the data lake / warehouse / lakehouse landscape at awareness level. The theme running through all of it: one source of truth, many derived stores, and a deliberate mechanism connecting them.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Choosing a storage engine: the five criteria, and polyglot persistence</h3>
+    <p>Before naming any product, name the requirement. Five questions decide almost every storage choice. <strong>Access pattern</strong>: read-heavy or write-heavy, point lookups or scans, append-only or update-in-place? <strong>Query shape</strong>: by primary key, by range, by full-text relevance, by two-dimensional proximity, by aggregation over billions of rows? <strong>Consistency need</strong>: does a stale read cost money, or is it merely untidy? <strong>Scale</strong>: kilobytes or petabytes, hundreds of writes per second or millions? <strong>Cost</strong>: what does a gigabyte-month and a query actually cost in each candidate, at your volume?</p>
+    <p>Answer those and the choice usually makes itself — and it will frequently be more than one store. That is <em>polyglot persistence</em>: a serious system deliberately runs a relational database for transactional truth, object storage for large binaries, a cache for hot reads, a search cluster for text, a time-series database for metrics, and a warehouse for analytics. The engineering discipline is not avoiding multiple stores; it is being explicit about which one is the source of truth and treating every other one as derived, rebuildable, and allowed to lag.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/technology-choices/data-store-overview" rel="noopener">Understand data store models — Azure Architecture Center (the decision matrix across store families)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/PolyglotPersistence.html" rel="noopener">PolyglotPersistence — Martin Fowler bliki (the term and the argument for it)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/8-data-structures-that-power-your" rel="noopener">8 Data Structures That Power Your Databases — ByteByteGo (B-tree, LSM, inverted index, R-tree and friends)</a></li>
+      <li>[Article] <a href="https://highscalability.com/" rel="noopener">High Scalability — real-world architecture case studies by storage choice</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kkeFE6iRfMM" rel="noopener">How To Choose The Right Database? — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Blob storage: why large binaries do not belong in a relational database</h3>
+    <p>Storing a profile photo, an invoice PDF or a training video as a <code>BLOB</code> column works in a demo and hurts everywhere else. Row size explodes, so fewer rows fit per page and the buffer pool caches fewer of them — one large object evicts thousands of useful rows, which is cache pollution paid for by every unrelated query. Backups grow from gigabytes to terabytes and restore times grow with them, turning your recovery-time objective into fiction. Replication ships those same bytes down every replica stream and across every region. And you are paying provisioned database storage prices — the most expensive gigabyte in your estate — for data that is written once and never queried.</p>
+    <p>Object storage exists precisely for this shape: an immutable-ish blob addressed by a key, retrieved whole, priced per gigabyte-month at a fraction of block storage, replicated and checksummed by the provider, and horizontally scalable without you thinking about it. The tradeoff you accept is that objects are not partially updatable and not queryable by content — you get a key/value store over bytes with metadata, not a database. That is the correct trade for photos, videos, documents, backups, logs, model artifacts and static site assets.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html" rel="noopener">What is Amazon S3? — AWS S3 User Guide (buckets, keys, durability model)</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/what-is/object-storage/" rel="noopener">What is object storage? — AWS (object vs block vs file, in one page)</a></li>
+      <li>[Article] <a href="https://www.allthingsdistributed.com/2023/07/building-and-operating-a-pretty-big-storage-system.html" rel="noopener">Building and operating a pretty big storage system called S3 — Andy Warfield, All Things Distributed</a></li>
+      <li>[Article] <a href="https://www.usenix.org/legacy/event/osdi10/tech/full_papers/Beaver.pdf" rel="noopener">Finding a Needle in Haystack: Facebook's Photo Storage — USENIX OSDI (why a filesystem-per-photo failed at scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=11ucebw1qdg" rel="noopener">S3 vs EBS vs HDFS vs EFS — object vs block vs file storage — Cloud With Raj</a></li>
+    </ul>
+
+    <h3>Metadata and content separation, and direct transfer with presigned URLs</h3>
+    <p>The pattern that follows is simple and near-universal: the <strong>database stores the pointer plus the attributes; object storage holds the bytes</strong>. A <code>documents</code> row carries the object key, the owner, the size, the content type, the checksum, the upload timestamp and whatever status flags your workflow needs — everything you would ever want to filter, sort, join or authorise on. The blob itself never enters the database. You get the query power of SQL over metadata and the cost and scale profile of object storage over content, and you can migrate the bytes to a different bucket, class or provider by rewriting one column.</p>
+    <p>The second half of the pattern is that <strong>your application never proxies the payload</strong>. Streaming a 500 MB upload through your API server burns a request thread for minutes, caps your throughput at your own bandwidth, and makes deploys hostile. Instead the client asks your API to authorise the transfer; the API checks permissions, allocates a key, records a pending metadata row and returns a short-lived <em>presigned URL</em>; the client then uploads (or downloads) straight to object storage. Your service stays on the control path and off the data path. Confirm the upload afterwards — either the client calls back or you subscribe to the bucket's object-created event — and flip the row from pending to available so an interrupted upload never becomes a visible half-record.</p>
+    <pre class="code-block" data-label="SQL"><code>-- metadata lives in the database; bytes live in the bucket
+CREATE TABLE document (
+  id            uuid PRIMARY KEY,
+  owner_id      uuid NOT NULL REFERENCES app_user(id),
+  bucket        text NOT NULL,
+  object_key    text NOT NULL UNIQUE,   -- the pointer, e.g. 'docs/2026/07/ab12...pdf'
+  filename      text NOT NULL,
+  content_type  text NOT NULL,
+  size_bytes    bigint NOT NULL,
+  sha256        bytea NOT NULL,         -- integrity + dedup handle
+  status        text NOT NULL,          -- pending -&gt; available -&gt; deleted
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON document (owner_id, created_at DESC);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ShareObjectPreSignedURL.html" rel="noopener">Sharing objects with presigned URLs — AWS S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html" rel="noopener">Multipart upload overview — AWS S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/uploading-to-amazon-s3-directly-from-a-web-or-mobile-application/" rel="noopener">Uploading to Amazon S3 directly from a web or mobile application — AWS Compute Blog</a></li>
+      <li>[Article] <a href="https://dropbox.tech/infrastructure/inside-the-magic-pocket" rel="noopener">Inside the Magic Pocket — Dropbox Tech (a purpose-built exabyte blob store)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U0xTu6E2CT8" rel="noopener">Dropbox / Google Drive system design: file share and upload — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>Large objects: chunking, content addressing, deduplication and CDN fronting</h3>
+    <p>Past a few tens of megabytes, "one object, one request" stops being safe. <strong>Chunking</strong> splits the file into parts — a few megabytes each — uploaded independently and in parallel, so a dropped connection costs one part instead of the whole file, throughput rises with concurrency, and the client can resume. Multipart upload is the managed form of this; sync clients like Dropbox's take it further and only ship the chunks that actually changed, which is why editing one slide in a large deck does not re-upload the deck.</p>
+    <p><strong>Content-addressed storage</strong> names each chunk by the hash of its bytes rather than by a path. Two consequences fall out for free: integrity, because re-hashing a chunk proves it is intact, and <strong>deduplication</strong>, because identical content produces an identical key and is therefore stored once no matter how many users upload it. That is how a file-sharing service absorbs ten thousand copies of the same company handbook at the cost of one. Finally, put a <strong>CDN</strong> in front of reads: object storage is durable and cheap but it is one region and it is not a low-latency edge. Serve public assets and long-lived media through the CDN with a sensible cache policy, and use the storage class and lifecycle rules to age cold objects into cheaper tiers instead of paying hot prices forever.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html" rel="noopener">Checking object integrity with checksums — AWS S3 User Guide (the content-addressing primitive)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html" rel="noopener">Understanding and managing storage classes — AWS S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html" rel="noopener">Managing the lifecycle of objects — AWS S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html" rel="noopener">Best practices design patterns: optimizing S3 performance — AWS</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html" rel="noopener">What is Amazon CloudFront? — AWS Developer Guide (CDN fronting for object reads)</a></li>
+      <li>[Article] <a href="https://dropbox.tech/infrastructure/streaming-file-synchronization" rel="noopener">Streaming File Synchronization — Dropbox Tech (chunking and delta sync in production)</a></li>
+    </ul>
+
+    <h3>Time-series stores: append-heavy data, compression, rollups and cardinality</h3>
+    <p>Time-series data — metrics, sensor readings, prices, click counters — has a shape no general-purpose database is built for. It is <strong>append-only</strong>: rows arrive in roughly timestamp order and are essentially never updated. It is <strong>enormous by count and tiny by row</strong>: a timestamp, a float, and a handful of labels, arriving thousands of times a second. It is <strong>always queried by time range</strong>, almost never by primary key, and nearly always <em>aggregated</em> — average CPU per minute over the last six hours, not the individual samples. Put that in a normal relational table and the B-tree index thrashes on every insert, the table balloons, and a range scan over a week reads hundreds of millions of rows to produce a two-hundred-point chart.</p>
+    <p>Purpose-built engines exploit the shape. Storage is <strong>partitioned by time</strong> into chunks or blocks, so old data is dropped by deleting a whole partition rather than by a slow row-by-row <code>DELETE</code>. <strong>Compression</strong> is enormous — delta-of-delta encoding on timestamps and XOR encoding on floats routinely gets an order of magnitude or better, because consecutive samples barely differ. <strong>Retention and downsampling</strong> are first-class: keep raw samples for a fortnight, a one-minute rollup for a quarter, an hourly rollup for years, with the aggregate computed continuously rather than at query time. And the constraint that bites in production is <strong>cardinality</strong>: the number of distinct label combinations, since each unique series is a separate stream to index and hold in memory. Putting a user id, a request id or an email address in a label is the classic way to take down a metrics cluster — the same warning you met in the Observability track's metrics module.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/storage/" rel="noopener">Storage — Prometheus documentation (time-partitioned blocks, compaction, retention)</a></li>
+      <li>[Official] <a href="https://docs.timescale.com/use-timescale/latest/hypertables/" rel="noopener">Hypertables — TimescaleDB documentation (automatic time partitioning over PostgreSQL)</a></li>
+      <li>[Official] <a href="https://docs.timescale.com/use-timescale/latest/continuous-aggregates/" rel="noopener">Continuous aggregates — TimescaleDB documentation (rollups and downsampling)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/practices/naming/" rel="noopener">Metric and label naming — Prometheus best practices (the cardinality rules)</a></li>
+      <li>[Article] <a href="https://netflixtechblog.com/scaling-time-series-data-storage-part-i-ec2b6d44ba39" rel="noopener">Scaling Time Series Data Storage, Part I — Netflix Technology Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=wH0U9kvQEsg" rel="noopener">Time Series Databases explained with examples: InfluxDB, Prometheus, TimescaleDB — Keerti Purswani</a></li>
+    </ul>
+
+    <h3>Search stores: the inverted index, tokenization, analyzers and relevance</h3>
+    <p>A B-tree index answers "which rows have this exact value". Search answers "which documents are <em>about</em> this phrase, ranked best first" — and <code>LIKE '%term%'</code> cannot do it, because a leading wildcard defeats every index and forces a full scan. The data structure that can is the <strong>inverted index</strong>: instead of mapping document → words, it maps each <em>term</em> → the list of documents containing it, with positions and frequencies. Looking up "storage" then means one dictionary probe and a posting-list read; a multi-word query intersects or unions posting lists. That inversion is why search engines answer in milliseconds over corpora that would take minutes to scan.</p>
+    <p>Getting text into that index is the job of the <strong>analyzer</strong>, a pipeline of character filters, a <strong>tokenizer</strong> that splits the stream into terms, and token filters that lowercase, strip stop words, fold accents, and stem or lemmatise so "storing" and "stored" collapse to one term. The single most common bug in a first search implementation is analyzing the query differently from the document — index and query must run compatible analyzers or matches silently disappear. On top of matching sits <strong>relevance scoring</strong> (BM25 by default in Lucene-based engines: rarer terms weigh more, repeated terms have diminishing returns, shorter fields score higher), which you then tune with field boosts, phrase matching and function scores. Elasticsearch and OpenSearch are the mainstream implementations, both Lucene underneath.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/text-analysis" rel="noopener">Text analysis — Elasticsearch reference (analyzers, tokenizers, token filters)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/manage-data/data-store/text-analysis/anatomy-of-an-analyzer" rel="noopener">Anatomy of an analyzer — Elastic documentation</a></li>
+      <li>[Official] <a href="https://opensearch.org/docs/latest/analyzers/" rel="noopener">Analyzers — OpenSearch documentation</a></li>
+      <li>[Official] <a href="https://lucene.apache.org/core/" rel="noopener">Apache Lucene — the indexing and scoring library under both engines</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=iHHqnyThrqE" rel="noopener">Inverted Index — the data structure behind search engines — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>The derived-store rule: a search index is never your source of truth</h3>
+    <p>This is the design point that separates people who have run a search cluster from people who have only configured one. A search index is a <strong>derived store</strong>. It is denormalised, eventually consistent, tuned for retrieval rather than correctness, and it has no transactions to protect an invariant. Writing to it as the primary record means that a lost shard, a botched mapping change or a reindex gone wrong is data loss rather than an inconvenience. Keep the relational database (or whatever holds your invariants) as the source of truth, project into the index, and make sure you can <em>rebuild the entire index from scratch</em> — because you will, every time you change a mapping, since Lucene mappings for existing fields are largely immutable and reindexing is the supported path.</p>
+    <p>That reframes the operational questions usefully. Sync lag becomes a budget you choose rather than a bug: a product catalogue can tolerate seconds, and the UI should be written to expect it. Consistency questions get an honest answer — read the item detail page from the database, read the results list from the index. And it makes you ask whether you need a separate cluster at all: PostgreSQL's built-in full-text search, with <code>tsvector</code>, a GIN index and <code>ts_rank</code>, comfortably covers a few million documents and saves you an entire distributed system to operate. Reach for Elasticsearch or OpenSearch when you need scale, aggregations, fuzzy and multi-language analysis, or serious relevance tuning — not by reflex. This is the read-model half of CQRS by another name.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/manage-data/data-store/index-basics" rel="noopener">Index basics — Elastic documentation (mappings, shards, why reindexing exists)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch.html" rel="noopener">Full Text Search — PostgreSQL documentation (the option before you add a cluster)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/CQRS.html" rel="noopener">CQRS — Martin Fowler bliki (separate read models, and the price you pay for them)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/elasticsearch-full-text-search-rest-api" rel="noopener">Full-Text Search with Elasticsearch and the REST API — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sAySPSyL2qE" rel="noopener">Nodes, Clusters and Shards — Elasticsearch 101, Episode 2 — Official Elastic Community</a></li>
+    </ul>
+
+    <h3>Geo-indexing: why two-dimensional queries defeat a B-tree</h3>
+    <p>"Find everything within five kilometres" looks like a range query, and people reach for <code>WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?</code>. A B-tree cannot serve that efficiently, because a B-tree orders on one dimension at a time. Index on latitude and the engine narrows to a horizontal band spanning the whole planet, then filters every row in it by longitude; a composite index only helps for the leading column. The problem is that two-dimensional proximity has no total order — you need a structure that maps 2-D space onto a 1-D key while preserving locality, or one that partitions space itself.</p>
+    <p><strong>Geohash</strong> takes the first route: interleave the bits of latitude and longitude, base-32 encode the result, and you get a string where a shared prefix means spatial proximity and each extra character subdivides the cell. Prefix matching then becomes a plain B-tree range scan, which is why Redis implements geospatial sets as a sorted set of geohash scores. Its famous flaw is the <strong>boundary problem</strong>: two points a metre apart can straddle a cell edge and share no prefix at all, so a correct search must query the target cell <em>plus its eight neighbours</em>. <strong>Quadtrees</strong> take the second route, recursively splitting a region into four quadrants only where density demands it — so dense Mumbai gets deep subdivision and the Arabian Sea does not — at the cost of a structure you must build and maintain in memory. <strong>S2</strong> (Google) projects the sphere onto a cube and orders cells along a Hilbert curve, which preserves locality better than geohash's Z-order; <strong>H3</strong> (Uber) tiles the world in hexagons, whose equal-distance neighbours make movement, coverage and aggregation maths far cleaner than square cells.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://h3geo.org/docs/" rel="noopener">H3 documentation — Uber's hexagonal hierarchical geospatial indexing system</a></li>
+      <li>[Official] <a href="https://s2geometry.io/devguide/s2cell_hierarchy" rel="noopener">S2 Cell Hierarchy — S2 Geometry developer guide (Hilbert curve cell ids)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/geospatial/" rel="noopener">Geospatial data — Redis documentation (geohash scores inside a sorted set)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/quadtrees-and-octrees" rel="noopener">Quadtrees and Octrees — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=OcUKFIjhKu0" rel="noopener">Designing a location database: QuadTrees and Hilbert Curves — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Proximity search in practice: "restaurants within 5 km"</h3>
+    <p>In an interview, do not start by inventing a spatial index — start by asking about scale and freshness, because the answers pick the tool. For a few hundred thousand static points, <strong>PostGIS</strong> on the PostgreSQL you already run is the right answer: a <code>geography</code> column, a GiST index, and <code>ST_DWithin</code> gives you a correct, index-backed radius query with real geodesic distance, plus polygons, routing and everything else spatial. For moving objects updated constantly — drivers, delivery partners — <strong>Redis</strong> with <code>GEOADD</code>/<code>GEOSEARCH</code> is the natural fit: in-memory, cheap writes, ephemeral by design. When proximity is one filter among many ("open now, rated above four, serving South Indian, within 5 km, sorted by relevance") you want a <strong>search engine</strong> with a <code>geo_point</code> field and a <code>geo_distance</code> filter, because the win is combining spatial with text and facets in one query. Massive analytical or coverage work — surge zones, demand heatmaps, supply balancing — is where <strong>H3 cells</strong> earn their place, since aggregating by cell id is a plain group-by.</p>
+    <p>Whatever the engine, the shape of the answer is the same and worth saying out loud: <strong>filter coarsely by cell, then rank precisely by distance</strong>. Compute the candidate cells covering the query circle (the target cell plus neighbours for geohash, the covering cell set for S2/H3), fetch their members with an index lookup, then compute exact haversine distance on that small candidate set and sort. Then handle the practical bits: cap the radius so a query in the Bay of Bengal cannot scan the country, cache results per cell rather than per exact coordinate so nearby users share a cache entry, expand the radius progressively when a dense-city assumption fails in a small town, and shard by geography so a city's traffic stays on one set of nodes.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://postgis.net/" rel="noopener">PostGIS — the spatial extender for PostgreSQL</a></li>
+      <li>[Official] <a href="https://www.mongodb.com/docs/manual/geospatial-queries/" rel="noopener">Geospatial queries — MongoDB Manual (2dsphere indexes, $near, $geoWithin)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/query-languages/query-dsl/query-dsl-geo-distance-query" rel="noopener">Geo-distance query — Elasticsearch query DSL reference</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/geosearch/" rel="noopener">GEOSEARCH — Redis command reference (radius and box queries)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-spatial" rel="noopener">Introduction to Hibernate Spatial — Baeldung (spatial types from a JPA application)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kzRb1KPhrjs" rel="noopener">Design a Proximity Service — Yelp design with QuadTree and GeoHash — System Design Pal</a></li>
+    </ul>
+
+    <h3>CDC pipelines: keeping every derived store in sync from the log</h3>
+    <p>Once you accept polyglot persistence you own a synchronisation problem: the search index, the cache, the read model and the warehouse all need to learn about a change to the source of truth. The naive fix — write to the database, then write to the index — is dual-write, and it is broken by construction: the process can die between the two writes, and there is no transaction spanning them, so the stores silently diverge. Periodic polling on <code>updated_at</code> is the next attempt and it misses deletes, hammers the database, and still loses rows to clock skew and long transactions.</p>
+    <p><strong>Change data capture</strong> solves it properly by reading the database's own replication log — the PostgreSQL write-ahead log, the MySQL binlog, the MongoDB oplog — which is the same stream the database already trusts for replication. Every committed insert, update and delete becomes an event, in commit order, with before and after images, published to Kafka or an equivalent. Debezium is the reference implementation and runs as a Kafka Connect source. Because it reads the log, it captures changes made by anything at all, including a manual <code>UPDATE</code> run at 2 a.m., and it never adds a write to the transaction path. Consumers are then ordinary stream processors that project into the index, invalidate the cache, or land rows in the warehouse — each independently, each replayable from an offset, each rebuildable by resetting to a snapshot. Where you need the event's <em>shape</em> to be a domain event rather than a row diff, combine CDC with the <strong>transactional outbox</strong> pattern from the Microservices track: write the business event into an outbox table in the same transaction as the state change, and let CDC ship it. Design consumers to be idempotent — CDC delivers at least once — and know the two operational sharp edges: schema changes propagate to consumers, and a stalled connector holds replication slots open until the disk fills.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/architecture.html" rel="noopener">Debezium architecture — official documentation (connectors, snapshots, offsets)</a></li>
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html" rel="noopener">Outbox Event Router — Debezium single message transform</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/connect/index.html" rel="noopener">Kafka Connect — Confluent Platform documentation (how a CDC connector is deployed)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional outbox — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/change-data-capture-debezium/" rel="noopener">Change Data Capture for Distributed Databases with Debezium — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ZCkJhOEhslw" rel="noopener">How Slack transitioned to CDC with Debezium and Kafka Connect — Confluent Developer</a></li>
+    </ul>
+
+    <h3>OLTP versus OLAP: row stores, column stores, and why analytics leaves production</h3>
+    <p>These are not two settings of one database; they are two different machines for two different jobs. <strong>OLTP</strong> serves the application: thousands of small concurrent transactions, each touching a handful of rows by key, with strict correctness and latency budgets in milliseconds. It stores data <strong>by row</strong>, so fetching one complete order is one page read, and it is <strong>normalised</strong>, so a fact is written in exactly one place and cannot go inconsistent. <strong>OLAP</strong> serves the business: a few large queries that scan hundreds of millions of rows but touch only three or four columns — revenue by city by month, cohort retention, funnel conversion — where minutes are acceptable and a slightly stale answer is fine.</p>
+    <p>That inverts every storage decision. Columnar layout stores each column contiguously, so a query reading four of eighty columns reads four columns' worth of disk instead of the whole table — often a twentyfold reduction before compression, and compression itself is dramatic because a column holds values of one type with heavy repetition, which run-length and dictionary encoding devour. Vectorised execution then processes column batches rather than row-at-a-time. Modelling changes too: warehouses use a <strong>star schema</strong> of a central fact table and denormalised dimensions, trading the write-side integrity of normalisation for scans that avoid deep joins. And this is exactly why you do not run analytics on the production database: one analyst's unbounded <code>GROUP BY</code> holds locks and snapshots, blows out the buffer pool that your latency depends on, saturates I/O, and pins the oldest transaction so vacuum cannot reclaim space. Even on a read replica, the row layout makes the query slow and the replication lag makes it unreliable. Ship the data to a system built for it — which is precisely the job of the CDC or ETL pipeline above.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/relational-data/online-transaction-processing" rel="noopener">Online transaction processing (OLTP) — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/relational-data/online-analytical-processing" rel="noopener">Online analytical processing (OLAP) — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://clickhouse.com/docs/en/faq/general/why-clickhouse-is-so-fast" rel="noopener">Why is ClickHouse so fast? — ClickHouse documentation (columnar storage and vectorised execution, explained)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/oltp-olap" rel="noopener">Online Transaction Processing vs. Online Analytical Processing — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6-VVu68hbgw" rel="noopener">OLTP vs OLAP explained in 5 minutes — techTFQ</a></li>
+    </ul>
+
+    <h3>Data lake, warehouse and lakehouse: ETL versus ELT, at awareness level</h3>
+    <p>You are not expected to build these, but you are expected to place them on a map. A <strong>data warehouse</strong> (Snowflake, BigQuery, Redshift, Synapse) holds structured, modelled, curated data with schema enforced on write; it is expensive per terabyte and excellent at SQL analytics. A <strong>data lake</strong> is object storage holding raw files in open formats — Parquet, Avro, JSON — with schema applied on read; it is cheap, keeps everything including data nobody has a use for yet, and degrades into a "data swamp" without catalogue and governance discipline. A <strong>lakehouse</strong> is the convergence: open table formats such as Apache Iceberg, Delta Lake and Hudi add ACID transactions, schema evolution and time travel on top of files in the lake, so warehouse-grade SQL runs directly over lake-priced storage without a second copy.</p>
+    <p>The pipeline vocabulary follows the same shift. <strong>ETL</strong> — extract, transform, load — was born when warehouse compute and storage were scarce, so you transformed in a staging tier and loaded only the finished shape. <strong>ELT</strong> loads raw data first and transforms inside the warehouse or lakehouse, which is now usually cheaper and much more flexible: the raw layer is retained, so when a definition changes you re-transform rather than re-ingest, and tooling like dbt makes transformations versioned SQL. The common architecture is bronze/silver/gold layering — raw, cleaned, and business-ready — over one storage substrate.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.snowflake.com/en/user-guide/intro-key-concepts" rel="noopener">Key concepts and architecture — Snowflake documentation (separated storage and compute)</a></li>
+      <li>[Official] <a href="https://iceberg.apache.org/docs/latest/" rel="noopener">Apache Iceberg documentation — open table format for the lakehouse</a></li>
+      <li>[Official] <a href="https://cloud.google.com/bigquery/docs/storage_overview" rel="noopener">BigQuery storage overview — Google Cloud (columnar storage internals)</a></li>
+      <li>[Article] <a href="https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf" rel="noopener">Lakehouse: A New Generation of Open Platforms that Unify Data Warehousing and Advanced Analytics — CIDR 2021 (the paper that named it)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/relational-data/data-warehousing" rel="noopener">Data warehousing — Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yRerKDM1h74" rel="noopener">Data Warehouse vs Data Lake vs Data Lakehouse, with ETL and OLAP vs OLTP — codebasics</a></li>
+    </ul>
+
+    <h3>A closing note: feature stores and serving data to models</h3>
+    <p>Machine learning adds one more storage shape worth recognising. A <strong>feature store</strong> holds the computed inputs a model consumes — a user's average order value over ninety days, a merchant's fraud rate this week — and it exists to solve two specific problems. The first is <strong>training/serving skew</strong>: if the feature is computed by a batch SQL job for training and re-implemented in application code for inference, the two drift and the model quietly degrades. A feature store defines each feature once and serves both paths from that definition. The second is <strong>point-in-time correctness</strong>: assembling a training set requires each feature's value <em>as of</em> the moment of the historical event, not today's value, otherwise the model learns from the future and looks brilliant offline and useless in production.</p>
+    <p>Architecturally it is the same offline/online split you have already seen — an offline store in the warehouse or lake for training data, and an online store (Redis, DynamoDB, Cassandra) for low-latency lookups during inference, kept in sync by the same batch and streaming pipelines. Knowing the vocabulary and the two problems it solves is enough for a system design round; you do not need to have operated one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.feast.dev/" rel="noopener">Feast documentation — the open-source feature store (offline and online stores, point-in-time joins)</a></li>
+      <li>[Article] <a href="https://www.tecton.ai/blog/what-is-a-feature-store/" rel="noopener">What is a feature store? — Tecton</a></li>
+      <li>[Article] <a href="https://cloud.google.com/architecture/dw2bq/dw-bq-data-pipelines" rel="noopener">Data pipelines for a data warehouse migration — Google Cloud Architecture Center</a></li>
+      <li>[Article] <a href="https://www.snowflake.com/guides/data-lake-vs-data-warehouse/" rel="noopener">Data lake vs. data warehouse — Snowflake guides</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-async-architectures.html">← Asynchronous Architectures</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="12-classic-designs-a.html">Classic Designs A →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Storage choice is where Indian product and service-company system design rounds separate memorised diagrams from real judgement — the file-upload question is near-universal, and proximity search and OLTP-versus-OLAP follow close behind:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> A user uploads a profile photo. Where do you store it, and what goes in the database?</summary>
+      <div class="answer"><p>The bytes go to object storage (S3, GCS, Azure Blob) under a generated key; the database stores only metadata — object key, bucket, owner id, filename, content type, size, checksum, status and timestamps. Never the binary itself: it bloats row size, pollutes the buffer pool, multiplies backup and replication cost, and pays the most expensive storage price for data that is never queried.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a presigned URL and why use one?</summary>
+      <div class="answer"><p>A time-limited, signed URL that grants a specific operation on a specific object without the client holding any credentials. Your API authorises the request, records a pending metadata row and hands back the URL; the client then uploads or downloads directly against object storage. The payload never passes through your application servers, so you do not burn threads or bandwidth proxying large files, and the URL expires on its own.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an inverted index?</summary>
+      <div class="answer"><p>A mapping from each term to the list of documents that contain it, with positions and frequencies — the inverse of the natural document-to-words mapping. It turns full-text search into a dictionary lookup plus a posting-list read instead of a full scan, which is why <code>LIKE '%term%'</code> cannot compete: a leading wildcard defeats a B-tree and forces the engine to read every row.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes time-series data different from ordinary relational data?</summary>
+      <div class="answer"><p>It is append-only and arrives in roughly time order, rows are tiny but arrive in huge volume, it is queried by time range rather than by key, and it is almost always aggregated or downsampled rather than read raw. That combination lets a purpose-built engine partition by time, compress consecutive samples hugely with delta and XOR encoding, drop old data by dropping whole partitions, and precompute rollups — none of which a general-purpose B-tree table can do.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is the two-column range query on latitude and longitude a bad way to find nearby places?</summary>
+      <div class="answer"><p>Because a B-tree orders on one dimension. An index on latitude narrows to a band that wraps the entire planet, and then every row in that band is filtered by longitude; the second column of a composite index does not help because the first is a range, not an equality. Two-dimensional proximity has no total order, so you need a structure that maps 2-D onto a locality-preserving 1-D key (geohash, S2, H3) or that partitions space itself (quadtree, R-tree in PostGIS).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain geohash and its boundary problem.</summary>
+      <div class="answer"><p>Geohash interleaves the bits of latitude and longitude and base-32 encodes the result, producing a string where a shared prefix means spatial proximity and each extra character subdivides the cell — so proximity becomes a prefix range scan on an ordinary index. The flaw is the cell boundary: two points a metre apart on opposite sides of an edge can share no prefix, so a correct nearby search must query the target cell plus its eight neighbours and then rank the union by true haversine distance.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Design "restaurants within 5 km, open now, rated 4+". Which store, and what is the query plan?</summary>
+      <div class="answer"><p>Ask about scale and freshness first. For static points at modest scale, PostGIS with a geography column, a GiST index and <code>ST_DWithin</code>. For constantly moving objects, Redis GEOADD/GEOSEARCH. For proximity combined with text, facets and ranking — which this question is — a search engine with a geo_point field and a geo_distance filter. Plan in either case: compute the candidate cells covering the circle, index-fetch their members, then apply the non-spatial filters and rank by exact distance. Cap the radius, cache per cell rather than per exact coordinate, and expand the radius progressively where density is low.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't you just run the monthly revenue report on the production database?</summary>
+      <div class="answer"><p>Because OLTP and OLAP want opposite things. The report scans hundreds of millions of rows over a few columns; a row store must read every column of every row to do it, so it saturates I/O and evicts the working set from the buffer pool that your millisecond queries depend on. It also holds a long-lived snapshot, which blocks vacuum and grows bloat. A read replica helps with locking but not with the row layout or the lag. Ship the data to a columnar warehouse via CDC or ELT and run it there.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Row storage versus columnar storage — what actually changes?</summary>
+      <div class="answer"><p>Row storage keeps a whole record contiguous, so fetching or updating one record is one page read — ideal for transactional point access. Columnar keeps each column contiguous, so a scan reading four of eighty columns reads only those four columns from disk, and because a column holds one type with heavy repetition, dictionary and run-length compression are dramatic. Add vectorised batch execution and you get order-of-magnitude analytical speedups — at the cost of expensive single-row updates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you keep a search index in sync with the database?</summary>
+      <div class="answer"><p>Not by dual-writing — writing to the database and then to the index has no shared transaction, so a crash between them leaves the stores permanently divergent. Use change data capture: read the write-ahead log or binlog with Debezium, publish committed changes to Kafka, and have a consumer project them into the index. Make the consumer idempotent because delivery is at least once, accept and communicate a lag budget, and keep a full reindex path — you will need it on every mapping change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is a search index a derived store and never the source of truth?</summary>
+      <div class="answer"><p>Because it is denormalised, eventually consistent, has no transactions to protect invariants, and its mappings are largely immutable so any schema change means a full reindex. If it is primary, a lost shard or a bad mapping migration is data loss. Keep the invariant-holding database as truth, project into the index, and guarantee you can rebuild the index from zero. It is the read-model side of CQRS, with the same tradeoff: cheap fast reads, in exchange for accepting lag and owning a rebuild path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the upload path for a 2 GB video with resumability and deduplication.</summary>
+      <div class="answer"><p>Client hashes the file and asks the API; if that content hash already exists, register a new metadata row pointing at the existing object and return instantly — that is dedup via content addressing. Otherwise the API initiates a multipart upload, records a pending row and returns presigned URLs per part. The client uploads parts in parallel, retrying only failed parts, and resumes after a disconnect by listing already-uploaded parts. On completion the client calls complete-multipart and the API — or a bucket event — flips the row to available. Add a lifecycle rule to abort incomplete multipart uploads so orphaned parts stop accruing cost, verify checksums, and serve reads through a CDN.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is high cardinality in a time-series store and how does it break things?</summary>
+      <div class="answer"><p>Cardinality is the number of distinct label-value combinations, and each unique combination is a separate series with its own index entry, memory footprint and compression buffer. Adding a user id, request id, email or full URL path as a label multiplies series count by the number of distinct values, so a metric that should be a few hundred series becomes millions — memory exhausts, ingestion stalls and queries time out. Keep labels to bounded, low-cardinality dimensions; unbounded identifiers belong in logs or traces, not metric labels.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> CDC versus the transactional outbox — do you need both?</summary>
+      <div class="answer"><p>They solve overlapping problems at different levels. CDC alone gives you row-level diffs, which is perfect for replicating into a warehouse or search index but a poor public contract — consumers end up coupled to your table schema. The outbox pattern writes a properly shaped domain event into an outbox table inside the same transaction as the state change, so atomicity is guaranteed by the database; CDC then tails that table and publishes it. Use CDC alone for internal derived stores, CDC over an outbox when other services consume the events. Either way consumers must be idempotent, since delivery is at least once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Data lake, data warehouse, lakehouse — distinguish them, and say when ELT beats ETL.</summary>
+      <div class="answer"><p>A warehouse stores structured, modelled data with schema on write — costly per terabyte, superb at SQL analytics. A lake stores raw files in open formats on object storage with schema on read — cheap and inclusive, prone to becoming a swamp without cataloguing. A lakehouse layers an open table format (Iceberg, Delta, Hudi) over lake files to add ACID transactions, schema evolution and time travel, so warehouse-grade SQL runs on lake-priced storage without a second copy. ETL fits when transformation must happen before landing — compliance, PII redaction, scarce warehouse compute. ELT wins when storage is cheap and warehouse compute is elastic: land raw, transform in place, keep the raw layer so a changed business definition means re-running SQL rather than re-ingesting history.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You are asked to add "full-text search" to an existing product. Walk through the decision.</summary>
+      <div class="answer"><p>Start with volume, query complexity and relevance expectations. Under a few million documents with simple matching, PostgreSQL full-text search — tsvector, a GIN index, ts_rank — avoids operating an entire distributed system, and it stays transactionally consistent with the data. Move to Elasticsearch or OpenSearch when you need horizontal scale, aggregations and facets, fuzzy or multi-language analysis, or serious relevance tuning. If you do, treat it as a derived store fed by CDC, ensure index and query analyzers match, plan for a rebuild on every mapping change, budget the sync lag into the UX, and size shards deliberately rather than accepting defaults.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.store.types</li>
+      <li>sd.store.analytics</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

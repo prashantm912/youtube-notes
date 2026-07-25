@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="System Design rate limiting module: why services throttle, fixed window and its boundary burst, sliding window log and counter, leaky bucket and token bucket compared, distributed limiting with Redis and Lua, keys and tiered quotas, 429 with Retry-After and RateLimit headers, and how limiting relates to load shedding and backpressure.">
+  <title>Rate Limiting — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Rate Limiting</h1>
+  <p class="standfirst">Every service has a throughput it can actually serve, and traffic does not care. Rate limiting is the policy that decides, before the work starts, whose requests get admitted — so that a scraper, a retry storm or an unexpectedly popular launch cannot take the system down for everyone.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Rate Limiting</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Rate limiting answers one question — <em>may this request proceed right now?</em> — and the interesting engineering is entirely in how you answer it cheaply, fairly and consistently across a fleet. The first half of this module covers the four algorithms every interview asks about, judged on the property that actually separates them: what each one does when a client sends a burst.</p>
+    <p>The second half covers everything that turns a working algorithm into a working system: enforcing one global limit when the limiter runs on fifty instances, the race conditions that make a naive shared counter wrong, what to key the limit on, tiered quotas and per-endpoint cost, and the response contract — <code>429</code>, <code>Retry-After</code>, <code>RateLimit-*</code> — that decides whether clients back off politely or hammer you harder. It closes on the boundary between rate limiting and load shedding, which are often confused and are not the same tool.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why rate limiting exists, and where it sits</h3>
+    <p>Four separate motivations get bundled under one name, and being able to name them apart is worth marks. <strong>Abuse prevention</strong>: credential stuffing, scraping, enumeration of ids, spam sign-ups. <strong>Cost control</strong>: every request you serve costs CPU, egress, a third-party API call or an LLM token bill, and an unlimited free tier is an unlimited invoice. <strong>Fair sharing</strong>: in a multi-tenant system one noisy tenant will otherwise consume capacity that the other thousand tenants paid for. And above all <strong>overload protection</strong>: a service pushed past its saturation point does not degrade gracefully — queues grow, latency climbs, timeouts fire, clients retry, and the retries make it worse. A limit that rejects the marginal request in microseconds keeps the service inside the region where it still works.</p>
+    <p>Where the limit lives determines what it can see and what it can protect. At the <strong>edge</strong> (CDN or WAF) you stop volumetric abuse before it costs you any origin capacity, but the only signals available there are the IP and the URL. At the <strong>API gateway</strong> the authenticated principal is known, so this is where per-key quotas and plan tiers naturally sit, and where one policy covers every service behind it. <strong>Per-service</strong> (or per-endpoint) limits protect a specific scarce resource — the report generator, the search cluster, the payment provider whose contract caps you at a fixed rate — that a global gateway limit knows nothing about. Real systems use all three layers, with progressively narrower scope and progressively better information.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.cloudflare.com/learning/bots/what-is-rate-limiting/" rel="noopener">What is rate limiting? — Cloudflare Learning Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/throttling" rel="noopener">Throttling pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/fairness-in-multi-tenant-systems/" rel="noopener">Fairness in multi-tenant systems — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://stripe.com/blog/rate-limiters" rel="noopener">Scaling your API with rate limiters — Stripe Engineering Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CVItTb_jdkE" rel="noopener">Master Rate Limiting — System Design — Piyush Garg</a></li>
+    </ul>
+
+    <h3>Fixed window counter — and the boundary burst that doubles your limit</h3>
+    <p>The simplest algorithm: chop time into fixed windows (say one minute), keep one integer per client per window, increment on each request, reject when the counter exceeds the limit, and let the key expire when the window ends. One counter per active client, one atomic increment per request, no timestamps, no history. On Redis this is two commands and it is the reason fixed window is everywhere: it costs almost nothing.</p>
+    <p>Its flaw is the window boundary, and interviewers ask about it constantly. Suppose the limit is 100 requests per minute. A client sends 100 requests in the final second of one window and 100 more in the first second of the next. Both windows are individually legal — 100 each — but the server just absorbed 200 requests in a two-second span, twice the intended rate over the sliding minute that straddles the boundary. Worse, this is not an exotic adversarial case: clients that schedule work on minute boundaries produce it accidentally, and every client doing so synchronises into the same spike. Fixed window is also unfair inside a window — a client that spends its whole allowance in the first two seconds is blocked for the remaining fifty-eight while the server sits idle.</p>
+    <pre class="code-block" data-label="Redis"><code># Fixed window: one counter per client per window, expiring with the window.
+# key = ratelimit:{api_key}:{floor(now / 60)}
+INCR   ratelimit:acme:29384710      # returns the new count
+EXPIRE ratelimit:acme:29384710 60 NX   # NX = only set a TTL if there isn't one
+
+# Careful: INCR and EXPIRE are two round trips. If the process dies between them the
+# key never expires and that client is throttled forever. Do both in one Lua script,
+# or use a pipeline/transaction, so the counter and its TTL are created together.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/incr/" rel="noopener">INCR — Redis command reference (includes the classic rate limiter pattern)</a></li>
+      <li>[Article] <a href="https://blog.arcjet.com/rate-limiting-algorithms-token-bucket-vs-sliding-window-vs-fixed-window/" rel="noopener">Rate limiting algorithms: token bucket vs sliding window vs fixed window — Arcjet Blog</a></li>
+      <li>[Article] <a href="https://smudge.ai/blog/ratelimit-algorithms" rel="noopener">Rate limiting algorithms, visualised — Smudge.ai Blog</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/system-design/rate-limiting-algorithms-system-design/" rel="noopener">Rate Limiting Algorithms — GeeksforGeeks System Design</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mhUQe4BKZXs" rel="noopener">Rate Limiting system design: token bucket, leaky bucket, sliding logs — Tech Dummies Narendra Lakshmana Gowda</a></li>
+    </ul>
+
+    <h3>Sliding window log and sliding window counter</h3>
+    <p>The <strong>sliding window log</strong> fixes the boundary problem exactly. Store a timestamp for every accepted request in a sorted set per client; on each new request, drop entries older than the window, count what remains, and admit only if the count is under the limit. The window now genuinely slides with the clock, so no boundary exists to exploit and the answer is exact. The price is memory and CPU: you store one entry per request per client, so a client sending 10,000 requests a minute costs 10,000 timestamps — and rejected requests still cost you a trim operation. For a large public API this is the algorithm that quietly turns your rate limiter into your biggest Redis consumer.</p>
+    <p>The <strong>sliding window counter</strong> is the pragmatic middle ground and, in practice, the most commonly deployed accurate-enough option. Keep just two counters — the previous window's total and the current window's total — and weight the previous one by how much of it still overlaps the trailing window. With a limit of 100 per minute, 30 seconds into the current window, a previous count of 80 and a current count of 40, the estimate is 80 × 0.5 + 40 = 80, so the request is admitted. The estimate assumes traffic was spread evenly across the previous window, which is a small and bounded inaccuracy — Cloudflare reported the approximation misclassifying well under 1% of requests at their scale — in exchange for two integers per client instead of thousands.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>// Sliding window counter: two integers per client, no per-request storage.
+elapsed  = now - currentWindowStart            // seconds into the current window
+overlap  = (windowSize - elapsed) / windowSize // fraction of the previous window still in view
+estimate = previousWindowCount * overlap + currentWindowCount
+
+if (estimate &lt; limit) { currentWindowCount += 1; return ALLOW }
+return DENY</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/glossary/rate-limiting/" rel="noopener">Rate limiting — Redis glossary (fixed window, sliding window and sorted-set logs)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/sliding-window-ratelimiter/" rel="noopener">Sliding Window Rate Limiting: design and implementation — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/" rel="noopener">Counting things, a lot of different things — Cloudflare Blog (the weighted sliding window in production)</a></li>
+      <li>[Article] <a href="https://blog.algomaster.io/p/rate-limiting-algorithms-explained-with-code" rel="noopener">Rate Limiting Algorithms Explained with Code — AlgoMaster</a></li>
+    </ul>
+
+    <h3>Leaky bucket: a queue that drains at a constant rate</h3>
+    <p>Leaky bucket inverts the framing. Instead of counting arrivals, model a bucket with a hole in the bottom: requests pour in at whatever rate clients send them, and leak out — get processed — at a fixed constant rate. If the bucket is full when a request arrives, that request is dropped. The defining property is that the <em>output</em> is perfectly smooth regardless of how spiky the input was, which is exactly what you want when the thing downstream is a fixed-capacity resource: a database with a known safe write rate, a third-party API with a contractual limit, an SMS gateway.</p>
+    <p>The trade-offs follow directly from that queue. Bursts are not rejected, they are <em>delayed</em>, so a client that sends a spike sees its later requests served with added latency — and if the bucket is deep, that latency can be large and hard to reason about. Requests can also sit in the bucket long after the caller has given up and timed out, so you end up doing work nobody is waiting for. When the bucket overflows you drop the newest arrivals even if they are the most valuable ones. NGINX's <code>limit_req</code> is the canonical implementation, with <code>burst</code> sizing the queue and <code>nodelay</code> switching between smoothing and immediate rejection.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://blog.nginx.org/blog/rate-limiting-nginx" rel="noopener">Rate Limiting with NGINX — NGINX Blog (leaky bucket, burst and nodelay explained)</a></li>
+      <li>[Official] <a href="https://en.wikipedia.org/wiki/Leaky_bucket" rel="noopener">Leaky bucket — Wikipedia (meter versus queue formulations)</a></li>
+      <li>[Article] <a href="https://konghq.com/blog/engineering/how-to-design-a-scalable-rate-limiting-algorithm" rel="noopener">How to design a scalable rate limiting algorithm — Kong Engineering Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=epM2jxi3Yi0" rel="noopener">System Design Interview Fundamentals: Rate Limiting — Roberto Vitillo</a></li>
+    </ul>
+
+    <h3>Token bucket, the implementation sketch, and choosing between the four</h3>
+    <p>Token bucket is the most widely deployed algorithm, and the reason is that it models real traffic honestly. A bucket holds up to <em>capacity</em> tokens and refills at a steady rate; each request removes a token, and a request that finds the bucket empty is rejected. Capacity and refill rate are two independent knobs: the refill rate sets the sustained throughput you are willing to serve, and the capacity sets how large a burst you will tolerate from a client that has been idle. That is precisely the behaviour real clients need — a mobile app that syncs ten resources on launch and then goes quiet is not abusive, and an algorithm that forces perfectly even spacing punishes it for no reason.</p>
+    <p>Implementations almost never run a background refill timer, because one timer per client does not scale. Instead they refill <em>lazily</em>: store the token count and the timestamp of the last update, and on each request compute how many tokens have accrued since. That makes the whole limiter two numbers per client, updatable in one atomic operation — which is also what makes it easy to move into Redis. It generalises nicely too: charge a heavy endpoint several tokens instead of one, and you have cost-weighted limiting for free. Spring Cloud Gateway's <code>RequestRateLimiter</code> exposes exactly this shape as <code>replenishRate</code>, <code>burstCapacity</code> and <code>requestedTokens</code>.</p>
+    <pre class="code-block" data-label="Pseudocode"><code>// Token bucket with lazy refill: two numbers per client, no timers.
+allow(now, cost = 1):
+    elapsed = now - lastRefill                       // seconds
+    tokens  = min(capacity, tokens + elapsed * refillPerSecond)
+    lastRefill = now
+
+    if (tokens &gt;= cost):
+        tokens -= cost
+        return ALLOW
+    // tell the caller exactly how long until the next token is available
+    return DENY(retryAfterSeconds = (cost - tokens) / refillPerSecond)</code></pre>
+    <table>
+      <caption>Comparing the four algorithms</caption>
+      <thead>
+        <tr><th>Dimension</th><th>Fixed window</th><th>Sliding window log</th><th>Sliding window counter</th><th>Leaky bucket</th><th>Token bucket</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Accuracy</td><td>Poor at boundaries — up to twice the limit</td><td>Exact</td><td>Approximate, error bounded and small</td><td>Exact on output rate</td><td>Exact on average rate, burst up to capacity</td></tr>
+        <tr><td>Memory per client</td><td>One counter</td><td>One timestamp per request in the window</td><td>Two counters</td><td>Queue depth (one slot per queued request)</td><td>Two numbers: token count and last-refill time</td></tr>
+        <tr><td>Burst handling</td><td>Allows a double-rate burst across the boundary</td><td>Rejects everything above the limit</td><td>Rejects, with a smoothed edge</td><td>Absorbs the burst by queueing it, adds latency</td><td>Permits a controlled burst up to capacity, then throttles</td></tr>
+        <tr><td>Output shape</td><td>Spiky</td><td>Spiky</td><td>Spiky</td><td>Perfectly smooth constant rate</td><td>Bursty but bounded</td></tr>
+        <tr><td>Implementation cost</td><td>Trivial — increment and expire</td><td>High — sorted set, trim on every call</td><td>Low — two counters plus arithmetic</td><td>Moderate — needs a real queue and a drain</td><td>Low — lazy refill, one atomic update</td></tr>
+        <tr><td>Reach for it when</td><td>Cheap, coarse protection is enough</td><td>The limit is contractual and must be exact</td><td>You want near-exactness at counter cost</td><td>A downstream needs a strictly constant feed rate</td><td>The general-purpose default for public APIs</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://en.wikipedia.org/wiki/Token_bucket" rel="noopener">Token bucket — Wikipedia (the algorithm and its traffic-shaping origins)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/requestratelimiter-factory.html" rel="noopener">RequestRateLimiter GatewayFilter factory — Spring Cloud Gateway reference</a></li>
+      <li>[Official] <a href="https://bucket4j.com/" rel="noopener">Bucket4j — token bucket rate limiting for the JVM (official site and documentation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-bucket4j" rel="noopener">Rate Limiting a Spring API Using Bucket4j — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YXkOdWBwqaA" rel="noopener">Rate Limiter System Design: token bucket, leaky bucket, scaling — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Distributed rate limiting: one limit across N instances</h3>
+    <p>Every algorithm above assumes one limiter holding one piece of state. Deploy it in-process and the limit silently multiplies: ten pods each permitting 100 requests per second permit 1000 at the provider, and autoscaling makes the effective limit a function of your current replica count — which is not a limit at all. This is the single most common follow-up in a "design a distributed rate limiter" interview, and the answer is always some position on a consistency-versus-latency spectrum.</p>
+    <p>The default answer is a <strong>shared store</strong>: Redis holding the counter or bucket, keyed by client. The correctness trap is doing it as read-modify-write from the application — <code>GET</code>, compare, <code>SET</code> — because two instances can read the same value concurrently and both decide there is room, so the limit leaks under exactly the concurrency you built it for. Use atomic server-side operations (<code>INCR</code> is atomic and does the whole job for fixed window) or, for anything with more logic — token refill, window weighting, conditional TTLs — put the whole decision in a <strong>Lua script</strong>, which Redis executes atomically as a single unit. GitHub's own limiter is a Lua script over a sharded, replicated Redis, precisely so that read and write cannot interleave.</p>
+    <p>Two alternatives trade accuracy for throughput. <strong>Sticky routing</strong> — hashing the client key at the load balancer so a given client always lands on the same instance — makes local in-memory state correct again with zero coordination, but it re-introduces hot spots and breaks the moment instances scale or restart. <strong>Local limiting with periodic reconciliation</strong> — each instance enforces its own share and asynchronously syncs counts every few hundred milliseconds — removes the per-request network hop entirely at the cost of briefly overshooting the limit; this is how limiters at CDN scale are built, and it is the honest answer when the limiter itself must handle millions of requests per second. State the trade explicitly in an interview: exact enforcement costs a network round trip on every request, and for a limiter that is often too expensive.</p>
+    <pre class="code-block" data-label="Lua"><code>-- Atomic fixed-window limiter as a Redis Lua script: count and TTL set together,
+-- executed as one unit so no other client can interleave a read between them.
+-- KEYS[1] = ratelimit:{client}:{window}   ARGV[1] = limit   ARGV[2] = window seconds
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+if count &gt; tonumber(ARGV[1]) then
+  return {0, redis.call('TTL', KEYS[1])}    -- denied, plus seconds until reset
+end
+return {1, tonumber(ARGV[1]) - count}       -- allowed, plus remaining quota</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/tutorials/howtos/ratelimiting/" rel="noopener">How to implement rate limiting with Redis — Redis tutorials</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/programmability/eval-intro/" rel="noopener">Scripting with Lua (EVAL) — Redis documentation on atomic server-side execution</a></li>
+      <li>[Official] <a href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/other_features/global_rate_limiting" rel="noopener">Global rate limiting — Envoy proxy architecture documentation</a></li>
+      <li>[Article] <a href="https://github.blog/engineering/infrastructure/how-we-scaled-github-api-sharded-replicated-rate-limiter-redis/" rel="noopener">How we scaled the GitHub API with a sharded, replicated rate limiter in Redis — The GitHub Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FU4WlwfS3G0" rel="noopener">System Design Interview: Rate Limiting, local and distributed — System Design Interview</a></li>
+    </ul>
+
+    <h3>What to key on: identity, tiered quotas and cost weighting</h3>
+    <p>The key you choose <em>is</em> the fairness policy. An <strong>API key or client id</strong> is the best key for machine traffic: it is stable, it maps to a contract, and it survives network changes. A <strong>user id</strong> is right for authenticated end-user traffic, because it follows the person across devices and networks. <strong>IP address</strong> is the only key available for unauthenticated traffic — login, sign-up, password reset — and it is genuinely useful there, but it is a poor fairness key on its own: behind corporate NAT, a university network, or carrier-grade NAT (CGNAT, which is how most mobile networks in India allocate addresses) thousands of unrelated users share one address, so a limit tuned for a person throttles a whole city. IPv6 flips the problem: a single subscriber may hold a huge address block and simply rotate. The usual compromise is a layered key — a strict per-account limit plus a looser per-IP limit as a backstop, and per-IP-prefix rather than per-address for IPv6.</p>
+    <p>Two refinements make quotas match reality. <strong>Tiering</strong>: free, paid and internal callers get different limits from the same policy engine, with the tier resolved from the authenticated principal — this is what AWS API Gateway usage plans and Stripe's per-mode limits do, and it turns the limiter into a product feature rather than only a defence. <strong>Cost weighting</strong>: not all requests are equal, so charge them unequally. A point lookup costs one token; a report export, a full-text search across a year of data, or an LLM completion costs many. GitHub's GraphQL API scores each query's cost before running it, which is the clean answer to the classic follow-up "how do you rate limit an endpoint where one request can be a thousand times more expensive than another?" — you stop counting requests and start counting work.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api" rel="noopener">Rate limits for the REST API — GitHub Docs (primary and secondary limits, points, headers)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/rate-limits" rel="noopener">Rate limits — Stripe API documentation (per-mode limits and how to handle them)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html" rel="noopener">Throttle API requests for better throughput — Amazon API Gateway developer guide (usage plans and per-key quotas)</a></li>
+      <li>[Official] <a href="https://developers.cloudflare.com/waf/rate-limiting-rules/best-practices/" rel="noopener">Rate limiting rules: best practices — Cloudflare Docs (choosing counting characteristics)</a></li>
+      <li>[Article] <a href="https://www.figma.com/blog/an-alternative-approach-to-rate-limiting/" rel="noopener">An alternative approach to rate limiting — Figma Engineering Blog</a></li>
+    </ul>
+
+    <h3>The client contract: 429, Retry-After and the RateLimit headers</h3>
+    <p>A limiter that just drops traffic teaches clients nothing, and an uninformed client retries immediately — converting your rejection into more load than the original request. The contract is what makes rate limiting cooperative. Reject with <strong><code>429 Too Many Requests</code></strong> (RFC 6585), never a bare connection reset and never <code>503</code>, which means something different and invites different retry behaviour. Include <strong><code>Retry-After</code></strong> with the number of seconds until capacity exists — your token bucket already computes this exactly — so a well-behaved client sleeps for precisely the right interval instead of guessing.</p>
+    <p>Better still, tell clients where they stand <em>before</em> they hit the wall. The IETF <code>RateLimit</code> header fields draft standardises what vendors have shipped for years in incompatible forms: the remaining quota, the limit, and when the window resets, returned on every response rather than only on rejections. A client that can see it has 5 calls left out of 5000 can slow itself down; a client that only learns on rejection cannot. Two production details: add jitter to any client-side retry so a thousand clients told to wait 30 seconds do not all return in the same millisecond, and make sure your <code>429</code> path is genuinely cheap — if rejecting costs a database lookup, a determined caller can exhaust you with requests you are refusing.</p>
+    <pre class="code-block" data-label="HTTP"><code>HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+RateLimit-Limit: 5000
+RateLimit-Remaining: 0
+RateLimit-Reset: 30
+Content-Type: application/problem+json
+
+{"type":"about:blank","title":"Too Many Requests",
+ "detail":"Quota of 5000 requests per hour exhausted for key acme-prod."}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/" rel="noopener">RateLimit header fields for HTTP — IETF HTTPAPI working group draft</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc6585" rel="noopener">RFC 6585: Additional HTTP Status Codes — the definition of 429 Too Many Requests</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/429" rel="noopener">429 Too Many Requests — MDN HTTP reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Retry-After" rel="noopener">Retry-After — MDN HTTP header reference</a></li>
+      <li>[Official] <a href="https://developer.konghq.com/plugins/rate-limiting/" rel="noopener">Rate Limiting plugin — Kong Gateway documentation (headers, policies, Redis backing)</a></li>
+    </ul>
+
+    <h3>Rate limiting, load shedding, backpressure and admission control</h3>
+    <p>These four are related and are routinely confused, so hold the distinction firmly. <strong>Rate limiting is a policy limit</strong>: a number you chose in advance, tied to an identity or a contract, enforced whether or not the system is currently under stress. <strong>Load shedding is a survival response</strong>: it looks at live signals — queue depth, latency, concurrency, CPU — and drops the least valuable work to stay alive, regardless of whose quota is intact. A service can be shedding load while nobody has exceeded their rate limit, and it can be rate limiting a client while running at 5% utilisation. The Amazon Builders' Library makes the key point that shedding must be paired with a fast rejection path and with prioritisation, so that health checks and high-criticality traffic survive when everything else is dropped.</p>
+    <p><strong>Backpressure</strong> is the third idea: rather than dropping work, propagate the "slow down" signal upstream so the producer stops producing — bounded queues that block, TCP windows, reactive-stream request counts, consumer lag driving a slower fetch. It preserves work instead of discarding it, but it only functions when the producer can actually be slowed, which is why it fits internal pipelines better than public APIs where the "producer" is the internet. <strong>Admission control</strong> is the umbrella: the decision, made at entry, about which work to let in at all — with rate limits, shedding thresholds and concurrency limits as its instruments. On the client side, the counterpart to all of this is the <strong>circuit breaker</strong>, which stops a caller from sending requests it can predict will fail; see the <a href="../microservices/08-resilience.html" rel="noopener">Microservices resilience module</a> for the state machine, retry budgets and the jitter that keeps backoff from synchronising. A complete design mentions both halves: the server limits and sheds, the client backs off and breaks the circuit.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/handling-overload/" rel="noopener">Handling Overload — Google SRE Book (criticality, client-side throttling, adaptive limits)</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/addressing-cascading-failures/" rel="noopener">Addressing Cascading Failures — Google SRE Book</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/" rel="noopener">Using load shedding to avoid overload — Amazon Builders' Library</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/rate-limiting-pattern" rel="noopener">Rate Limiting pattern — Azure Architecture Center (the client-side side of the contract)</a></li>
+      <li>[Article] <a href="https://ferd.ca/handling-overload.html" rel="noopener">Handling Overload — Fred Hébert (backpressure versus load shedding, worked through)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-caching.html">← Caching Strategy</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="06-database-scaling.html">Database Scaling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Rate limiting is one of the highest-frequency system design rounds in Indian product and service companies — it is short enough to fit a 45-minute slot and deep enough to separate candidates, so the algorithm comparison and the distributed follow-up come up again and again:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is rate limiting and why does a service need it?</summary>
+      <div class="answer"><p>A policy that caps how many requests a given client may make in a given period, enforced before the work starts. Four reasons: preventing abuse (scraping, credential stuffing, spam), controlling cost, sharing capacity fairly between tenants, and above all protecting the service from overload — past its saturation point a service degrades non-linearly, and rejecting the marginal request cheaply keeps it in the region where it still works.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the common rate limiting algorithms.</summary>
+      <div class="answer"><p>Fixed window counter, sliding window log, sliding window counter, leaky bucket and token bucket. Fixed window is cheapest and least accurate; sliding window log is exact but memory-hungry; sliding window counter approximates the log with two counters; leaky bucket smooths output to a constant rate by queueing; token bucket allows controlled bursts and is the usual default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which HTTP status code do you return, and what do you send with it?</summary>
+      <div class="answer"><p><code>429 Too Many Requests</code>, defined in RFC 6585. Send <code>Retry-After</code> with the seconds until capacity exists, and ideally the <code>RateLimit-Limit</code>, <code>RateLimit-Remaining</code> and <code>RateLimit-Reset</code> fields from the IETF draft on every response so clients can self-throttle before they get rejected. Do not use <code>503</code> — it means the server is unavailable, which is a different condition and triggers different client retry logic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where in the architecture would you place the rate limiter?</summary>
+      <div class="answer"><p>Usually all three layers, narrowing as you go in. At the edge or WAF to absorb volumetric abuse before it costs origin capacity, though it only knows IP and URL. At the API gateway, where the authenticated principal is known, so per-key quotas and plan tiers live there and one policy covers every service behind it. Per-service or per-endpoint for a specific scarce resource — a report generator, a third-party API with a contractual cap — that the gateway knows nothing about.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the fixed window boundary problem with a concrete example.</summary>
+      <div class="answer"><p>With a limit of 100 requests per minute, a client sends 100 in the last second of one window and 100 in the first second of the next. Each window is individually legal, but the server absorbed 200 requests in two seconds — double the intended rate over the sliding minute that straddles the boundary. It is not only adversarial: clients scheduled on minute boundaries produce it accidentally and synchronise with each other. Fix it with a sliding window log (exact) or a sliding window counter (weighted approximation).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Token bucket versus leaky bucket — when would you pick each?</summary>
+      <div class="answer"><p>Token bucket refills tokens at a steady rate up to a capacity, so an idle client can spend a burst and then settles to the sustained rate; excess requests are rejected immediately. Leaky bucket queues arrivals and drains them at a fixed rate, so the output is perfectly smooth and bursts become latency rather than errors. Pick token bucket for public APIs, where legitimate clients are naturally bursty and fast rejection is kinder than unbounded queueing. Pick leaky bucket when a downstream requires a strictly constant feed rate — a payment provider's contracted rate, a write-limited database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does the sliding window counter work, and how accurate is it?</summary>
+      <div class="answer"><p>Keep only the previous window's count and the current window's count, and weight the previous one by the fraction of it still inside the trailing window: <code>estimate = prev × overlap + current</code>. With a limit of 100 per minute, 30 seconds in, a previous count of 80 and a current count of 40, the estimate is 80. It assumes the previous window's traffic was evenly distributed, so it can be slightly off in either direction, but the error is bounded and small — Cloudflare reported well under 1% of requests misclassified at their scale — for two integers per client instead of one timestamp per request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is rate limiting by IP address alone a bad idea?</summary>
+      <div class="answer"><p>Because IP is not identity. Behind corporate NAT, campus networks and especially carrier-grade NAT — how most Indian mobile networks allocate addresses — thousands of unrelated users share one public IP, so a per-person limit throttles a whole population. In the other direction, IPv6 gives a single subscriber a large block to rotate through, and attackers rent proxy pools. Use IP as a backstop layer for unauthenticated endpoints (login, sign-up, OTP), key the real limit on API key or user id, and limit per IPv6 prefix rather than per address.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you rate limit when one request can be far more expensive than another?</summary>
+      <div class="answer"><p>Stop counting requests and start counting work: assign each endpoint a token cost and charge that many tokens, which token bucket supports natively. A point lookup costs one, a search or export or LLM call costs many. For query languages where cost is not known from the route, score the request before executing it — GitHub's GraphQL API computes a query's point cost up front and rejects it against a points budget. Report the cost in the response headers so clients can budget too.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design a distributed rate limiter for an API served by fifty instances.</summary>
+      <div class="answer"><p>Start by naming the problem: per-instance state means the effective limit is the configured limit multiplied by the replica count, and autoscaling makes it non-deterministic. Then walk the options. Shared store — Redis holding a token bucket or window counter per key, with the whole decision in a Lua script so it is atomic; simple, exact, but a network hop on every request and Redis becomes an availability dependency, so decide the fail-open versus fail-closed policy explicitly. Sticky routing — hash the client key at the load balancer so a client always reaches the same limiter; zero coordination, but hot spots and breakage on scaling events. Local limiting with asynchronous reconciliation — each instance enforces a share and gossips counts every few hundred milliseconds; highest throughput, brief overshoot, the right answer at CDN scale. Finish with the response contract, the key design (API key with an IP backstop), tiering and the observability you would add.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What race condition breaks a naive Redis-backed limiter, and how do you fix it?</summary>
+      <div class="answer"><p>Read-modify-write from the application: two instances both <code>GET</code> the counter, both see room, both <code>SET</code>, and the limit leaks under exactly the concurrency it exists to control. Similarly, <code>INCR</code> followed by a separate <code>EXPIRE</code> can leave a key with no TTL if the process dies in between, throttling that client permanently. Fix by making the whole decision atomic: use a single atomic command where one suffices (<code>INCR</code>), or move the entire read-compute-write into a Lua script, which Redis runs as one indivisible unit. Redis transactions or <code>WATCH</code> with optimistic retry also work but are clumsier for this shape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Redis rate limiter cluster goes down. What should the service do?</summary>
+      <div class="answer"><p>A deliberate, documented choice. Fail open — admit everything — keeps the product working but removes the protection at the moment overload is most likely, so it is only safe if a separate load-shedding layer still guards the service. Fail closed — reject everything — protects the backend but converts a limiter outage into a total outage. The usual production answer is fail open on the shared limiter while falling back to a conservative per-instance local limit, so you keep serving with a coarser guarantee, plus a circuit breaker on the Redis call so a slow store does not add its latency to every request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Distinguish rate limiting from load shedding, backpressure and admission control.</summary>
+      <div class="answer"><p>Rate limiting is a policy limit chosen in advance and tied to an identity or contract; it applies whether or not the system is stressed. Load shedding is a survival response driven by live signals — queue depth, latency, concurrency — that drops the least valuable work regardless of whose quota is intact, and needs prioritisation so critical traffic survives. Backpressure propagates a slow-down signal to the producer instead of discarding work, which preserves the work but only functions when the producer can be slowed, so it suits internal pipelines more than public APIs. Admission control is the umbrella term for deciding at entry what gets in, with all three as instruments. On the client side the counterpart is the circuit breaker plus jittered backoff.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A rate limiter is deployed and abuse still gets through, while legitimate users get throttled. Diagnose.</summary>
+      <div class="answer"><p>Almost always a keying problem. Attackers rotate IPs or unauthenticated identifiers, so a limit keyed on something cheap to change is not a limit; legitimate users share NAT addresses, so the same key over-throttles them. Check whether the limit is keyed on the strongest identity available at that endpoint, whether unauthenticated endpoints have a separate, tighter policy, and whether limits are per-endpoint rather than one global number. Then check the window: a generous fixed window lets boundary bursts through. Finally check enforcement scope — a per-instance limiter behind a scaled deployment is enforcing many times the configured number.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What would you monitor to know your rate limiter is set correctly?</summary>
+      <div class="answer"><p>The rejection rate broken down by key, tier and endpoint — a client sitting permanently at its ceiling is either abusive or under-provisioned, and you cannot tell without the breakdown. Track the ratio of rejected to admitted traffic over time, the distribution of per-key consumption (a long tail is healthy, a cliff is a mis-set limit), the latency and error rate of the limiter's own store, and whether rejections correlate with backend saturation — if you are shedding while the backend is idle, the limit is too tight. Alert on a sudden change in rejection rate in either direction, and always ship the limiter in observe-only mode first so you can see what it would have blocked before it blocks anything.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.rl.algorithms — Token bucket, leaky bucket, fixed and sliding window, comparison table and token bucket implementation sketch</li>
+      <li>sd.rl.distributed — Distributed limiting across instances, shared store and Lua atomicity, client fairness and tiered quotas, 429 with Retry-After and RateLimit headers, backpressure and load shedding</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

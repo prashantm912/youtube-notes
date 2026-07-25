@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Classic Designs B: worked walkthroughs of the news feed, web crawler, proximity service, cloud file storage, e-commerce checkout and inventory, payment flow with idempotency, and a video platform — requirements, scale assumptions, data models, and the tradeoffs interviewers probe, with verified resources and interview questions.">
+  <title>Classic Designs B — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Classic Designs B</h1>
+  <p class="standfirst">Seven more designs that show up by name in interviews — and, underneath them, four moves that keep recurring: precompute versus compute-on-read, reserve-then-confirm for a contended resource, idempotency for anything touching money, and derived stores kept honest from a log.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">System Design track</a> → Classic Designs B</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 12 covered the designs whose difficulty is mostly about scale — shorteners, key-value stores, chat, autocomplete. This module covers the ones whose difficulty is about <em>asymmetry and contention</em>: a feed where one writer has ninety million readers, a crawler that must be polite to strangers, a checkout where two customers want the last unit, a payment that must never happen twice.</p>
+    <p>Each design below is written the way you should deliver it in a room: requirements and scale assumptions first so the numbers justify the architecture, then the two or three decisions that actually shape the system, a sketch of the data model, and finally the tradeoff the interviewer is waiting to push on. Read them for the transferable judgement, not the diagrams — the same four moves solve all seven.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>News feed: fan-out on write, fan-out on read, and the celebrity that breaks both</h3>
+    <p>Requirements: a user opens the app and sees a reverse-chronological or ranked list of posts from the accounts they follow, refreshed in near real time, infinitely scrollable. Scale assumptions worth stating out loud: roughly 300 million daily active users, an average of 300 follows each, around 5 posts per user per day, and a read-to-write ratio somewhere between one hundred and one thousand to one. Those two numbers — a huge read multiple and a long tail of follower counts — decide everything that follows.</p>
+    <p>The core decision is <em>when</em> the feed is materialised. <strong>Fan-out on write</strong> (push) appends the new post id into a precomputed feed list for every follower at publish time, so a read is one lookup of an already-sorted list — fast, cacheable, and the reason feeds feel instant. <strong>Fan-out on read</strong> (pull) stores the post once and, at read time, queries the posts of everyone you follow and merges them — cheap writes, expensive and unpredictable reads. Push wastes enormous work on inactive followers; pull collapses on users who follow thousands of accounts.</p>
+    <table>
+      <caption>Fan-out models compared</caption>
+      <thead><tr><th>Model</th><th>Write cost</th><th>Read cost</th><th>Fails when</th></tr></thead>
+      <tbody>
+        <tr><td>Fan-out on write (push)</td><td>O(followers) per post</td><td>One list read</td><td>A writer has millions of followers, or followers are inactive</td></tr>
+        <tr><td>Fan-out on read (pull)</td><td>One insert</td><td>O(followees) scatter-gather + merge</td><td>A reader follows thousands of accounts; tail latency explodes</td></tr>
+        <tr><td>Hybrid</td><td>Push for ordinary accounts</td><td>One list read + small pull merge</td><td>Rarely — but you now maintain two code paths and a threshold</td></tr>
+      </tbody>
+    </table>
+    <p>The <strong>celebrity problem</strong> is what makes this a design question rather than a lookup. A push to ninety million follower lists is tens of millions of writes for a single tap, it takes minutes to drain, and it makes the publish path's latency a function of the author's popularity. The standard resolution is hybrid: push for the ordinary long tail, and for accounts above a follower threshold write nothing at all — at read time, merge the reader's precomputed feed with a small pull over the handful of celebrities they follow. The merge is cheap because nobody follows thousands of celebrities, and the threshold becomes a tunable operational knob rather than a hard architectural boundary.</p>
+    <p>Two supporting decisions round it out. <strong>Ranking</strong> turns the merged candidate set into an ordered page: a candidate-generation stage produces a few hundred posts, then a scoring model ranks on engagement-prediction features, recency decay, affinity to the author and content type — which is precisely why the feed cannot be a pure database sort. <strong>Pagination</strong> must be cursor-based, never offset-based: an offset over a list that grows while the reader scrolls silently duplicates and skips items, so encode an opaque cursor of (score or timestamp, post id) and ask for items strictly after it. For the <strong>cache</strong>, store only ids in a per-user sorted structure capped at roughly 500–1000 entries (nobody scrolls further; anything deeper is served from the store), keep post bodies and author profiles in separate shared caches so a popular post is stored once rather than once per follower, and hydrate ids to content on read.</p>
+    <pre class="code-block" data-label="Data model"><code>posts(post_id PK, author_id, body_ref, created_at, media_ids)
+follows(follower_id, followee_id, created_at)      # sharded by follower_id
+follower_counts(user_id, count, is_hot BOOL)       # drives the push/pull switch
+
+# Redis, per reader: capped list of ids only, never post bodies
+ZADD feed:{user_id} &lt;score&gt; &lt;post_id&gt;   +  ZREMRANGEBYRANK feed:{user_id} 0 -1001
+
+# Cursor pagination: opaque, stable under concurrent inserts
+GET /feed?limit=20&amp;cursor=eyJzIjoxNzUzNDQwMDAwLCJpZCI6Ijk5MTIifQ
+  -&gt; decode to (score, post_id); return items strictly &lt; that pair; emit next_cursor</code></pre>
+    <p><em>What the interviewer probes:</em> whether you can name the threshold at which push stops being viable and describe the hybrid <em>read</em> path in detail — most candidates describe the write path and stop. Expect follow-ups on what happens to a user's feed when they follow a new account (backfill by pull, or leave it to accrue?), on unfollow and deletion (tombstone and filter at hydration, rather than rewriting millions of lists), and on the hot-key problem when a single celebrity post is hydrated by a million readers in the same second.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://engineering.fb.com/2021/01/26/ml-applications/news-feed-ranking/" rel="noopener">How machine learning powers Facebook's News Feed ranking algorithm — Meta Engineering</a></li>
+      <li>[Official] <a href="https://blog.x.com/engineering/en_us/topics/infrastructure/2017/the-infrastructure-behind-twitter-scale" rel="noopener">The infrastructure behind Twitter: scale — X (Twitter) Engineering</a></li>
+      <li>[Official] <a href="https://slack.engineering/evolving-api-pagination-at-slack/" rel="noopener">Evolving API Pagination at Slack — Slack Engineering (why cursors beat offsets)</a></li>
+      <li>[Article] <a href="https://bytebytego.com/courses/system-design-interview/design-a-news-feed-system" rel="noopener">Design a News Feed System — ByteByteGo (System Design Interview chapter)</a></li>
+      <li>[Article] <a href="https://highscalability.com/design-decisions-for-scaling-your-high-traffic-feeds/" rel="noopener">Design Decisions for Scaling Your High Traffic Feeds — High Scalability</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=qogwP78LzAk" rel="noopener">Design the Facebook/Twitter News Feed — Jordan has no life</a></li>
+    </ul>
+
+    <h3>Web crawler: frontier, politeness, deduplication and the traps</h3>
+    <p>Requirements: fetch a large slice of the public web, keep it fresh, respect publishers, and never fetch the same content twice. Scale assumptions: a billion pages a month is roughly 400 pages per second sustained; at an average compressed page of 100 KB that is around 100 TB of raw content per month before extraction. State the freshness target separately from the coverage target — they pull the design in different directions.</p>
+    <p>The heart of the system is the <strong>URL frontier</strong>, which is not a queue but a scheduler with two independent responsibilities. Priority decides <em>what</em> to crawl next (PageRank-like importance, change rate, depth from a seed); politeness decides <em>when</em> it may be fetched. The classic structure is two tiers of queues: front queues that hold URLs bucketed by priority, and back queues where each queue is dedicated to exactly one host, with a heap of (next-allowed-fetch-time, back-queue-id) entries in front. A worker pops the earliest-eligible host, fetches one URL, and pushes the host back with a new timestamp derived from that host's own crawl delay — usually a multiple of the observed response time, so a slow site is automatically crawled more slowly. Because a host maps to exactly one back queue, per-domain concurrency is one by construction and no distributed lock is required.</p>
+    <p><strong>Politeness</strong> also means honouring <code>robots.txt</code>, now standardised as RFC 9309: fetch it per host, cache it with a TTL, apply the longest-match rule for <code>Allow</code>/<code>Disallow</code>, honour <code>Crawl-delay</code> where offered, and treat a 5xx on <code>robots.txt</code> as "do not crawl" rather than "crawl freely". Send a real, identifying user agent with a contact URL — the operational difference between a crawler and an attack is that operators can find you.</p>
+    <p><strong>Deduplication happens twice.</strong> Before fetching, normalise the URL — lowercase the scheme and host, strip the default port and the fragment, sort or drop tracking query parameters, resolve dot segments — and test membership against a Bloom filter in front of the seen-URL store, since an exact set of tens of billions of URLs will not fit in memory. After fetching, fingerprint the <em>content</em>: an exact hash catches byte-identical mirrors, but the real problem is near-duplicates (same article with a different ad slot or session id), which is what simhash was designed for — a locality-sensitive fingerprint where documents differing in a few tokens land within a small Hamming distance, so "near-duplicate" becomes an index lookup rather than a pairwise comparison.</p>
+    <p><strong>Traps</strong> are the failure mode that ruins naive crawlers: calendars that generate an infinite series of "next month" links, session ids that make every URL unique, faceted-search pages whose filter combinations are combinatorial, and deliberately generated spider traps. Defences are budget-based rather than clever — a cap on URLs and depth per host, a cap on distinct URLs per path prefix, detection of high-similarity output from one host, and a manual denylist. For <strong>distributed coordination</strong>, shard the frontier by hash of the host so all URLs for a domain land on one crawler and politeness stays local; keep the shard map in a coordination service so the assignment survives node loss. For <strong>re-crawl</strong>, keep a per-URL change history and set an adaptive interval — a news front page every few minutes, a static documentation page every few weeks — validated cheaply with conditional GETs using <code>If-Modified-Since</code> and <code>ETag</code>.</p>
+    <pre class="code-block" data-label="Data model"><code>frontier_front[p]        # p priority buckets, FIFO
+frontier_back[b]         # one queue per host; host -&gt; b is a stable mapping
+host_heap                # min-heap of (next_fetch_epoch_seconds, b)
+robots_cache(host, rules_blob, fetched_at, ttl)
+
+url_seen                 # Bloom filter in memory + durable KV of url_hash
+doc_index(doc_id, url, http_status, content_sha256, simhash64, fetched_at)
+simhash_buckets(band_key, doc_id)   # banded lookup for near-duplicate probing
+recrawl(url_hash, last_modified, etag, observed_change_rate, next_due_at)</code></pre>
+    <p><em>What the interviewer probes:</em> whether politeness is structural or bolted on. If your answer is "we rate-limit per domain with a shared counter", expect to be asked what happens when that counter's store is unavailable and 500 workers all decide the host is free. The strong answer makes one host live in one queue on one shard so the invariant cannot be violated. The second probe is the dedup pair — candidates almost always give URL dedup and forget content dedup, which is where most of the waste actually is.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9309.html" rel="noopener">RFC 9309: Robots Exclusion Protocol — IETF standard</a></li>
+      <li>[Official] <a href="https://developers.google.com/crawling/docs/robots-txt/robots-txt-spec" rel="noopener">robots.txt specification — Google Search Central</a></li>
+      <li>[Official] <a href="https://research.google/pubs/detecting-near-duplicates-for-web-crawling/" rel="noopener">Detecting Near-Duplicates for Web Crawling — Google Research (the simhash paper)</a></li>
+      <li>[Article] <a href="https://commoncrawl.org/" rel="noopener">Common Crawl — an openly published web-scale crawl and its architecture notes</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BKZxZwUgL3Y" rel="noopener">System Design: distributed web crawler to crawl billions of web pages — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>Proximity and location service: static places, then moving vehicles</h3>
+    <p>Requirements come in two flavours and you must separate them early. <strong>Static proximity</strong> ("restaurants within 5 km, ranked") is read-heavy over a slowly changing set of a few hundred million places. <strong>Dynamic proximity</strong> ("drivers near this rider right now") is write-heavy: a million active drivers reporting every 4 seconds is roughly 250,000 location writes per second, against a much smaller number of matching reads. Same query shape, opposite amplification, different designs.</p>
+    <p>The geo-indexing decision — covered in depth in <a href="11-storage-systems.html">module 11 on storage systems</a> — is the first real choice. A <strong>geohash</strong> interleaves latitude and longitude bits into a base-32 string, so a shared prefix means spatial proximity and a plain B-tree prefix scan becomes a spatial query, which is why it works on any ordinary database. A <strong>quadtree</strong> subdivides only where density demands it, so Mumbai gets deep cells and the Arabian Sea gets one, but it is an in-memory structure someone has to rebuild and shard. <strong>S2</strong> projects the sphere onto a cube and uses a Hilbert curve, giving cells of far more uniform area than geohash and a clean cell-covering API for arbitrary shapes; <strong>H3</strong> uses hexagons, whose equal distance to all six neighbours makes ring expansion and demand-surface smoothing natural — which is why it came out of a ride-hailing marketplace.</p>
+    <p><strong>Search-radius expansion</strong> is the algorithm on top of whichever index you pick: compute the cells covering the requested radius, query the reader's cell plus its neighbours (geohash needs all eight, because a point 10 metres away can sit across a cell boundary with a completely different prefix), and if fewer than <em>k</em> results come back, step to a coarser precision and repeat. Then filter by true haversine distance and rank — the index is a candidate generator, never the final answer. Cache aggressively per cell for static places; a cell's contents change rarely, so cell-keyed results have excellent hit rates.</p>
+    <p>For moving objects, the <strong>update rate</strong> is the whole problem. Writing every ping through a durable, indexed store at 250,000 writes per second is both expensive and pointless, because a location is worthless four seconds later. The standard answer is to treat current location as ephemeral in-memory state — a Redis geo set or an equivalent partitioned by cell — while the durable trip history goes to a separate append-only store for billing and analytics. Reduce the write load at the source too: send updates on movement rather than on a fixed timer, back off when a vehicle is stationary, and batch several pings per request. Recognise the amplification explicitly: static proximity is read-amplified and answered with precomputation and caching; dynamic proximity is write-amplified and answered by shrinking, batching and de-durabilising the writes.</p>
+    <pre class="code-block" data-label="Data model"><code>place(place_id PK, name, lat, lng, cell_l12, cell_l10, cell_l8, category)
+INDEX (cell_l10, category)          # coarse cell + facet = candidate generation
+
+# Static: candidates from the cell and its ring, then exact distance filter
+cells = cover(center, radius_m, level)          # S2/H3 covering, or geohash + 8 neighbours
+candidates = union(place_by_cell[c] for c in cells)
+results = rank(p for p in candidates if haversine(p, center) &lt;= radius_m)
+
+# Dynamic: current position ephemeral, history durable and separate
+GEOADD drivers:{cell} &lt;lng&gt; &lt;lat&gt; &lt;driver_id&gt;        # TTL'd, in memory
+GEOSEARCH drivers:{cell} FROMLONLAT ... BYRADIUS 3 km ASC COUNT 20
+trip_pings(trip_id, driver_id, ts, lat, lng)          # append-only, not indexed for search</code></pre>
+    <p><em>What the interviewer probes:</em> the boundary case and the write path. Expect "a driver is 50 metres away but in the adjacent cell — does your query find them?" (only if you query neighbours, which is the point of ring expansion) and "what if a cell contains 40,000 drivers at a stadium?" (cap and sample, or use a finer level adaptively). The senior-level probe is whether you noticed that current location does not need durability at all, and separated it from the trip history that does.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://s2geometry.io/" rel="noopener">S2 Geometry — official documentation (cells, Hilbert curve, coverings)</a></li>
+      <li>[Official] <a href="https://h3geo.org/docs/" rel="noopener">H3 documentation — hexagonal hierarchical geospatial indexing system</a></li>
+      <li>[Official] <a href="https://github.com/uber/h3" rel="noopener">uber/h3 — GitHub (the library, its grid model and resolution table)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/geosearch/" rel="noopener">GEOSEARCH — Redis command reference (radius and box queries over a geo set)</a></li>
+      <li>[Article] <a href="https://highscalability.com/designing-uber/" rel="noopener">Designing Uber — High Scalability (dispatch, supply and demand services)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kzRb1KPhrjs" rel="noopener">Design a Proximity Service — Yelp design, QuadTree, GeoHash — System Design Pal</a></li>
+    </ul>
+
+    <h3>Cloud file storage: chunking, dedup, delta sync and conflicts</h3>
+    <p>Requirements: files of arbitrary size sync across a user's devices and are shareable with others, offline edits reconcile on reconnect, and history is recoverable. Scale assumptions: 100 million users, 50 GB average stored, a heavy skew toward reads and toward small metadata operations — most traffic is "has anything changed?" rather than bytes. The number that drives the architecture is that a large fraction of stored bytes are duplicates of bytes some other user already stored.</p>
+    <p>The decision that makes everything else possible is <strong>splitting the metadata service from the block store</strong>. The metadata service is a transactional database holding the namespace — files, folders, versions, sharing, and the ordered list of block hashes that constitutes each file version. The block store holds immutable, <strong>content-addressed</strong> chunks keyed by the hash of their bytes, typically 4 MB, and knows nothing about files or users. Content addressing buys three things at once: <em>deduplication</em> (identical chunks are stored once, globally or per account), <em>integrity</em> (the key is the checksum, so corruption is detectable by construction), and <em>immutability</em> (a chunk is never updated, only referenced or garbage-collected, so it caches and replicates trivially). Clients upload chunks directly to the block store, so the metadata service never carries file bytes.</p>
+    <p><strong>Delta sync</strong> follows from chunking: to save an edited 2 GB file, the client re-chunks, compares the new hash list to the old, and uploads only chunks the server does not already have. Use content-defined chunking (a rolling hash choosing boundaries by content rather than fixed offsets) if inserts in the middle of a file must not reshuffle every subsequent boundary. On the wire, the client keeps a long-poll or notification channel open for cheap change detection and only then pulls the changed metadata — polling a full listing per device per minute is what kills naive designs. <strong>Sharing and permissions</strong> live entirely in metadata: an access-control entry binds a principal (user or group or link token) to a namespace subtree with a role, and effective permission is computed by walking to the nearest ancestor that grants one. Never encode permission in the block store; blocks are shared across accounts by design, so a leaked chunk hash must not be an access grant — issue short-lived signed URLs instead.</p>
+    <p><strong>Conflict resolution</strong> is where honesty matters. Two devices editing offline produce two divergent versions of the same file, and for opaque binary content there is no correct automatic merge. The pragmatic answer used in production is not last-write-wins — which silently destroys work — but conflict materialisation: keep both, rename one to a conflicted copy carrying the device and timestamp, and let the human decide. Optimistic concurrency on the metadata row (compare-and-set on a version or generation number) turns the race into a detectable event rather than a lost update, and a per-namespace monotonically increasing cursor lets each device replay exactly the changes it has not seen.</p>
+    <pre class="code-block" data-label="Data model"><code>file(file_id PK, namespace_id, path, current_version, is_deleted)
+file_version(file_id, version, size, block_list[], created_by_device, created_at)
+block(block_hash PK, size, storage_locator, refcount)      # content-addressed, immutable
+device_cursor(device_id, namespace_id, last_seen_seq)      # replay changes since seq
+acl(namespace_id, subtree_path, principal_id, role)        # permissions live in metadata only
+
+# Save: client re-chunks, asks which hashes are missing, uploads only those
+POST /blocks/missing  {"hashes": ["a1..","b2..","c3.."]}  -&gt; ["b2.."]
+PUT  /blocks/b2..     &lt;4 MB body, direct to block store via signed URL&gt;
+POST /files/{id}/commit {"version_from": 41, "blocks": [...]}   # CAS on version_from</code></pre>
+    <p><em>What the interviewer probes:</em> whether dedup is per-user or global, and whether you can articulate why global dedup is a privacy and security question rather than only a storage saving — a client-side "do you already have this hash?" probe leaks whether some other user stored a given file. Also expect the conflict question in its sharpest form ("two offline devices edited the same spreadsheet; what does the user see?"), where the only strong answer names conflicted copies and explains why merging opaque bytes is not on the table.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://dropbox.tech/infrastructure/streaming-file-synchronization" rel="noopener">Streaming File Synchronization — Dropbox Tech (chunking and delta sync in production)</a></li>
+      <li>[Official] <a href="https://dropbox.tech/infrastructure/rewriting-the-heart-of-our-sync-engine" rel="noopener">Rewriting the heart of our sync engine — Dropbox Tech (cursors, conflicts, correctness)</a></li>
+      <li>[Official] <a href="https://dropbox.tech/infrastructure/inside-the-magic-pocket" rel="noopener">Inside the Magic Pocket — Dropbox Tech (the content-addressed block store)</a></li>
+      <li>[Article] <a href="https://rsync.samba.org/tech_report/" rel="noopener">The rsync algorithm — Tridgell and Mackerras technical report (rolling hash and delta transfer)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U0xTu6E2CT8" rel="noopener">Dropbox / Google Drive system design — file share and upload — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>E-commerce checkout and inventory: the oversell problem</h3>
+    <p>Requirements: browse a catalogue, add to cart, check out, pay, and receive an order — with the hard constraint that you never sell the same unit twice. Scale assumptions: a catalogue of tens of millions of SKUs, ordinary traffic in the low thousands of requests per second, and a flash-sale peak two or three orders of magnitude higher concentrated on a handful of SKUs. That last sentence is the design: the system is easy at average load and hard on one row.</p>
+    <p><strong>Oversell is the core difficulty</strong> because "check availability, then decrement" is a read-then-write race. Two requests both read 1 remaining, both decide it is available, both decrement, and you have sold two units of one. There are three defensible mechanisms and you should be able to compare them rather than recite one. <em>Pessimistic locking</em> (<code>SELECT ... FOR UPDATE</code> on the stock row) is correct and simple, but serialises every buyer of a hot SKU behind one row lock — fine for a normal SKU, a disaster for a drop. <em>Optimistic concurrency</em> — a conditional update such as <code>UPDATE stock SET available = available - 1 WHERE sku = ? AND available &gt;= 1</code>, checking the affected-row count — is a single atomic statement with no held lock, and losers simply retry or are told it sold out; this is the default answer. <em>Reservation with expiry</em> layers on top: at checkout, move stock from <code>available</code> to <code>reserved</code> with a hold that expires in ten or fifteen minutes, so the unit is neither sold nor available while the customer types their card details. Reservations are what make a multi-step checkout honest, and their expiry sweeper (or TTL) is what stops abandoned carts from permanently consuming inventory.</p>
+    <p>At flash-sale scale, add a fast counter in front of the database: decrement an atomic counter in Redis to admit exactly N winners, and only admitted requests touch the durable stock row — the database then handles hundreds of writes instead of hundreds of thousands, and the counter is a load shedder rather than the source of truth. Keep the <strong>cart</strong> separate from inventory: a cart is a per-user document (durable for logged-in users, cookie or Redis-backed with a TTL for guests) that holds intent and does <em>not</em> reserve anything — reserving at add-to-cart is how sites become permanently "out of stock" while nobody buys anything. Price and availability are therefore re-validated at checkout, not trusted from the cart.</p>
+    <p>Checkout spans three services — order, payment, inventory — and no distributed transaction is available across them, so it is a <strong>saga</strong> (see the <a href="../microservices/09-distributed-data.html">Microservices distributed-data module</a> for the pattern in full). Order is created in a pending state, inventory is reserved, payment is authorised, then inventory is committed and the order confirmed; any failure triggers the compensations in reverse — release the reservation, void or refund the authorisation, cancel the order. Two details separate a working saga from a whiteboard one: each step must be idempotent, because the orchestrator will retry after ambiguous timeouts, and each step's outcome must be published through a transactional outbox so the local state change and the event that announces it cannot diverge.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Optimistic decrement: one atomic statement, no held lock. Zero rows = sold out.
+UPDATE stock SET available = available - :qty, reserved = reserved + :qty
+ WHERE sku = :sku AND available &gt;= :qty;
+
+-- Reservation with expiry: the hold that makes multi-step checkout honest
+INSERT INTO reservation(reservation_id, sku, qty, order_id, expires_at, state)
+VALUES (:rid, :sku, :qty, :order_id, now() + interval '15 minutes', 'HELD');
+
+-- Sweeper (or TTL) returns abandoned holds to the pool
+UPDATE stock s SET available = available + r.qty, reserved = reserved - r.qty
+  FROM reservation r
+ WHERE r.state = 'HELD' AND r.expires_at &lt; now() AND r.sku = s.sku;</code></pre>
+    <p><em>What the interviewer probes:</em> "two customers click buy on the last unit at the same millisecond — walk me through it." The answer must name the atomic operation and what the loser sees. Follow-ups: what happens if payment succeeds but the inventory commit fails (the reservation is your evidence; commit is retried, and the compensation is a refund, not a silent drop); what happens if the reservation expires while the payment provider is still deciding (extend the hold on authorisation, or re-acquire before capture); and how you keep an eventually-consistent read replica from showing stock that is already reserved.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/saga" rel="noopener">Saga design pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/scheduler-agent-supervisor" rel="noopener">Scheduler Agent Supervisor pattern — Azure Architecture Center (recovering half-finished checkouts)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/saga.html" rel="noopener">Pattern: Saga — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional outbox — microservices.io</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/saga-orchestration-outbox/" rel="noopener">Saga Orchestration for Microservices Using the Outbox Pattern — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uH163go3pvQ" rel="noopener">System Design: Inventory Management (Amazon interview question) — System Design Fight Club</a></li>
+    </ul>
+
+    <h3>Payment flow: idempotency end to end, intent then capture, reconciliation</h3>
+    <p>Requirements: charge a customer exactly once for an order, survive network failures and client retries, support authorisation now and capture later, handle refunds, and produce an audit trail an accountant can defend. Scale assumptions matter less here than correctness assumptions: any request may be duplicated, any response may be lost, any webhook may arrive twice or out of order, and the payment provider — not your database — is the ultimate source of truth about whether money moved.</p>
+    <p>The <strong>double-charge scenarios</strong> are worth enumerating, because each needs a different defence. The user double-clicks pay. The mobile client times out and the app retries automatically. Your service retries a call to the provider after a timeout, not knowing whether the first attempt reached them. A queue redelivers a payment message after a consumer crash between processing and acknowledging. A webhook is redelivered by the provider. Only the first is solved by disabling a button; the rest are solved by <strong>idempotency keys applied at every hop</strong>. The client generates a key per logical payment attempt (a UUID, bound to the order, not regenerated on retry) and sends it in a header; your service stores it in a table with a unique constraint together with a fingerprint of the request and, once complete, the saved response. A repeat with the same key and the same fingerprint returns the stored response without re-executing; a repeat with the same key but a <em>different</em> body is a client bug and must be rejected, not silently accepted. Your service in turn passes its own idempotency key to the provider, so the retry you perform is also deduplicated on their side.</p>
+    <p><strong>Intent then capture</strong> is the model every modern provider exposes: create a payment intent that represents "the customer intends to pay this amount for this order", drive it through authentication and authorisation, then capture — immediately for digital goods, or later when the item ships. The value for the designer is that the intent is a durable, provider-side object with a stable id and a well-defined state machine, so recovery from any crash is "fetch the intent and see what state it is in" rather than "guess". Model the same states locally and treat transitions as one-way: an authorised payment may be captured or voided, a captured payment may only be refunded.</p>
+    <p><strong>Webhooks</strong> deliver state changes asynchronously and they are hostile by default: at-least-once, unordered, and forgeable if you skip signature verification. Verify the signature, then persist the raw event keyed by the provider's event id (unique constraint = deduplication), acknowledge fast, and process asynchronously. Handle <strong>out-of-order</strong> delivery by making handlers state-based rather than transition-based: if a <code>captured</code> event arrives before <code>authorised</code>, applying "set state to captured" is safe, whereas "advance the state by one" is not. Guard with a monotonic sequence or by ignoring any event whose state is behind the state you already hold.</p>
+    <p>Two closing points that mark seniority. <strong>Exactly-once is effectively-once</strong>: you cannot make delivery exactly-once across a network, so you make delivery at-least-once and the <em>effect</em> idempotent — the money moves once because the operation is deduplicated, not because the message arrived once. And <strong>reconciliation is not optional</strong>: run a scheduled job that pulls the provider's settlement report and compares it line by line against your ledger, because webhooks get lost, intents get abandoned mid-flight, and only the provider knows what actually settled. Keep the ledger append-only with double-entry semantics so every balance is derivable from immutable entries — that, plus the stored idempotency responses and raw webhook payloads, is your auditability story.</p>
+    <pre class="code-block" data-label="Data model"><code>idempotency_key(key PK, endpoint, request_fingerprint, state, response_body, created_at)
+  -- same key + same fingerprint -&gt; replay stored response; different fingerprint -&gt; 422
+
+payment(payment_id PK, order_id, provider_intent_id UNIQUE, amount_minor, currency,
+        state, authorised_at, captured_at, version)
+  -- state: REQUIRES_ACTION -&gt; AUTHORISED -&gt; CAPTURED -&gt; (REFUNDED | PARTIALLY_REFUNDED)
+  --                        \-&gt; FAILED     \-&gt; VOIDED
+
+webhook_event(provider_event_id PK, type, payload_json, received_at, processed_at)
+ledger_entry(entry_id PK, account, direction, amount_minor, payment_id, created_at)
+  -- append-only, double-entry; balances are derived, never updated in place</code></pre>
+    <p><em>What the interviewer probes:</em> "the client got a timeout and retried — how do you guarantee one charge?" and then, immediately, "what is the scope and lifetime of the idempotency key?" (per logical attempt, generated by the caller, stored with the request fingerprint, retained long enough to outlive every retry policy in the chain — typically 24 hours or more). The deeper probe is the ambiguous outcome: your call to the provider timed out and you do not know whether it succeeded. The answer is never "retry blindly" — it is retry with the same idempotency key, or query the intent by id, and let reconciliation catch whatever slips through.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/api/idempotent_requests" rel="noopener">Idempotent requests — Stripe API reference (key semantics, replay rules, retention)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/payments/payment-intents" rel="noopener">The Payment Intents API — Stripe documentation</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/payments/paymentintents/lifecycle" rel="noopener">Payment Intent lifecycle — Stripe documentation (the state machine, end to end)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/webhooks" rel="noopener">Receive Stripe events in your webhook endpoint — Stripe documentation (signatures, retries, ordering)</a></li>
+      <li>[Official] <a href="https://razorpay.com/docs/webhooks/" rel="noopener">Webhooks — Razorpay documentation (signature verification and delivery guarantees)</a></li>
+      <li>[Article] <a href="https://stripe.com/blog/idempotency" rel="noopener">Designing robust and predictable APIs with idempotency — Stripe Blog (Brandur Leach)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/" rel="noopener">Making retries safe with idempotent APIs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://arpit.substack.com/p/designing-idempotent-payment-apis" rel="noopener">Designing Idempotent Payment APIs — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m6DtqSb1BDM" rel="noopener">Build a robust Payments service using Idempotency Keys — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Video platform basics: upload, transcode, adaptive streaming, CDN</h3>
+    <p>Requirements: creators upload arbitrary source files, viewers stream them smoothly on flaky mobile networks across a range of devices, and the system serves far more reads than writes. Scale assumptions: a strongly write-light, read-heavy profile (uploads in the thousands per hour, views in the millions per hour), with viewing concentrated on a small fraction of the catalogue — a Zipf distribution that makes caching unusually effective and makes cold long-tail content unusually expensive per view.</p>
+    <p>The <strong>upload and transcoding pipeline</strong> is an asynchronous workflow, never a request-response. The client uploads in resumable chunks directly to object storage via a signed URL; completion emits an event; a transcoding orchestrator splits the source into segments and fans them out to a worker pool that produces multiple <strong>renditions</strong> — say 240p through 1080p and above, each at a target bitrate, in one or two codecs for device coverage — plus audio tracks, captions and thumbnails. Segment-level parallelism is what makes a two-hour source finish in minutes instead of hours, and per-segment retries make individual worker failures cheap. The video is publishable when the first usable ladder rung is ready; higher renditions can land later. Store the source in cold storage and keep only the renditions hot.</p>
+    <p><strong>Adaptive bitrate streaming</strong> is what turns those renditions into a smooth playback experience. Each rendition is cut into segments of a few seconds; a manifest (an M3U8 playlist for HLS, an MPD for DASH) describes the available renditions and the segment URLs for each. The player measures throughput and buffer level and switches rendition at segment boundaries, so a train entering a tunnel drops to a lower quality instead of stalling. The design consequences are concrete: segments must be independently decodable, so each starts at a keyframe with aligned boundaries across renditions; shorter segments mean faster adaptation and lower live latency but more requests and more manifest overhead; and everything is ordinary HTTP GET, which is exactly why it caches so well.</p>
+    <p><strong>CDN distribution</strong> follows naturally: segments are immutable and content-addressable by URL, so they take long cache lifetimes at the edge, while manifests take short ones (or none, for live). Origin traffic is then a function of catalogue coldness, not viewership. For a scheduled premiere or a big match, <strong>cache warming</strong> — pre-pushing segments to edge points of presence before the audience arrives — turns a thundering herd at the origin into a set of local hits; tiered caching (edge to regional to origin shield) does the same job continuously for the long tail. <strong>Thumbnails and metadata</strong> ride alongside: generate several candidate frames during transcode, store the video's descriptive metadata in an ordinary database with a search index derived from it, and serve the poster images from the same CDN.</p>
+    <p>The <strong>storage and cost profile</strong> is the part candidates forget. One source file becomes six to ten renditions, so stored bytes are a multiple of ingested bytes; two codec families double it again. Egress, not storage, is usually the dominant line item at scale, which is why per-title and per-shot encoding — spending more CPU to find the lowest bitrate that still looks good for <em>this</em> content — pays for itself, and why lifecycle policies that demote rarely-watched renditions to cheaper tiers matter.</p>
+    <pre class="code-block" data-label="HLS manifest"><code>#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.4d401e,mp4a.40.2"
+360p/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS="avc1.4d401f,mp4a.40.2"
+720p/index.m3u8
+
+# 720p/index.m3u8 — segments are immutable, so cache them for a long time
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.000,
+seg-00001.m4s
+#EXTINF:6.000,
+seg-00002.m4s</code></pre>
+    <p><em>What the interviewer probes:</em> why you cannot simply store one high-quality file and let the client downscale (the client's problem is bandwidth, not pixels — you must send fewer bits, not fewer pixels after the fact), how playback starts fast (start on a low rung and climb, keep the initial segment small), and the cost question: "your encoding ladder has ten rungs — justify each one, and tell me what you would cut." Expect a follow-up on live, where the same design gains a hard latency budget and loses the luxury of a slow transcode.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.apple.com/documentation/http-live-streaming" rel="noopener">HTTP Live Streaming — Apple Developer documentation</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc8216.html" rel="noopener">RFC 8216: HTTP Live Streaming — the M3U8 playlist format</a></li>
+      <li>[Official] <a href="https://dashif.org/guidelines/" rel="noopener">Guidelines and interoperability points — DASH Industry Forum</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Audio_and_video_delivery/Live_streaming_web_audio_and_video" rel="noopener">Live streaming web audio and video — MDN Web Docs</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Media_Source_Extensions_API" rel="noopener">Media Source Extensions API — MDN Web Docs (how players feed segments to the decoder)</a></li>
+      <li>[Article] <a href="https://netflixtechblog.com/per-title-encode-optimization-7e99442b62a2" rel="noopener">Per-Title Encode Optimization — Netflix Technology Blog (why one ladder does not fit all content)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RI9np1LWzqw" rel="noopener">What is a CDN and how does it work? — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=psQzyFfsUGU" rel="noopener">Netflix system design — software architecture for Netflix — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>The recurring moves: what these seven designs actually teach</h3>
+    <p>Strip the domains away and four moves solve all seven problems, which is the reason to study designs at all rather than memorise them. <strong>Precompute versus compute-on-read</strong> is the feed's fan-out choice, but it is also the proximity service's cell cache, the crawler's frontier ordering and the video platform's encoding ladder: you are always deciding whether to pay at write time for a cheap read, or at read time for a cheap write, and the right answer follows from the read-to-write ratio and from how skewed the workload is. When the skew is extreme — the celebrity, the flash-sale SKU, the stadium cell — you do not pick one side, you special-case the tail.</p>
+    <p><strong>Reserve-then-confirm</strong> is how you allocate a contended resource across a multi-step, human-paced workflow: hold the seat, the unit, the slot with an expiry, do the slow uncertain thing, then commit or let the hold lapse. It appears as the inventory reservation, as the payment authorisation held until capture, and as the crawler's per-host lease. <strong>Idempotency for anything involving money</strong> — and, more broadly, for anything whose repetition is visible to a user — turns an unreliable network into a reliable outcome: at-least-once delivery plus a deduplicated effect equals effectively-once, and there is no other way to get there.</p>
+    <p><strong>Derived stores kept in sync from a log</strong> is the fourth: the source of truth is a single ordered stream of facts, and everything else — the search index, the feed cache, the geo index, the analytics warehouse, the read model — is a projection you can drop and rebuild. It is what lets the payment ledger stay append-only while balances are queryable, what lets the file-sync cursor replay exactly the changes a device missed, and what makes the transactional outbox the standard answer to "how does the event get published if the transaction commits?" When a design question stalls, run through these four; one of them is usually the move you have not made yet.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view" rel="noopener">Materialized View pattern — Azure Architecture Center (precompute the read shape)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs" rel="noopener">CQRS pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" rel="noopener">Event Sourcing pattern — Azure Architecture Center (the log as source of truth)</a></li>
+      <li>[Article] <a href="https://github.com/donnemartin/system-design-primer" rel="noopener">donnemartin/system-design-primer — GitHub (the canonical open study companion)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bUHFg8CZFws" rel="noopener">System Design Interview — step by step guide — System Design Interview</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-classic-designs-a.html">← Classic Designs A</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="14-enterprise-design.html">Enterprise Application Design →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>These designs dominate the second and third rounds at Indian product companies and the architecture round at the larger service companies. The questions below are the follow-ups, not the openers — interviewers assume you can draw the boxes and spend their time on the tradeoffs:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Fan-out on write versus fan-out on read — explain both and when each wins.</summary>
+      <div class="answer"><p>Fan-out on write (push) materialises each follower's feed at publish time, so reads are a single lookup of a precomputed list; it costs O(followers) writes per post and wastes work on inactive users. Fan-out on read (pull) stores the post once and merges the followees' posts at read time; writes are trivial but reads are a scatter-gather whose latency depends on how many accounts you follow. Push wins for a read-heavy product with ordinary follower counts, pull wins for users with enormous followee lists or for accounts nobody reads.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What does politeness mean in a web crawler, and how do you enforce it structurally?</summary>
+      <div class="answer"><p>Politeness means never overwhelming a host you do not own: honour robots.txt (RFC 9309), keep at most one in-flight request per host, and space requests using an observed or declared crawl delay. Enforce it structurally by mapping each host to exactly one back queue on exactly one crawler shard, with a heap ordered by each host's next-allowed-fetch time. Then the invariant is a property of the data structure, not of a shared counter that can fail open.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why does a geohash make proximity search possible on an ordinary B-tree index?</summary>
+      <div class="answer"><p>A geohash interleaves latitude and longitude bits and base-32 encodes them, so points that are close on the map share a long common prefix. A prefix range scan on an ordinary sorted index therefore returns spatial candidates — no special index type required. The catch is cell boundaries: two points metres apart can fall either side of a boundary and share almost no prefix, so you must also query the eight neighbouring cells and then filter by true distance.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A celebrity with ninety million followers posts. What breaks, and what is your fix?</summary>
+      <div class="answer"><p>Pure fan-out on write turns one tap into tens of millions of list writes: the publish path takes minutes, the fan-out workers saturate, and publish latency becomes a function of the author's popularity. The fix is hybrid — do not push for accounts above a follower threshold. At read time, merge the reader's precomputed feed with a small pull over the few celebrity accounts they follow. It works because followee counts for celebrities are small even when follower counts are enormous, and the threshold stays a tunable knob rather than a rewrite.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must an infinite feed use cursor pagination rather than offsets?</summary>
+      <div class="answer"><p>Because the underlying list changes while the user scrolls. With <code>LIMIT 20 OFFSET 40</code>, three new posts arriving between page two and page three shift every item down, so the reader sees three duplicates and, on deletion, silently skips items. A cursor encodes the position of the last item seen — the (score or timestamp, id) pair — and the next page is "items strictly after this pair", which is stable under concurrent inserts and also indexes better because it is a range seek rather than a scan-and-discard.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you avoid crawling the same content twice at web scale?</summary>
+      <div class="answer"><p>Two independent layers. Before fetching: normalise the URL (canonical scheme and host, no fragment, no default port, tracking parameters stripped, dot segments resolved) and test it against a Bloom filter in front of a durable seen-set, because an exact set of tens of billions of URLs will not fit in memory. After fetching: fingerprint the content — an exact hash for byte-identical mirrors and simhash for near-duplicates, where documents differing by a few tokens land within a small Hamming distance, so near-duplicate detection becomes a banded index lookup rather than a pairwise comparison.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A million drivers report location every four seconds. What is the write amplification and how do you survive it?</summary>
+      <div class="answer"><p>Roughly 250,000 writes per second, against far fewer reads — the mirror image of the static proximity service. Surviving it means refusing to make those writes durable and indexed: keep current position in an in-memory geo structure partitioned by cell with a TTL, and send only the trip history to a separate append-only store for billing and analytics. Then cut the writes at the source — report on movement rather than on a fixed timer, back off when stationary, batch several pings per request. The insight the interviewer wants is that a location four seconds old has no value, so it does not need the guarantees you would give an order.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is a cloud file store split into a metadata service and a content-addressed block store?</summary>
+      <div class="answer"><p>Because the two have opposite requirements. Metadata is small, transactional, relational and frequently updated — the namespace, versions, sharing, the ordered block list per file version. Blocks are large, immutable and enormous in aggregate. Keying blocks by the hash of their bytes gives deduplication (identical chunks stored once), integrity (the key is the checksum) and safe caching and replication (immutable data never invalidates). It also means clients can upload chunks directly to the block store, so file bytes never pass through the metadata tier.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Two offline devices edit the same file. What does the user see when both reconnect?</summary>
+      <div class="answer"><p>For opaque binary content there is no correct automatic merge, so last-write-wins is not an answer — it silently destroys work. The production behaviour is conflict materialisation: the second commit fails its compare-and-set against the file's current version, and the client preserves both by creating a conflicted copy named with the device and time, leaving the human to reconcile. The mechanics are optimistic concurrency on the metadata row plus a per-namespace monotonic cursor so each device replays exactly the changes it has not yet seen.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Two customers buy the last unit at the same instant. Prevent the oversell, and compare the mechanisms.</summary>
+      <div class="answer"><p>The bug is read-then-write: both read 1 available and both decrement. Options: pessimistic locking (<code>SELECT ... FOR UPDATE</code>) is correct but serialises every buyer of a hot SKU behind one row lock; optimistic concurrency — <code>UPDATE stock SET available = available - 1 WHERE sku = ? AND available &gt;= 1</code>, checking the affected-row count — is one atomic statement with no held lock and is the default answer, with the loser told it sold out; reservation with expiry layers on top so a unit is held while the customer completes payment and returns to the pool automatically if they abandon. For flash sales, add an atomic in-memory counter that admits exactly N winners so the database sees hundreds of writes, not hundreds of thousands.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A user's payment request timed out and the client retried. Guarantee exactly one charge.</summary>
+      <div class="answer"><p>Idempotency keys at every hop. The client generates one key per logical payment attempt — bound to the order, not regenerated on retry — and sends it as a header. The service stores it with a unique constraint plus a fingerprint of the request body and, on completion, the response. A repeat with the same key and fingerprint replays the stored response without re-executing; a repeat with the same key and a different body is rejected as a client bug. The service passes its own key down to the provider, so its retries are deduplicated there too. Retention must outlive every retry policy in the chain, typically a day or more.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your call to the payment gateway timed out. You do not know whether the charge happened. What now?</summary>
+      <div class="answer"><p>Never retry blindly and never assume failure. Either retry with the identical idempotency key — so the provider deduplicates if the first attempt landed — or query the payment intent by its id and read the authoritative state. Record the attempt as indeterminate rather than failed so the user is not double-charged by a well-meaning support action, and let the scheduled reconciliation against the provider's settlement report close the gap. The provider is the source of truth about money movement; your database is a replica of it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A payment webhook is delivered twice, and out of order. How does your handler stay correct?</summary>
+      <div class="answer"><p>Verify the signature first — an unauthenticated webhook endpoint is a funds-manipulation vector. Then persist the raw event keyed by the provider's event id with a unique constraint, so redelivery is a no-op insert; acknowledge immediately and process asynchronously so provider retries are not triggered by your slow handler. Handle ordering by making handlers state-based rather than transition-based: applying "set state to captured" is safe whenever it arrives, whereas "advance one step" is not. Ignore any event whose state is behind what you already hold, using the provider's sequence or timestamp.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> "We need exactly-once processing." Respond.</summary>
+      <div class="answer"><p>Exactly-once delivery is not achievable across an unreliable network — the two-generals problem — so the goal is effectively-once: at-least-once delivery combined with an idempotent effect. Concretely, give every message a stable business key, deduplicate on it at the consumer (a processed-events table with a unique constraint, or a conditional update), keep the dedup record and the state change in the same local transaction, and publish downstream events through a transactional outbox so the state change and its announcement cannot diverge. The money moves once because the operation is deduplicated, not because the message arrived once.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why transcode into a ladder of renditions instead of storing one high-quality file and letting the client scale it?</summary>
+      <div class="answer"><p>Because the viewer's constraint is bits per second, not pixels. Downscaling on the client still requires downloading the full-bitrate stream, so a weak connection stalls regardless. Adaptive bitrate streaming needs genuinely smaller encodes, cut into keyframe-aligned segments with boundaries consistent across renditions, described by an HLS or DASH manifest so the player can switch rung at any segment boundary based on measured throughput and buffer level. The cost is real — stored bytes are a multiple of ingested bytes, doubled again per codec family — which is why per-title encoding and lifecycle policies on cold renditions matter.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Design the cache for a feed serving a hundred million daily readers. What do you store, and what goes wrong?</summary>
+      <div class="answer"><p>Store ids only, in a per-reader sorted structure capped at roughly the first thousand entries, with post bodies and author profiles in separate shared caches so a popular post is held once rather than once per follower; hydrate ids to content on read. What goes wrong: the hot key, when one celebrity post is hydrated by a million readers in the same second — mitigate with a local in-process cache in front of the shared one, request coalescing so a miss triggers one origin fetch rather than a million, and replication of that key across shards. Also plan invalidation on delete and unfollow as filter-at-hydration using tombstones, because rewriting millions of precomputed lists is not viable.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.cd.b1 — News feed, web crawler, proximity and location service</li>
+      <li>sd.cd.b2 — Cloud file storage, e-commerce checkout and inventory, payment flow, video platform basics</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

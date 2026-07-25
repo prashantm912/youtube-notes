@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Authentication and authorization failures module: sessions versus JWTs and revocation, JWT algorithm and claim validation, cookie flags and token storage, session fixation and credential handling, IDOR and broken object-level authorization, function-level checks, mass assignment and multi-tenancy isolation — with verified resources and interview questions.">
+  <title>Authentication and Authorization Failures — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Authentication and Authorization Failures</h1>
+  <p class="standfirst">Broken access control is the most common serious finding in real applications, and the reason is structural: authentication is a library you install once, authorization is a decision you have to get right at every single endpoint.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Secure Coding track</a> → Authentication and Authorization Failures</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two questions sit behind every protected request. <em>Who is this?</em> is authentication — proving identity, then carrying that proof across stateless HTTP requests with a session or a token. <em>What may they do to this particular thing?</em> is authorization — and it has to be answered again for every endpoint, every object and every field. The first question you answer once, in a framework. The second you answer hundreds of times, by hand, and one missed answer is a breach.</p>
+    <p>This module is about the failure modes and the design decisions, not framework configuration. The first half covers identity and sessions: the session-versus-token tradeoff argued on its actual merits, the JWT traps that turn a token into a free pass, cookie flags, browser token storage, session lifecycle and credential handling. The second half covers authorization failures: IDOR, missing function-level checks, mass assignment and multi-tenancy isolation — closing with the design rule that prevents all of them. The <a href="../spring-security/index.html">Spring Security track</a> covers how to configure the framework; here we look at what goes wrong and why.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Authentication is a library; authorization is a decision at every endpoint</h3>
+    <p>Say it plainly, because it explains the statistics. Authentication is a solved, centralised problem: you add a filter chain, plug in an identity provider, and every request in the application is either authenticated or rejected before your code runs. It is one decision, made in one place, and a framework makes it for you. Authorization has no such single place. "Can this user cancel <em>this</em> order?" depends on the user, the order, the order's owner, the order's state and the tenant it belongs to — knowledge only your domain code has. Every new endpoint is a fresh opportunity to forget, and forgetting is silent: the endpoint works perfectly for the developer testing it with their own data.</p>
+    <p>That asymmetry is why broken access control sits at the top of the OWASP Top 10 and why the API Security Top 10 gives it three separate entries (object level, object property level, function level). The practical consequence for how you write code: never treat "the user is logged in" as authorization. A request that reaches your controller has already answered <em>who</em>; it has answered nothing at all about <em>what</em>. Separate the two concepts in your vocabulary, in your code and in your tests, and be suspicious of any handler whose only guard is that a principal exists.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/" rel="noopener">A01 Broken Access Control — OWASP Top 10 (why it ranks first, with prevention guidance)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html" rel="noopener">Authorization Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/access-control" rel="noopener">Access control vulnerabilities and privilege escalation — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vUFVxoV5y_I" rel="noopener">Broken Access Control Explained: OWASP Top 10 A01 with Examples — Aikido Security</a></li>
+    </ul>
+
+    <h3>Server-side sessions versus stateless tokens — the tradeoff on its merits</h3>
+    <p>A server-side session is an opaque random identifier in a cookie; all the real state (user id, roles, expiry, tenant) lives in server storage. Its properties follow directly: revocation is instant and total because you delete one row, the identifier leaks nothing if intercepted, and you can change a user's roles mid-session. Its cost is equally direct: state must be shared across replicas, so you need Redis or a database rather than in-memory sessions, and sticky sessions are a load-balancer crutch that breaks the moment a pod restarts.</p>
+    <p>A JWT inverts every one of those. It carries its own claims, signed, so any service can validate it with a public key and no shared store — which is genuinely why it wins in microservice and multi-team estates. But it is valid until it expires, and there is no clean way to un-issue it. That single property drives the whole design: keep access tokens short-lived (minutes, not days) and pair them with a refresh token, because the real bug is not "we chose JWT", it is "we chose JWT and then made it valid for thirty days so users would not have to log in again". If you need instant revocation with long-lived credentials, you are describing a session, and the honest answer in an interview is that you would either use one or add a server-side check — a revocation list, a token version column, a short cache — which trades away exactly the statelessness you chose JWT for.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html" rel="noopener">Session Management Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc9700" rel="noopener">RFC 9700 — OAuth 2.0 Security Best Current Practice (IETF)</a></li>
+      <li>[Article] <a href="https://developer.okta.com/blog/2022/02/08/cookies-vs-tokens" rel="noopener">A Comparison of Cookies and Tokens for Secure Authentication — Okta Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-session" rel="noopener">Control the Session with Spring Security — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UBUNrFtufWo" rel="noopener">Session vs Token Authentication in 100 Seconds — Fireship</a></li>
+    </ul>
+
+    <h3>JWT traps: algorithm confusion, unchecked claims, and signed is not encrypted</h3>
+    <p>The classic failures are all "the library verified something, but not the thing you assumed". <code>alg: none</code> is the original: a token declares it is unsigned, and a permissive library accepts it. Algorithm confusion is the grown-up version — a token issued with RS256 is replayed as HS256, and a verifier that takes the algorithm from the token's own header uses the <em>public</em> key as an HMAC secret. The public key is public, so anyone can now mint valid tokens. The fix in both cases is the same shape: the algorithm is a property of your configuration, never of the incoming token. Pin the expected algorithm and key, and reject anything else.</p>
+    <p>Then validate every claim you rely on, not just the signature: <code>exp</code> (with a small clock skew, not a generous one), <code>iss</code> so a token from a different issuer is rejected, <code>aud</code> so an access token minted for a different service cannot be replayed at yours, and <code>nbf</code> where present. Skipping <code>aud</code> is how a token for a low-value internal API becomes a token for the payments API. Finally, remember what a JWT actually is: base64url-encoded JSON with a signature. It is <em>signed</em>, not <em>encrypted</em> — anyone holding the token can read every claim. Phone numbers, national identifiers, internal role names and email addresses do not belong in a payload that is sitting in a browser and being logged by every proxy in the path.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: algorithm taken from the attacker-controlled header, no claim checks
+Claims c = Jwts.parser().setSigningKey(publicKey).build()
+               .parseClaimsJws(token).getBody();      // RS256 token replayed as HS256
+
+// FIXED: algorithm and key pinned by configuration; issuer, audience, expiry all required
+JwtDecoder decoder = NimbusJwtDecoder
+        .withPublicKey(rsaPublicKey)
+        .signatureAlgorithm(SignatureAlgorithm.RS256)   // pinned, never read from the token
+        .build();
+decoder.setJwtValidator(JwtValidators.createDefaultWithValidators(
+        new JwtIssuerValidator("https://idp.internal/realms/app"),
+        new JwtClaimValidator&lt;List&lt;String&gt;&gt;("aud", a -&gt; a != null &amp;&amp; a.contains("orders-api"))));
+// exp/nbf are enforced by the default validator; keep clock skew small (seconds)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_Cheat_Sheet.html" rel="noopener">JSON Web Token Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc8725" rel="noopener">RFC 8725 — JSON Web Token Best Current Practices (IETF)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/jwt" rel="noopener">JWT attacks — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/jwt/algorithm-confusion" rel="noopener">JWT algorithm confusion attacks — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://auth0.com/blog/critical-vulnerabilities-in-json-web-token-libraries/" rel="noopener">Critical vulnerabilities in JSON Web Token libraries — Auth0 blog (the alg-confusion write-up)</a></li>
+    </ul>
+
+    <h3>Refresh tokens: rotation, reuse detection, and revocation that actually revokes</h3>
+    <p>The refresh-token pattern exists to reconcile the two halves of the tradeoff above: a short-lived access token (so a leak expires quickly) plus a long-lived refresh token held somewhere safer and exchanged for new access tokens. The refresh token is now the crown jewel, so it gets three protections. <strong>Rotation</strong>: every refresh returns a new refresh token and invalidates the old one, so a stolen token is useful only until the legitimate client next refreshes. <strong>Reuse detection</strong>: if an already-rotated token is presented again, that means two parties hold the same token — treat it as theft and revoke the entire token family, forcing a fresh login. <strong>Binding</strong>: for confidential clients, sender-constrain the token so it cannot be replayed from another client.</p>
+    <p>Logout is where teams get careless. Deleting the token from browser memory changes nothing on the server — the token remains valid until <code>exp</code>. A logout that means anything must invalidate server-side state: destroy the session record, revoke the refresh token at the authorization server, and where you use an identity provider, perform an RP-initiated logout so the IdP session ends too (otherwise "log out" followed by "log in" silently signs the same user straight back in). If your threat model demands that access tokens die on logout as well, accept the cost consciously: a short revocation cache checked per request, or a token-version claim compared against a column you bump. Also revoke on the events that matter — password change, role removal, MFA reset, account disable.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc7009" rel="noopener">RFC 7009 — OAuth 2.0 Token Revocation (IETF)</a></li>
+      <li>[Official] <a href="https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-token-rotation" rel="noopener">Refresh token rotation and automatic reuse detection — Auth0 documentation</a></li>
+      <li>[Article] <a href="https://auth0.com/blog/refresh-tokens-what-are-they-and-when-to-use-them/" rel="noopener">Refresh Tokens: When to Use Them and How They Interact with JWTs — Auth0 blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NcLtLZqGu2M" rel="noopener">Spring Boot 3 + Spring Security 6: JWT Authentication and Authorization — Java Techie</a></li>
+    </ul>
+
+    <h3>Cookie flags done properly</h3>
+    <p>If the credential lives in a cookie, the flags <em>are</em> the security control. <code>HttpOnly</code> keeps JavaScript from reading it, which is what stops an XSS bug from escalating into permanent account takeover. <code>Secure</code> refuses to send it over plain HTTP. <code>SameSite</code> governs whether the browser attaches it to cross-site requests, and its three values are worth knowing precisely: <code>Strict</code> withholds the cookie on every cross-site request including plain top-level navigation, so a user arriving from an external link looks logged out; <code>Lax</code> (the modern default) sends it on top-level GET navigations but not on cross-site POSTs, subresource loads or iframes, which blocks the classic form-based CSRF; <code>None</code> sends it everywhere and is only accepted alongside <code>Secure</code>.</p>
+    <p>Scope it as tightly as it will go. Do not set a <code>Domain</code> attribute unless subdomains genuinely need the cookie — omitting it produces a host-only cookie, while setting <code>Domain=example.com</code> hands your session to every subdomain, including the marketing site someone else operates. The <code>__Host-</code> name prefix makes that discipline enforceable by the browser: a cookie so named is only accepted if it is <code>Secure</code>, has <code>Path=/</code> and has <em>no</em> <code>Domain</code> attribute, which shuts down subdomain-injection and cookie-fixation tricks. Note also that <code>Path</code> is not a security boundary — same-origin script can read cookies on other paths — so treat it as tidiness, not isolation.</p>
+    <pre class="code-block" data-label="HTTP"><code># VULNERABLE: readable by script, sent over http, shared with every subdomain
+Set-Cookie: session=eyJhbGci...; Path=/; Domain=example.com
+
+# FIXED: browser-enforced constraints, host-only, script cannot touch it
+Set-Cookie: __Host-session=eyJhbGci...; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=900
+# SameSite=None would additionally REQUIRE Secure, and needs its own CSRF defence</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie" rel="noopener">Set-Cookie — MDN HTTP headers reference (every attribute and prefix)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies" rel="noopener">Using HTTP cookies — MDN guide</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies" rel="noopener">Cookies — MDN practical implementation guide</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/rfc6265" rel="noopener">RFC 6265 — HTTP State Management Mechanism (IETF)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/samesite-cookies-explained" rel="noopener">SameSite cookies explained — web.dev (Google)</a></li>
+    </ul>
+
+    <h3>Where a browser should keep a token — an honest tradeoff, not a best practice</h3>
+    <p>There is no option without a downside, and interviewers ask this precisely because candidates recite a slogan instead of the tradeoff. <code>localStorage</code> and <code>sessionStorage</code> are readable by any JavaScript running on the origin, so a single XSS bug — yours or a compromised dependency's — exfiltrates the token, and it survives the tab. Cookies with <code>HttpOnly</code> are unreadable by script, but the browser attaches them automatically to requests it makes on the site's behalf, which is exactly the property CSRF exploits, so you now owe a CSRF defence (<code>SameSite</code> plus an anti-forgery token for state-changing requests — see the <a href="06-csrf-ssrf-deserialization.html">CSRF, SSRF and Deserialization</a> module).</p>
+    <p>The common compromise is to hold the short-lived access token <em>in memory only</em> — a module-scoped variable, never persisted — and keep the long-lived refresh token in a <code>__Host-</code>, <code>HttpOnly</code>, <code>SameSite</code> cookie scoped to the token endpoint. XSS can then steal an access token that expires in minutes but cannot read the refresh token; a page reload silently re-acquires an access token. The stricter version is the backend-for-frontend pattern: tokens never reach the browser at all, the BFF holds them and the browser gets an ordinary session cookie. Say the quiet part in the interview too — if an attacker is executing script on your origin they can simply make authenticated requests as the user, so storage choice limits the blast radius but never substitutes for fixing XSS.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/html/draft-ietf-oauth-browser-based-apps" rel="noopener">OAuth 2.0 for Browser-Based Applications — IETF draft (token storage patterns and BFF)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html" rel="noopener">HTML5 Security Cheat Sheet — OWASP (web storage guidance)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage" rel="noopener">Window.localStorage — MDN reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-gateway-bff-oauth2" rel="noopener">OAuth2 Backend for Frontend with Spring Cloud Gateway — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2PPSXonhIck" rel="noopener">Authentication on the Web: Sessions, Cookies, JWT, localStorage and more — Code Realm</a></li>
+    </ul>
+
+    <h3>Session lifecycle: fixation, timeouts, concurrency and logout</h3>
+    <p>Session fixation is the oldest trap and still the easiest to reintroduce. If an attacker can plant a known session identifier in a victim's browser — via a link, a subdomain, or an application that accepts an identifier it did not issue — and your application keeps that same identifier after the user authenticates, the attacker's session is now a logged-in session. The defence is one line of behaviour: <strong>always issue a brand-new session identifier at the moment privilege changes</strong>, which means on login and again on any step-up (elevating to admin, entering a payment flow). Every mainstream framework does this by default; the bugs come from custom login handlers and from switching the session strategy off to fix a different problem.</p>
+    <p>Then set both timeouts, because they answer different threats: an <em>idle</em> timeout limits how long an unattended or stolen session stays usable, and an <em>absolute</em> timeout caps the total lifetime regardless of activity, so a session cannot be kept alive forever by a background poll. Choose the numbers from the value of the data — a banking console is minutes, an internal wiki can be hours. Decide concurrent-session policy deliberately as well: allowing unlimited parallel logins makes credential sharing invisible, while capping them (or listing active sessions and letting users terminate them) gives real accounts real control. And make logout mean it — invalidate server-side, clear the cookie with the same attributes it was set with, and never rely on the client to forget.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: authenticate into the session the visitor already had
+public void login(HttpServletRequest req, User user) {
+    req.getSession().setAttribute("user", user);   // same session id survives login
+}
+
+// FIXED: new id on privilege change, plus explicit lifetime bounds
+public void login(HttpServletRequest req, User user) {
+    req.changeSessionId();                          // fixation defence
+    HttpSession s = req.getSession();
+    s.setAttribute("user", user);
+    s.setAttribute("createdAt", Instant.now());     // enforce an absolute cap yourself
+    s.setMaxInactiveInterval(900);                  // idle timeout, in seconds
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html" rel="noopener">Session Management — Spring Security reference (fixation strategies, concurrency control)</a></li>
+      <li>[Official] <a href="https://openid.net/specs/openid-connect-rpinitiated-1_0.html" rel="noopener">OpenID Connect RP-Initiated Logout 1.0 — OpenID Foundation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/session-hijacking" rel="noopener">How to Prevent Session Hijacking — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-track-logged-in-users" rel="noopener">Keep Track of Logged-in Users with Spring Security — Baeldung</a></li>
+    </ul>
+
+    <h3>Credential handling: throttling, silent errors, reset flows and MFA</h3>
+    <p>The login endpoint is the one place where an attacker gets unlimited free guesses, so it needs a budget. Rate-limit per account <em>and</em> per source, because per-account limits alone do nothing against credential stuffing (one attempt each against a million accounts) and per-IP limits alone do nothing against a distributed botnet. Prefer progressive delays and temporary lockouts over permanent ones — a hard lockout on failed attempts hands attackers a denial-of-service primitive against named users. Layer in breached-password checks and a device or risk signal before you reach for CAPTCHA.</p>
+    <p>Say nothing you do not have to. "Invalid username or password" for every failure; the same generic response on password reset whether or not the address exists; and comparable response times on both paths, because a login that returns in five milliseconds for unknown users and eighty for known ones is a user enumeration oracle regardless of the message. Reset flows need a token that is cryptographically random, single-use, short-lived, tied to one account, invalidated when the password changes, and delivered out of band — never a link that carries the new password, and never a "security question" that a social media profile answers. Finally, MFA: a second factor is the single most effective control against stolen and reused passwords, and the strength order is worth knowing — phishing-resistant WebAuthn or passkeys, then authenticator apps or push, then SMS one-time codes, which remain vulnerable to SIM swap and are still the norm across Indian consumer applications.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html" rel="noopener">Authentication Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Forgot_Password_Cheat_Sheet.html" rel="noopener">Forgot Password Cheat Sheet — OWASP (secure reset token design)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html" rel="noopener">Credential Stuffing Prevention Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html" rel="noopener">Multifactor Authentication Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/authentication" rel="noopener">Authentication vulnerabilities — PortSwigger Web Security Academy</a></li>
+    </ul>
+
+    <h3>IDOR: broken object-level authorization, the single most exploited flaw</h3>
+    <p>The mechanic is trivial, which is why it is everywhere. An endpoint takes an identifier from the request, loads the record by that identifier, and returns it. Change the number in the URL and you get somebody else's invoice — because the query filtered by <em>id</em> and never by <em>owner</em>. There is no exploit craft involved; the attacker edits a URL. It scales badly for the victim too: sequential identifiers mean an attacker can enumerate the entire table in an afternoon, which is how these bugs turn into full-database breaches rather than single-record leaks.</p>
+    <p>The fix is a coding pattern, not a review habit. <strong>Scope the query by the authenticated principal</strong> so an unauthorised row is never loaded in the first place — <code>findByIdAndOwnerId(id, currentUser)</code>, not <code>findById(id)</code> followed by a check. Fetch-then-check works only if every developer remembers to write the check, the check is complete, and no early return skips it; scoped queries fail closed by construction and return an honest 404 instead of leaking existence through a 403. Two supporting habits: apply the same rule to nested and batch routes (a child resource identifier is just as forgeable as a parent one, and a bulk endpoint accepting a list of identifiers needs the filter applied to the whole list), and use unguessable identifiers — UUIDv4, or opaque public ids — as <em>defence in depth</em> that slows enumeration, never as the access control itself. An unguessable identifier that has leaked into a log, a referrer header or a shared screenshot is no longer unguessable.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: filtered by id only — any authenticated user can read any invoice
+@GetMapping("/api/invoices/{id}")
+public Invoice get(@PathVariable Long id) {
+    return invoiceRepository.findById(id).orElseThrow(NotFoundException::new);
+}
+
+// FIXED: the principal is part of the query, so an unowned row is never loaded
+@GetMapping("/api/invoices/{id}")
+public Invoice get(@PathVariable Long id, @AuthenticationPrincipal AppUser me) {
+    return invoiceRepository.findByIdAndOwnerId(id, me.getId())
+                            .orElseThrow(NotFoundException::new);   // 404, not 403
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html" rel="noopener">Insecure Direct Object Reference Prevention Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/" rel="noopener">API1 Broken Object Level Authorization — OWASP API Security Top 10</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html" rel="noopener">Access Control Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/access-control/idor" rel="noopener">Insecure direct object references (IDOR) — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JopQ38v-LYQ" rel="noopener">Quick Intro to Insecure Direct Object References and How to Fix Them — AWS Developers</a></li>
+    </ul>
+
+    <h3>Function-level authorization, hidden buttons, and mass assignment</h3>
+    <p>Object-level checks answer "may you touch this record?"; function-level checks answer "may you call this operation at all?" The failure mode is arithmetic: a service with sixty endpoints needs sixty correct answers, and the one endpoint added under deadline pressure — the new bulk-export, the admin-only report, the internal debug route someone left mapped — is the one that ships without an annotation. Attackers find them by reading your JavaScript bundle, which conveniently lists every route the front end knows about, including the admin ones. Which leads to the rule stated bluntly: <strong>hiding a button is not authorization</strong>. The front end deciding not to render an action is a usability choice; the server still has to refuse the request when it arrives directly.</p>
+    <p>Mass assignment (over-posting) is the same class of bug at field granularity. Binding a request body straight onto a persistent entity means every writable field is an input, so a registration form that only shows name and email will happily accept <code>{"role":"ADMIN"}</code> or <code>{"accountBalance":100000}</code> — and the server-side validation never fires because the value is structurally valid. Bind to an explicit DTO containing only the fields a client may set, map it deliberately, and never expose the entity itself. Framework allow-lists and ignore-lists work, but a DTO fails safe when someone adds a new column: the field simply is not bindable until you say so.</p>
+    <pre class="code-block" data-label="Java"><code>// VULNERABLE: entity bound directly; role and enabled are writable from the request body
+@PostMapping("/api/users")
+public User create(@RequestBody User user) { return repo.save(user); }
+
+// FIXED: explicit DTO is the allow-list; privileged fields are set by the server
+public record CreateUserRequest(@NotBlank String name, @Email String email) {}
+
+@PostMapping("/api/users")
+@PreAuthorize("hasRole('ADMIN')")          // function-level check, enforced server-side
+public UserView create(@Valid @RequestBody CreateUserRequest in) {
+    User u = new User(in.name(), in.email());
+    u.setRole(Role.USER);                  // never taken from client input
+    return UserView.of(repo.save(u));
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/API-Security/editions/2023/en/0xa5-broken-function-level-authorization/" rel="noopener">API5 Broken Function Level Authorization — OWASP API Security Top 10</a></li>
+      <li>[Official] <a href="https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/" rel="noopener">API3 Broken Object Property Level Authorization — OWASP API Security Top 10</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html" rel="noopener">Mass Assignment Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html" rel="noopener">Method Security — Spring Security reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-method-security" rel="noopener">Introduction to Spring Method Security — Baeldung</a></li>
+    </ul>
+
+    <h3>Multi-tenancy isolation: the highest-stakes version of the same bug</h3>
+    <p>In a shared-schema SaaS application every table has a tenant column, and every query that forgets it is a cross-tenant data leak — the failure that ends contracts rather than generating a bug ticket. Two rules carry most of the weight. First, <strong>the tenant identifier comes from the authenticated context and never from a request parameter, header or body field</strong>. An endpoint that reads <code>X-Tenant-Id</code> from the request and trusts it is not multi-tenant, it is single-tenant with a tenant selector for attackers; derive it from the token claim or session and resolve it once, at the edge, into a request-scoped value.</p>
+    <p>Second, enforce it in a shared layer rather than by per-query discipline. Per-query discipline means every developer, forever, on every new repository method — and it fails on the reporting query written at 11pm. Push the filter down: a base repository or specification that appends the tenant predicate, a Hibernate <code>@Filter</code> enabled per session, a JPA interceptor, or best of all database row-level security, where the policy is enforced by PostgreSQL against a session variable and even a raw JDBC query cannot escape it. Layer them if the data warrants it. Then test it deliberately: for every endpoint, an automated test that authenticates as tenant A and requests an object belonging to tenant B and asserts a not-found. Nobody writes those tests by accident, which is exactly why cross-tenant bugs survive to production.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Database-enforced isolation: policy applies even to hand-written queries
+ALTER TABLE invoice ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON invoice
+  USING (tenant_id = current_setting('app.tenant_id')::uuid);
+
+-- The application sets the variable from the AUTHENTICATED principal, per connection,
+-- never from a request header. Nothing downstream can widen the visible rows.
+SET LOCAL app.tenant_id = '4f6c...';</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Multi_Tenant_Security_Cheat_Sheet.html" rel="noopener">Multi Tenant Security Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html" rel="noopener">Row Security Policies — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/multitenancy-with-spring-data-jpa" rel="noopener">Multitenancy with Spring Data JPA — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-dynamic-mapping" rel="noopener">Dynamic Mapping with Hibernate — Baeldung (@FilterDef and @Filter)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4Kd85ZXn3EY" rel="noopener">Beyond the SQL WHERE Clause: Isolating SaaS Multi-Tenant Data in Shared Relational Databases — AWS Partner Network</a></li>
+    </ul>
+
+    <h3>The design rule: deny by default, centralise the decision, test negatively</h3>
+    <p>Every failure in this module reduces to one of three omissions, so make each impossible by construction. <strong>Deny by default</strong>: the filter chain ends with "any other request is denied", new endpoints are unreachable until someone grants access, and the absence of a rule is a locked door rather than an open one. Contrast that with a permit-listing configuration, where forgetting to add a rule publishes the endpoint. <strong>Centralise the decision</strong>: authorization logic belongs in one place a reviewer can read — a policy service, a permission object, method security on the service layer — not scattered as <code>if (user.isAdmin())</code> across controllers where nobody can enumerate the rules or change them consistently.</p>
+    <p>And <strong>test negatively</strong>, because positive tests pass on broken systems. A suite that only asserts "the owner can read their invoice" passes perfectly against an endpoint with no access control at all. The tests that find real bugs assert the refusals: another user gets a not-found, an anonymous caller gets a 401, a plain user calling the admin route gets a 403, tenant A cannot see tenant B. Make that a template applied to every new endpoint, add authorization to the pull-request checklist, and treat a missing negative test the same way you treat a missing null check — as an incomplete implementation, not a nice-to-have.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Testing_Automation_Cheat_Sheet.html" rel="noopener">Authorization Testing Automation Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Regression_Testing_Cheat_Sheet.html" rel="noopener">Authorization Regression Testing Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-prefilter-postfilter" rel="noopener">Spring Security @PreFilter and @PostFilter — Baeldung (filtering collections by permission)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BMilF9kfDgY" rel="noopener">Broken Access Control — OWASP Top 10 — VISTA InfoSec</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-xss-csp.html">← XSS and Content Security Policy</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="06-csrf-ssrf-deserialization.html">CSRF, SSRF and Deserialization →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Access control questions dominate security rounds at Indian product companies and appear in almost every senior backend interview at the large service firms — IDOR, JWT storage and JWT revocation are near-guaranteed:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between authentication and authorization?</summary>
+      <div class="answer"><p>Authentication establishes <em>who</em> the caller is — verifying credentials and producing a principal. Authorization decides <em>what</em> that principal may do to a specific resource. Authentication happens once per request at the edge and is handled by a framework; authorization has to be decided at every endpoint, and often per object and per field, which is why it fails far more often.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do HttpOnly, Secure and SameSite do on a cookie?</summary>
+      <div class="answer"><p>HttpOnly hides the cookie from JavaScript, so an XSS bug cannot read the session. Secure sends it only over HTTPS. SameSite controls whether the browser attaches it to cross-site requests: Strict withholds it on all cross-site requests including top-level navigation, Lax (the default) sends it on top-level GET navigations but not cross-site POSTs or subresource loads, and None sends it everywhere but is only accepted together with Secure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is IDOR, and how do you fix it?</summary>
+      <div class="answer"><p>Insecure Direct Object Reference: an endpoint loads a record by an identifier taken from the request without checking the caller owns it, so changing the id in the URL returns another user's data. Fix it by scoping the query to the authenticated principal — findByIdAndOwnerId(id, currentUser) — so an unauthorised row is never loaded, rather than fetching first and checking afterwards. Return not-found rather than forbidden so you do not confirm the record exists.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why should login errors say "invalid username or password" instead of "no such user"?</summary>
+      <div class="answer"><p>Because a specific message confirms which accounts exist, giving an attacker a validated list to target with credential stuffing or phishing. Keep the message generic on login, password reset and registration — and equalise the response time as well, since a fast path for unknown users leaks the same information through timing even when the wording is identical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where do you store a JWT in the browser?</summary>
+      <div class="answer"><p>There is no free option, and the expected answer is the tradeoff. localStorage is readable by any script on the origin, so one XSS exfiltrates the token. An HttpOnly cookie is unreadable by script but is sent automatically, so you now need CSRF defence (SameSite plus an anti-forgery token on state-changing requests). The usual compromise is to keep the short-lived access token in memory only and the refresh token in a __Host-, HttpOnly, SameSite cookie scoped to the token endpoint — or go further with a backend-for-frontend so tokens never reach the browser. Add the caveat that with script execution on your origin an attacker can act as the user regardless, so this limits blast radius rather than replacing an XSS fix.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you revoke a JWT before it expires?</summary>
+      <div class="answer"><p>You cannot, cleanly — that is the cost of statelessness. The practical answers: keep access tokens short-lived (minutes) so the exposure window is small and revoke the refresh token instead; or reintroduce server state — a denylist of revoked token ids checked per request, or a token-version claim compared against a column you increment on logout, password change or role change. Both trade away the stateless property you chose JWT for, so choose deliberately: if you need instant revocation on a long-lived credential, a server-side session is the simpler design.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Server-side sessions or JWTs — how do you choose?</summary>
+      <div class="answer"><p>Sessions give instant revocation, an opaque identifier that leaks nothing, and mid-session privilege changes, at the cost of shared storage (Redis or a database) across replicas. JWTs give stateless validation with a public key, which scales across services and teams without a shared store, at the cost of being valid until expiry. Monolith or a small estate with strong revocation requirements: sessions. Many services, multiple teams, third-party API consumers: short-lived JWTs plus rotating refresh tokens. The wrong answer is a long-lived JWT chosen to avoid re-login.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is session fixation and how does regenerating the session id prevent it?</summary>
+      <div class="answer"><p>An attacker plants a session identifier they know in the victim's browser; the victim logs in, the application keeps that identifier, and the attacker's session is now authenticated. Issuing a new identifier at login — and again on any privilege escalation such as stepping up to admin — makes the planted identifier worthless, because the authenticated session is one the attacker never saw. Frameworks do this by default; bugs appear in custom login handlers and when the fixation strategy is disabled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is mass assignment and how do you prevent it?</summary>
+      <div class="answer"><p>Binding a request body directly onto a persistent entity makes every writable field an input, so a client can post role=ADMIN or a balance field the UI never shows and the server never validated. Prevent it with an explicit DTO or record containing only client-settable fields, mapping to the entity deliberately and setting privileged fields server-side. Allow-lists and ignore-lists work too, but a DTO fails safe when a new column is added later.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is hiding the admin button in the UI not authorization?</summary>
+      <div class="answer"><p>Because the browser is under the attacker's control. The endpoint is still mapped and still reachable with a direct request, and the JavaScript bundle typically lists every route including the hidden ones. UI hiding is a usability decision; the server must refuse the request when it arrives. The same applies to disabled form fields, client-side role checks and unlinked pages.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain the JWT algorithm-confusion attack and the correct defence.</summary>
+      <div class="answer"><p>A verifier that reads the algorithm from the token's own header can be handed an RS256-issued token re-signed as HS256; the library then uses the RSA public key as the HMAC secret. Since the public key is public, anyone can forge valid tokens. Its ancestor is alg:none, where the token declares itself unsigned. Defence in both cases: the algorithm and key are configuration, never taken from the token — pin the expected algorithm, reject any other, and validate exp, iss and aud as well, since a signature alone does not tell you the token was minted for your service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does refresh-token rotation with reuse detection work, and what does it actually protect against?</summary>
+      <div class="answer"><p>Each refresh returns a new refresh token and invalidates the one presented, so a stolen refresh token is useful only until the legitimate client refreshes next. If an already-rotated token is presented again, two parties hold the same token — the server treats that as theft and revokes the whole token family, forcing re-authentication. It does not prevent theft; it bounds the window and guarantees detection, converting a silent long-term compromise into a visible event with a forced logout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A multi-tenant API takes the tenant id from an X-Tenant-Id header. Critique it.</summary>
+      <div class="answer"><p>That is a tenant selector for attackers, not isolation — any authenticated caller can change the header and read another customer's data. The tenant identifier must be derived from the authenticated context (a token claim or the session), resolved once at the edge into a request-scoped value, and enforced in a shared layer rather than per query: a base repository or specification, a Hibernate filter, or database row-level security keyed on a session variable, which holds even for hand-written SQL. Then prove it with tests that authenticate as tenant A, request tenant B's object and assert not-found.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your authorization tests all pass but a pen test found broken access control. How is that possible, and how do you change the tests?</summary>
+      <div class="answer"><p>Because the suite only contains positive tests — "the owner can read their own invoice" passes just as happily against an endpoint with no checks at all. Only negative tests detect missing authorization: another user gets not-found, an anonymous caller gets 401, a plain user calling an admin route gets 403, tenant A cannot reach tenant B. Make that a required template for every new endpoint, combine it with a deny-by-default configuration so an unlisted route is unreachable, and centralise the decision so a reviewer can enumerate the rules in one file instead of grepping controllers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Should sensitive data ever go inside a JWT payload, and what stops it being tampered with?</summary>
+      <div class="answer"><p>No. A JWT is signed, not encrypted — the payload is base64url-encoded JSON that anyone holding the token can decode, and it is stored in browsers, forwarded through proxies and captured in logs. The signature guarantees integrity (tampering is detected) and authenticity, but provides no confidentiality. Keep the payload to identifiers and claims that are safe to disclose; if a claim genuinely must be confidential, use an encrypted token (JWE) or, better, keep the data server-side and put an opaque reference in the token.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.auth.session — session vs token pitfalls, cookie flags, token storage, logout and revocation</li>
+      <li>sec.auth.access — broken object-level authorization (IDOR), function-level checks, multi-tenancy isolation</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

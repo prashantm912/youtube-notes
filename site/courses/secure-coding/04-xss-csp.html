@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="XSS and Content Security Policy module: reflected, stored and DOM-based cross-site scripting, sources and sinks, context-dependent output encoding, Angular contextual sanitization and bypassSecurityTrust discipline, Thymeleaf and JSTL escaping, strict nonce-based CSP with strict-dynamic in Spring Security, Trusted Types and HttpOnly cookies — with verified resources and interview questions.">
+  <title>XSS and Content Security Policy — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: XSS and Content Security Policy</h1>
+  <p class="standfirst">Cross-site scripting is not "an alert box pops up". It is attacker-supplied text that the browser's parser decides is code — and once that code runs inside your origin it can do everything the logged-in user can do, silently. This module is about writing the code that never gives the parser that chance, and the browser-level policy that catches the one time you slip.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Secure Coding track → XSS and Content Security Policy</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every XSS bug has the same shape: data crosses into a place where the browser expects code, and nothing along the way converted it back into data. The <a href="03-injection.html">previous module</a> covered injection into a SQL or shell parser; this one covers injection into the browser's HTML, JavaScript, URL and CSS parsers. The consequence is worse than it looks, because the same-origin policy is a privilege boundary: injected script inherits your origin, so it can read the DOM, call your APIs with the user's session, rewrite the page a user is trusting, and exfiltrate anything it finds — no password needed.</p>
+    <p>The first half is the mechanics you need in order to prevent it: the three types classified by <em>where</em> the injection happens, sources and sinks as the mental model for DOM XSS, why the correct output encoding depends on context, how Angular's contextual sanitization works and when <code>bypassSecurityTrust*</code> is defensible, and the equivalent controls in server-rendered Java templates. The second half builds a Content Security Policy properly — the strict nonce-based pattern rather than a host allow-list, wired into Spring Security, rolled out in report-only mode — and finishes with Trusted Types, which closes DOM XSS at the sink rather than at the source. If you have already done the <a href="../angular-advanced/12-security.html">Angular Advanced security module</a>, this is the deeper, framework-agnostic treatment of the same ground.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Reflected, stored and DOM-based XSS: three delivery routes, one bug class</h3>
+    <p>The taxonomy is about where attacker data enters and how it reaches the victim's parser, not about different vulnerabilities. In <strong>reflected</strong> XSS the payload rides in the request — a query parameter, a form field, a header — and the server echoes it straight back into the response for that same request. It needs a delivery trick (a crafted link, a link in an email or a chat message) because the attacker has to get the victim to make the request, which is also why it is often rated lower than it deserves: a single click is not a high bar.</p>
+    <p><strong>Stored</strong> XSS is the dangerous one. The payload is persisted — a comment, a profile bio, a product review, a support-ticket body, an imported CSV field, even a log line rendered in an admin console — and then served to everyone who views that record. No social engineering is required, the blast radius is every viewer including administrators, and it is <em>wormable</em>: a payload that posts itself into the victim's own profile propagates without further attacker involvement, which is exactly how the Samy worm took MySpace down in under a day. <strong>DOM-based</strong> XSS is different in kind: the payload may never reach the server at all. Client-side JavaScript reads an attacker-influenced value and writes it into a dangerous API, so the server logs are clean, the WAF sees nothing, and a fragment after <code>#</code> is not even transmitted. That is why DOM XSS survives in applications whose server-side encoding is impeccable.</p>
+    <pre class="code-block" data-label="Java"><code>// Vulnerable (reflected): request data concatenated into the response body
+String q = req.getParameter("q");
+resp.getWriter().write("&lt;p&gt;No results for " + q + "&lt;/p&gt;");   // parser sees markup
+
+// Fixed: convert data back into data for the context it lands in
+String safe = Encode.forHtml(q);                                  // OWASP Java Encoder
+resp.getWriter().write("&lt;p&gt;No results for " + safe + "&lt;/p&gt;");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://owasp.org/www-community/attacks/xss/" rel="noopener">Cross Site Scripting (XSS) — OWASP community page (types, impact, terminology)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/XSS" rel="noopener">Cross-site scripting (XSS) — MDN security guide</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting" rel="noopener">Cross-site scripting — PortSwigger Web Security Academy (the reference treatment)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/reflected" rel="noopener">Reflected XSS — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/stored" rel="noopener">Stored XSS — PortSwigger Web Security Academy</a></li>
+    </ul>
+
+    <h3>Sources and sinks: the mental model that makes DOM XSS findable</h3>
+    <p>DOM XSS is best reasoned about as a data flow with two ends. A <strong>source</strong> is any DOM property an attacker can influence: <code>location.href</code>, <code>location.search</code>, <code>location.hash</code>, <code>document.referrer</code>, <code>document.cookie</code>, <code>window.name</code>, the <code>data</code> of a <code>postMessage</code> event, and anything read back out of <code>localStorage</code>. A <strong>sink</strong> is any API that turns a string into code or markup: <code>innerHTML</code>, <code>outerHTML</code>, <code>insertAdjacentHTML</code>, <code>document.write</code>, <code>eval</code>, <code>Function</code>, the string form of <code>setTimeout</code>, an <code>href</code> or <code>src</code> assignment that accepts a <code>javascript:</code> scheme, and framework-specific sinks such as jQuery's <code>$(...)</code> when given HTML. A vulnerability exists precisely when a source flows to a sink without a sanitizing step in between.</p>
+    <p>The defensive move is almost always to change the sink rather than to filter the source. <code>textContent</code> cannot parse markup, so it is safe by construction where <code>innerHTML</code> is not; <code>setAttribute</code> on a non-URL attribute is safe where a raw <code>href</code> assignment is not; <code>JSON.parse</code> replaces <code>eval</code> outright. When you genuinely must render HTML, run it through a well-maintained sanitizer such as DOMPurify rather than a regular expression of your own — filter-evasion is a decades-old cat-and-mouse game and hand-rolled blocklists lose it. Reviewers should grep for the sink list above; that single search finds most DOM XSS in a codebase.</p>
+    <pre class="code-block" data-label="JavaScript"><code>// Vulnerable: source (URL fragment, never sent to the server) flows into an HTML sink
+const tab = decodeURIComponent(location.hash.slice(1));
+panel.innerHTML = 'Section: ' + tab;          // browser parses the string as markup
+
+// Fixed: change the sink — textContent cannot create elements or handlers
+panel.textContent = 'Section: ' + tab;
+
+// If markup really is required, sanitize at the boundary
+panel.innerHTML = DOMPurify.sanitize(tab);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/DOM_based_XSS_Prevention_Cheat_Sheet.html" rel="noopener">DOM based XSS Prevention Cheat Sheet — OWASP Cheat Sheet Series (rules per sink)</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/dom-based" rel="noopener">DOM-based XSS, sources and sinks — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/cross-site-scripting-xss-explained" rel="noopener">Cross-Site Scripting (XSS) Explained — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nDUjp4m39hg" rel="noopener">Testing for DOM XSS with DOM Invader — PortSwigger</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CNNCCgDkt5k" rel="noopener">Finding DOM XSS with DevTools — Reconless</a></li>
+    </ul>
+
+    <h3>Output encoding is the primary defense — and the context decides the encoding</h3>
+    <p>Input validation is useful but it is not the fix: the same string is harmless in one place and executable in another, so the decision can only be made correctly at the moment of output. Encoding means converting characters that carry meaning in the destination grammar into their inert representations, immediately before the value is written into that grammar. Do it late, do it once, and do it per context — double-encoding produces visible mojibake, and encoding at input time makes the stored data wrong for every other consumer.</p>
+    <p>This is why a single project-wide <code>escapeHtml()</code> helper is a false comfort. HTML body text needs <code>&amp; &lt; &gt;</code> replaced. An attribute value needs the quote characters too, and needs to be quoted in the first place — an unquoted attribute can be escaped with a space alone. A URL context needs a scheme allow-list (reject <code>javascript:</code> and <code>data:</code> before you even get to percent-encoding) because escaping does nothing to a dangerous scheme. A JavaScript context needs JavaScript string escaping and is so error-prone that the correct answer is not to interpolate at all: emit the value as JSON into a <code>data-</code> attribute or a <code>&lt;script type="application/json"&gt;</code> block and read it from script. A CSS context is similarly unsafe to interpolate. And there is one place no encoding saves you: never place untrusted data inside a <code>&lt;script&gt;</code> block, an event-handler attribute, or a stylesheet, because those grammars execute before your escaping is meaningful.</p>
+    <pre class="code-block" data-label="HTML"><code>&lt;p&gt;VALUE&lt;/p&gt;                   &lt;!-- HTML body: escape &amp; &lt; &gt; --&gt;
+&lt;a title="VALUE"&gt;               &lt;!-- attribute: also escape " and ', and always quote --&gt;
+&lt;a href="VALUE"&gt;                &lt;!-- URL: allow-list the scheme, then percent-encode --&gt;
+&lt;script&gt;var x = "VALUE";&lt;/script&gt;   &lt;!-- JS: do not interpolate; pass JSON via data-* --&gt;
+&lt;!-- CSS in a stylesheet or an inline styling attribute: do not interpolate at all --&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html" rel="noopener">Cross Site Scripting Prevention Cheat Sheet — OWASP (the per-context encoding rules)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-project-java-encoder/" rel="noopener">OWASP Java Encoder — contextual encoders for HTML, attribute, JavaScript, URL and CSS</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/contexts" rel="noopener">XSS in different contexts — PortSwigger Web Security Academy</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/preventing" rel="noopener">How to prevent XSS — PortSwigger Web Security Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SXbrgvAK_5U" rel="noopener">The Last XSS Defense Talk: why XSS defense has radically changed — Jim Manico, OWASP Foundation</a></li>
+    </ul>
+
+    <h3>Angular: contextual auto-sanitization, and the bypassSecurityTrust discipline</h3>
+    <p>Angular's design decision is that every value bound into a template is untrusted until proven otherwise, and the framework picks its treatment from the binding's <em>security context</em>. Interpolation with <code>{{ }}</code> and property bindings into text always escape, so markup renders as visible characters. Binding into <code>[innerHTML]</code> is the HTML context: Angular does not escape, it <em>sanitizes</em> — parses the fragment, drops <code>&lt;script&gt;</code> elements, <code>on*</code> handler attributes and <code>javascript:</code> URLs, keeps benign markup. Style and URL contexts get their own sanitizers. The resource-URL context (<code>&lt;script src&gt;</code>, <code>&lt;iframe src&gt;</code>, <code>&lt;object data&gt;</code>) is the strict one: a resource URL causes the browser to load and execute code from that address, so there is no partial sanitization that is meaningful, and Angular simply refuses a bound value unless you hand it a <code>SafeResourceUrl</code>.</p>
+    <p><code>DomSanitizer.bypassSecurityTrustHtml / Style / Script / Url / ResourceUrl</code> is how you produce those trusted wrappers, and it is a loaded gun pointed at your own users: it does not sanitize, it turns sanitization off. There are legitimate uses — rendering rich text your CMS produces, building an embed URL from a validated video id, injecting an SVG icon you ship yourself — and the discipline that makes them defensible is uniform. Sanitize before you bypass, using a real sanitizer such as DOMPurify, so the bypass is only asserting "this has already been checked". Bypass a value you constructed, never a value a user typed, and construct it from validated components rather than accepting a whole URL. Keep every call in one small pipe or service so code review has a single choke point. Treat any <code>bypassSecurityTrust*</code> call reachable from user input as a finding, not a style preference. Note the limit of all of this: Angular protects the paths it renders, so an <code>ElementRef.nativeElement.innerHTML</code> assignment, a <code>Renderer2</code> raw-HTML write, or a server-side template that stamps unescaped values into the HTML shell walks straight around it.</p>
+    <pre class="code-block" data-label="TypeScript"><code>&lt;p&gt;{{ comment }}&lt;/p&gt;                    &lt;!-- escaped: renders as text, always --&gt;
+&lt;div [innerHTML]="commentHtml"&gt;&lt;/div&gt;  &lt;!-- sanitized: handlers and scripts stripped --&gt;
+&lt;iframe [src]="embedUrl"&gt;&lt;/iframe&gt;     &lt;!-- resource URL: needs a SafeResourceUrl --&gt;
+
+// Wrong: user input handed straight to a bypass — the hole is fully reopened
+this.html = this.sanitizer.bypassSecurityTrustHtml(userSuppliedHtml);
+
+// Defensible: sanitize first, bypass a value we constructed, one place in the codebase
+const clean = DOMPurify.sanitize(cmsRichText);
+this.html = this.sanitizer.bypassSecurityTrustHtml(clean);
+this.embed = this.sanitizer.bypassSecurityTrustResourceUrl(EMBED_BASE + validatedId);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/best-practices/security" rel="noopener">Security — Angular official guide (sanitization, security contexts, trusted values)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/platform-browser/DomSanitizer" rel="noopener">DomSanitizer — Angular API reference (sanitize and the bypassSecurityTrust family)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/SecurityContext" rel="noopener">SecurityContext — Angular API reference (HTML, STYLE, SCRIPT, URL, RESOURCE_URL)</a></li>
+      <li>[Reference] <a href="https://github.com/cure53/DOMPurify" rel="noopener">DOMPurify — cure53 (the maintained client-side HTML sanitizer)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fIaJDU-jGrA" rel="noopener">Cross-site scripting explained: stored, reflected and DOM-based — Dev Academy</a></li>
+    </ul>
+
+    <h3>Server-rendered Java templates: Thymeleaf, JSP and JSTL</h3>
+    <p>Single-page apps are not the only front end you will ship, and the Java template engines have the same escaped-versus-unescaped split — with the unescaped variant sitting one character away from the safe one. In Thymeleaf, <code>th:text</code> escapes its result and is what you should be writing; <code>th:utext</code> deliberately does not, and every Thymeleaf XSS bug in the wild is a <code>th:utext</code> (or its inlining twin <code>[(...)]</code> versus the safe <code>[[...]]</code>). Grep for <code>utext</code> during review the way you grep for <code>innerHTML</code> in JavaScript, and where you truly need stored markup, run it through the OWASP Java HTML Sanitizer with an explicit element and attribute policy before it is ever written to the template.</p>
+    <p>JSP is the sharper edge, because the unsafe behaviour is the default rather than an opt-in. A bare <code>${value}</code> expression in a JSP page writes the value out with no escaping at all, so legacy pages are full of latent reflected XSS. The JSTL <code>&lt;c:out&gt;</code> tag escapes by default (and can be turned off with <code>escapeXml="false"</code> — another review grep). Servlet-level defenses matter too: set the response character encoding explicitly so a browser cannot be talked into re-interpreting your bytes as UTF-7-style alternate encodings, and set <code>Content-Type</code> plus <code>X-Content-Type-Options: nosniff</code> so a JSON or text response containing user data is never sniffed and rendered as HTML. That last one turns a whole family of "file download becomes stored XSS" bugs into non-issues.</p>
+    <pre class="code-block" data-label="HTML"><code>&lt;!-- Thymeleaf: escaped, correct by default --&gt;
+&lt;p th:text="${comment}"&gt;&lt;/p&gt;
+
+&lt;!-- Thymeleaf: unescaped — this is where the bug lives --&gt;
+&lt;p th:utext="${comment}"&gt;&lt;/p&gt;
+
+&lt;!-- JSP: a bare EL expression is NOT escaped --&gt;
+&lt;p&gt;${comment}&lt;/p&gt;
+
+&lt;!-- JSTL: c:out escapes by default; escapeXml="false" undoes it --&gt;
+&lt;p&gt;&lt;c:out value="${comment}"/&gt;&lt;/p&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.thymeleaf.org/doc/tutorials/3.1/usingthymeleaf.html" rel="noopener">Using Thymeleaf — official tutorial (th:text, th:utext and inlining semantics)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/tags/3.0/" rel="noopener">Jakarta Tags (JSTL) 3.0 specification — the c:out escaping contract</a></li>
+      <li>[Official] <a href="https://owasp.org/www-project-java-html-sanitizer/" rel="noopener">OWASP Java HTML Sanitizer — policy-driven server-side HTML cleaning</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-prevent-xss" rel="noopener">Prevent Cross-Site Scripting (XSS) in a Spring Application — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3pYioNIPj84" rel="noopener">Understand attacks: CSRF, XSS, CORS and SQL injection with a demo — Concept and Coding (Shrayansh)</a></li>
+    </ul>
+
+    <h3>Content Security Policy: the header, the directives, and why script-src 'self' is weak</h3>
+    <p>CSP is a response header that tells the browser which resources this document is allowed to load and execute. The browser enforces it, so it holds even when your application logic has already lost. The directives you will actually configure are <code>script-src</code> (what may execute — the one that matters for XSS), <code>object-src</code> (plugins, which should be <code>'none'</code>), <code>base-uri</code> (which should be <code>'none'</code> so an injected <code>&lt;base&gt;</code> tag cannot repoint every relative script URL), <code>frame-ancestors</code> (clickjacking, replacing the old framing header), <code>default-src</code> as the fallback for fetch directives, and <code>connect-src</code>, <code>img-src</code>, <code>style-src</code> and <code>font-src</code> for the rest.</p>
+    <p>The tempting first policy is a host allow-list: <code>script-src 'self' https://cdn.example.com</code>. Google's large-scale study of deployed policies found this approach is bypassable in the overwhelming majority of real sites, and the reasons are mundane rather than exotic. If any allowed host serves a JSONP endpoint, an attacker names your callback and gets arbitrary script from an approved origin. If any allowed host serves a framework with a client-side template compiler — an older AngularJS bundle is the classic — the attacker injects markup that the framework itself evaluates. If any allowed host lets users upload files, they upload a script. And a CDN allow-list transitively trusts every library that CDN hosts. Add the fact that a real application's allow-list only grows, and the conclusion is that host allow-listing is not a security boundary. Run any candidate policy through Google's CSP Evaluator before you ship it; it names these bypasses explicitly.</p>
+    <pre class="code-block" data-label="HTTP"><code># Weak: one JSONP endpoint or one templating library on an allowed host defeats it
+Content-Security-Policy: script-src 'self' https://cdn.example.com
+
+# Also useless: 'unsafe-inline' permits exactly the injected inline script you fear
+Content-Security-Policy: script-src 'self' 'unsafe-inline'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP" rel="noopener">Content Security Policy — MDN guide (concepts, directives, common policies)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy" rel="noopener">Content-Security-Policy — MDN header reference (every directive and source expression)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html" rel="noopener">Content Security Policy Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Article] <a href="https://research.google/pubs/csp-is-dead-long-live-csp-on-the-insecurity-of-whitelists-and-the-future-of-content-security-policy/" rel="noopener">CSP Is Dead, Long Live CSP — Google Research (the study that killed host allow-lists)</a></li>
+      <li>[Tool] <a href="https://csp-evaluator.withgoogle.com/" rel="noopener">CSP Evaluator — Google (paste a policy, see its bypasses)</a></li>
+    </ul>
+
+    <h3>Strict CSP: nonces, hashes and strict-dynamic, wired into Spring Security</h3>
+    <p>The modern recommendation replaces the allow-list with per-response trust. A <strong>nonce</strong> is a cryptographically random value generated fresh for every response, placed in the header as <code>'nonce-...'</code> and stamped as a <code>nonce</code> attribute on each script tag you intend to run. An attacker injecting a script tag cannot guess the value, so their script does not execute. Two rules make or break it: the nonce must come from a CSPRNG with at least 128 bits of entropy, and it must be unique per response — a nonce cached in a static HTML file or reused across requests is worthless. <strong>Hashes</strong> (<code>'sha256-...'</code>) are the alternative for genuinely static inline scripts, which suits fully static hosting where you cannot generate a per-response value.</p>
+    <p><code>'strict-dynamic'</code> is what makes this practical. It says: any script that has already been trusted (by nonce or hash) may load further scripts programmatically, and while it is in effect the browser ignores host allow-lists. That is precisely the behaviour a bundled application needs, because your entry bundle loads chunks whose names you cannot enumerate. Pair it with <code>object-src 'none'</code> and <code>base-uri 'none'</code>, and keep the legacy fallbacks <code>https:</code> and <code>'unsafe-inline'</code> at the end of the directive — modern browsers ignore both when <code>'strict-dynamic'</code> and a nonce are present, and older ones fall back to something rather than nothing. Note what a strict CSP does <em>not</em> give you: it does not stop an attacker rewriting page content, planting a fake login form, or exfiltrating data through an allowed channel. It stops script execution, which is most of the damage, not all of it.</p>
+    <pre class="code-block" data-label="Java"><code>// Per-response nonce: CSPRNG, 128 bits, never cached, never reused
+byte[] raw = new byte[16];
+secureRandom.nextBytes(raw);
+String nonce = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+request.setAttribute("cspNonce", nonce);        // template reads it: nonce="${cspNonce}"
+
+response.setHeader("Content-Security-Policy",
+      "script-src 'nonce-" + nonce + "' 'strict-dynamic' https: 'unsafe-inline'; "
+    + "object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+
+// Static parts of the policy can equally come from the Spring Security DSL:
+// http.headers(h -&gt; h.contentSecurityPolicy(csp -&gt; csp.policyDirectives("...")));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/headers.html" rel="noopener">Security HTTP Response Headers — Spring Security reference (contentSecurityPolicy and friends)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/strict-csp" rel="noopener">Mitigate cross-site scripting with a strict Content Security Policy — web.dev (Google)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-csp" rel="noopener">Content Security Policy with Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://portswigger.net/web-security/cross-site-scripting/content-security-policy" rel="noopener">Content security policy — PortSwigger Web Security Academy (including how weak policies fall)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MNT0O94FYTg" rel="noopener">No More XSS: deploying CSP with nonces and strict-dynamic — Devin Lundberg, BSidesSF</a></li>
+    </ul>
+
+    <h3>Rolling CSP out on a single-page app without breaking it</h3>
+    <p>Ship a policy blind and you will break production. The safe sequence is: send it as <code>Content-Security-Policy-Report-Only</code> first, which makes the browser evaluate and report violations while enforcing nothing; collect reports for long enough to cover your real traffic mix; fix the genuine violations; only then switch the header name to the enforcing one. Reporting has two generations — the older <code>report-uri</code> directive posting to your endpoint, and the newer <code>Reporting-Endpoints</code> header plus <code>report-to</code> directive — and because browser support is uneven you generally emit both for a while. Budget for noise: browser extensions and injected ISP scripts generate violation reports you cannot act on, so filter before you alert.</p>
+    <p>The SPA-specific friction is predictable. Inline styles are everywhere — component libraries, animation code and Angular's own style handling produce them — so <code>style-src</code> usually needs a nonce, a hash set, or (pragmatically, and much less dangerous than its script counterpart) <code>'unsafe-inline'</code> for styles only. Development builds want <code>'unsafe-eval'</code> because source maps, hot module replacement and some dev-mode compilers evaluate strings; the correct answer is a different, looser policy for the dev server and the strict one for production, never <code>'unsafe-eval'</code> in the shipped header. Your bundler must be told to stamp the nonce onto the tags it generates — Angular reads it from the <code>ngCspNonce</code> attribute on the root element or from the <code>CSP_NONCE</code> injection token — and any HTML shell that carries a nonce must not be cached at a CDN, since a cached nonce is a shared nonce.</p>
+    <pre class="code-block" data-label="HTTP"><code># Phase one: observe only, break nothing
+Content-Security-Policy-Report-Only:
+  script-src 'nonce-RANDOM' 'strict-dynamic' https: 'unsafe-inline';
+  style-src 'self' 'unsafe-inline';
+  object-src 'none'; base-uri 'none';
+  report-uri /csp-violations;
+  report-to csp-endpoint
+
+Reporting-Endpoints: csp-endpoint="https://example.com/csp-violations"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy-Report-Only" rel="noopener">Content-Security-Policy-Report-Only — MDN header reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Reporting-Endpoints" rel="noopener">Reporting-Endpoints — MDN header reference (the modern reporting wiring)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/CSP_NONCE" rel="noopener">CSP_NONCE — Angular API reference (feeding the nonce to Angular's style injection)</a></li>
+      <li>[Article] <a href="https://content-security-policy.com/" rel="noopener">Content Security Policy Reference — directive-by-directive quick reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_L06HetskC4" rel="noopener">Content Security Policy: a successful mess between hardening and mitigation — Spagnuolo and Weichselbaum, LocoMocoSec</a></li>
+    </ul>
+
+    <h3>Trusted Types: closing DOM XSS at the sink</h3>
+    <p>Everything above asks developers to remember something at every call site. Trusted Types inverts that. Sending <code>require-trusted-types-for 'script'</code> in the CSP header makes the browser refuse plain strings at the dangerous DOM sinks — <code>innerHTML</code>, <code>outerHTML</code>, <code>insertAdjacentHTML</code>, <code>document.write</code>, script <code>src</code>, <code>eval</code> and the rest. Those sinks now accept only <code>TrustedHTML</code>, <code>TrustedScript</code> or <code>TrustedScriptURL</code> objects, which can be produced only by a policy you registered with <code>trustedTypes.createPolicy()</code>. The security property is structural rather than behavioural: instead of auditing thousands of assignments, you audit the handful of policies, because nothing else in the application can create a value the sinks will accept. The <code>trusted-types</code> directive additionally names which policies may exist, so a third-party script cannot quietly register a permissive one.</p>
+    <p>Deployment follows the same report-only path as the rest of CSP, and the reports are unusually actionable — each one is a real source-to-sink flow in your code. Angular supports Trusted Types and its own rendering paths are already compliant, so a well-behaved Angular application typically switches it on with little churn; the violations you do see are precisely the raw-DOM escape hatches you wanted to find. Two honest caveats: browser support is Chromium-led rather than universal, so treat it as defense in depth on top of encoding, not a replacement; and a policy whose <code>createHTML</code> simply returns its input is a policy that protects nothing. Point it at a real sanitizer.</p>
+    <pre class="code-block" data-label="JavaScript"><code>// With require-trusted-types-for 'script' this now throws instead of injecting
+el.innerHTML = userHtml;                       // TypeError: requires TrustedHTML
+
+// One audited choke point for the whole application
+const policy = trustedTypes.createPolicy('app-html', {
+  createHTML: (input) =&gt; DOMPurify.sanitize(input)    // a real sanitizer, not identity
+});
+el.innerHTML = policy.createHTML(userHtml);    // allowed, and provably sanitized</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Trusted_Types_API" rel="noopener">Trusted Types API — MDN (policies, types, protected sinks)</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/require-trusted-types-for" rel="noopener">require-trusted-types-for — MDN CSP directive reference</a></li>
+      <li>[Official] <a href="https://w3c.github.io/trusted-types/dist/spec/" rel="noopener">Trusted Types — W3C editor's draft specification</a></li>
+      <li>[Article] <a href="https://web.dev/articles/trusted-types" rel="noopener">Prevent DOM-based XSS with Trusted Types — web.dev (Google)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NUj7-XM51y8" rel="noopener">Trusted Types: DOM XSS protection at scale — Jen Ozmen and Aaron Shim</a></li>
+    </ul>
+
+    <h3>Limiting the blast radius, and the honest verdict on CSP</h3>
+    <p>Assume for a moment that one XSS gets through. What the attacker can reach is a design decision you made earlier. A session cookie marked <code>HttpOnly</code> is invisible to <code>document.cookie</code>, so the classic one-line session theft stops working; add <code>Secure</code> so it never crosses plaintext, and <code>SameSite</code> to blunt the forgery angle covered in a later module. Tokens kept in <code>localStorage</code> have the opposite property — they are readable by any script in the origin, which is the strongest practical argument for cookie-based session handling in a browser app. Round it out by binding sessions to sensible lifetimes, re-authenticating for high-value actions so a hijacked session cannot change an email address or a payout account unchallenged, and keeping <code>X-Content-Type-Options: nosniff</code> on every response.</p>
+    <p>The verdict to carry into an interview and into a design review: CSP is a second line of defense, not a substitute for encoding. It is genuinely valuable — it converts many injections from full compromise into a blocked-script console message, and its violation reports tell you about bugs you did not know you had. But it does not stop an attacker who can inject markup from defacing the page or phishing through it, it does nothing about server-side template injection, a badly built policy is theatre, and every serious deployment still rests on getting output encoding right at every sink. Build the encoding correctly, then add CSP and Trusted Types so that the day you get one call site wrong is a bad day rather than a breach.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie" rel="noopener">Set-Cookie — MDN reference (HttpOnly, Secure, SameSite attributes)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html" rel="noopener">Session Management Cheat Sheet — OWASP (cookie flags, lifetimes, re-authentication)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/HTML5_Security_Cheat_Sheet.html" rel="noopener">HTML5 Security Cheat Sheet — OWASP (sandboxed frames, postMessage, storage risks)</a></li>
+      <li>[Article] <a href="https://web.dev/articles/csp" rel="noopener">Content Security Policy — web.dev (what CSP does and does not buy you)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pD6C1-zSxIM" rel="noopener">Cross-site scripting explained with examples, and preventing it with CSP — Hussein Nasser</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-injection.html">← Injection</a>
+    <a href="index.html">All Secure Coding modules</a>
+    <a href="05-authn-authz.html">Authentication and Authorization Failures →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>XSS is the security question Indian product and service companies ask most often, and it scales cleanly from a screening round to a senior design discussion — the three types get asked almost every time, and the follow-ups about Angular and CSP nonces separate people who have shipped a policy from people who have read about one:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is XSS, and why is it serious when the page is "just" a comment box?</summary>
+      <div class="answer"><p>Attacker-supplied data ends up in a place the browser parses as code, so the attacker's script runs inside your origin. Because the same-origin policy grants that script everything the page has, it can read the DOM, call your APIs with the user's session, steal readable tokens, rewrite the interface the user trusts, and exfiltrate results — all without a password. A comment box that renders unescaped is a comment box that runs code for every viewer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the three types of XSS and how they differ.</summary>
+      <div class="answer"><p><strong>Reflected</strong>: the payload is in the request and the server echoes it into that same response, so the attacker needs the victim to follow a crafted link. <strong>Stored</strong>: the payload is persisted and served to everyone who views the record — no social engineering, largest blast radius, and potentially wormable. <strong>DOM-based</strong>: the payload never has to reach the server; client-side JavaScript reads an attacker-influenced source and writes it to a dangerous sink, so server logs and a WAF see nothing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is stored XSS usually rated more severe than reflected?</summary>
+      <div class="answer"><p>Delivery is free and automatic. Reflected XSS needs each victim to click the attacker's link; stored XSS fires for every user who loads the affected page, including administrators viewing it in a privileged console. It also persists until someone cleans the data, and a payload that writes itself into the viewer's own content becomes self-propagating.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are sources and sinks in DOM XSS?</summary>
+      <div class="answer"><p>A source is a DOM property an attacker can influence — <code>location.search</code>, <code>location.hash</code>, <code>document.referrer</code>, <code>window.name</code>, <code>postMessage</code> data, values read back from storage. A sink is an API that turns a string into markup or code — <code>innerHTML</code>, <code>document.write</code>, <code>insertAdjacentHTML</code>, <code>eval</code>, a <code>javascript:</code> URL assignment. A bug exists when a source reaches a sink with no sanitization in between; the usual fix is to change the sink (<code>textContent</code>, <code>JSON.parse</code>) rather than filter the source.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is a single project-wide escapeHtml() function not enough?</summary>
+      <div class="answer"><p>Because the correct encoding depends on the destination grammar. HTML body text needs the angle brackets and ampersand; an attribute value additionally needs the quote characters and needs to be quoted at all; a URL needs a scheme allow-list before percent-encoding, since escaping does nothing to <code>javascript:</code>; a JavaScript or CSS context needs different rules again and is best not interpolated at all — pass data as JSON via a <code>data-</code> attribute. One helper applied everywhere is under-escaping in some contexts and mangling output in others.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Should you encode on input or on output, and why?</summary>
+      <div class="answer"><p>On output, immediately before the value enters a specific context. Encoding at input corrupts the stored data for every other consumer (an API, a report, a mobile client) and is still wrong, because at input time you do not yet know which grammar the value will land in. Validate on input — type, length, format, allow-list — and encode on output. Doing both at input produces double-encoded text and a false sense of safety.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is Angular immune to XSS?</summary>
+      <div class="answer"><p>No — it is safe by default, which is different. Interpolation escapes, <code>[innerHTML]</code> is sanitized, and resource-URL bindings are refused outright, so idiomatic template code is safe. You lose that the moment you opt out: any <code>bypassSecurityTrust*</code> call on user-influenced data, a direct <code>ElementRef.nativeElement.innerHTML</code> write, a <code>Renderer2</code> raw-HTML write, a server-rendered shell that stamps unescaped values into <code>index.html</code>, or a dependency with a known XSS advisory. Angular protects the paths Angular renders; it cannot protect the ones you route around.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are Angular's security contexts, and why does binding to a script src behave differently from innerHTML?</summary>
+      <div class="answer"><p>HTML, style, URL and resource URL. Angular chooses its treatment by context because the same string is dangerous in different ways in each. <code>[innerHTML]</code> is the HTML context, so Angular can parse the fragment and strip scripts, handlers and <code>javascript:</code> URLs while keeping benign markup. A resource URL (script/iframe/object source) causes the browser to fetch and execute whatever lives at that address, so there is no meaningful partial cleaning — Angular refuses the binding unless you supply an explicitly trusted <code>SafeResourceUrl</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> In Thymeleaf and JSP, where does the XSS bug usually live?</summary>
+      <div class="answer"><p>In the unescaped variant. Thymeleaf's <code>th:text</code> escapes; <code>th:utext</code> (and the <code>[(...)]</code> inlining form) does not, and that is where Thymeleaf XSS comes from. In JSP the default is the unsafe one: a bare <code>${value}</code> expression is written out unescaped, while JSTL's <code>&lt;c:out&gt;</code> escapes unless you pass <code>escapeXml="false"</code>. Review greps: <code>utext</code>, bare EL in JSP, and <code>escapeXml="false"</code>. If stored HTML is genuinely required, clean it with the OWASP Java HTML Sanitizer under an explicit policy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a CSP nonce work, end to end?</summary>
+      <div class="answer"><p>For each response the server generates a fresh random value from a CSPRNG (at least 128 bits), puts it in the header as <code>script-src 'nonce-VALUE'</code>, and stamps the same value as a <code>nonce</code> attribute on every script tag it intends to run. The browser executes only scripts whose nonce matches. An injected script tag cannot carry the right value because the attacker never sees it. It fails if the nonce is predictable, if it is reused across responses, or if the HTML carrying it is cached — a cached nonce is a published nonce.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is script-src 'self' plus a CDN allow-list considered weak?</summary>
+      <div class="answer"><p>Because allow-listing a host trusts everything that host can serve. A JSONP endpoint on an allowed origin returns attacker-chosen script through an approved URL. A client-side templating library on an allowed origin (an old AngularJS bundle is the standard example) evaluates injected markup for you. A host that accepts user uploads serves the attacker's file. A general-purpose CDN transitively trusts every library it hosts. Google's measurement study found the large majority of deployed allow-list policies were bypassable on these grounds, which is why the recommendation moved to nonces or hashes with <code>'strict-dynamic'</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does 'strict-dynamic' do, and what would you pair it with?</summary>
+      <div class="answer"><p>It propagates trust: a script already trusted via nonce or hash may load further scripts programmatically, and while it is active the browser ignores host allow-lists. That makes bundled applications workable, since chunk URLs are not enumerable in advance. Pair it with a per-response nonce, <code>object-src 'none'</code>, <code>base-uri 'none'</code> (otherwise an injected <code>&lt;base&gt;</code> repoints every relative script URL), <code>frame-ancestors 'none'</code>, and the legacy fallbacks <code>https:</code> and <code>'unsafe-inline'</code> at the end, which modern browsers ignore and older ones use as a weaker net.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you roll a strict CSP onto an existing single-page app in production?</summary>
+      <div class="answer"><p>Start with <code>Content-Security-Policy-Report-Only</code> so nothing breaks, wire up <code>report-uri</code> plus <code>Reporting-Endpoints</code> and <code>report-to</code>, and collect over a full traffic cycle. Filter extension noise out of the reports, fix genuine violations, then flip to the enforcing header. Expect specific friction: inline styles from component libraries usually force a <code>style-src</code> nonce, hash set or (for styles only) <code>'unsafe-inline'</code>; dev builds want <code>'unsafe-eval'</code>, so keep a separate looser dev policy and never ship it; the bundler and framework must stamp the nonce (Angular via <code>ngCspNonce</code> or the <code>CSP_NONCE</code> token); and the HTML shell carrying a nonce must not be CDN-cached.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are Trusted Types, and why are they a stronger guarantee than sanitizing at each call site?</summary>
+      <div class="answer"><p><code>require-trusted-types-for 'script'</code> makes the browser reject plain strings at dangerous DOM sinks; those sinks accept only <code>TrustedHTML</code>, <code>TrustedScript</code> or <code>TrustedScriptURL</code> objects, and only a policy registered via <code>trustedTypes.createPolicy()</code> can mint them. The guarantee is structural: you audit a handful of policies instead of thousands of assignments, and the <code>trusted-types</code> directive can restrict which policy names may exist. Caveats: support is Chromium-led so it is defense in depth, not a replacement for encoding, and a policy whose <code>createHTML</code> returns its input unchanged protects nothing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> If XSS still happens, what limits the damage — and is CSP a substitute for encoding?</summary>
+      <div class="answer"><p>Damage limiting: <code>HttpOnly</code> on session cookies so script cannot read them, <code>Secure</code> and <code>SameSite</code> alongside, cookie-based sessions rather than tokens in <code>localStorage</code> (which any script can read), short session lifetimes, step-up re-authentication for high-value actions, and <code>nosniff</code> so a user-controlled response is never rendered as HTML. And no, CSP is not a substitute: it is a second line of defense. It blocks script execution but not defacement, phishing forms rendered into your page, or server-side template injection, and a badly built policy is theatre. Get output encoding right first; CSP and Trusted Types are what make one mistake survivable.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Secure Coding track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sec.xss.types — reflected, stored and DOM XSS, sources and sinks, context-dependent output encoding, Angular contextual sanitization and bypassSecurityTrust discipline, Thymeleaf and JSTL escaping</li>
+      <li>sec.xss.csp — Content Security Policy directives, strict nonce and hash policies with strict-dynamic, Spring Security wiring, single-page-app rollout in report-only mode, Trusted Types</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Secure Coding track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

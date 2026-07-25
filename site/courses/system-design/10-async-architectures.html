@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Asynchronous architectures module: deciding what belongs on the request path, queue-based load leveling and its capacity caveat, queue depth and consumer lag, competing consumers, publish-subscribe fan-out, fan-out on write versus on read, priority work, batch versus stream processing, windowing and event time, distributed cron, and exactly-once at design level — with verified resources and interview questions.">
+  <title>Asynchronous Architectures — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Asynchronous Architectures</h1>
+  <p class="standfirst">The design question is not "should we use a queue" — it is which work must finish before you answer the user. The honest answer is almost always less than you think, and everything else belongs behind a queue.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Asynchronous Architectures</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the design-level view of going asynchronous: when to do it, what shape to choose, and what each shape costs you. It starts with the request-path discipline — do only what the response genuinely depends on, queue the rest — then works through queue-based load leveling and its capacity caveat, the health signals that tell you a queue is in trouble, the fan-out strategies (competing consumers, publish-subscribe, fan-out on write versus on read), and priority work. The second half covers processing models: batch versus stream, windowing and event time, scheduled work and the distributed-cron trap, and exactly-once revisited as a design target rather than a delivery guarantee.</p>
+    <p>Broker mechanics live elsewhere in this course. Partitions, consumer groups, acknowledgements, retry topics and dead-letter queues are taught in depth in the <a href="../messaging/index.html">Messaging track</a> — start with <a href="../messaging/01-messaging-fundamentals.html">Messaging Fundamentals</a> and <a href="../messaging/02-kafka-architecture.html">Kafka Architecture</a>. Here we stay at the level an architect argues at: what work moves off the request path, what shape the flow takes, and what breaks when load rises.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The request path: what must finish before you answer?</h3>
+    <p>Every endpoint has an implicit contract about what is true by the time the response is written. The design work is making that contract explicit and then aggressively shrinking it. Take "user uploads a video": the response depends on the bytes being durably stored and a video id existing. It does not depend on the thumbnail being generated, the transcode ladder being built, the search index being updated, the recommendation model being recalculated, or the "your upload is live" email being sent. Do the first two synchronously; publish an event and let the other five happen behind it. The same test applies to checkout (charge the card and persist the order synchronously; send the confirmation email, decrement loyalty points and warm the analytics warehouse asynchronously) and to signup (create the account; queue the welcome mail, the CRM sync and the fraud score).</p>
+    <p>Shrinking the request path buys three things at once: latency (you stop paying for work the user is not waiting on), availability (the email provider being down no longer fails checkouts), and independent scaling (thumbnail workers scale on thumbnail load, not on HTTP load). It costs you one hard thing in exchange — the user's mental model and yours diverge. The response now means "accepted", not "done", so the API has to say so: return <code>202 Accepted</code> with a status resource the client can poll, or push completion over a websocket. Anything that silently pretends the work is finished will eventually surface as a support ticket. Two failure modes to name in an interview: the <em>dual write</em>, where you commit to the database and then fail to publish the event (fixed with the transactional outbox, covered below), and the <em>read-your-writes</em> break, where the user reloads and cannot see the thing they just created.</p>
+    <pre class="code-block" data-label="HTTP"><code>POST /v1/videos            → 201 Created  { "id": "vid_9f3", "state": "uploaded" }
+                             (synchronous: bytes durable, id assigned — that is all)
+
+  ↳ publishes VideoUploaded → thumbnail worker
+                            → transcode worker
+                            → search-index worker
+                            → notification worker
+
+GET  /v1/videos/vid_9f3    → 200 OK       { "state": "processing", "ready": false }
+                             client polls or subscribes; "accepted" is not "done"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply" rel="noopener">Asynchronous Request-Reply pattern — Azure Architecture Center (the 202 + status-endpoint shape)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven" rel="noopener">Event-driven architecture style — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/communication-style/messaging.html" rel="noopener">Pattern: Messaging — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/synchronous-vs-asynchronous-communication" rel="noopener">Synchronous vs Asynchronous Communication: When to Use What? — ByteByteGo blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e_ldsz7xzmY" rel="noopener">Stream, Event Bus or Queue? What's the Difference? — James Eastham</a></li>
+    </ul>
+
+    <h3>Queue-based load leveling: turning a spike into queue depth</h3>
+    <p>A synchronous service facing a burst has only bad options: accept the load and fall over, or reject it with errors. Put a queue between the front door and the workers and the burst becomes something else entirely — <em>queue depth</em>. The producers write at whatever rate the world throws at them, the buffer absorbs it, and the consumers drain at their own steady, provisioned pace. You size the workers for the <em>average</em> load rather than the peak, which is often an order of magnitude cheaper, and a five-minute flash sale that would have produced a wall of HTTP 503s instead produces a queue that is a few hundred thousand messages deep and empties over the next twenty minutes.</p>
+    <p>Now the caveat that separates people who have run this in production from people who have read about it: <strong>a queue converts an availability problem into a latency problem — it does not create capacity.</strong> Load leveling only works if average consumer capacity exceeds average producer load over the window that matters. If the arrival rate exceeds the drain rate on a sustained basis, the queue does not smooth anything; it grows without bound until you hit the broker's retention limit, run out of disk, or blow past every latency expectation the business had. A queue is a shock absorber, not an engine. Bound it deliberately: set a maximum depth or an age limit, decide what happens when the bound is hit (shed, reject, spill to cold storage), and never treat "the queue is holding it" as a capacity plan. It is also worth remembering that the queue itself is now a dependency — if the broker is down, the front door is down, so the producer needs its own local durability story.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/queue-based-load-leveling" rel="noopener">Queue-Based Load Leveling pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/web-queue-worker" rel="noopener">Web-Queue-Worker architecture style — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/avoiding-insurmountable-queue-backlogs/" rel="noopener">Avoiding insurmountable queue backlogs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://codeopinion.com/web-queue-worker-architecture-style-for-scaling/" rel="noopener">Web-Queue-Worker Architecture Style for Scaling — CodeOpinion (Derek Comartin)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BIGiLJJlE08" rel="noopener">Avoiding a QUEUE Backlog Disaster with Backpressure and Flow Control — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Queue depth and consumer lag: the health signals, and what to do when they rise</h3>
+    <p>Two numbers tell you almost everything about an asynchronous system. <em>Queue depth</em> (or consumer lag, on a log-based broker like Kafka, which measures how far behind the latest offset a group is) tells you whether you are keeping up. <em>Age of the oldest message</em> tells you what a user is actually experiencing — depth of ten thousand means nothing on its own, but an oldest message that is forty minutes old means somebody's password reset mail is forty minutes late. Alert on the age, not just the depth; graph the arrival rate and the drain rate on the same chart so the gap is visible; and watch the trend, because a queue that is growing linearly has a deterministic time-to-disaster you can compute.</p>
+    <p>When the gap is real you have exactly three levers, and a good answer names all three in order. First, <strong>scale the consumers</strong> — this is the reflex, and it is right when the bottleneck is worker CPU and the downstream can take the extra concurrency. It fails when the real bottleneck is a shared database or a third-party API, where adding consumers just moves the queue somewhere less observable. Second, <strong>shed load</strong> — drop or downgrade work you can afford to lose (analytics events, non-critical notifications, recommendation refreshes), and consider processing newest-first so recent users get service while the old backlog is written off. Third, <strong>reject at the front door</strong> — throttle or rate-limit producers so the backlog stops growing while you recover; an honest error at the edge is better than an unbounded queue that silently degrades everyone. A fourth, underrated tactic from the Builders' Library: separate the backlogged work onto its own queue so a poisoned or slow class of message cannot starve everything else.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-available-cloudwatch-metrics.html" rel="noopener">Available CloudWatch metrics for Amazon SQS — AWS documentation (visible messages, age of oldest message)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/auto-scaling" rel="noopener">Autoscaling guidance — Azure Architecture Center (scaling workers on queue length)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/using-load-shedding-to-avoid-overload/" rel="noopener">Using load shedding to avoid overload — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://codeopinion.com/beware-of-consumer-lag/" rel="noopener">Beware of Consumer Lag! — CodeOpinion</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0KYoIvrM9VY" rel="noopener">Backpressure Explained — Petabridge</a></li>
+    </ul>
+
+    <h3>Work queues and competing consumers</h3>
+    <p>The first fan-out shape is point-to-point: one queue, many identical workers, each message delivered to exactly one of them. This is the <em>competing consumers</em> pattern, and it is the workhorse of asynchronous design because it makes throughput a dial. Workers are stateless and interchangeable, so you scale by adding processes; the broker handles the distribution, so there is no coordinator to write; and a worker that dies mid-message simply has its message redelivered once the acknowledgement times out. Note the delivery model this implies — you acknowledge <em>after</em> the work is done, not on receipt, which is precisely why at-least-once is the default and duplicates are inevitable.</p>
+    <p>Two design consequences follow. First, competing consumers destroy ordering by construction: if two messages for the same order land on two workers, they may complete in either sequence. If you need per-entity ordering, partition by key so all messages for one key go to one consumer, and accept that you have now capped parallelism at the number of partitions and created a hot-key risk. Second, the workers must be idempotent, because redelivery is a normal event and not an error. Keep messages small — pass an identifier and let the worker fetch, or use the claim-check pattern to put a large payload in object storage and send a pointer — and give every queue a dead-letter destination so one unprocessable message cannot block the line. Ordering, acknowledgement modes and dead-letter mechanics are worked through properly in <a href="../messaging/09-ordering-concurrency.html">Ordering and Concurrency</a> and <a href="../messaging/08-dlq-retries.html">DLQ and Retries</a>.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/competing-consumers" rel="noopener">Competing Consumers pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/claim-check" rel="noopener">Claim-Check pattern — Azure Architecture Center (keeping messages small)</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/CompetingConsumers.html" rel="noopener">Competing Consumers — Enterprise Integration Patterns (Hohpe &amp; Woolf)</a></li>
+      <li>[Article] <a href="https://codeopinion.com/competing-consumers-pattern-for-scalability/" rel="noopener">Competing Consumers Pattern for Scalability — CodeOpinion</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=iJLL-KPqBpM" rel="noopener">System Design Interview — Distributed Message Queue — System Design Interview</a></li>
+    </ul>
+
+    <h3>Publish-subscribe fan-out to independent subscribers</h3>
+    <p>The second shape is broadcast: the producer publishes one event to a topic and every interested subscriber gets its own copy. Where a work queue divides work among clones, publish-subscribe multiplies one fact across different consumers doing different things — <code>OrderPlaced</code> lands on the invoicing service, the warehouse service, the loyalty service and the analytics pipeline, none of which the order service knows about. The publisher names an event, not a recipient, which is what actually delivers the decoupling everyone claims for messaging: adding a sixth subscriber is a deployment, not a change to the publisher.</p>
+    <p>The costs are real and worth stating. Each subscriber has its own delivery state, so one slow or broken subscriber lags alone rather than blocking the others — good — but it also means failure is now per-subscriber and you need per-subscriber monitoring and dead-lettering. The event schema becomes a public contract with many consumers you may not control, so versioning is additive and breaking changes are expensive. And you lose the single-place-to-read control flow: no code says "when an order is placed, do these four things", which is the recurring complaint about choreographed event-driven systems. The design guidance is to publish domain facts ("OrderPlaced") rather than commands dressed as events ("SendInvoiceEmail"), and to be deliberate about when a request-response call is simply clearer. The event-driven style itself is treated at length in <a href="../messaging/10-event-driven-architecture.html">Event-Driven Architecture</a>.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber" rel="noopener">Publisher-Subscriber pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/choreography" rel="noopener">Choreography pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/201701-event-driven.html" rel="noopener">What do you mean by "Event-Driven"? — Martin Fowler</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/PublishSubscribeChannel.html" rel="noopener">Publish-Subscribe Channel — Enterprise Integration Patterns</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=TRb9L-5bWgM" rel="noopener">Event-Driven Architecture — ByteMonk</a></li>
+    </ul>
+
+    <h3>Fan-out on write versus fan-out on read</h3>
+    <p>This is the fan-out decision that shows up in almost every senior interview, and it is a pure precompute-versus-compute-later trade. <em>Fan-out on write</em> (push) does the work at publish time: when a user posts, you write a copy of the post reference into every follower's precomputed timeline. Reads become a single sequential fetch of one list — fast, cheap, predictable, which is exactly what you want when the read-to-write ratio is a hundred to one. <em>Fan-out on read</em> (pull) does nothing at write time and assembles the feed at request time by fetching from everyone the reader follows and merging. Writes become trivial and there is no derived storage to keep consistent, but reads become a scatter-gather whose latency depends on how many people you follow and whose cost is paid on every refresh.</p>
+    <p>Pure fan-out on write breaks on the <strong>celebrity problem</strong>: one post by an account with fifty million followers turns a single write into fifty million writes. That burst saturates the write path, delays delivery for everyone else, and consumes storage proportional to the follower graph rather than the content. Pure fan-out on read breaks on the other end — a user following two thousand accounts pays a two-thousand-way fan-in on every pull. The production answer is the <strong>hybrid</strong>: fan out on write for ordinary accounts, and for accounts above a follower threshold skip the fan-out and merge their posts in at read time from a small, heavily cached "celebrity" set. Reads therefore do one cheap list fetch plus a merge over a handful of hot accounts. This is the shape Twitter and Instagram converged on, and it is the backbone of the news feed design in <a href="13-classic-designs-b.html">Classic Designs B</a>. Related follow-ups worth rehearsing: what happens to a user's precomputed timeline when they follow someone new (backfill or leave a seam), and how you handle inactive users whose timelines you are paying to maintain for nobody.</p>
+    <pre class="code-block" data-label="Design"><code>post(author, item):
+    if followerCount(author) &lt; CELEBRITY_THRESHOLD:
+        for f in followers(author):          # fan-out on write
+            push(timeline[f], item)
+    else:
+        append(celebrityPosts[author], item) # skipped; merged at read
+
+read(user):
+    base    = fetch(timeline[user])                       # one sequential read
+    hot     = merge(celebrityPosts[a] for a in celebritiesFollowedBy(user))
+    return  rank(merge(base, hot))                        # hybrid: cheap read + small fan-in</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://blog.x.com/engineering/en_us/topics/infrastructure/2017/the-infrastructure-behind-twitter-scale" rel="noopener">The Infrastructure Behind Twitter: Scale — X (Twitter) Engineering Blog</a></li>
+      <li>[Article] <a href="https://highscalability.com/the-architecture-twitter-uses-to-deal-with-150m-active-users/" rel="noopener">The Architecture Twitter Uses to Deal with 150M Active Users — High Scalability (the classic pull-to-push write-up)</a></li>
+      <li>[Article] <a href="https://blog.bytebytego.com/p/messaging-patterns-explained-pub" rel="noopener">Messaging Patterns Explained: Pub-Sub, Queues, and Event Streams — ByteByteGo blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FEkXjNFrL1o" rel="noopener">Twitter Timeline Architecture: Fanout — ByteMonk</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=wYk0xPP_P_8" rel="noopener">Twitter system design and software architecture — Tech Dummies (Narendra Lakshmana Gowda)</a></li>
+    </ul>
+
+    <h3>Priority work, and the starvation you are signing up for</h3>
+    <p>Not all queued work is equal: a password-reset mail and a monthly-digest mail are both "send an email", but only one of them has a user staring at an inbox. There are two ways to express that. A true <em>priority queue</em> keeps one queue and orders messages by a priority field, which is elegant but has real costs — priority ordering interacts badly with partitioned or log-based brokers, it complicates prefetch and batching, and support varies (RabbitMQ implements priorities per queue with caveats; Kafka has no notion of them at all). The pragmatic alternative, and the one most systems land on, is <em>multiple queues by class</em>: an interactive queue, a bulk queue, maybe a bulk-retry queue, with separate consumer pools sized independently. Separate pools also give you isolation — a flood of bulk work cannot consume the workers that serve interactive traffic — which a single priority queue does not.</p>
+    <p>The hazard to name before the interviewer does is <strong>starvation</strong>: if consumers always drain the high-priority queue first and high-priority work never runs dry, the low-priority tier waits forever. The standard mitigations are weighted service (consume in a fixed ratio such as nine high to one low rather than strict priority), ageing (promote a message's priority as it gets older, so nothing waits indefinitely), and dedicated capacity (reserve a minimum number of workers for the low tier). Whichever you pick, monitor the oldest-message age <em>per class</em> — a healthy aggregate depth routinely hides a low-priority queue that has not moved in a day. The same reasoning generalises to per-tenant fairness: one large customer's bulk job should not be able to consume the shared worker pool, which is where isolation techniques such as shuffle sharding earn their keep.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/priority-queue" rel="noopener">Priority Queue pattern — Azure Architecture Center (both the single-queue and multi-queue designs)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/priority" rel="noopener">Priority Queue Support — RabbitMQ documentation (and its limitations)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/workload-isolation-using-shuffle-sharding/" rel="noopener">Workload isolation using shuffle-sharding — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://codeopinion.com/message-ordering-in-pub-sub-or-queues/" rel="noopener">Message Ordering in Pub/Sub or Queues — CodeOpinion</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/blocking-queues/" rel="noopener">What are Blocking Queues and Why We Need Them — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Batch versus stream processing</h3>
+    <p><em>Batch</em> processing runs over a bounded, complete dataset on a schedule: yesterday's orders, this month's settlements, the full product catalogue. Its virtues are underrated — throughput per rupee is excellent because you amortise setup over millions of records, the reasoning is simple because the input does not move while you read it, failures are handled by rerunning the job, and reprocessing after a bug fix is a rerun rather than an archaeology project. Its vice is latency: results are as stale as the schedule, so a nightly job means a business decision is up to a day behind. <em>Stream</em> processing runs continuously over an unbounded input, producing results within seconds. Its virtue is freshness; its vices are operational — the job is long-lived and must carry state across restarts, correctness now depends on how you handle out-of-order and duplicate events, and reprocessing history means replaying a log rather than rerunning a script.</p>
+    <p>Choose on requirements, not fashion. Ask what the freshness requirement actually is (fraud scoring on a card swipe needs seconds; a finance reconciliation report is fine daily), whether the computation needs the complete dataset (global ranking, deduplication across the whole corpus, and most model training want batch), how expensive correction is, and how much operational maturity the team has — a streaming job is a service you run forever, not a script you schedule. <em>Micro-batching</em> is the middle ground: process small batches on a short interval (a few seconds), as Spark Structured Streaming does. You get most of the freshness with batch-shaped reasoning and simpler exactly-once story, at the cost of a latency floor equal to the batch interval. Many mature systems run both over the same events — a streaming path for the fast, approximate answer and a batch path that recomputes the authoritative one — which is the practical residue of the old lambda-architecture argument.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/big-data/batch-processing" rel="noopener">Batch processing — Azure Architecture Center data guide</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/big-data/real-time-processing" rel="noopener">Real time processing — Azure Architecture Center data guide</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/technology-choices/stream-processing" rel="noopener">Choosing a stream processing technology — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.oreilly.com/radar/the-world-beyond-batch-streaming-101/" rel="noopener">Streaming 101: The world beyond batch — Tyler Akidau (O'Reilly Radar)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=A3Mvy8WMk04" rel="noopener">Batch Processing vs Stream Processing: System Design Primer — Tech Primers</a></li>
+    </ul>
+
+    <h3>Windows, watermarks, and event time versus processing time</h3>
+    <p>An unbounded stream has no end, so any aggregation needs a <em>window</em> — a finite slice to compute over. The three you should be able to name are tumbling (fixed, non-overlapping: each minute), sliding or hopping (fixed length, overlapping: the last five minutes, recomputed every minute), and session (dynamic, closed by a gap of inactivity — the natural window for user behaviour). The follow-up question is always the same: when do you decide a window is finished? That is what a <em>watermark</em> is — the system's assertion that it believes it has seen all events up to a given event time, and may therefore emit the result. Watermarks are a heuristic, so they encode a deliberate trade between latency (emit early, risk being wrong) and completeness (wait longer, be more right).</p>
+    <p>Which brings us to the distinction behind most streaming bugs. <strong>Event time</strong> is when the thing happened in the real world; <strong>processing time</strong> is when your pipeline got around to it. They diverge constantly — a mobile client was offline in a lift for ten minutes, a partition was rebalancing, a consumer was restarted and replayed an hour of backlog. Aggregate by processing time and your "orders per minute at 8 pm" chart is really "orders our pipeline handled at 8 pm", and a replay after an incident will happily attribute yesterday's orders to today. Aggregate by event time and the numbers mean what they say, but you must now decide what to do with <em>late-arriving data</em> that shows up after its window has closed: drop it, hold windows open for a bounded allowed lateness and emit an updated result, or route the stragglers to a side output for correction. Make that policy explicit; a pipeline with no stated lateness policy has one anyway, and it is "silently wrong".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://beam.apache.org/documentation/programming-guide/#windowing" rel="noopener">Windowing and watermarks — Apache Beam programming guide</a></li>
+      <li>[Official] <a href="https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/concepts/time/" rel="noopener">Timely stream processing: event time and watermarks — Apache Flink documentation</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/stream-analytics/stream-analytics-time-handling" rel="noopener">Understand time handling in Azure Stream Analytics — Microsoft Learn (late and out-of-order policies)</a></li>
+      <li>[Article] <a href="https://www.oreilly.com/radar/the-world-beyond-batch-streaming-102/" rel="noopener">Streaming 102: The world beyond batch — Tyler Akidau (windows, watermarks, triggers)</a></li>
+      <li>[Article] <a href="https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf" rel="noopener">The Dataflow Model — Akidau et al., VLDB 2015 (the paper the whole vocabulary comes from)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sdhwpUAjqaI" rel="noopener">Event Time and Watermarks: Apache Flink 101 — Confluent</a></li>
+    </ul>
+
+    <h3>Scheduled work and the distributed-cron problem</h3>
+    <p>Plenty of asynchronous work is not event-driven at all — it is periodic: expire abandoned carts every ten minutes, settle payouts nightly, refresh a materialised view hourly, retry the stuck records every quarter of an hour. On one box this is a cron entry or a <code>@Scheduled</code> annotation and it works perfectly. Then you scale to three replicas and it breaks silently and expensively, because <strong>every replica fires the job</strong>. Three copies of the settlement run, three emails to the same customer, three increments of the same counter. This is the single most common production surprise when a scheduled monolith becomes a scheduled deployment, and interviewers in India ask it constantly because everyone has been bitten by it.</p>
+    <p>The fixes, roughly in order of weight: a <em>distributed lock</em> that the job must acquire before running (ShedLock over your existing database or Redis is the standard Spring answer — simple, no new infrastructure, and adequate as long as you understand that a lock without fencing is best-effort under pauses); <em>leader election</em>, where one instance is elected via a consensus store and only the leader schedules — stronger, and the right answer once several jobs need coordinating; or a dedicated <em>scheduler service</em> that owns time and does no work itself, instead enqueueing a message that ordinary competing consumers pick up, which cleanly separates "decide when" from "do the work" and makes retries and observability normal. Whichever you choose, design the job to be idempotent and re-runnable anyway, make it resumable in chunks rather than one giant transaction, avoid scheduling everything on the hour boundary (a thundering herd of jobs at midnight is self-inflicted), and monitor for the job that silently stopped running — a job that never fires produces no errors at all. Locks and fencing are covered in <a href="07-coordination.html">Distributed Coordination</a>.</p>
+    <pre class="code-block" data-label="Java"><code>@Scheduled(cron = "0 */10 * * * *")             // every ten minutes, on every replica
+@SchedulerLock(name = "expireAbandonedCarts",   // ...but only one wins the lock
+               lockAtLeastFor = "PT5M",         // guard against clock skew re-runs
+               lockAtMostFor  = "PT9M")         // released if the holder dies
+public void expireAbandonedCarts() {
+    // idempotent and chunked: safe to re-run, safe to interrupt
+    cartRepo.expireBatch(Instant.now().minus(Duration.ofHours(2)), 500);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/background-jobs" rel="noopener">Background jobs guidance — Azure Architecture Center (triggers, scheduling, resiliency)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/leader-election" rel="noopener">Leader Election pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/distributed-periodic-scheduling/" rel="noopener">Distributed Periodic Scheduling with Cron — Google SRE Book, chapter 24</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/shedlock-spring" rel="noopener">Guide to ShedLock with Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RW6dRN7XN4I" rel="noopener">System Design: Distributed Cron — System Design Fight Club</a></li>
+    </ul>
+
+    <h3>Exactly-once revisited: at-least-once plus idempotent consumers</h3>
+    <p>"Exactly-once delivery" over a network is not achievable, and saying so crisply is a strong interview signal. The reason is the ambiguity of a timeout: a producer that does not get an acknowledgement cannot distinguish "the message never arrived" from "it arrived and the ack was lost". It must choose — resend (risking a duplicate, at-least-once) or give up (risking a loss, at-most-once). There is no third option at the delivery layer. What systems like Kafka market as exactly-once is really exactly-once <em>processing</em> within a closed world: idempotent producers plus transactions that atomically commit output records and consumer offsets, valid as long as everything stays inside the broker. The moment your consumer charges a card or calls an external API, that guarantee stops at the boundary. The mechanics of Kafka transactions are covered in <a href="../messaging/04-kafka-advanced.html">Kafka Advanced</a>.</p>
+    <p>So the achievable design target is <strong>at-least-once delivery plus idempotent consumers</strong>, and the effect the user sees is exactly-once. Two mechanisms implement it. The explicit one is a <em>dedup store</em>: every message carries a stable identifier (a producer-assigned message id, or better, a business idempotency key such as the order id) and the consumer records processed keys, rejecting repeats. Record the key and the effect in the same transaction as the work, or you have simply moved the race. Dedup stores need a retention window — you cannot remember every key forever — so size it against your realistic redelivery horizon and accept that a duplicate arriving after the window slips through. The better mechanism, where you can get it, is to make the operation <em>naturally idempotent</em> so no bookkeeping is needed at all: set a field rather than incrementing it, upsert on a natural key rather than inserting, use a conditional update guarded by a version or expected state, and model state transitions so that applying "mark as shipped" twice is a no-op. Naturally idempotent operations survive replays, backfills and reprocessing without any dedup infrastructure; bolted-on deduplication is the fallback for when the operation genuinely cannot be reshaped. Finally, close the producer-side gap with the transactional outbox: write the event into an outbox table in the same database transaction as the state change and let a relay publish it, so you never commit a change whose event was lost.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Naturally idempotent: same message applied twice, same final state.
+UPDATE orders SET status = 'SHIPPED', shipped_at = :ts
+ WHERE id = :orderId AND status = 'PACKED';        -- conditional, not blind
+
+INSERT INTO loyalty_points (user_id, order_id, points)
+VALUES (:userId, :orderId, :points)
+ON CONFLICT (user_id, order_id) DO NOTHING;        -- upsert on a natural key,
+                                                   -- not points = points + n</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/documentation/#semantics" rel="noopener">Message Delivery Semantics — Apache Kafka documentation (what exactly-once does and does not mean)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-message-deduplication.html" rel="noopener">Amazon SQS FIFO queue deduplication — AWS documentation (the five-minute dedup window in practice)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/" rel="noopener">Making retries safe with idempotent APIs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html" rel="noopener">Pattern: Idempotent Consumer — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/idempotent-receiver.html" rel="noopener">Idempotent Receiver — Patterns of Distributed Systems (Unmesh Joshi, martinfowler.com)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional Outbox — microservices.io (closing the dual-write gap)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xeBY8fCWfvU" rel="noopener">Handling Duplicate Messages (Idempotent Consumers) — CodeOpinion</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-api-design.html">← API Design at Scale</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="11-storage-systems.html">Storage Systems →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Asynchronous design is where Indian product-company rounds separate candidates fast — service-company panels ask the queue and scheduler questions, product panels push on fan-out and exactly-once until you either hedge correctly or over-claim:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> When would you make an operation asynchronous instead of synchronous?</summary>
+      <div class="answer"><p>When the response does not depend on it. Ask what must be true for the user's answer to be correct — persist that synchronously, queue everything else. Typical asynchronous work: confirmation emails and notifications, thumbnail and media generation, search-index updates, recommendation recalculation, analytics, third-party syncs. The gains are lower latency, higher availability (a failing email provider no longer fails checkout) and independent scaling; the cost is that "accepted" is not "done", so the API must expose status.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is queue-based load leveling?</summary>
+      <div class="answer"><p>Putting a buffer between producers and consumers so a traffic spike becomes queue depth instead of errors or a crash. Producers write at whatever rate arrives; consumers drain at their own provisioned rate. It lets you size workers for average load rather than peak, and it protects fragile downstreams from bursts they cannot absorb.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between a work queue and a publish-subscribe topic?</summary>
+      <div class="answer"><p>A work queue is point-to-point: each message goes to exactly one consumer out of a pool of interchangeable workers — it divides work, and you scale throughput by adding consumers. Publish-subscribe broadcasts: every subscriber gets its own copy and does something different with it — it multiplies one fact across independent consumers, and you add capability by adding subscribers without touching the publisher.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the competing consumers pattern and what does it cost you?</summary>
+      <div class="answer"><p>Multiple identical workers pulling from one queue, each message handled by whichever worker is free. It gives near-linear throughput scaling and automatic redelivery if a worker dies. The costs: ordering is lost unless you partition by key, and consumers must be idempotent because at-least-once redelivery is normal, not exceptional.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your queue depth has been growing steadily for two hours. Walk me through the diagnosis and the fix.</summary>
+      <div class="answer"><p>First, confirm the shape: compare arrival rate against drain rate, and look at the age of the oldest message — that is what the user feels. Growth means arrival exceeds drain, so either the arrival rate rose or per-message processing got slower (a slow downstream, a lock, a bad deploy, a poison message causing retry loops). Then apply the three levers in order. Scale consumers, if the bottleneck is worker capacity and the downstream can take more concurrency — useless or harmful if the real bottleneck is a shared database. Shed load: drop or defer non-critical classes of work, and consider newest-first processing so current users get served while the backlog is written off. Reject at the front door: throttle producers so the backlog stops growing while you recover. Also isolate the offending message class onto its own queue so it cannot starve everything else. And say the underlying truth: a queue does not add capacity, so if average load genuinely exceeds average capacity, only more capacity or less load fixes it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A queue converts one kind of problem into another. Which, and why does that matter?</summary>
+      <div class="answer"><p>It converts an availability problem into a latency problem — requests that would have been rejected are now accepted and answered late. That is usually a good trade, but only while average consumer capacity exceeds average producer load. Below that line the queue grows without bound until retention, disk or patience runs out; it is a shock absorber, not an engine. So bound the queue explicitly (max depth or max age), decide what happens at the bound, and never present a queue as a capacity plan.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain fan-out on write versus fan-out on read, and which you would pick.</summary>
+      <div class="answer"><p>Fan-out on write precomputes: at publish time you push a copy into every recipient's materialised list, so a read is one sequential fetch — fast and cheap, ideal when reads massively outnumber writes. Fan-out on read computes at request time by fetching from every source the reader follows and merging — writes are trivial and there is no derived state, but read latency and cost scale with the number of sources. Pick on the read-to-write ratio and the fan-out distribution. In practice neither pure form survives: use the hybrid.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the celebrity problem and how do you solve it?</summary>
+      <div class="answer"><p>Under fan-out on write, one post by an account with tens of millions of followers becomes tens of millions of writes — a burst that saturates the write path, delays delivery for every other user, and grows storage with the follower graph. The fix is a hybrid: keep fan-out on write for ordinary accounts, and above a follower threshold skip the fan-out entirely, storing celebrity posts once and merging them in at read time from a small, heavily cached set. Readers then pay one cheap list fetch plus a merge over a handful of accounts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you handle work of different priorities?</summary>
+      <div class="answer"><p>Either a priority field on a single queue, or — more commonly and more robustly — separate queues per class with independently sized consumer pools, which also gives isolation so bulk work cannot consume the workers serving interactive traffic. Note that priority support is uneven across brokers (RabbitMQ supports it with caveats, Kafka has no concept of it). Whichever you choose, name starvation as the hazard and give a mitigation: weighted service in a fixed ratio rather than strict priority, ageing that promotes old messages, or reserved capacity for the low tier. Monitor oldest-message age per class, not aggregate depth.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Batch or stream — how do you decide?</summary>
+      <div class="answer"><p>Start from the freshness requirement the business actually has, not the one that sounds impressive. Batch when results can be minutes or hours old, when the computation needs the complete dataset (global ranking, corpus-wide dedup, model training), when throughput per rupee matters, or when easy reprocessing after a bug is valuable — a rerun is far simpler than a replay. Stream when a decision must be made within seconds of the event (fraud, live dashboards, alerting, personalisation) and the team can operate a permanently running stateful job. Micro-batching is the middle ground: batch-shaped reasoning with a latency floor of a few seconds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You run a nightly reconciliation job on three replicas of your service. What goes wrong?</summary>
+      <div class="answer"><p>All three replicas fire it — three reconciliation runs, triple side effects, possibly triple payouts. Fixes, in increasing weight: a distributed lock the job must acquire first (ShedLock backed by the existing database or Redis, understanding that a lock without fencing is best-effort under long pauses); leader election so only the elected instance schedules; or a separate scheduler service that owns time and merely enqueues a message which ordinary competing consumers execute. Regardless, make the job idempotent and chunked so a re-run or interruption is harmless, and alert on the job that stopped firing — silence produces no errors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is exactly-once delivery possible? What do you actually build?</summary>
+      <div class="answer"><p>Not across a network. A timeout is ambiguous — the sender cannot tell a lost message from a lost acknowledgement — so it must either resend (at-least-once, duplicates possible) or not (at-most-once, loss possible). Kafka's exactly-once is exactly-once <em>processing</em> inside its own boundary: idempotent producers plus transactions committing output records and offsets atomically; it does not extend to a payment gateway your consumer calls. The buildable target is at-least-once delivery plus idempotent consumers, which the user experiences as exactly-once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you make a consumer idempotent, and why is a naturally idempotent operation better than a dedup table?</summary>
+      <div class="answer"><p>Two routes. Explicit deduplication: every message carries a stable key — ideally a business key like the order id rather than a broker-generated id — and the consumer records processed keys, writing the key and the effect in one transaction so there is no race. That needs a retention window, so duplicates arriving after it slip through, and it is extra state to operate. Natural idempotency is better: set a field instead of incrementing it, upsert on a natural key instead of inserting, guard updates with an expected current state or version, and model transitions so re-applying is a no-op. Such operations survive redelivery, replay, backfill and reprocessing with no dedup infrastructure at all — design for it first, and bolt on deduplication only where the operation genuinely cannot be reshaped.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Event time versus processing time — why does the distinction cause so many bugs?</summary>
+      <div class="answer"><p>Event time is when the thing happened; processing time is when your pipeline saw it. They diverge whenever a client is offline, a partition rebalances, or a consumer restarts and replays a backlog. Aggregate by processing time and your metrics describe your pipeline rather than your business — and a replay after an incident cheerfully attributes yesterday's events to today. Aggregate by event time and the numbers are meaningful, but you must now decide the late-data policy: a watermark declares when a window is presumed complete, and stragglers arriving afterwards are dropped, folded into an updated result within an allowed-lateness bound, or routed to a side output for correction. A pipeline with no stated policy still has one, and it is "quietly wrong".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You commit an order to the database and then publish OrderPlaced, but the publish fails. What is this problem and how do you fix it?</summary>
+      <div class="answer"><p>The dual-write problem: two systems, one non-atomic sequence, so a crash between them leaves the database and the event stream disagreeing — an order nobody was told about (or, if you publish first, an event for an order that never committed). Distributed transactions across a database and a broker are the wrong tool at this scale. Use the transactional outbox: write the event into an outbox table in the same local transaction as the state change, and have a relay (a poller or change-data-capture reading the log) publish it afterwards. Publication is then at-least-once, which is fine because your consumers are idempotent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your consumers acknowledge messages on receipt and then process them. Critique that.</summary>
+      <div class="answer"><p>It converts the system to at-most-once: a worker that crashes after the ack and before finishing loses the work silently, with no redelivery and no error anywhere. Acknowledge after the work is durably complete so a crash leads to redelivery — which is precisely why duplicates are normal and consumers must be idempotent. Acking early is usually a hidden attempt to fix a throughput or visibility-timeout problem, which is better addressed by scaling consumers, chunking the work, or extending the timeout deliberately.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.async.leveling — request-path discipline, queue-based load leveling and its capacity caveat, queue depth and consumer lag, competing consumers, publish-subscribe fan-out, fan-out on write versus on read, priority queues and starvation</li>
+      <li>sd.async.processing — batch versus stream versus micro-batching, windowing and watermarks, event time versus processing time and late data, scheduled work and distributed cron, exactly-once as at-least-once plus idempotent consumers</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

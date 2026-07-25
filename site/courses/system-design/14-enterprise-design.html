@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Enterprise application design module: layered vs hexagonal, onion and clean architecture, vertical slices, the modular monolith and the tooling that enforces its boundaries, architecture decision records, C4 diagramming and diagrams as code, plus a repeatable system design interview method and mock walkthrough — with verified resources and interview questions.">
+  <title>Enterprise Application Design — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Enterprise Application Design</h1>
+  <p class="standfirst">The previous thirteen modules were about systems at scale. This one is about the codebase you will actually open tomorrow morning — how to shape it so it survives five years of change — and about the other half of the job nobody teaches: explaining a design out loud, under time pressure, to someone who is judging you.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → System Design track → Enterprise Application Design</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything so far has been about the shape of a <em>system</em>: how it shards, caches, queues, replicates and degrades. Almost none of that decides whether your team can still ship features in year three. That is decided by the internal architecture of each service — where the dependencies point, which code is allowed to know about which other code, and whether those rules are written down or merely remembered.</p>
+    <p>So this closing module works at two altitudes. First, the application-level styles you will be asked to defend: layered, hexagonal, onion and clean, and vertical slice — compared honestly, including what they cost. Then the modular monolith as the sane default for most teams, with the tooling that makes its boundaries real rather than aspirational. Then the two artefacts that keep a design legible to other humans: architecture decision records and C4 diagrams. Finally, the design interview itself, taught as a repeatable procedure with a time budget, a list of behaviours that score and lose points, and a compact mock walkthrough that applies the whole track.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Layered architecture: the familiar default, and where its dependency direction hurts</h3>
+    <p>Classic n-tier splits an application horizontally: a presentation layer holding controllers and DTOs, a service or business layer holding orchestration, and a data access layer holding repositories and the persistence model. Each layer may call only the layer beneath it. It is the shape almost every Spring codebase starts in, every developer recognises it in ten seconds, and for a genuinely CRUD-shaped service it is completely fine — you should not apologise for it.</p>
+    <p>The problem is the direction of the arrows. Every layer ends up pointing down toward the database, so the domain layer imports repository interfaces, entity annotations and driver types, and the business rules quietly become a thin coating on the persistence model. Two symptoms follow. Domain tests need a database (or a mountain of mocks) because the domain cannot be instantiated without infrastructure. And a change of infrastructure — swap the ORM, move a table to a different store, put a queue in front of a write — ripples upward through code that had no business caring. Fowler's point is worth internalising: layering is a fine <em>first</em> split, but it is a technical split, and a large system usually needs a domain split above it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/PresentationDomainDataLayering.html" rel="noopener">PresentationDomainDataLayering — Martin Fowler (why the three-layer split is only the first cut)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/architecture/" rel="noopener">Software Architecture Guide — martinfowler.com (the whole hub, worth bookmarking)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/layered-architecture" rel="noopener">Layered Architecture — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/common-web-application-architectures" rel="noopener">Common web application architectures — Microsoft Learn (monolithic, layered and clean, side by side)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9Az0q2XHtH8" rel="noopener">5 Things Every Developer Should Know about Software Architecture — Simon Brown, GOTO 2020 (GOTO Conferences)</a></li>
+    </ul>
+
+    <h3>Hexagonal architecture: ports and adapters</h3>
+    <p>Alistair Cockburn's formulation inverts the picture. Put the application at the centre. It defines <em>ports</em> — interfaces expressed entirely in its own vocabulary, with no framework or driver types in the signatures. Everything outside is an <em>adapter</em> that implements or drives a port: an HTTP controller, a CLI, a scheduled job and a message listener are all driving adapters on the left; a JPA repository, an S3 client, an SMTP sender and a payment gateway are all driven adapters on the right. The intent of the hexagon shape is only "there are several sides, not two" — it is not six of anything.</p>
+    <p>The payoff is symmetry and testability. The database is not privileged; it is just another adapter, exactly like the web framework. Your domain compiles and runs with no Spring on the classpath, so the interesting tests are plain unit tests with in-memory fakes for the driven ports, and the slow integration tests shrink to "does this one adapter honour its port's contract?". The discipline that makes it work is unglamorous: the port interfaces live <em>with the domain</em>, not with the adapter that implements them, and no framework annotation or persistence type ever crosses into the centre.</p>
+    <pre class="code-block" data-label="Java"><code>// domain package — a driven port, owned by the domain, no framework types
+public interface PricingRules { Money priceFor(Sku sku, Quantity qty); }
+public interface OrderRepository { Optional&lt;Order&gt; byId(OrderId id); void save(Order o); }
+
+// domain package — a driving port: the use case the outside world may invoke
+public interface PlaceOrder { OrderId handle(PlaceOrderCommand cmd); }
+
+// adapter package — infrastructure implements the port; the arrow points inward
+@Repository
+class JpaOrderRepository implements OrderRepository { /* JPA lives only here */ }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://alistair.cockburn.us/hexagonal-architecture/" rel="noopener">Hexagonal Architecture — Alistair Cockburn (the original article by the pattern's author)</a></li>
+      <li>[Article] <a href="https://netflixtechblog.com/ready-for-changes-with-hexagonal-architecture-b315ec967749" rel="noopener">Ready for changes with Hexagonal Architecture — Netflix Technology Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hexagonal-architecture-ddd-spring" rel="noopener">Hexagonal Architecture, DDD, and Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ChUlRa0xsWo" rel="noopener">The Hexagonal — Ports &amp; Adapters Architecture — Alistair Cockburn, SAG 2025 (iSAQB)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aMcmKVRk-Sk" rel="noopener">Hexagonal Architecture with Spring Boot — a real example — Java Techie</a></li>
+    </ul>
+
+    <h3>Onion and clean architecture: one idea, three drawings — and its honest cost</h3>
+    <p>Jeffrey Palermo's onion architecture and Robert Martin's clean architecture are not rivals to hexagonal; they are the same rule redrawn with more rings and more naming. Clean architecture's concentric circles run entities, use cases, interface adapters, frameworks and drivers, governed by one Dependency Rule: <strong>source code dependencies point only inward</strong>. Nothing in an inner circle may name anything in an outer circle. Where an inner circle needs to call outward, you invert it — the inner circle declares the interface, the outer circle implements it. That is dependency inversion doing all the work, and it is the single idea shared by hexagonal, onion and clean. If you learn one sentence from this section, learn that one; interviewers reward the candidate who says "these are three drawings of the same rule" over the one who recites three diagrams.</p>
+    <p>Now the honest caution, because the internet rarely gives it. This style buys you replaceability and fast tests, and it charges indirection: extra interfaces, mapping between domain models and persistence models and API models, more files per feature, and a longer path from a stack trace to the line that matters. On a service whose "business logic" is validate-then-save, that is a poor trade — you get ceremony and no protection. Apply it where the domain is genuinely rich or genuinely long-lived, keep it thin where it is not, and be able to say <em>which</em> parts of your system deserve it. "We used clean architecture everywhere" is a weaker answer than "we used it in the two modules with real rules and kept the rest a plain layered CRUD service."</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html" rel="noopener">The Clean Architecture — Robert C. Martin (the Dependency Rule, stated in one paragraph)</a></li>
+      <li>[Official] <a href="https://jeffreypalermo.com/2008/07/the-onion-architecture-part-1/" rel="noopener">The Onion Architecture, part 1 — Jeffrey Palermo</a></li>
+      <li>[Article] <a href="https://herbertograca.com/2017/11/16/explicit-architecture-01-ddd-hexagonal-onion-clean-cqrs-how-i-put-it-all-together/" rel="noopener">DDD, Hexagonal, Onion, Clean, CQRS — how I put it all together — Herberto Graça</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-clean-architecture" rel="noopener">Clean Architecture with Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o_TH-Y78tt4" rel="noopener">The Principles of Clean Architecture — Robert C. Martin (NorfolkDevelopers)</a></li>
+    </ul>
+
+    <h3>Vertical slice architecture: the reaction against organising by layer</h3>
+    <p>Jimmy Bogard's vertical slice architecture starts from an observation about how change actually arrives. Nobody files a ticket that says "modify the repository layer". They ask for a feature, and a feature cuts through every layer at once — so if your folders are <code>controller/</code>, <code>service/</code>, <code>repository/</code>, then every change touches four directories and each of those directories is coupled to a dozen unrelated features. Slice the other way: one folder per use case, containing that use case's request, handler, validation and persistence access, and let the slice choose its own internals. Coupling within a slice is fine and expected; coupling <em>between</em> slices is the thing you police.</p>
+    <p>The liberating consequence is that abstraction becomes a per-slice decision rather than a project-wide edict. A complex "place order" slice can hold a rich domain model behind ports; a "get order summary" slice can be a single hand-written query straight to the read model, with no repository interface and no mapping ceremony, and both can live in the same codebase without anyone feeling guilty. The risk is the mirror image: without review discipline you get duplicated rules smeared across slices and no single place where an invariant is enforced. In practice teams combine the two — vertical slices for organisation, a shared domain core for the rules that must not be duplicated.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.jimmybogard.com/vertical-slice-architecture/" rel="noopener">Vertical Slice Architecture — Jimmy Bogard (the post that named the style)</a></li>
+      <li>[Article] <a href="https://milanjovanovic.tech/blog/vertical-slice-architecture" rel="noopener">Vertical Slice Architecture — Milan Jovanović</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5kOzZz2vj2o" rel="noopener">Vertical Slice Architecture — Jimmy Bogard (NDC Conferences)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=T-EwN9UqRwE" rel="noopener">Vertical Slice Architecture: how does it compare to Clean Architecture? — .NET Conf 2023 (dotnet)</a></li>
+    </ul>
+
+    <h3>The modular monolith: the default recommendation for most teams</h3>
+    <p>After thirteen modules of distributed systems, the most useful thing this track can tell you is that you probably should not start distributed. A modular monolith is one deployable artefact containing several modules, each of which owns its own data, exposes a small published interface, and is forbidden from reaching into another module's internals or tables. You get the properties people actually buy microservices for — clear ownership, independent reasoning, the ability to extract a module later — without network calls, distributed transactions, per-service pipelines or a tracing bill for a five-engineer team.</p>
+    <p>Frame the tradeoff the way a senior engineer would. Microservices buy independent <em>deployment</em> and independent <em>scaling</em>, and they cost you eventual consistency, partial failure, operational surface and a much harder debugging story. If your real constraint is "we cannot find the code that owns this rule", that is a modularity problem, and modularity is free inside a single process. Split later, along boundaries you have already proved by keeping them clean — which is exactly why Fowler's advice is to earn the split rather than to assume it. Shopify's much-cited migration went the same direction: not monolith to microservices, but messy monolith to modular monolith.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/projects/spring-modulith" rel="noopener">Spring Modulith — Spring project page (the framework's own answer to modular monoliths)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/MonolithFirst.html" rel="noopener">MonolithFirst — Martin Fowler (start monolithic, split when the boundaries are proven)</a></li>
+      <li>[Article] <a href="https://www.kamilgrzybek.com/blog/posts/modular-monolith-primer" rel="noopener">Modular Monolith: A Primer — Kamil Grzybek</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/monolith-defense-part-1/" rel="noopener">In Defence of the Monolith, Part 1 — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5OjqD-ow8GE" rel="noopener">Modular Monoliths — Simon Brown, GOTO 2018 (GOTO Conferences)</a></li>
+    </ul>
+
+    <h3>Making boundaries real: Spring Modulith, ArchUnit, Java modules and package-private discipline</h3>
+    <p>A boundary that exists only in a wiki diagram is not a boundary. Someone under deadline will autocomplete an import across it, review will not catch it, and eighteen months later the "modules" are a single ball of mud with optimistic package names. The fix is to make the rule executable, so that violating it fails the build rather than disappointing an architect.</p>
+    <p>The JVM gives you four escalating levels. <strong>Package-private by default</strong> is the cheapest and most underrated: put each module in its own package, make only the published interface <code>public</code>, and the compiler enforces the rest for free. <strong>Spring Modulith</strong> formalises that convention — top-level packages under the application package are modules, nested packages are internals, and <code>ApplicationModules.of(App.class).verify()</code> is a JUnit test that fails on illegal dependencies and cycles; it also publishes module documentation and encourages event-based communication between modules instead of direct calls. <strong>ArchUnit</strong> expresses arbitrary rules as ordinary unit tests — "nothing in <code>..domain..</code> may depend on <code>..infrastructure..</code>", "no cycles between slices", "controllers may not touch repositories" — which is the direct way to enforce hexagonal or clean dependency direction. <strong>The Java Platform Module System</strong> is the strongest option, enforcing <code>exports</code> at compile and run time, at the cost of real migration effort.</p>
+    <pre class="code-block" data-label="Java"><code>// Spring Modulith: the whole structural check is one test
+@Test void modulesRespectTheirBoundaries() {
+    ApplicationModules.of(ShopApplication.class).verify();   // fails on illegal deps + cycles
+}
+
+// ArchUnit: the hexagonal rule, enforced by the build
+@ArchTest static final ArchRule domainIsPure = noClasses()
+        .that().resideInAPackage("..domain..")
+        .should().dependOnClassesThat()
+        .resideInAnyPackage("..infrastructure..", "..web..", "jakarta.persistence..");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html" rel="noopener">Fundamentals — Spring Modulith reference (application modules, internals, verification)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/verification.html" rel="noopener">Verifying Application Module Structure — Spring Modulith reference</a></li>
+      <li>[Official] <a href="https://www.archunit.org/userguide/html/000_Index.html" rel="noopener">ArchUnit User Guide — archunit.org</a></li>
+      <li>[Official] <a href="https://dev.java/learn/modules/" rel="noopener">Modules — dev.java (the Java Platform Module System, from Oracle's Java team)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Y4T55XMpP_Y" rel="noopener">Building Better Monoliths: implementing modulithic applications with Spring — SpringDeveloper</a></li>
+    </ul>
+
+    <h3>Architecture Decision Records: capturing the why before it evaporates</h3>
+    <p>Code records what you decided. It never records <em>why</em>, and the why is what evaporates. Two years on, a new joiner sees an odd choice — a synchronous call where a queue seems obvious, a denormalised table, a home-grown scheduler — and has exactly two options: ask someone who has probably left, or rip it out and rediscover the constraint the hard way. An architecture decision record is a short markdown file, numbered and immutable, that preserves the reasoning. Michael Nygard's original template has four parts: <strong>context</strong> (the forces in play — load, deadlines, team skills, existing contracts), <strong>decision</strong> (what we will do, in active voice), <strong>status</strong> (proposed, accepted, deprecated, or superseded by ADR-0042), and <strong>consequences</strong> (what becomes easier and what becomes harder — both, honestly).</p>
+    <p>Three habits make ADRs stick. Keep them <em>in the repository</em>, next to the code, in the same pull request as the change — a decision log in a wiki nobody opens is a decision log nobody reads. Never edit an accepted record: supersede it with a new one, so the history of your thinking survives. And write one only for decisions that are expensive to reverse — the datastore, the consistency model, the auth scheme, the module boundaries — not for every library choice, or the signal drowns. Thoughtworks put lightweight ADRs on the "adopt" ring of its Technology Radar for exactly this reason, and being able to describe them fluently is an easy differentiator in an architect-level round.</p>
+    <pre class="code-block" data-label="Markdown"><code>=== ADR-0007: Use outbox table for order events ===
+Status: Accepted (supersedes ADR-0004)
+Context: Orders must publish an event on commit. Dual-writing to Postgres and
+  Kafka loses events on partial failure; XA is not available on managed Kafka.
+Decision: Write events to an outbox table in the same transaction; a relay
+  polls the table and publishes, with at-least-once delivery downstream.
+Consequences: Atomicity solved; consumers must be idempotent; adds a relay
+  to operate, and event publication is now asynchronous by a small delay.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://adr.github.io/" rel="noopener">Architectural Decision Records — adr.github.io (the community home, templates and tooling)</a></li>
+      <li>[Official] <a href="https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions" rel="noopener">Documenting Architecture Decisions — Michael Nygard (the post that started ADRs)</a></li>
+      <li>[Official] <a href="https://www.thoughtworks.com/radar/techniques/lightweight-architecture-decision-records" rel="noopener">Lightweight Architecture Decision Records — Thoughtworks Technology Radar</a></li>
+      <li>[Article] <a href="https://github.com/joelparkerhenderson/architecture-decision-record" rel="noopener">Architecture decision record — templates and examples (GitHub)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QlAlGAngDcI" rel="noopener">ADRs: the lost art of documenting important architectural decisions — Marek Dominiak (Devoxx UK)</a></li>
+    </ul>
+
+    <h3>C4: drawing systems at the level your audience needs</h3>
+    <p>Most architecture diagrams fail for one reason: they mix altitudes. A single picture shows a load balancer next to a Java class next to an org chart, with arrows whose meaning changes halfway across the page. Simon Brown's C4 model fixes this by defining four nested levels and insisting each diagram stays on one. <strong>Context</strong> — one box for your whole system, surrounded by the people and external systems it talks to; readable by anyone, including a product manager. <strong>Container</strong> — the separately deployable or runnable things inside it: the web app, the API, the database, the message broker, the mobile client, with technology and protocol on each arrow. This is the level most engineering conversations actually want. <strong>Component</strong> — the major building blocks inside one container. <strong>Code</strong> — a class diagram, which you should almost never draw by hand because the IDE generates it better.</p>
+    <p>The practical rules matter more than the notation. Draw the level that matches your audience and stop; a container diagram plus a short paragraph beats a wall of boxes. Give every diagram a title, a legend and unambiguous arrow labels — "sends order confirmation email using SMTP" rather than a bare line. Notation is deliberately not prescribed: any consistent shapes work, as long as the levels are honest. In an interview, saying "let me draw the container level first, then zoom into the ingestion path" is itself a signal that the candidate knows how to structure a design conversation.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://c4model.com/" rel="noopener">The C4 model for visualising software architecture — c4model.com (Simon Brown)</a></li>
+      <li>[Official] <a href="https://c4model.com/abstractions" rel="noopener">Abstractions — C4 model (person, software system, container, component)</a></li>
+      <li>[Official] <a href="https://c4model.com/diagrams/container" rel="noopener">Container diagram — C4 model (the level most conversations need)</a></li>
+      <li>[Article] <a href="https://www.workingsoftware.dev/software-architecture-documentation-the-ultimate-guide/" rel="noopener">The Ultimate Guide to Software Architecture Documentation — workingsoftware.dev</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3Gc5pN9sGzw" rel="noopener">The C4 Model — misconceptions, misuses and mistakes — Simon Brown, GOTO 2024 (GOTO Conferences)</a></li>
+    </ul>
+
+    <h3>Diagrams as code: Structurizr, PlantUML and Mermaid</h3>
+    <p>Diagrams drawn in a drawing tool rot, because updating them is a chore nobody owns and the source file lives on someone's laptop. Diagrams as code fixes the incentive: the model is a text file in the repository, it is reviewed in pull requests, it diffs, and it renders in continuous integration. Structurizr is Simon Brown's own take and the most C4-native — you describe the model once (people, systems, containers, components, relationships) in the Structurizr DSL and generate every view from it, so a renamed container updates all four levels rather than three diagrams going stale.</p>
+    <p>The lighter options are worth knowing because they are already in your toolchain. C4-PlantUML gives you C4 shapes and styling in PlantUML, which almost every wiki and IDE can render. Mermaid ships C4 syntax and renders natively inside GitHub markdown, so a diagram can live in the README with zero build step — the fastest way to get a team to start drawing at all. The choice matters less than the rule: keep the diagram in the same repository as the code it describes, so a change that invalidates it shows up in the same review.</p>
+    <pre class="code-block" data-label="Structurizr DSL"><code>workspace {
+  model {
+    customer = person "Customer"
+    shop = softwareSystem "Shop" {
+      api  = container "Order API"   "Spring Boot"
+      db   = container "Order Store" "PostgreSQL" "Database"
+      api -&gt; db "reads from and writes to" "JDBC"
+    }
+    customer -&gt; api "places orders using" "HTTPS/JSON"
+  }
+  views { systemContext shop { include * } container shop { include * } }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://structurizr.com/" rel="noopener">Structurizr — tooling for the C4 model (Simon Brown)</a></li>
+      <li>[Official] <a href="https://docs.structurizr.com/dsl" rel="noopener">Structurizr DSL — documentation (define the model once, generate every view)</a></li>
+      <li>[Official] <a href="https://mermaid.js.org/syntax/c4.html" rel="noopener">C4 diagrams — Mermaid documentation (renders natively in GitHub markdown)</a></li>
+      <li>[Article] <a href="https://github.com/plantuml-stdlib/C4-PlantUML" rel="noopener">C4-PlantUML — C4 shapes and styling for PlantUML (GitHub)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Za1-v4Zkq5E" rel="noopener">Diagrams as Code 2.0 — Simon Brown, GOTO 2021 (GOTO Conferences)</a></li>
+    </ul>
+
+    <h3>The system design interview method: a repeatable procedure with a time budget</h3>
+    <p>The design round is not a knowledge test; it is a simulation of a design meeting, and it is scored on how you run the meeting. Treat it as a procedure you have rehearsed, with a clock. For a forty-five minute round, a workable budget is roughly: <strong>five minutes clarifying</strong>, <strong>five minutes on scope and estimates</strong>, <strong>ten to twelve minutes on the high-level design</strong>, <strong>fifteen minutes going deep where the interviewer probes</strong>, and <strong>the last five to seven minutes on bottlenecks, tradeoffs and what changes at ten times the load</strong>. Say the plan out loud at the start — "I'll spend a few minutes on requirements, sketch a first cut, then we can go deep wherever you like" — because it immediately shows you have done this before.</p>
+    <p>Each phase has a job. <em>Clarify</em>: who are the users, what are the core flows, read-heavy or write-heavy, how fresh must data be, is this global or one region, mobile or web, do we own authentication? <em>Scope</em>: write the functional requirements as a short list and get explicit agreement, then state the non-functional ones as numbers — availability target, tail-latency target, consistency expectation, retention. <em>Estimate</em>: daily active users to requests per second, average payload to storage per year, working set to cache size, and read-to-write ratio; round aggressively and say your assumptions aloud, because the interviewer is checking your method, not your arithmetic. <em>High-level design</em>: clients, edge and gateway, the two or three services, the datastores, the queues, drawn in one pass with the happy path traced end to end. <em>Deep dive</em>: follow the interviewer — the schema and partition key, the caching and invalidation strategy, the idempotency of the write path, the fan-out approach, the failure behaviour. <em>Wrap up</em>: name the bottleneck you would hit first, the tradeoff you are least happy with, and what you would change at ten times the scale.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/donnemartin/system-design-primer" rel="noopener">The System Design Primer — donnemartin (GitHub; the "how to approach a design question" section)</a></li>
+      <li>[Article] <a href="https://bytebytego.com/courses/system-design-interview/a-framework-for-system-design-interviews" rel="noopener">A Framework for System Design Interviews — ByteByteGo (Alex Xu's four-step method)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/structure-your-design-interviews/" rel="noopener">Turn System Design Interviews into Discussions — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/delivery" rel="noopener">The Delivery Framework — Hello Interview (System Design in a Hurry)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=i7twT3x5yv8" rel="noopener">System Design Interview: A Step-By-Step Guide — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Behaviours that score, and behaviours that lose points</h3>
+    <p>What scores: <strong>stating assumptions out loud</strong> ("I'm assuming reads outnumber writes by a wide margin — is that right?"), so a wrong premise gets corrected in ten seconds instead of derailing twenty minutes. <strong>Driving the conversation</strong> — proposing the next step rather than waiting to be prompted; the interviewer is imagining you leading a design review. <strong>Naming tradeoffs instead of pretending a design is free</strong>: every choice you make should come with the sentence "which costs us…". <strong>Admitting what you do not know</strong>, then reasoning from principles anyway — "I have not run Cassandra in production, but this access pattern is a wide-row lookup by partition key, so here's how I would model it" beats confident invention every time. And <strong>quantifying</strong>: one honest number beats a paragraph of adjectives.</p>
+    <p>What loses points: <strong>jumping straight to a solution</strong> before requirements exist, which reads as someone who builds the wrong thing quickly. <strong>Silent thinking</strong> — a candidate who stares at the board for ninety seconds has given the interviewer nothing to score; narrate the search, including the options you reject. <strong>Over-engineering for scale nobody asked for</strong>: proposing Kafka, a service mesh, multi-region active-active and a data lake for a system with a few thousand users is a red flag about judgement, not a display of knowledge. <strong>Name-dropping without justification</strong> — saying "we'll use Redis" is worth nothing; saying "we'll cache the hot key set in Redis because the read-to-write ratio is extreme and we can tolerate a short staleness window" is worth everything. And <strong>ignoring the interviewer's steer</strong>: when they ask about the write path, they are telling you where the marks are.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://interviewing.io/guides/system-design-interview" rel="noopener">System Design Interview Guide for Senior Engineers — interviewing.io (what interviewers actually grade)</a></li>
+      <li>[Article] <a href="https://www.hellointerview.com/learn/system-design/in-a-hurry/introduction" rel="noopener">System Design in a Hurry — Hello Interview (level expectations and common failure modes)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=OvufRkoD-D0" rel="noopener">System Design Interview — biggest mistakes to avoid — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8dG0qzNAVXI" rel="noopener">System Design Interviews: 10 Key Principles — IGotAnOffer: Engineering</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1r9bPisYaOQ" rel="noopener">How to approach System Design? — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>A compact mock walkthrough, and what to actually practise</h3>
+    <p>Take "design a ticket booking system for a cinema chain" — a favourite in Indian product and service-company rounds because it hides a concurrency problem inside an innocent CRUD description. <em>Clarify</em>: how many cities and screens, do seats have fixed numbering, is there a hold period before payment, must we prevent double-booking absolutely or is compensation acceptable, do we own payments? <em>Scope</em>: browse shows, view seat map, hold seats, pay, confirm, cancel; explicitly out of scope for now are recommendations, loyalty and dynamic pricing. <em>Estimate</em>: state a daily booking volume, convert to average and peak writes per second — noting that peak is what matters, since a blockbuster release opens at one moment nationwide — and size the seat-map reads, which dwarf the writes. <em>High-level</em>: clients, CDN for static seat maps, gateway, a catalogue service reading from a replica, a booking service owning the seat inventory in a strongly consistent store, a payment adapter, and a queue for confirmations and notifications. <em>Deep dive</em> where the real question lives: the seat hold. Take a row lock or a conditional update on the seat rows inside one transaction, write a hold with a short expiry, make the booking request idempotent on a client-generated key, and reconcile expired holds with a sweeper. Say plainly that you would not use a cache as the source of truth for seat state. <em>Wrap up</em>: the first bottleneck is write contention on a single popular show, so partition by show identifier; the tradeoff you dislike is the hold expiry window, which trades a little inventory utilisation for a much simpler failure story; at ten times the load you would shard by city and region, move notifications fully asynchronous, and pre-materialise seat maps.</p>
+    <p>The verdict for this track: do not read more designs — <em>rehearse</em> them. Pick six or seven classic problems from modules twelve and thirteen, and do each one out loud on a whiteboard against a timer, alone if you have to, until the procedure is automatic and you stop needing to remember what comes next. Keep a one-page cheat sheet of the numbers you use constantly: latency figures, rough throughput of a single database node, the read-to-write ratios you assume. Then, separately, practise the other half of this module on your day job — write one honest ADR for a decision your team made recently, and draw the container diagram for the service you own. If you can talk about your own system at the container level, name the module boundaries in it, and point to the record explaining a decision you disagree with, you are already doing the thing that senior design rounds are trying to detect.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://github.com/karanpratapsingh/system-design" rel="noopener">System Design course — Karan Pratap Singh (GitHub; end-to-end worked designs to rehearse against)</a></li>
+      <li>[Article] <a href="https://github.com/ashishps1/awesome-system-design-resources" rel="noopener">Awesome System Design Resources — ashishps1 (GitHub; a practice index, India-friendly)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/" rel="noopener">Cloud Design Patterns — Azure Architecture Center (the vocabulary to name what you are drawing)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o-k7h2G3Gco" rel="noopener">How to Crack Any System Design Interview — ByteByteGo</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="13-classic-designs-b.html">← Classic Designs B</a>
+    <a href="index.html">All System Design modules</a>
+    <a href="index.html">Track complete — back to contents →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Architecture and design-process questions from Indian product and service-company rounds — the ones that decide whether you are pitched as a senior engineer or an architect:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is layered (n-tier) architecture, and what is its main weakness?</summary>
+      <div class="answer"><p>A horizontal split into presentation, business/service and data access layers, each calling only the layer below. It is familiar and perfectly adequate for CRUD-shaped services. Its weakness is the dependency direction: everything ultimately points at the database, so the domain imports persistence and framework types, domain tests need infrastructure, and swapping a datastore ripples upward through code that should not have cared.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are ports and adapters in hexagonal architecture?</summary>
+      <div class="answer"><p>A port is an interface the application itself defines, in its own vocabulary, with no framework or driver types in the signature. An adapter is outside code that either drives a port (HTTP controller, CLI, scheduler, message listener) or implements one (JPA repository, S3 client, SMTP sender). The database and the web framework are both just adapters — neither is privileged.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What goes into an architecture decision record?</summary>
+      <div class="answer"><p>Nygard's four sections: context (the forces — load, deadlines, skills, existing contracts), decision (what we will do, in active voice), status (proposed, accepted, deprecated, superseded by a later record), and consequences (what gets easier and what gets harder). Keep it in the repository next to the code, number it, and never edit an accepted one — supersede it instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the four levels of the C4 model and who each one is for.</summary>
+      <div class="answer"><p>Context (the whole system plus its users and external systems — readable by anyone, including non-engineers), Container (the separately deployable/runnable pieces: web app, API, database, broker — the level most engineering conversations want), Component (major building blocks inside one container), and Code (a class diagram, best generated rather than drawn). Draw the level your audience needs, and do not mix levels in one picture.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How would you structure the first five minutes of a system design round?</summary>
+      <div class="answer"><p>State the plan, then clarify: who the users are, the two or three core flows, read-heavy or write-heavy, freshness and consistency expectations, scale and geography, what is explicitly out of scope, and what we own versus integrate with. End the phase by reading back a short agreed list of functional requirements plus numeric non-functional targets before drawing anything.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Hexagonal versus layered — when is each the right call?</summary>
+      <div class="answer"><p>Layered when the service is genuinely CRUD-shaped, the team is small and the lifetime is short: you get a shape everyone recognises with no indirection tax. Hexagonal when the domain has real rules worth protecting, when infrastructure is likely to change, or when fast dependency-free domain tests matter. The deciding question is not "which is better" but "does this codebase have enough domain logic to be worth isolating?" — if the answer is no, hexagonal buys ceremony and nothing else.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Hexagonal, onion and clean architecture — what is actually different between them?</summary>
+      <div class="answer"><p>Almost nothing structurally. All three enforce the same rule: source dependencies point inward toward the domain, and any outward call is inverted via an interface the inner layer owns. Hexagonal frames it as ports and adapters with no privileged side; onion draws concentric rings around a domain model; clean adds named rings (entities, use cases, interface adapters, frameworks) and states the Dependency Rule explicitly. Saying "three drawings of dependency inversion" scores better than reciting three diagrams.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you NOT use microservices?</summary>
+      <div class="answer"><p>When the team is small enough to coordinate a single deploy; when the domain boundaries are not yet understood, so you would freeze the wrong lines into network calls; when the workload does not need independent scaling; when strong transactional consistency across the operations matters and you would be trading it for sagas; and when you lack the operational maturity — pipelines, tracing, on-call — to run many services. Microservices buy independent deployment and scaling and charge eventual consistency, partial failure and operational surface. If the real complaint is "we cannot find the code that owns this rule", that is modularity, and modularity is free inside one process.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a modular monolith, and how do you stop it from decaying into a big ball of mud?</summary>
+      <div class="answer"><p>One deployable containing modules that each own their data, expose a small published interface, and never reach into another module's internals or tables. It decays when the boundaries are only documented. Make them executable: package-private by default with one public interface per module; Spring Modulith's <code>ApplicationModules.of(App.class).verify()</code> as a JUnit test; ArchUnit rules for dependency direction and cycles; the Java Platform Module System where you can afford the migration. If a violation does not fail the build, it will happen.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is vertical slice architecture, and what is its risk?</summary>
+      <div class="answer"><p>Organise by feature rather than by technical layer: one folder per use case containing its request, handler, validation and data access, because change arrives as features, not as layers. It lets each slice pick its own level of abstraction — a rich model where the rules are complex, a direct query where they are not. The risk is duplicated business rules smeared across slices with no single place to enforce an invariant, so most teams pair slices with a shared domain core for the rules that must not diverge.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you do a back-of-envelope estimate in an interview, and what if you get the arithmetic wrong?</summary>
+      <div class="answer"><p>Work in a fixed order and say every assumption aloud: daily active users to daily requests, daily requests to average requests per second, average to peak with a stated multiplier, payload size to storage per year, read-to-write ratio to cache and replica sizing. Round hard to keep the maths mental. Arithmetic slips are cheap — an interviewer will correct a number and move on — but an unstated assumption or a missing peak factor is expensive, because it means you cannot size anything.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your team has an ADR you disagree with. What do you do?</summary>
+      <div class="answer"><p>Read the context section first — most disagreements are with a decision made under constraints that no longer apply, and that is exactly what the record is for. If the constraints have changed, write a new ADR that supersedes it, citing what changed and what the new consequences are; do not edit the accepted record, because the history of the reasoning is the asset. If the constraints still hold, the disagreement is a preference and the decision stands. Escalating without engaging the recorded context is the answer that loses points.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you extract a module out of a modular monolith into its own service?</summary>
+      <div class="answer"><p>Start from a module whose boundary is already clean — one published interface, its own tables, no foreign keys crossing in. Route all callers through that interface, then move communication to events where you can so callers stop expecting synchronous answers. Split the schema, backfill and dual-write behind a flag, then move the module out and replace the in-process call with a remote one. Expect the properties that were free in-process to become work: transactions become sagas or an outbox, an exception becomes a timeout, and you now need retries, idempotency and tracing across the hop. If the boundary is not already clean, fix it inside the monolith first — extracting a leaky module just distributes the leak.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You are twenty minutes into a design round and the interviewer says the requirements have changed — traffic is now ten times higher. How do you respond?</summary>
+      <div class="answer"><p>Do not redraw from scratch. Name what breaks first and why: usually a single write-hot partition, a synchronous fan-out, or a cache that no longer holds the working set. Then apply one change at a time and state its cost — partition by a different key (loses cross-key transactions), add read replicas (adds replication lag and stale reads), move fan-out to a queue (adds eventual consistency and a backlog to monitor), precompute (adds staleness and a rebuild path). Finish with what you would measure to confirm the bottleneck moved rather than multiplied. The interviewer is testing whether you reason from a bottleneck or reach for a bigger technology.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Critique this: "we applied clean architecture across all forty of our services."</summary>
+      <div class="answer"><p>It signals a policy rather than a judgement. Clean architecture buys replaceability and infrastructure-free tests, and charges indirection: extra interfaces, three models per concept with mapping between them, more files per feature, and a longer path from a stack trace to the offending line. On services whose logic is validate-then-save, that cost buys nothing. The mature answer is selective application — the style in the few modules with genuinely rich domains, plain layered code elsewhere — plus an ArchUnit rule so that where the discipline exists it is actually enforced.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An interviewer asks you to design something you have never built. How do you handle it?</summary>
+      <div class="answer"><p>Say so once, briefly, and then reason from primitives rather than from products. Reduce the unfamiliar problem to the shapes you do know: is this a fan-out on write or on read, a hot-key problem, a uniqueness constraint under concurrency, a stream with ordering requirements? Design against those, state the assumptions you are making about the unfamiliar part, and mark them as things you would verify with a benchmark or a spike. Candidates are rarely rejected for not having used a specific technology; they are rejected for inventing confident details that turn out to be wrong.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the System Design track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>sd.ent.architecture — Layered vs hexagonal and clean architecture, modular monolith design, ADRs, C4 diagramming</li>
+      <li>sd.ent.interview — The system design interview method, framework and mock walkthrough</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the System Design track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
