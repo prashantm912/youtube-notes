@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Cloud Enterprise Deployment capstone brief: run the e-commerce microservices estate on Kubernetes (EKS or a free local cluster), define it in Terraform, ship it with GitHub Actions and OIDC, observe it with Prometheus, Grafana, Loki and OpenTelemetry, then prove it survives a disaster-recovery drill — with the cost reality, ten delivery phases, verified resources and interview questions.">
+  <title>Cloud Enterprise Deployment — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 10: Cloud Enterprise Deployment</h1>
+  <p class="standfirst">The graduation project. You already have a system that works on your laptop — capstone 08 built the e-commerce application, capstone 09 pulled it apart into services. This brief takes that estate and runs it properly in the cloud: defined in code, deployed by a pipeline nobody can bypass, observed well enough to argue with, and then deliberately broken to find out whether any of it is true.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Cloud Enterprise Deployment</nav>
+
+  <section id="intro">
+    <h2>What this capstone covers</h2>
+    <p>This is a brief, not a tutorial. It specifies a target architecture, an infrastructure inventory, a pipeline design and ten delivery phases — each of which leaves you with something that runs. It does not hand you the YAML. Producing the YAML, and understanding why each line is there, <em>is</em> the exercise.</p>
+    <p>Two things separate this capstone from every previous one. First, everything is defined as code: no click-ops in a console, no manual <code>kubectl apply</code> against production, no cloud key stored in a repository. Second, the deliverable is not the deployment — it is the write-up of the disaster-recovery drill at the end, in which you break the system you just built and record honestly what failed. A backup you have never restored is not a backup, and a runbook you have never rehearsed is fiction.</p>
+    <p>You do not need to spend money to do this. The section on the two paths is explicit about what the AWS route costs per month and what a local cluster on your own machine teaches for nothing — which is most of it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>The target architecture</h3>
+    <p>The shape is the standard cloud-native web estate, and it is worth committing to memory because you will meet it in almost every product company. A browser reaches a CDN for the Angular build and an ingress or Gateway API listener for the APIs. Behind the ingress sits a Kubernetes cluster running the services from capstone 09 — gateway, catalog, cart, order, payment, inventory, notification — each a Deployment with probes, resource requests and limits, and a horizontal autoscaler. Behind the services sit managed stateful things you deliberately do not run yourself: a Postgres instance per service boundary, a Kafka cluster, a Redis cache, an object store. Secrets come from a manager, never from a checked-in file. Every arrow in the diagram is defined in Terraform, and every pod in it arrives via the pipeline.</p>
+    <p>The single most important property of this architecture is that it is <em>reproducible</em>. If someone deletes the whole cluster, you should be able to recreate it from the repository and a database backup. That property is exactly what the drill at the end tests, and it is what turns a demo into something you can talk about in an interview.</p>
+    <pre class="code-block" data-label="Architecture"><code>                  users
+                    |
+        +-----------+------------+
+        |                        |
+   CDN + object store       ingress / Gateway API
+   (Angular build)          (TLS from cert-manager or ACM)
+                                 |
+   ============================= KUBERNETES CLUSTER =============================
+   ns: prod                      |
+        +------------+-----------+-----------+------------+
+        | api-gateway  catalog     cart        order        payment  ...        |
+        |   Deployment + probes + requests/limits + HPA + PodDisruptionBudget   |
+        +--------+--------------+---------------+--------------+----------------+
+                 |              |               |              |
+   platform ns:  |              |               |              |
+     Prometheus  |  Loki  |  Grafana  |  OpenTelemetry Collector -> Tempo       |
+   =============================================================================
+                 |              |               |              |
+        +--------+-----+  +-----+------+  +-----+-----+  +-----+------------+
+        | managed      |  | managed    |  | managed   |  | secrets manager  |
+        | Postgres     |  | Kafka      |  | Redis     |  | (no secrets in   |
+        | (multi-AZ)   |  | (or oper.) |  | cache     |  |  git, ever)      |
+        +--------------+  +------------+  +-----------+  +------------------+
+
+   everything above this line: Terraform          apps: pipeline or GitOps</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/overview/" rel="noopener">Kubernetes overview and concepts — kubernetes.io</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html" rel="noopener">What is Amazon EKS — AWS EKS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/eks/latest/best-practices/introduction.html" rel="noopener">Amazon EKS Best Practices Guide — AWS (reliability, security, cost, networking)</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html" rel="noopener">AWS Well-Architected Framework — the six pillars to review your design against</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=X48VuDVv0do" rel="noopener">Kubernetes Tutorial for Beginners (full course) — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Two paths, and the cost reality</h3>
+    <p>Be honest with yourself about the bill before you start. A realistic AWS build of this architecture — an EKS control plane, two or three small managed nodes, an RDS Postgres instance with multi-AZ, a small MSK or self-hosted Kafka, an ElastiCache node, a NAT gateway, an application load balancer, CloudFront and S3 — lands somewhere around $250 to $450 per month if you leave it running, and the NAT gateway plus the EKS control plane are a fixed floor of roughly $100 before you deploy a single pod. Left on by accident for a month, that is a genuinely painful amount of money for a learner. Run the numbers in the pricing calculator <em>first</em>, set a billing alarm, and destroy the stack with <code>terraform destroy</code> the moment a session ends.</p>
+    <p>The cost-conscious path is not a lesser path. Run the whole thing on a local Kubernetes cluster — kind or k3d, both of which create a multi-node cluster inside Docker in under a minute — and you learn manifests, probes, resource limits, HPA behaviour, ingress, cert-manager, Helm, Kustomize, Argo CD, Prometheus, Grafana, Loki, OpenTelemetry, the pipeline, and the whole disaster-recovery drill for nothing. What you do <em>not</em> learn locally is IAM, VPC networking, managed-service failover semantics and real cloud billing. The pragmatic compromise most learners should make: build phases 1 through 3 and 7 locally, then spend one focused weekend standing up the AWS foundation with Terraform to see phases 4 through 6 for real, and destroy it on Sunday night. That costs a few dollars, not a few hundred.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kind.sigs.k8s.io/" rel="noopener">kind — Kubernetes in Docker (the free local cluster, multi-node capable)</a></li>
+      <li>[Official] <a href="https://k3d.io/" rel="noopener">k3d — k3s clusters in Docker (lighter still, built-in registry and load balancer)</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/eks/pricing/" rel="noopener">Amazon EKS pricing — AWS (the control-plane hourly charge, before nodes)</a></li>
+      <li>[Official] <a href="https://calculator.aws/" rel="noopener">AWS Pricing Calculator — model your exact stack before you build it</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=d6WC5n9G_sM" rel="noopener">Kubernetes Course — Full Beginners Tutorial — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>The infrastructure inventory</h3>
+    <p>Write the inventory down before you write any code, because it is the list Terraform has to produce and the list the DR drill has to restore. For the cloud path: a VPC with public and private subnets across at least two availability zones; an EKS cluster with a managed node group; an RDS Postgres instance with multi-AZ enabled and automated backups plus point-in-time recovery; a Kafka cluster — managed MSK if you can afford it, the Strimzi operator inside your own cluster if you cannot; an ElastiCache Redis node for sessions and the cart; an S3 bucket plus a CloudFront distribution for the Angular build; a certificate from ACM or cert-manager; a secrets manager holding database credentials, JWT signing keys and third-party API keys; a Route 53 hosted zone; and an ECR registry for images.</p>
+    <p>Two decisions in this list are the ones interviewers probe. First, why managed Postgres rather than a Postgres pod: because failover, backups, patching and point-in-time recovery are exactly the operational work you do not want to invent, and a database on ephemeral cluster storage is a data-loss incident waiting for a node to die. Second, Kafka. Self-hosting via an operator is legitimate and cheap, and Strimzi is genuinely good, but you now own broker rebalancing, disk pressure and upgrades. Pick one deliberately and be able to defend it — "we self-hosted with Strimzi because MSK was three times our budget and our throughput was tiny" is a much better answer than "we used MSK because it is managed".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html" rel="noopener">Multi-AZ deployments and failover — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/msk/latest/developerguide/what-is-msk.html" rel="noopener">What is Amazon MSK — managed Kafka developer guide</a></li>
+      <li>[Official] <a href="https://strimzi.io/docs/operators/latest/overview" rel="noopener">Strimzi overview — the Kafka operator for Kubernetes (the self-hosted path)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html" rel="noopener">What is Amazon ElastiCache — managed Redis and Valkey</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/GettingStarted.SimpleDistribution.html" rel="noopener">Serve static content from S3 through CloudFront — AWS CloudFront guide</a></li>
+    </ul>
+
+    <h3>Terraform: repository layout and modules per concern</h3>
+    <p>The layout matters more than the syntax. Split the infrastructure into modules by concern — <code>network</code> (VPC, subnets, routing, NAT), <code>cluster</code> (EKS, node groups, IAM roles for service accounts), <code>data</code> (RDS, ElastiCache, MSK, the parameter groups and subnet groups they need) and <code>dns</code> (Route 53 records, ACM certificates) — and keep each module ignorant of the others except through explicit input variables and outputs. The test of a good module boundary is whether you could destroy and rebuild the data layer without touching the network layer's state.</p>
+    <p>Do not write the VPC or the EKS cluster yourself. The community modules in the Terraform registry encode years of edge cases — subnet tagging that the AWS load balancer controller requires, IRSA wiring, node group lifecycle rules — and reimplementing them by hand is how learners lose a weekend to a cluster that will not schedule pods. Consume them as modules, pin the version, and read their source: it is some of the best Terraform you will find to learn from.</p>
+    <pre class="code-block" data-label="Repository layout"><code>infra/
+  modules/
+    network/      main.tf variables.tf outputs.tf   # VPC, subnets, NAT, routing
+    cluster/      main.tf variables.tf outputs.tf   # EKS, node groups, IRSA
+    data/         main.tf variables.tf outputs.tf   # RDS, ElastiCache, MSK
+    dns/          main.tf variables.tf outputs.tf   # Route 53, ACM
+  envs/
+    dev/          main.tf backend.tf terraform.tfvars   # its OWN state file
+    staging/      main.tf backend.tf terraform.tfvars   # its OWN state file
+    prod/         main.tf backend.tf terraform.tfvars   # its OWN state file
+
+# envs/* are thin: they wire modules together and set sizes.
+# Anything copy-pasted between two env directories belongs in a module.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/style" rel="noopener">Terraform style guide — file layout, naming and formatting conventions</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/modules/develop/structure" rel="noopener">Standard module structure — Terraform module development docs</a></li>
+      <li>[Reference] <a href="https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws/latest" rel="noopener">terraform-aws-modules/vpc — the reference VPC module on the registry</a></li>
+      <li>[Reference] <a href="https://github.com/terraform-aws-modules/terraform-aws-eks" rel="noopener">terraform-aws-modules/terraform-aws-eks — GitHub (read the source, not just the README)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fgp-t5SqQmM" rel="noopener">Terraform Zero to Hero, Day 1 — Abhishek.Veeramalla</a></li>
+    </ul>
+
+    <h3>Remote state, locking, environments, and what does not belong in Terraform</h3>
+    <p>State is the part beginners get wrong and the part that ends careers. Local state in <code>terraform.tfstate</code> is fine for a tutorial and unacceptable for anything shared: it lives on one laptop, it contains secrets in plaintext, and two people running apply at once will corrupt it. Use a remote backend — an S3 bucket with versioning and encryption enabled — and turn on locking so a second apply blocks instead of racing. Modern Terraform supports native S3 state locking; older setups used a DynamoDB lock table, and you will still meet both in real repositories.</p>
+    <p>Give each environment its <em>own</em> state file, not a copy-pasted directory sharing one. Separate state is the blast-radius boundary: a botched apply against dev cannot reach prod's resources because prod's resources are not in dev's state. Then enforce the discipline: <code>terraform plan</code> runs on every pull request and its output is what the reviewer actually reviews; <code>terraform apply</code> runs only after merge, only from the pipeline, and only with a plan file the reviewer approved. Nobody applies from a laptop.</p>
+    <p>Equally important is what you keep <em>out</em>. Terraform owns long-lived infrastructure: networks, clusters, databases, DNS, IAM. It should not own your application Deployments. If Terraform applies your Kubernetes manifests, then every application release becomes an infrastructure change, your state file churns on every deploy, and a rollback of the app means a rollback of the infrastructure repository. Application deployment belongs to the pipeline or to a GitOps controller. The dividing line is lifecycle: things that change monthly go in Terraform, things that change several times a day do not.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state/remote" rel="noopener">Remote state — Terraform language documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/backend/s3" rel="noopener">S3 backend — Terraform backend reference (encryption, versioning, locking)</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state/locking" rel="noopener">State locking — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/run" rel="noopener">The core Terraform workflow: write, plan, apply — HashiCorp CLI docs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o04xfWEouKM" rel="noopener">Terraform Remote State Backend using S3 and DynamoDB — Cloud Champ</a></li>
+    </ul>
+
+    <h3>Kubernetes: the runtime contract every service must satisfy</h3>
+    <p>Write down a contract that every one of your services must meet before it is allowed into the cluster, and hold each service to it. A Deployment with at least two replicas. A readiness probe that returns healthy only when the service can actually serve — database pool up, Kafka producer connected — because readiness is what removes a pod from the load balancer. A liveness probe that is deliberately dumber than readiness, checking only that the process is not wedged, because a liveness probe wired to a downstream dependency will restart your entire fleet the moment that dependency wobbles. A startup probe for anything with a slow JVM warm-up, so liveness does not kill a pod that is merely booting.</p>
+    <p>Then resource requests and limits on every container. Requests are what the scheduler uses to place pods and are the number that actually matters; limits are the ceiling, and a CPU limit set too low will throttle a service that has plenty of headroom on the node. Add a HorizontalPodAutoscaler keyed on something meaningful — CPU is the default, requests-per-second or queue depth via custom metrics is better — and a PodDisruptionBudget so a node drain during a cluster upgrade cannot take your last two replicas down simultaneously. Namespaces separate environments; if dev, staging and prod share one cluster, they must not share a namespace, a quota or a network policy.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" rel="noopener">Deployments — Kubernetes concepts (rolling update strategy, maxSurge, maxUnavailable)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" rel="noopener">Configure liveness, readiness and startup probes — Kubernetes tasks</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/" rel="noopener">Resource management for pods and containers — requests, limits and QoS classes</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/" rel="noopener">Horizontal Pod Autoscaling — Kubernetes documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/run-application/configure-pdb/" rel="noopener">Specifying a Disruption Budget for your application — Kubernetes tasks</a></li>
+    </ul>
+
+    <h3>The edge: ingress or Gateway API, TLS, and externally sourced configuration</h3>
+    <p>Ingress is the mature, universally supported way to get HTTP into a cluster, and for this project it is entirely sufficient: one ingress controller, host and path rules per service, TLS terminated at the edge. Gateway API is its successor and the direction the ecosystem is moving — richer routing, a cleaner separation between the platform team who owns the Gateway and the application teams who own their Routes, and no more vendor-specific annotations. Build with Ingress if you want the shortest path; build with Gateway API if you want the thing you will be asked about in two years. Either way, do not terminate TLS by hand: cert-manager issues and renews Let's Encrypt certificates automatically inside the cluster, and on AWS an ACM certificate on the load balancer does the same job with zero renewal work.</p>
+    <p>Configuration and secrets come from outside the image. ConfigMaps hold non-sensitive per-environment settings; secrets are <em>not</em> stored in Git, not even base64-encoded in a manifest, because base64 is encoding rather than encryption and a Kubernetes Secret in a repository is a plaintext credential in a repository. Use the External Secrets Operator to sync values from AWS Secrets Manager (or Vault) into cluster secrets at runtime, so the source of truth is the secrets manager, rotation is a manager-side operation, and your Git history stays clean. If you take one habit from this capstone into your first job, make it this one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" rel="noopener">Ingress — Kubernetes networking concepts</a></li>
+      <li>[Official] <a href="https://gateway-api.sigs.k8s.io/" rel="noopener">Kubernetes Gateway API — the successor to Ingress</a></li>
+      <li>[Official] <a href="https://cert-manager.io/docs/" rel="noopener">cert-manager documentation — automated certificate issuance and renewal</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html" rel="noopener">AWS Certificate Manager overview — managed TLS certificates</a></li>
+      <li>[Official] <a href="https://external-secrets.io/latest/" rel="noopener">External Secrets Operator — sync secrets from a manager into Kubernetes</a></li>
+    </ul>
+
+    <h3>Packaging environments: Helm charts or Kustomize overlays</h3>
+    <p>You need one definition of each service that renders differently in dev, staging and prod. Copy-pasting three near-identical manifest directories is the failure mode this section exists to prevent — they drift within a fortnight, and the drift is invisible until an outage. Helm templates the manifests and parameterises them through <code>values.yaml</code>, giving you one chart plus a values file per environment, versioned releases, and <code>helm rollback</code>. Kustomize takes the opposite approach: a plain-YAML base plus declarative overlays that patch it, with no templating language to learn and manifests that stay valid YAML you can read.</p>
+    <p>For a team of one building this capstone, Kustomize is the gentler start and is built into <code>kubectl</code>. For anything you intend to distribute, or where you want release history and a rollback verb, Helm wins. Choose one and be consistent — a repository that uses both for the same service is a repository nobody can reason about. Either way, put the environment differences where they belong: replica counts, resource sizes, hostnames, log levels and feature flags in the overlay or values file; everything else identical, so that "it works in staging" means something.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://helm.sh/docs/" rel="noopener">Helm documentation — charts, values, releases and rollback</a></li>
+      <li>[Official] <a href="https://helm.sh/docs/chart_best_practices/" rel="noopener">Chart best practices — Helm official guide</a></li>
+      <li>[Official] <a href="https://kubectl.docs.kubernetes.io/references/kustomize/" rel="noopener">Kustomize reference — bases, overlays and patches</a></li>
+      <li>[Reference] <a href="https://github.com/kubernetes-sigs/kustomize" rel="noopener">kubernetes-sigs/kustomize — GitHub, with worked example directories</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-ykwb1d0DXU" rel="noopener">What is Helm in Kubernetes? Helm and Helm Charts explained — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Push deploys or GitOps: the either/or you have to decide</h3>
+    <p>There are two coherent ways to get a new image into the cluster and you must pick one, not blend them. In the <em>push</em> model the pipeline holds cluster credentials and runs <code>helm upgrade</code> or <code>kubectl apply</code> itself. It is simple, it is what most teams start with, it works on day one — and its weaknesses are that CI needs standing access to your cluster, and that the truth about what is running lives in whatever the last job happened to do.</p>
+    <p>In the <em>pull</em> or GitOps model, the pipeline's last step is a commit: it updates an image tag in a manifests repository and stops. A controller inside the cluster — Argo CD is the mature choice — watches that repository and reconciles the cluster towards it continuously. The repository becomes the single declarative source of truth, drift is detected and reverted automatically, a rollback is a git revert, the audit trail is the git log, and CI never needs cluster credentials at all. The cost is a second repository, a controller to operate, and a slightly longer path from merge to running pod.</p>
+    <p>The honest recommendation for this capstone: build phase 6 with push deploys so you understand what the pipeline is actually doing, then convert to Argo CD in phase 8 and keep both branches in your repository. Being able to explain, in an interview, why you migrated and what changed is worth more than either implementation alone.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://argo-cd.readthedocs.io/en/stable/" rel="noopener">Argo CD documentation — declarative GitOps continuous delivery for Kubernetes</a></li>
+      <li>[Official] <a href="https://argo-cd.readthedocs.io/en/stable/user-guide/best_practices/" rel="noopener">Argo CD best practices — separating source code and manifest repositories</a></li>
+      <li>[Article] <a href="https://opengitops.dev/" rel="noopener">OpenGitOps — the four GitOps principles, CNCF working group</a></li>
+      <li>[Article] <a href="https://www.infoq.com/gitops/" rel="noopener">GitOps coverage — InfoQ topic hub (practitioner reports and case studies)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eqiqQN1CCmM" rel="noopener">GitOps and Argo CD crash course, episode 1 — Abhishek.Veeramalla</a></li>
+    </ul>
+
+    <h3>CI/CD: build the image once, promote the same image</h3>
+    <p>The rule that governs everything else in the pipeline: an artifact is built exactly once and the identical, immutable image is promoted through every environment. Tag by commit SHA, never by <code>latest</code>, and never rebuild for production. If staging tested image <code>a1b2c3d</code> and production runs a rebuild of the same branch, you have tested nothing — the base image may have moved, a transitive dependency may have published a new patch, and the artifact in production is one nobody ever ran a test against.</p>
+    <p>Design the stages explicitly and make each one a gate: compile and unit test; integration test with Testcontainers; static analysis and dependency scanning; build the container image; scan the image for vulnerable OS packages; sign it with cosign so you can verify provenance later; push to the registry; deploy to staging; run a smoke test against the deployed staging environment; then a gated production deploy that a human approves. Everything before the staging deploy runs on every pull request; everything after runs only on the main branch.</p>
+    <pre class="code-block" data-label="Pipeline stages"><code>pull request:        compile -> unit -> integration -> lint/SAST -> dep-scan
+                          -> build image (SHA tag) -> image scan -> sign
+
+merge to main:       reuse image :$SHA
+                          -> deploy staging (OIDC role, staging env)
+                          -> smoke test against staging URL
+                          -> [ manual approval gate: production environment ]
+                          -> db migration job (expand-only)
+                          -> deploy prod (canary 10% -> 50% -> 100%)
+                          -> verify SLO burn rate -> promote or auto-rollback
+
+never:               rebuild the artifact between environments
+never:               a long-lived cloud access key stored as a repo secret</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions" rel="noopener">GitHub Actions documentation — workflows, jobs, runners and reusable actions</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/security/secure-use" rel="noopener">Secure use reference for GitHub Actions — hardening workflows and third-party actions</a></li>
+      <li>[Official] <a href="https://docs.sigstore.dev/" rel="noopener">Sigstore documentation — keyless signing and verification of container images</a></li>
+      <li>[Reference] <a href="https://github.com/actions/starter-workflows" rel="noopener">actions/starter-workflows — GitHub's own reference workflow templates</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=R8_veQiYBjI" rel="noopener">GitHub Actions Tutorial — basic concepts and CI/CD pipeline with Docker — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>OIDC federation, environment protection and the gated production deploy</h3>
+    <p>No cloud keys. This is not a nice-to-have; a leaked long-lived AWS access key in a repository secret is one of the most common breach vectors in the industry, and the fix has been standard for years. Configure GitHub as an OIDC identity provider in AWS IAM, create a role whose trust policy is scoped to your specific repository <em>and specific branch or environment</em>, and let the workflow exchange a short-lived GitHub-issued token for temporary AWS credentials at runtime. The credentials expire in minutes and nothing is ever stored. Getting the trust policy's subject condition right — pinning <code>repo:org/name:environment:production</code> rather than a wildcard — is the part interviewers ask about, because a sloppy wildcard lets any branch in the repository assume your production role.</p>
+    <p>Layer environment protection rules on top. Declare <code>staging</code> and <code>production</code> as GitHub environments, attach required reviewers and a wait timer to production, and scope each environment's secrets and variables to itself. The result is that the production deploy job physically cannot start until a named human clicks approve, the approval is recorded against the run, and a pull request from a fork can never reach the production role. That is the difference between a pipeline and a pipeline you would let near real customers.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/security/openid-connect" rel="noopener">About security hardening with OpenID Connect — GitHub Actions docs</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws" rel="noopener">Configuring OpenID Connect in Amazon Web Services — GitHub Actions how-to</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments" rel="noopener">Managing environments for deployment — protection rules and required reviewers</a></li>
+      <li>[Reference] <a href="https://github.com/aws-actions/configure-aws-credentials" rel="noopener">aws-actions/configure-aws-credentials — the official OIDC action, with trust-policy examples</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Io5UFJlEJKc" rel="noopener">Securely deploy to AWS with GitHub Actions and OIDC — GitHub</a></li>
+    </ul>
+
+    <h3>Rolling out and rolling back: migrations, canaries and blue-green</h3>
+    <p>A rolling deploy means old and new versions of your code run against the same database at the same time, for minutes. That single fact dictates the migration rule: every schema change must be backwards compatible with the version currently running. Expand, then contract. To rename a column you add the new column, deploy code that writes both and reads the new one with a fallback, backfill, deploy code that only uses the new column, and only then — in a <em>later</em> release, after you are certain no rollback target needs it — drop the old one. A migration that drops or renames in the same release as the code change cannot be rolled back, because rolling the code back leaves it staring at a schema that no longer has its column.</p>
+    <p>Run migrations as an explicit pipeline step, not as an application startup hook: a Kubernetes Job that runs Flyway or Liquibase before the new pods roll, so a failed migration fails the deploy loudly instead of crash-looping ten replicas. Then choose a rollout strategy for the code itself. A canary sends a small percentage of live traffic to the new version and promotes only if the error rate and latency hold; blue-green stands up a complete parallel environment and flips traffic in one atomic switch, which makes rollback instant but doubles your compute during the cut-over. Argo Rollouts implements both as drop-in replacements for a Deployment, with automated analysis and automatic abort.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://documentation.red-gate.com/flyway" rel="noopener">Flyway documentation — versioned database migrations</a></li>
+      <li>[Official] <a href="https://argo-rollouts.readthedocs.io/en/stable/" rel="noopener">Argo Rollouts — progressive delivery with canary and blue-green strategies</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/ParallelChange.html" rel="noopener">ParallelChange (expand and contract) — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/BlueGreenDeployment.html" rel="noopener">BlueGreenDeployment — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/CanaryRelease.html" rel="noopener">CanaryRelease — Martin Fowler bliki</a></li>
+    </ul>
+
+    <h3>Metrics: Micrometer to Prometheus</h3>
+    <p>Every Spring Boot service already has Micrometer; expose <code>/actuator/prometheus</code>, add a ServiceMonitor or a scrape annotation, and Prometheus collects it. What you get free is worth knowing: JVM heap and garbage collection, thread pools, HikariCP connection pool saturation, HTTP server request counts and latency histograms per endpoint and status, Kafka consumer lag, and every Resilience4j circuit breaker's state. What you must add yourself are the business counters that make an incident diagnosable — orders placed, payments authorised, payments declined, carts abandoned, inventory reservations failed.</p>
+    <p>Name them properly, because metric names are an API you will live with. Follow the Prometheus conventions: a single-word application prefix, a unit suffix, base units (seconds not milliseconds, bytes not megabytes), and <code>_total</code> on counters. Keep label cardinality under control — a label whose value is a user id or an order id will multiply your time series into the millions and take Prometheus down. That cardinality mistake is one of the most common real-world production incidents caused by well-meaning instrumentation.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/introduction/overview/" rel="noopener">Prometheus overview — data model, scraping and PromQL</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/" rel="noopener">Micrometer reference documentation — meters, tags and registries</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/practices/naming/" rel="noopener">Metric and label naming — Prometheus best practices</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html" rel="noopener">Metrics — Spring Boot Actuator reference documentation</a></li>
+      <li>[Reference] <a href="https://prometheus.io/docs/practices/instrumentation/" rel="noopener">Instrumentation best practices — what to measure and what not to</a></li>
+    </ul>
+
+    <h3>Dashboards as code, and logs that join up with traces</h3>
+    <p>Dashboards built by clicking in the Grafana UI are lost the first time the pod is rescheduled with an empty volume. Provision them instead: keep dashboard JSON in the repository, mount it through Grafana's provisioning directory, and treat a dashboard change like any other code change — reviewed in a pull request. Build four for this project: a service overview with the RED signals (rate, errors, duration) per service, a Kubernetes cluster view (node and pod resource usage, restarts, pending pods), a data-layer view (connection pool saturation, replication lag, Kafka consumer lag), and a business view (orders per minute, checkout conversion, payment decline rate). The last one is the dashboard a non-engineer will look at, and the one that tells you fastest that something is genuinely wrong.</p>
+    <p>Logs go to Loki, shipped by Alloy or Promtail as a DaemonSet. The single change that makes them useful is structured JSON output with the trace id and span id in every line — Spring Boot's Micrometer Tracing puts them in the MDC automatically once tracing is wired up. With that in place, Grafana can jump from a slow span in a trace straight to the log lines that span emitted, and from a suspicious log line to the full distributed trace of that request. Without it you are grepping across seven services by timestamp, which is exactly the experience distributed tracing exists to abolish.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://grafana.com/docs/grafana/latest/visualizations/dashboards/build-dashboards/" rel="noopener">Build dashboards — Grafana documentation</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/grafana/latest/administration/provisioning/" rel="noopener">Provision Grafana — dashboards and data sources as code</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/" rel="noopener">Grafana Loki documentation — label-based log aggregation</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/alloy/latest/" rel="noopener">Grafana Alloy — the collector that ships logs, metrics and traces</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=C38dT0Kt3zs" rel="noopener">Monitor a Kubernetes cluster using Prometheus and Grafana with Helm — Cloudamy</a></li>
+    </ul>
+
+    <h3>Traces, SLOs and burn-rate alerts</h3>
+    <p>Instrument with OpenTelemetry rather than a vendor SDK, and route everything through an OpenTelemetry Collector deployed in the cluster. The collector is the piece that makes this architecture durable: applications talk OTLP to one endpoint, the collector batches, samples, enriches with Kubernetes metadata, and exports onward — to Tempo, Jaeger, or a commercial backend — so swapping your tracing vendor is a collector config change rather than a redeploy of every service. For Java, the OpenTelemetry agent instruments Spring MVC, WebClient, JDBC and Kafka with no code changes at all, which is the fastest possible route to a useful trace.</p>
+    <p>Then define service level objectives, because "the site is slow" is not an alertable condition. Two are enough for this system: a checkout success rate objective (for example, 99.5% of checkout requests succeed over a rolling 30-day window) and a latency objective (95% of checkout requests complete within 800 milliseconds). Each objective implies an error budget, and you alert on the <em>burn rate</em> of that budget rather than on raw thresholds — a fast burn over a short window pages someone immediately, a slow burn over a long window opens a ticket. That two-window approach is what stops alert fatigue, and it is why on-call engineers can sleep. Route the page somewhere a human actually sees it, and test the routing before you need it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/collector/" rel="noopener">OpenTelemetry Collector — receivers, processors, exporters and deployment modes</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/languages/java/" rel="noopener">OpenTelemetry Java — the zero-code agent and the SDK</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/tempo/latest/" rel="noopener">Grafana Tempo documentation — the trace backend and trace-to-logs linking</a></li>
+      <li>[Article] <a href="https://sre.google/workbook/alerting-on-slos/" rel="noopener">Alerting on SLOs — Google SRE Workbook (multi-window burn-rate alerting)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/service-level-objectives/" rel="noopener">Service Level Objectives — Google SRE Book, chapter 4</a></li>
+    </ul>
+  </section>
+
+  <section id="build">
+    <h2>Building it</h2>
+
+    <h3>Delivery phases</h3>
+    <p>Ten phases, each ending in something that runs. Do not skip ahead: every phase depends on the previous one working, and the ordering is deliberately front-loaded with the free local steps so you spend money only once you know what you are doing.</p>
+    <ol>
+      <li><strong>Containerise everything and run the full stack in Compose.</strong> Multi-stage Dockerfiles, a non-root user, a JRE base image, and a <code>docker compose up</code> that brings up every service plus Postgres, Kafka and Redis. Done when a fresh clone plus one command gives a working checkout.</li>
+      <li><strong>A local Kubernetes cluster with hand-written manifests.</strong> kind or k3d, one namespace, plain Deployments and Services, an ingress controller, probes and resource requests. Done when the same checkout works through the ingress.</li>
+      <li><strong>Helm or Kustomize with environment overlays.</strong> Collapse the copy-pasted manifests into one definition plus a dev and a staging overlay. Done when the only difference between environments is the overlay file.</li>
+      <li><strong>Terraform for the cloud foundation.</strong> Remote state with locking, the network and cluster modules, one environment. Done when <code>terraform apply</code> from an empty account produces a cluster you can reach with <code>kubectl</code>, and <code>terraform destroy</code> removes every trace of it.</li>
+      <li><strong>Managed data services and secrets.</strong> RDS with multi-AZ and backups, Redis, Kafka, the secrets manager, and the External Secrets Operator wiring. Done when no credential exists anywhere in the repository.</li>
+      <li><strong>The CI/CD pipeline to staging.</strong> Build once, scan, sign, push, OIDC-federated deploy, smoke test. Done when merging a pull request puts the new image in staging with no human touching a terminal.</li>
+      <li><strong>The observability stack.</strong> Prometheus, Grafana with provisioned dashboards, Loki, the OpenTelemetry Collector and Tempo. Done when you can start from a slow checkout on a dashboard and reach the exact log line, through the trace, in under a minute.</li>
+      <li><strong>Production, gated, with a progressive rollout.</strong> A production environment with required reviewers, and a canary or blue-green strategy with automated analysis. Done when a deliberately broken build is rejected by the canary and rolled back without you intervening.</li>
+      <li><strong>The disaster-recovery drill and the write-up.</strong> The graduation exercise, below.</li>
+      <li><strong>A cost-optimisation pass.</strong> Right-size everything you guessed at in phase 4 and cut the bill. Done when you can state the before and after figure and justify every remaining line.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/" rel="noopener">Docker Compose documentation — the phase 1 target</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/setup/production-environment/" rel="noopener">Production environment setup — Kubernetes documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes" rel="noopener">A Guide to Kubernetes — Baeldung (objects, manifests and kubectl for Java developers)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pIPji3_rYPY" rel="noopener">Run and deploy a Spring Boot application with MySQL on Kubernetes — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yn_stY3HCr8" rel="noopener">Spring Boot 3 Microservices with Kubernetes and Angular — Programming Techie</a></li>
+    </ul>
+
+    <h3>The graduation exercise: define RTO and RPO, then run the drill</h3>
+    <p>Start with the two numbers, written down and agreed before you touch anything. <em>RTO</em>, the recovery time objective, is how long the business can tolerate the system being down. <em>RPO</em>, the recovery point objective, is how much data the business can tolerate losing. For this project, propose something like a 30-minute RTO and a 5-minute RPO for the order and payment data, and then check whether your architecture can actually deliver them: automated RDS backups plus point-in-time recovery gives you an RPO in the low minutes, but a restore of a large database can take far longer than 30 minutes, which means your stated RTO may be a fiction. Discovering that mismatch on paper, before an incident, is the entire point of writing the numbers down.</p>
+    <p>Then run the drill, in this order, recording the wall-clock time and what you observed at each step:</p>
+    <ol>
+      <li><strong>Kill a pod.</strong> Delete one running replica and watch the ReplicaSet reschedule it. Did any in-flight request fail? If yes, your readiness probe or your graceful-shutdown handling is wrong.</li>
+      <li><strong>Drain a node.</strong> Cordon and drain a worker while traffic flows. Did your PodDisruptionBudget hold, or did a service lose all replicas at once?</li>
+      <li><strong>Fail over the database.</strong> Trigger a multi-AZ failover on RDS. How long was the write outage, and did your connection pool recover on its own or did the pods need a restart?</li>
+      <li><strong>Restore a backup into a fresh environment.</strong> Not a test of the snapshot's existence — an actual restore into a new instance, followed by a row-count and checksum comparison against the source. Time it. This is the step that most often reveals the RTO was fantasy.</li>
+      <li><strong>Simulate an availability-zone loss.</strong> Remove the nodes in one AZ. Did the cluster reschedule into the surviving zone, or were all your replicas on the zone that just vanished because you never set topology spread constraints?</li>
+      <li><strong>Roll back a bad deploy.</strong> Ship a deliberately broken build to production and recover — via canary abort, <code>helm rollback</code>, or a git revert under Argo CD. Time from bad deploy to healthy, and note whether an in-flight database migration made rollback harder than it should have been.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html" rel="noopener">Disaster recovery options in the cloud — AWS whitepaper (backup-restore, pilot light, warm standby, multi-site)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html" rel="noopener">Reliability Pillar — AWS Well-Architected Framework</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/" rel="noopener">Safely drain a node — Kubernetes cluster administration</a></li>
+      <li>[Official] <a href="https://velero.io/docs/v1.18/" rel="noopener">Velero documentation — back up and restore Kubernetes cluster resources and volumes</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=06xuF0PfUVo" rel="noopener">Kubernetes Disaster Recovery — Cloud With Raj</a></li>
+    </ul>
+
+    <h3>The write-up is the real deliverable</h3>
+    <p>When the drill is over, write it up. Not a success report — an honest one. For each of the six exercises: what you expected, what actually happened, the measured time, what broke, and what you would change. The write-up is the artifact you show people. Anyone can put "deployed microservices to Kubernetes" on a CV; almost nobody can say "our stated RTO was 30 minutes, the database restore took 47, so we moved to a warm standby replica and re-measured at 6". That sentence is a hiring signal, and it is the thing this capstone exists to give you.</p>
+    <p>Once the manual drill works, automate a small piece of it. A chaos experiment that kills a random pod on a schedule, or introduces 200 milliseconds of network latency between two services, turns resilience from something you assert into something continuously verified. Start with pod-kill — it is safe, it is fast, and it catches the single most common bug in this architecture, which is a service that cannot tolerate its own dependency restarting. And when a real incident does happen, write a blameless postmortem in the same format: the discipline of recording what happened without hunting for someone to blame is what makes a team learn from an outage instead of quietly repeating it.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://principlesofchaos.org/" rel="noopener">Principles of Chaos Engineering — the original statement of the practice</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/data-integrity/" rel="noopener">Data Integrity — Google SRE Book (why an untested backup is not a backup)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/postmortem-culture/" rel="noopener">Postmortem Culture: Learning from Failure — Google SRE Book</a></li>
+      <li>[Official] <a href="https://chaos-mesh.org/" rel="noopener">Chaos Mesh — a CNCF chaos engineering platform for Kubernetes</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5G7Ebd8pop8" rel="noopener">Chaos Engineering with Kubernetes: safe failure injection using LitmusChaos and Chaos Mesh — SystemDR</a></li>
+    </ul>
+
+    <h3>The cost-optimisation pass</h3>
+    <p>Phase 10 is a real engineering exercise, not an afterthought, and "how would you halve this bill" is a question senior candidates get asked constantly. Work from measurement rather than instinct: pull the actual CPU and memory usage of every pod over a week and compare it to what you requested. Most first drafts over-request by a factor of two or three, and since requests are what the scheduler reserves, over-requesting means you are paying for nodes to hold air. Right-size the requests, and the same workload fits on fewer nodes.</p>
+    <p>Then attack the big line items in order. Consolidate NAT gateways, or remove them entirely by using VPC endpoints for S3 and ECR traffic. Move non-production node groups to Spot instances, which are dramatically cheaper and perfectly appropriate for workloads that can tolerate interruption. Replace a fixed node group with Karpenter so nodes are provisioned to fit pending pods and removed when empty, instead of sitting idle overnight. Scale dev and staging to zero replicas outside working hours — for a learner, this alone is often the single largest saving. Downsize the RDS instance class and drop multi-AZ in non-production. Set S3 lifecycle rules on logs and old artifacts. Finally, attribute the remaining spend per namespace with OpenCost so you can point at which service costs what, which is the conversation that actually changes behaviour.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/cost-optimization-pillar/welcome.html" rel="noopener">Cost Optimization Pillar — AWS Well-Architected Framework</a></li>
+      <li>[Official] <a href="https://karpenter.sh/" rel="noopener">Karpenter — just-in-time node provisioning and consolidation for Kubernetes</a></li>
+      <li>[Official] <a href="https://opencost.io/" rel="noopener">OpenCost — the CNCF standard for Kubernetes cost monitoring and allocation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/" rel="noopener">Node autoscaling — Kubernetes cluster administration</a></li>
+      <li>[Article] <a href="https://www.finops.org/introduction/what-is-finops/" rel="noopener">What is FinOps — FinOps Foundation (the vocabulary teams use for this work)</a></li>
+    </ul>
+
+    <h3>Reference implementations worth reading</h3>
+    <p>Read production-grade repositories before you write your own, and read them the way you would read a book — following the structure, not copying the files. These five between them show every piece of this architecture done properly by people who operate it.</p>
+    <ul class="resources">
+      <li>[Reference] <a href="https://github.com/GoogleCloudPlatform/microservices-demo" rel="noopener">GoogleCloudPlatform/microservices-demo — a polyglot microservices e-commerce app with full Kubernetes manifests, Kustomize variants, Helm chart and load generator</a></li>
+      <li>[Reference] <a href="https://github.com/aws-ia/terraform-aws-eks-blueprints" rel="noopener">aws-ia/terraform-aws-eks-blueprints — AWS-maintained EKS reference patterns in Terraform</a></li>
+      <li>[Reference] <a href="https://github.com/argoproj/argocd-example-apps" rel="noopener">argoproj/argocd-example-apps — the canonical GitOps application repository layouts</a></li>
+      <li>[Reference] <a href="https://github.com/prometheus-operator/kube-prometheus" rel="noopener">prometheus-operator/kube-prometheus — the full Prometheus, Alertmanager and Grafana stack with cluster rules and dashboards</a></li>
+      <li>[Reference] <a href="https://github.com/kubernetes/examples" rel="noopener">kubernetes/examples — the upstream worked examples repository</a></li>
+    </ul>
+
+    <h3>Which track modules this capstone exercises</h3>
+    <p>Nothing here is new material — this capstone is where nine tracks meet. If a phase stalls, the module that unblocks it is on this list.</p>
+    <ul>
+      <li>Containers and images: <a href="../devops/07-docker-basics.html">Docker Basics</a>, <a href="../devops/08-docker-production.html">Docker in Production</a>, <a href="../devops/09-docker-compose.html">Docker Compose</a> — phase 1.</li>
+      <li>Kubernetes: <a href="../devops/10-kubernetes-basics.html">Kubernetes Basics</a> and <a href="../devops/11-kubernetes-production.html">Kubernetes in Production</a> — phases 2, 3 and 8.</li>
+      <li>Pipelines and rollouts: <a href="../devops/12-cicd-concepts.html">CI/CD Concepts</a>, <a href="../devops/13-github-actions.html">GitHub Actions</a>, <a href="../devops/14-deployment-strategies.html">Deployment Strategies</a> — phases 6 and 8.</li>
+      <li>Cloud foundation: <a href="../aws/01-cloud-foundations.html">Cloud Foundations</a>, <a href="../aws/02-iam.html">IAM</a>, <a href="../aws/05-vpc.html">VPC and Networking</a>, <a href="../aws/11-infrastructure-as-code.html">Infrastructure as Code</a> — phase 4.</li>
+      <li>Managed data and edge services: <a href="../aws/06-rds.html">RDS</a>, <a href="../aws/07-load-balancing-scaling.html">Load Balancing and Scaling</a>, <a href="../aws/08-containers-serverless.html">Containers and Serverless</a>, <a href="../aws/09-caching-dns-cdn.html">Caching, DNS and CDN</a> — phase 5.</li>
+      <li>Putting the cloud pieces together: <a href="../aws/12-reference-architecture.html">Reference Architecture</a> and <a href="../aws/10-cloud-monitoring.html">Cloud Monitoring</a> — phases 5 and 7.</li>
+      <li>Observability: <a href="../observability/01-observability-foundations.html">Foundations</a>, <a href="../observability/02-logging.html">Logging</a>, <a href="../observability/03-log-aggregation.html">Log Aggregation</a>, <a href="../observability/04-metrics.html">Metrics</a>, <a href="../observability/05-dashboards.html">Dashboards</a>, <a href="../observability/06-health-checks.html">Health Checks</a>, <a href="../observability/07-tracing.html">Tracing</a>, <a href="../observability/08-alerting-slo.html">Alerting and SLOs</a> — phase 7 and the whole of the drill.</li>
+      <li>Service behaviour under failure: <a href="../microservices/05-api-gateway.html">API Gateway</a>, <a href="../microservices/08-resilience.html">Resilience with Resilience4j</a>, <a href="../microservices/11-tracing-debugging.html">Tracing and Debugging</a> — phases 7 and 9.</li>
+      <li>The reasoning behind the shape: <a href="../system-design/02-scaling-basics.html">Scaling Basics</a>, <a href="../system-design/08-consistency-availability.html">Consistency and Availability</a>, <a href="../system-design/14-enterprise-design.html">Enterprise Design</a> — the architecture and RTO/RPO sections.</li>
+      <li>Security of the pipeline and the estate: <a href="../secure-coding/07-secrets-crypto.html">Secrets and Cryptography</a>, <a href="../secure-coding/09-supply-chain.html">Supply Chain Security</a> — phases 5 and 6.</li>
+      <li>What you are deploying: <a href="08-ecommerce-application.html">Capstone 08, E-Commerce Application</a> and <a href="09-microservices-refactor.html">Capstone 09, Microservices Refactor</a>.</li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="09-microservices-refactor.html">← Microservices Refactor</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="index.html">Back to the track contents →</a>
+  </nav>
+
+  <section id="closing">
+    <h2>Closing the course</h2>
+    <p>That is the tenth capstone and the last page of the curriculum. Step back and look at what the ten of them add up to. You started with an expense tracker — Boot, JPA, Angular, a login — and ended with a distributed system running on managed cloud infrastructure that you defined in code, shipped through a gated pipeline, instrumented well enough to debug from a dashboard, and then deliberately broke to find out what was actually true. In between you built an admin dashboard with signal-based state, an inventory system with real transactional concurrency and a full test pyramid, a job portal with search at scale, an HR system with workflows and audit logging, a real-time stock dashboard, a banking application where correctness was the feature, an e-commerce platform end to end, and a strangler-fig migration from that monolith to services.</p>
+    <p>What you can now legitimately claim is not a list of technologies. It is that you have made the decisions: chosen a consistency model and lived with it, picked a rollout strategy and rolled something back, sized a thread pool, named a metric, written a migration that survived a rolling deploy, and measured a recovery instead of assuming one.</p>
+    <p>Present them accordingly. On a CV, one line per project: the problem, the scale or constraint, the one decision you are proudest of, and the measured outcome. Not "built microservices with Spring Boot and Kafka" but "split a monolith into seven services using a strangler-fig migration; kept checkout available throughout; reduced deploy lead time from a weekly release to under an hour". In an interview, the tradeoffs are the story and the feature list is noise — a candidate who says "we chose eventual consistency for the inventory count and accepted occasional oversell, because the alternative was a distributed transaction on the checkout path" has already outperformed a candidate reciting a stack. Have the DR write-up and one architecture diagram ready to share; both invite exactly the questions you want to be asked. And be equally ready to say what you would do differently, because that answer is the one that signals seniority.</p>
+    <p>What to learn next, in rough order of return on effort:</p>
+    <ul>
+      <li>Depth in one data store rather than breadth across five — Postgres internals (query plans, indexes, vacuum, replication) pays back on every project you will ever touch.</li>
+      <li>Performance work as a discipline: profiling a JVM, reading a flame graph, load-testing to find the actual bottleneck rather than the assumed one.</li>
+      <li>Platform and reliability engineering: service meshes, multi-region topologies, capacity planning, and running a real on-call rotation.</li>
+      <li>Security beyond the checklist: threat modelling your own designs, and the supply-chain end of it — SBOMs, provenance attestation, and verifying signatures at admission.</li>
+      <li>The part nobody teaches: writing design documents your colleagues can review, and reviewing theirs well. It is the highest-leverage skill on this list.</li>
+    </ul>
+    <ul class="resources">
+      <li>[Article] <a href="https://12factor.net/" rel="noopener">The Twelve-Factor App — still the clearest statement of what makes an app deployable</a></li>
+      <li>[Article] <a href="https://builder.aws.com/learn/topics/builders-library" rel="noopener">Amazon Builders' Library — how Amazon builds and operates distributed systems</a></li>
+      <li>[Article] <a href="https://www.cncf.io/reports/cncf-annual-survey-2024/" rel="noopener">CNCF Annual Survey — what the cloud-native ecosystem actually runs in production</a></li>
+      <li>[Reference] <a href="https://roadmap.sh/devops" rel="noopener">DevOps roadmap — roadmap.sh (a map of what remains, to choose from deliberately)</a></li>
+    </ul>
+  </section>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>When this project is on your CV, the interviewer will not ask you what Kubernetes is — they will assume you deployed something and probe whether you understood it. These are the questions that separate a candidate who ran the commands from one who made the decisions, weighted towards Indian product and service-company rounds:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through what happens when you merge a pull request to main on this project.</summary>
+      <div class="answer"><p>CI builds and unit-tests, runs integration tests, scans dependencies, builds a container image tagged with the commit SHA, scans and signs that image, and pushes it to the registry. The workflow then assumes a short-lived AWS role via OIDC and deploys that exact image to staging, runs a smoke test against the deployed staging URL, and stops at a manual approval gate. After a reviewer approves, a migration job runs, then the same image rolls out to production as a canary. The key point is that one artifact is built once and promoted; production never rebuilds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why did you use Terraform instead of clicking through the AWS console?</summary>
+      <div class="answer"><p>Reproducibility and review. The console gives you infrastructure nobody can recreate and changes nobody can audit. With Terraform the whole environment is a reviewable diff, a second environment is a new state file rather than a week of clicking, drift is detectable, and teardown is one command — which for a learner also means you stop paying the moment you finish. It also makes the DR drill possible at all: recovering into a fresh environment requires the environment to be code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a liveness and a readiness probe, and what goes wrong if you confuse them?</summary>
+      <div class="answer"><p>Readiness decides whether a pod receives traffic; liveness decides whether it gets restarted. Confuse them and you get a cluster-wide outage: if liveness checks a downstream dependency and that dependency has a blip, Kubernetes restarts every replica of every service that depends on it, turning a small degradation into a full outage. Liveness should check only that the process itself is alive and not deadlocked; readiness can be as strict as you like because failing it merely removes the pod from the load balancer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You have a rolling deploy and a schema change. How do you avoid breaking the old version?</summary>
+      <div class="answer"><p>Expand and contract. During a rolling deploy both versions run against one database, so every migration must be backwards compatible with the currently deployed code. Add the new column, deploy code that dual-writes and reads the new column with a fallback, backfill existing rows, deploy code that uses only the new column, and drop the old column in a later release once no rollback target needs it. Migrations run as an explicit pipeline job before the pods roll, not on application startup, so a failure blocks the deploy instead of crash-looping the fleet.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you roll back a bad production deploy, and how fast is it?</summary>
+      <div class="answer"><p>Three layers. The canary aborts automatically if error rate or latency breaches the analysis thresholds, so most bad deploys never reach full traffic. If it gets through, it is <code>helm rollback</code> to the previous release, or under GitOps a git revert that Argo CD reconciles — both under a minute because the previous image is still in the registry and the previous manifest is still in history. The hard case is a deploy that already ran a destructive migration; that is why migrations are expand-only, so the code can always go back even when the schema has moved forward.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your pipeline deploys to AWS. Where are the AWS credentials stored?</summary>
+      <div class="answer"><p>Nowhere. GitHub is registered as an OIDC identity provider in IAM, and the workflow exchanges a short-lived GitHub-issued token for temporary AWS credentials at runtime. The IAM role's trust policy pins the subject to a specific repository and environment, so a pull request from a fork or an unrelated branch cannot assume it. The credentials last minutes and are never written down — which removes the single most common cause of cloud breaches, a long-lived access key leaked from a repository or a log.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is the database managed rather than a pod in the cluster?</summary>
+      <div class="answer"><p>Because the operational work is the product. Managed Postgres gives automated backups, point-in-time recovery, a tested multi-AZ failover, patching and monitoring — all of which I would otherwise have to build and, more importantly, verify. A stateful database on cluster storage also inherits the cluster's failure modes: a node eviction or a bad upgrade becomes a data incident. The tradeoff is cost and less control over configuration, which is a fair price for not owning failover.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Terraform or the pipeline — which one applies your Kubernetes manifests, and why?</summary>
+      <div class="answer"><p>The pipeline, or a GitOps controller — not Terraform. The dividing line is lifecycle. Terraform owns things that change monthly: networks, clusters, databases, DNS, IAM. Applications change several times a day, and putting them in Terraform means every release churns infrastructure state, every rollback becomes an infrastructure rollback, and a plan output becomes unreadable. Keeping them separate also keeps the blast radius separate: a bad app deploy cannot touch the VPC.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are your RTO and RPO, and how do you know they are real?</summary>
+      <div class="answer"><p>Stated: a 30-minute recovery time objective and a 5-minute recovery point objective for order and payment data. Known, because we measured them rather than asserted them — we restored a backup into a fresh environment and timed it end to end, then compared row counts and checksums against the source. RPO is credible because point-in-time recovery on RDS has a granularity in the low minutes. RTO was the number that failed: the restore took longer than the objective, so either the objective moves or the architecture does, and both are legitimate answers as long as the number is measured.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Tell me what actually broke during your disaster-recovery drill.</summary>
+      <div class="answer"><p>This is the question the project exists to answer, and a specific answer beats a polished one. Typical genuine findings: pod deletion dropped in-flight requests because the app did not handle SIGTERM with a graceful shutdown; a node drain took a service to zero replicas because there was no PodDisruptionBudget; the connection pool did not recover after an RDS failover until pods were restarted; all replicas of one service were scheduled in the AZ that was removed because no topology spread constraint existed; and the restore took longer than the stated RTO. Each of those is a real fix, and describing the fix is what demonstrates you ran the drill instead of reading about it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your monthly cloud bill is $400. Halve it without dropping availability.</summary>
+      <div class="answer"><p>Measure first: compare actual pod CPU and memory usage against requests over a week — most workloads over-request by two to three times, and since requests are what the scheduler reserves, right-sizing them alone consolidates nodes. Then the big line items: remove or consolidate NAT gateways using VPC endpoints for S3 and ECR; move non-production node groups to Spot; replace the fixed node group with Karpenter so nodes bin-pack and scale to zero; scale dev and staging to zero replicas outside working hours; downsize the RDS class and drop multi-AZ in non-production only; add S3 lifecycle rules on logs. Then attribute spend per namespace with OpenCost so the next conversation is evidence-based. Production availability is untouched because every change targets idle capacity and non-production.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You chose Argo CD over pushing deploys from CI. Defend it — and say what it cost you.</summary>
+      <div class="answer"><p>The gains: CI no longer needs standing cluster credentials, which removes a large piece of attack surface; the manifests repository is a single declarative source of truth, so what is running is always inspectable in git; drift is detected and reconciled continuously rather than discovered during an incident; rollback is a revert, and the audit trail is the git log. The costs: a second repository and the commit-back step that keeps them in sync; a controller to operate and upgrade; a longer and less obvious path from merge to running pod, which makes first-time debugging harder; and secrets management gets more awkward because plain secrets cannot live in the manifests repository, so you need External Secrets or sealed secrets. For a solo project push deploys are entirely defensible; the GitOps case gets stronger with every additional engineer and cluster.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A checkout request is slow in production. Walk me through your first five minutes.</summary>
+      <div class="answer"><p>Start at the service overview dashboard: is it rate, errors or duration, and is it one service or all of them? If latency is up on one service only, open a slow trace in Tempo and look at the span breakdown — a slow JDBC span points at the database, a slow client span points at a downstream, a large gap between spans points at thread-pool queuing or garbage collection. Jump from that span to its logs, which carry the same trace id. In parallel check the obvious infrastructure signals: connection pool saturation, Kafka consumer lag, pod restarts, CPU throttling from a too-low limit, and whether any circuit breaker has opened. Five minutes is enough because the dashboards, traces and logs are joined by trace id — if they were not, this would be twenty minutes of grep.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you keep three environments identical, and what legitimately differs?</summary>
+      <div class="answer"><p>One definition plus per-environment overlays or values files, so there is no copy-pasted YAML to drift. Terraform uses the same modules with separate state per environment, so the shape is shared and only the sizes differ. What legitimately differs: replica counts, resource requests and limits, instance classes, hostnames, log levels, feature flags, and whether multi-AZ is on. What must not differ: the image, the schema version, the deployment mechanism, and the observability configuration. If a bug reproduces in staging but not production — or worse, the reverse — the first thing I check is which of those "must not differ" items quietly did.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.cld.brief — target architecture, the two cost paths, infrastructure inventory, Terraform layout and state, the Kubernetes runtime contract, ingress and secrets, Helm or Kustomize, GitOps, the CI/CD pipeline with OIDC, migrations and rollouts, and the Prometheus, Grafana, Loki and OpenTelemetry stack</li>
+      <li>prj.cld.build — ten delivery phases, the disaster-recovery drill and its write-up, chaos experiments, the cost-optimisation pass, reference implementations, the module map, and the closing retrospective across all ten capstones</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

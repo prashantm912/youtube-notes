@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Admin Dashboard capstone brief: a frontend-focused internal console with metrics charts, a server-driven data table whose query state lives in the URL, RBAC in the UI, typed reactive forms, an NgRx SignalStore state design, nine runnable build phases, reference implementations and a map of the course modules it exercises.">
+  <title>Capstone: Admin Dashboard — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 02: Admin Dashboard</h1>
+  <p class="standfirst">The frontend flagship of the set. The backend here is deliberately modest — a handful of read endpoints and a few writes — because everything worth learning lives on the Angular side: how you slice features, where each piece of state belongs, why the table's filters live in the address bar, and how you prove any of it works with tests.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Admin Dashboard</nav>
+
+  <section id="intro">
+    <h2>What this capstone is</h2>
+    <p>You are building an internal admin console over the expense and inventory domain you already modelled in capstone 01 — the screen an operations team actually opens every morning. It shows what the business spent this month, lets a manager page through thousands of expense records with real filters, opens a record in a side drawer to correct it, and gives an administrator a place to grant and revoke roles. Nothing here is novel product design; that is the point. The novelty is entirely architectural.</p>
+    <p>Treat this brief as a specification, not a tutorial. It names the features, sketches the architecture, fixes the API contract, and breaks the work into phases that each end with something you can demo. It does not hand you the code. Where a decision has a defensible alternative — SignalStore or a plain service, Chart.js or ECharts, filters in the component or filters in the URL — the brief states the tradeoff and picks one, and you should be able to defend the pick in an interview.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Feature outline: the MVP you must finish, and the stretch goals you may not</h3>
+    <p>Scope discipline is the first skill this capstone teaches. An admin dashboard is infinitely expandable, and half-finished dashboards are the single most common dead project on a junior CV. Fix the MVP first and treat everything else as optional. The MVP is seven things: a metrics overview page with headline totals and two charts; a paginated, sortable expense table with server-side filtering; an entity detail and edit drawer; user and role administration; an audit trail view; light and dark theming; and a settings page. That is a complete, coherent product — an operator can see the numbers, drill into a record, fix it, and see who else changed what.</p>
+    <p>The stretch list exists to be attempted only after the MVP ships and is tested: saved filter views (named, shareable query presets), CSV export, bulk actions with optimistic updates and rollback on failure, virtual scrolling for tables past a few thousand rows, and internationalisation. Each stretch goal is chosen because it forces a genuinely harder version of a decision you already made — optimistic updates make you confront where the source of truth lives, saved views make you confront URL serialisation, i18n makes you confront how much text is hard-coded in your components.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/style-guide" rel="noopener">Angular coding style guide — angular.dev (naming, file layout, component conventions)</a></li>
+      <li>[Official] <a href="https://angular.dev/reference/configs/file-structure" rel="noopener">Workspace and project file structure — angular.dev reference</a></li>
+      <li>[Official] <a href="https://material.angular.dev/components/categories" rel="noopener">Component catalog — Angular Material (what you get for free before you build anything)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/the-perfect-project-setup-for-angular-structure-and-automation-for-more-quality/" rel="noopener">The Perfect Project Setup for Angular: Structure and Automation for More Quality — ANGULARarchitects</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=I0WeVvKyf28" rel="noopener">Top Fullstack Developer Interview Questions for Experienced — Code Decode</a></li>
+    </ul>
+
+    <h3>Architecture sketch: standalone components, feature folders, lazy routes</h3>
+    <p>There are no NgModules in this project. Every component, directive and pipe is standalone, every route is lazy, and the folder tree is organised by feature rather than by technical kind — no top-level <code>components/</code> bucket holding forty unrelated files. Each feature folder owns its routes, its smart container components, its presentational children, its data-access service and its store, and exposes exactly one public entry point. Anything two features both need moves into <code>shared/</code>; anything the whole app needs at boot lives in <code>core/</code>.</p>
+    <p>Inside a feature, keep the smart/presentational split honest: container components inject the store, read signals and hand plain data down; presentational components take inputs, emit outputs and inject nothing. That split is what makes the presentational half trivially testable and reusable, and it is the first thing an interviewer probes when you say "component library". Enforce the boundaries mechanically if you can — Sheriff lints folder-level dependency rules so a violation fails the build instead of surviving a code review.</p>
+    <pre class="code-block" data-label="Folder tree"><code>src/app/
+  core/                  bootstrapped once: auth, interceptors, error handling, theme
+    auth/                session store, permission model, /me loader
+    http/                auth + error + correlation-id interceptors (functional)
+  shared/                no feature imports this from another feature's internals
+    ui/                  presentational library: card, stat-tile, empty-state, drawer
+    table/               generic data-table wrapper + query-params helpers
+    charts/              thin chart wrappers, data in via inputs only
+  features/
+    overview/            metrics page: containers + chart adapters
+    expenses/            the server-driven table, detail drawer, edit form, store
+    admin/               users, roles, permission assignment
+    audit/               read-only audit trail view
+    settings/            profile, theme, locale
+  app.routes.ts          top-level lazy routes, one loadChildren per feature</code></pre>
+    <pre class="code-block" data-label="Runtime sketch"><code>  Router URL  ──(page, size, sort, filters as query params)──┐
+       │                                                     │
+       v                                                     v
+  [ ExpensesPage ]  smart container                  [ ExpensesStore ]
+       │  reads signals                                signalStore + rxMethod
+       │  passes plain data down                            │ HTTP
+       v                                                     v
+  [ DataTable ] [ FilterBar ] [ StatTile ] [ TrendChart ]   ExpenseApi ──&gt; /api/expenses
+        presentational: inputs in, outputs out, no DI</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/components/anatomy-of-components" rel="noopener">Anatomy of a component — angular.dev (standalone components by default)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/routing/define-routes" rel="noopener">Define routes — angular.dev routing guide</a></li>
+      <li>[Official] <a href="https://angular.dev/best-practices/performance/lazy-loaded-routes" rel="noopener">Lazy-loaded routes — angular.dev performance best practices</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/en/blog/modern-architectures-with-angular-part-1-strategic-design-with-sheriff-and-standalone-components/" rel="noopener">Modern Architectures with Angular, Part 1: Strategic Design with Sheriff — ANGULARarchitects</a></li>
+      <li>[Reference] <a href="https://github.com/softarc-consulting/sheriff" rel="noopener">softarc-consulting/sheriff — GitHub (lint-enforced module boundaries for folder-based Angular projects)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Sle_EoKcoes" rel="noopener">Lazy Loading with Standalone Components — procademy (A Complete Angular Course)</a></li>
+    </ul>
+
+    <h3>Data model and the API contract</h3>
+    <p>Keep the backend small and boring: Spring Boot, a relational schema, Spring Data paging, and a handful of DTOs. Eight tables carry the whole product. <code>app_user</code> and <code>role</code> with a join table, <code>permission</code> joined to roles, <code>expense</code> with a status enum and money stored as a scaled integer or <code>numeric</code> (never a float), <code>category</code> and <code>vendor</code> as lookups, and <code>audit_event</code> as an append-only log of actor, action, entity type, entity id, timestamp and a JSON diff. Saved views, if you build them, are one more table holding a user id, a name and a serialised query string.</p>
+    <p>The contract that actually shapes the frontend is the list endpoint. Every collection returns the same envelope — a <code>content</code> array plus <code>page</code>, <code>size</code>, <code>totalElements</code>, <code>totalPages</code> and <code>sort</code> — so one generic table adapter serves expenses, users and audit events without special-casing. Publish the contract with an OpenAPI document generated by springdoc rather than hand-writing it; you can then generate the TypeScript interfaces instead of maintaining two copies of the same shape by hand, which is the single most common source of frontend/backend drift on a project like this.</p>
+    <table>
+      <caption>Core API contract — the shape the Angular side codes against</caption>
+      <thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td>GET</td><td><code>/api/me</code></td><td>Current user, roles and the flat permission list the UI keys off</td></tr>
+        <tr><td>GET</td><td><code>/api/metrics/summary?from=&amp;to=</code></td><td>Headline totals plus period-over-period deltas</td></tr>
+        <tr><td>GET</td><td><code>/api/metrics/trend?from=&amp;to=&amp;interval=month</code></td><td>Time series for the trend chart</td></tr>
+        <tr><td>GET</td><td><code>/api/metrics/breakdown?dimension=category</code></td><td>Grouped totals for the breakdown chart</td></tr>
+        <tr><td>GET</td><td><code>/api/expenses?page=&amp;size=&amp;sort=&amp;status=&amp;q=&amp;from=&amp;to=</code></td><td>The paged, sorted, server-filtered table feed</td></tr>
+        <tr><td>GET</td><td><code>/api/expenses/{id}</code></td><td>Detail payload for the drawer</td></tr>
+        <tr><td>PATCH</td><td><code>/api/expenses/{id}</code></td><td>Partial update from the edit form</td></tr>
+        <tr><td>POST</td><td><code>/api/expenses/bulk-approve</code></td><td>Bulk action (stretch) — takes an id list, returns per-id outcomes</td></tr>
+        <tr><td>GET</td><td><code>/api/users?page=&amp;size=&amp;q=</code></td><td>User administration list</td></tr>
+        <tr><td>PUT</td><td><code>/api/users/{id}/roles</code></td><td>Replace a user's role assignment</td></tr>
+        <tr><td>GET</td><td><code>/api/roles</code></td><td>Roles with their permission sets</td></tr>
+        <tr><td>GET</td><td><code>/api/audit?page=&amp;size=&amp;actor=&amp;entity=&amp;from=&amp;to=</code></td><td>Append-only audit trail, newest first</td></tr>
+        <tr><td>GET</td><td><code>/api/expenses/export</code></td><td>CSV export honouring the same filters (stretch)</td></tr>
+      </tbody>
+    </table>
+    <pre class="code-block" data-label="JSON"><code>{
+  "content": [ { "id": 8123, "vendor": "Acme", "category": "Travel",
+                 "amountMinor": 249900, "currency": "INR",
+                 "status": "PENDING", "incurredOn": "2026-07-04" } ],
+  "page": 0, "size": 25, "totalElements": 4192, "totalPages": 168,
+  "sort": "incurredOn,desc"
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/making-requests" rel="noopener">Making HTTP requests — angular.dev HttpClient guide</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/commons/reference/repositories/query-methods-details.html" rel="noopener">Paging, sorting and limiting query methods — Spring Data reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/servlet.html" rel="noopener">Servlet web applications — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://spec.openapis.org/oas/latest.html" rel="noopener">OpenAPI Specification — the contract format itself</a></li>
+      <li>[Official] <a href="https://springdoc.org/" rel="noopener">springdoc-openapi — generating the OpenAPI document from your Spring controllers</a></li>
+    </ul>
+
+    <h3>State design: what is global, what is feature-scoped, what is component-local</h3>
+    <p>Make this decision explicitly and write it down, because "how did you decide what goes in the store?" is the question this project exists to answer. Three tiers. <strong class="lede">Global</strong>: the authenticated session — user identity, roles, the flat permission set, the active theme and locale. It is read by guards, interceptors, the shell and half the feature components, it is written exactly once at bootstrap, and it must survive navigation. That belongs in a root-provided SignalStore. <strong class="lede">Feature-scoped</strong>: the expenses list, its loading and error flags, the currently selected row, the pending bulk-action set. Several components inside one feature read it, nothing outside the feature cares, and it should die when you navigate away. That is a SignalStore provided on the feature's lazy route, not in root. <strong class="lede">Component-local</strong>: whether a drawer is open, which tab is active, the value of a search box before it is debounced. Plain <code>signal()</code> inside the component. Putting any of this in a store is over-engineering and interviewers notice.</p>
+    <p>There is a fourth tier that people forget, and it is the interesting one: <strong class="lede">URL state</strong>. Page, page size, sort column, sort direction and every active filter are not application state at all — they are navigation state, and they belong in the query string. The SignalStore then derives from the URL rather than owning a duplicate copy, which removes an entire category of bug where the table and the address bar disagree. Choose <code>@ngrx/signals</code> SignalStore over a hand-rolled service because you get the parts you would otherwise write badly — <code>patchState</code> with immutable updates, computed selectors, <code>rxMethod</code> for cancellable async flows, <code>withEntities</code> for keyed collections, and lifecycle hooks — while staying signal-native and avoiding the action/reducer/effect ceremony that classic NgRx Store imposes. Reach for classic Store only if you genuinely need time-travel debugging or a global, replayable action log.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const ExpensesStore = signalStore(
+  // provided on the feature route, NOT in root: dies with the feature
+  withEntities&lt;Expense&gt;(),
+  withState({ total: 0, loading: false, error: null as string | null,
+              selected: [] as number[] }),
+  withComputed(({ entities, selected }) =&gt; ({
+    hasSelection: computed(() =&gt; selected().length &gt; 0),
+    pageTotal:    computed(() =&gt; entities().reduce((s, e) =&gt; s + e.amountMinor, 0)),
+  })),
+  withMethods((store, api = inject(ExpenseApi)) =&gt; ({
+    // driven by the URL query params, not by component-held filter state
+    load: rxMethod&lt;ExpenseQuery&gt;(pipe(
+      tap(() =&gt; patchState(store, { loading: true, error: null })),
+      switchMap((q) =&gt; api.list(q).pipe(
+        tapResponse({
+          next: (p) =&gt; patchState(store, setAllEntities(p.content),
+                                  { total: p.totalElements, loading: false }),
+          error: (e: Error) =&gt; patchState(store, { error: e.message, loading: false }),
+        }))),
+    )),
+  })),
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/signals" rel="noopener">Signals — angular.dev (signal, computed, and when a plain signal is enough)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store" rel="noopener">SignalStore — NgRx Signals documentation</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-state" rel="noopener">signalState — NgRx Signals documentation (the lighter option)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store/entity-management" rel="noopener">Entity management with withEntities — NgRx Signals documentation</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/the-ngrx-signal-store-and-your-architecture/" rel="noopener">The NgRx Signal Store and Your Architecture — ANGULARarchitects (where to provide a store)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/bits/hello-ngrx-signals" rel="noopener">Hello NgRx Signals — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=u7bbTkONgSI" rel="noopener">Why NgRx Signal Store is My New Default — Zoaib Khan</a></li>
+    </ul>
+
+    <h3>The server-driven table: query state belongs in the URL</h3>
+    <p>This is the most instructive screen in the project, so build it deliberately. The table is server-driven: the client never holds the full dataset, it holds one page and a total count. Page index, page size, sort field, sort direction, the free-text query and every filter travel to the server as query parameters, and the server returns the paged envelope. Client-side filtering of an already-paged array is the classic mistake here — it filters twenty-five rows out of four thousand and quietly lies to the user about the totals.</p>
+    <p>The design decision worth defending: that same query state also lives in the browser's address bar. When a manager filters to pending travel expenses from March, sorted by amount, and hits page three, the URL should read <code>/expenses?status=PENDING&amp;category=Travel&amp;from=2026-03-01&amp;sort=amount,desc&amp;page=2</code>. Three things follow for free. The view is shareable — she can paste that link into a chat and a colleague sees exactly what she sees. It survives reload and browser back, because the router, not a component field, is holding the truth. And deep-linking from an email or a saved bookmark works without any extra plumbing. The implementation shape: the filter bar and paginator do not mutate state, they call <code>router.navigate</code> with merged query params; the container reads <code>ActivatedRoute.queryParams</code> as a signal, validates and coerces it into a typed query object (a schema validator earns its keep here, because query params are always strings and always attacker-controlled), and feeds that into the store's <code>rxMethod</code>. One direction of flow, no synchronisation code, and the back button behaves.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// container: the URL is the single source of truth for the query
+private readonly route = inject(ActivatedRoute);
+private readonly router = inject(Router);
+private readonly store = inject(ExpensesStore);
+
+readonly query = computed(() =&gt; parseExpenseQuery(this.routeParams()));
+private readonly routeParams = toSignal(this.route.queryParams, { initialValue: {} });
+
+constructor() { this.store.load(this.query); }   // rxMethod accepts a signal
+
+// paginator / sort / filter-bar outputs all funnel through one navigation
+onQueryChange(patch: Partial&lt;ExpenseQuery&gt;) {
+  this.router.navigate([], {
+    relativeTo: this.route,
+    queryParams: { ...patch, page: patch.page ?? 0 },  // any filter change resets to page 0
+    queryParamsHandling: 'merge',
+  });
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/routing/read-route-state" rel="noopener">Read route state — angular.dev (ActivatedRoute, query params, signal interop)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/signals/linked-signal" rel="noopener">linkedSignal — angular.dev (derived-but-writable local state over a URL-driven source)</a></li>
+      <li>[Official] <a href="https://material.angular.dev/components/table/overview" rel="noopener">Table — Angular Material (the CDK table and its data-source contract)</a></li>
+      <li>[Official] <a href="https://material.angular.dev/components/paginator/overview" rel="noopener">Paginator — Angular Material (server-side paging with a known length)</a></li>
+      <li>[Official] <a href="https://material.angular.dev/components/sort/overview" rel="noopener">Sort header — Angular Material</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/get-easy-access-to-angular-route-and-query-parameters-with-zod" rel="noopener">Get easy access to Angular route and query parameters with zod — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pgVn7I6UEoY" rel="noopener">Angular Pagination with Angular Material: Step-by-Step Guide — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Detail and edit drawers with typed reactive forms</h3>
+    <p>Clicking a row opens a side drawer rather than navigating to a full page — the operator keeps the list in view, which is why every real admin console works this way. Give the drawer its own route (a child route or an outlet), so the open drawer is part of the URL and is therefore also shareable and back-button-friendly; a drawer whose open state lives in a component field is one more thing that breaks on reload.</p>
+    <p>The edit form is a strictly typed reactive form. Build it with <code>FormBuilder.nonNullable.group</code> and let inference do the work — no <code>FormGroup&lt;any&gt;</code>, no untyped <code>get('field')</code> lookups scattered through the template. Typed forms turn a whole class of runtime nulls into compile errors, and the interview follow-up is always about <code>value</code> versus <code>getRawValue</code> and why disabled controls disappear from the former. Two more rules for this screen: patch, don't replace — send a <code>PATCH</code> with only the dirty controls so two concurrent editors do not clobber each other's untouched fields; and map server-side validation errors back onto the matching controls with <code>setErrors</code> instead of dumping a toast, because a field-level error is the difference between a form the user can fix and a form the user abandons.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/forms/typed-forms" rel="noopener">Typed forms — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/forms/reactive-forms" rel="noopener">Reactive forms — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/forms/form-validation" rel="noopener">Validating form input — angular.dev</a></li>
+      <li>[Official] <a href="https://material.angular.dev/components/sidenav/overview" rel="noopener">Sidenav and drawer — Angular Material</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-typed-forms/" rel="noopener">Angular Strictly Typed Forms (Complete Guide) — Angular University</a></li>
+    </ul>
+
+    <h3>RBAC in the UI: permissions from /me, guards, and the caveat that matters</h3>
+    <p>Model permissions, not roles, in the UI. Roles are an administrative grouping that changes when the org chart changes; permissions are the stable atoms your components check. The session store loads a flat set such as <code>expense:read</code>, <code>expense:approve</code>, <code>user:manage</code>, <code>audit:read</code> — either decoded from the access token's claims or fetched from <code>/me</code> at bootstrap. Prefer <code>/me</code> when the permission set is large or changes without a re-login; prefer token claims when you want zero extra round trips and can live with staleness until the token refreshes. Say which you chose and why.</p>
+    <p>Then apply it in three places. A functional route guard per permission stops navigation into a feature the user cannot use, and the lazy route means the code is never even downloaded. A structural directive or a signal-driven <code>&#64;if</code> hides the actions the user cannot perform — hide, do not disable, unless the disabled state is itself informative. And a functional HTTP interceptor attaches the token on the way out and centralises the response on the way back: a 401 clears the session and routes to login, a 403 shows a "not permitted" surface rather than a generic error toast, so the two failures stay distinguishable. Now the caveat, and put it in your README because interviewers ask it as a trap: <em>hiding a button is user experience, not security</em>. Anyone can open DevTools, flip a signal, or simply <code>curl</code> the endpoint. Every permission checked in the UI must be enforced again on the server — method-level authorization in Spring Security — and the UI check exists only so users are not shown doors they cannot open.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/routing/route-guards" rel="noopener">Route guards — angular.dev (functional CanActivateFn)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/http/interceptors" rel="noopener">HTTP interceptors — angular.dev (functional interceptors, auth and error handling)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html" rel="noopener">Authorization Cheat Sheet — OWASP (enforce on the server, deny by default)</a></li>
+      <li>[Reference] <a href="https://github.com/AlexKhymenko/ngx-permissions" rel="noopener">AlexKhymenko/ngx-permissions — GitHub (a mature permission-directive implementation worth reading before writing your own)</a></li>
+      <li>[Article] <a href="https://devblogs.microsoft.com/premier-developer/angular-how-to-implement-role-based-security/" rel="noopener">Angular How-to: Implement Role-based Security — Microsoft Developer Support</a></li>
+      <li>[Article] <a href="https://dev.to/iambetaraybill/permission-based-authorization-in-angular-pbac-42c7" rel="noopener">Permission-Based Authorization in Angular — DEV Community</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YJ4dgoHEmGs" rel="noopener">Angular Authentication: Role Based Authorization — Code Shots With Profanis</a></li>
+    </ul>
+
+    <h3>Charts: pick a library on purpose, and keep chart components dumb</h3>
+    <p>You need three visuals on the overview page: a trend line over time, a category breakdown as a bar or donut, and a row of stat tiles with period-over-period deltas. Pick one library and commit. <em>ngx-charts</em> is Angular-native and declarative — components, inputs, Angular animations, no imperative canvas API — which makes it the smoothest fit and the easiest to test, at the cost of a smaller chart vocabulary. <em>Chart.js behind a thin wrapper</em> is the pragmatic middle: tiny, canvas-based so it stays fast at a few thousand points, enormous community, but you own the wrapper component and the lifecycle (destroy on <code>ngOnDestroy</code>, re-render on input change). <em>ECharts</em> is the heavyweight — the widest chart vocabulary and the best behaviour on very large series — and the right answer when the dashboard is genuinely analytical, but it is the largest bundle and the steepest configuration surface. For this brief, Chart.js behind a wrapper or ngx-charts is the proportionate choice; say ECharts only if you can name what you needed that the others lack.</p>
+    <p>Whatever you pick, the architectural rule is the same and it is the thing interviewers actually probe: <strong class="lede">a chart component takes data as an input and never fetches its own.</strong> The container calls the metrics endpoint, shapes the response into the chart's data structure, and passes it down; the chart component is presentational, injects nothing, and is therefore renderable in a test with a fixed array and no HTTP mock at all. A chart that calls <code>HttpClient</code> in its own constructor cannot be reused on a second page, cannot be storybooked, and drags a network round trip into every test that renders it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.chartjs.org/docs/latest/" rel="noopener">Chart.js documentation — configuration, chart types, lifecycle</a></li>
+      <li>[Official] <a href="https://echarts.apache.org/handbook/en/get-started/" rel="noopener">Apache ECharts handbook — getting started</a></li>
+      <li>[Reference] <a href="https://github.com/swimlane/ngx-charts" rel="noopener">swimlane/ngx-charts — GitHub (declarative, Angular-native charting)</a></li>
+      <li>[Reference] <a href="https://github.com/valor-software/ng2-charts" rel="noopener">valor-software/ng2-charts — GitHub (the maintained Chart.js wrapper for Angular)</a></li>
+      <li>[Reference] <a href="https://github.com/xieziyu/ngx-echarts" rel="noopener">xieziyu/ngx-echarts — GitHub (the ECharts directive for Angular)</a></li>
+      <li>[Article] <a href="https://www.angularminds.com/blog/charting-libraries-for-angular" rel="noopener">Charting libraries for Angular, compared — Angular Minds</a></li>
+    </ul>
+
+    <h3>The shell: theming, settings and accessibility</h3>
+    <p>The shell is the toolbar, the collapsible sidenav, the content outlet and the theme. Light and dark are not a cosmetic afterthought on an internal tool that people stare at for eight hours — they are a feature request you will get on day two. Implement them as CSS custom properties toggled by a class or a <code>data-theme</code> attribute on the root element, driven by a signal in the core theme service and persisted to <code>localStorage</code>. Default to the operating system preference via <code>prefers-color-scheme</code> and let the settings page override it; that combination is what users expect and it costs one media query.</p>
+    <p>The settings page is where profile details, theme and (if you attempt i18n) locale live. Keep it deliberately thin — it is a form over the session store, not a feature with its own architecture. Spend the time you save on accessibility instead: a data table needs proper header semantics and sort announcements, a drawer needs focus trapping and an escape key, and every icon-only toolbar button needs an accessible label. Admin tools are exactly the software that gets audited for accessibility, and "it is internal" has never been an accepted answer.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://material.angular.dev/guides" rel="noopener">Guides — Angular Material (theming your app and your own components)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/components/styling" rel="noopener">Component styling and view encapsulation — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/best-practices/a11y" rel="noopener">Accessibility in Angular — angular.dev best practices</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-color-scheme" rel="noopener">prefers-color-scheme — MDN reference</a></li>
+      <li>[Article] <a href="https://web.dev/articles/prefers-color-scheme" rel="noopener">prefers-color-scheme: hello darkness, my old friend — web.dev</a></li>
+    </ul>
+
+    <h3>Build phases: nine slices, each one runnable and demoable</h3>
+    <p>Build in vertical slices, not layers. Every phase below ends with something you can run, click and show to somebody — that is the discipline that keeps a capstone alive, and it is also what lets you talk about the project as a sequence of decisions rather than a wall of code. Commit at the end of each phase with a message that names what now works; the commit history becomes the story you tell in the interview.</p>
+    <ol>
+      <li><strong class="lede">Shell, routing, layout and theming.</strong> Standalone bootstrap, the toolbar and sidenav, five lazy feature routes with placeholder pages, the theme signal with light/dark and OS-preference default. Demo: navigate between empty features, flip the theme, reload and see it stick.</li>
+      <li><strong class="lede">Auth, interceptor, guards and the permission model.</strong> Login, token storage, the auth interceptor, the error interceptor, the session SignalStore loading <code>/me</code>, one functional guard per permission, and the permission directive. Demo: log in as two users with different roles and watch routes and buttons appear and disappear.</li>
+      <li><strong class="lede">The metrics overview with two charts.</strong> The summary endpoint, stat tiles with deltas, a trend chart and a breakdown chart — all fed by inputs from a container. Demo: the landing page shows real numbers and two charts that redraw when you change the date range.</li>
+      <li><strong class="lede">The server-driven data table with URL-synced query state.</strong> Paged endpoint, generic table component, filter bar, sort headers, paginator, all funnelling through router navigation. Demo: filter and sort, copy the URL into a fresh tab, land on exactly the same view; press back and it unwinds.</li>
+      <li><strong class="lede">Detail and edit drawers with typed reactive forms.</strong> A routed drawer, the detail payload, a strictly typed edit form, dirty-field <code>PATCH</code>, server validation mapped onto controls. Demo: open a row, edit one field, save, see the list row update.</li>
+      <li><strong class="lede">User and role administration.</strong> The users table reusing the generic table, the role assignment screen, permission sets per role. Demo: grant a role to a second account and watch that account's UI change.</li>
+      <li><strong class="lede">The audit trail view.</strong> Append-only list with actor, action, entity and diff, filterable by actor and date, reusing the same table adapter. Demo: make an edit in phase 5, then find it in the audit view.</li>
+      <li><strong class="lede">The testing pass.</strong> Vitest for pure logic and the query parsers, TestBed for containers, component harnesses for the Material table and paginator, store tests for the SignalStore, and one Playwright happy path that logs in, filters the table, opens a row, edits it and asserts the audit entry. Demo: a green pipeline and a coverage number you can justify.</li>
+      <li><strong class="lede">One stretch goal, finished properly.</strong> Pick a single item — saved views, CSV export, bulk actions with optimistic rollback, virtual scrolling, or i18n — and ship it with tests rather than starting three and finishing none.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/migrating-to-vitest" rel="noopener">Testing with Vitest — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/using-component-harnesses" rel="noopener">Using component harnesses in tests — angular.dev</a></li>
+      <li>[Official] <a href="https://vitest.dev/guide/" rel="noopener">Vitest guide — official documentation</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/intro" rel="noopener">Installation and first test — Playwright documentation</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/best-practices" rel="noopener">Best practices — Playwright documentation (user-facing locators, test isolation)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store/testing" rel="noopener">Testing a SignalStore — NgRx Signals documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yUKlUfO4A0M" rel="noopener">High ROI Testing in Angular with Playwright — Christian Lydemann</a></li>
+    </ul>
+
+    <h3>Reference implementations worth reading before you write</h3>
+    <p>Reading one well-structured Angular application teaches more about folder layout and container boundaries than a week of blog posts. Read for structure, not for features: open the routes file first, then find where state is provided, then find one presentational component and check what it injects. Do not copy wholesale — these codebases target different constraints from yours, and a reviewer can spot lifted code instantly.</p>
+    <p>The NgRx example app is the closest thing to a canonical reference for store-driven Angular. The RealWorld app is the best small, complete, idiomatic codebase for seeing routing, forms, guards and interceptors in one place without framework noise. The Tailwind admin starter is the closest match to this brief's actual shape — a real dashboard with a shell, theming and standalone components. JHipster is worth an hour even if you never use it, because its generated Spring Boot plus Angular applications ship a full user and role administration module and an audit trail, which is exactly the pair of features people most often hand-wave.</p>
+    <ul class="resources">
+      <li>[Reference] <a href="https://github.com/ngrx/platform/tree/main/projects/example-app" rel="noopener">ngrx/platform example-app — GitHub (the canonical NgRx application, actively maintained)</a></li>
+      <li>[Reference] <a href="https://github.com/realworld-apps/angular-realworld-example-app" rel="noopener">RealWorld Angular example app — GitHub (small, complete, idiomatic; routing, guards, interceptors, forms)</a></li>
+      <li>[Reference] <a href="https://github.com/lannodev/angular-tailwind" rel="noopener">lannodev/angular-tailwind — GitHub (open-source Angular admin dashboard starter with standalone components and signals)</a></li>
+      <li>[Reference] <a href="https://github.com/jhipster/generator-jhipster" rel="noopener">jhipster/generator-jhipster — GitHub (generated Spring Boot + Angular apps with user, role and audit modules)</a></li>
+      <li>[Reference] <a href="https://github.com/angular/components" rel="noopener">angular/components — GitHub (the Material and CDK source, and the best harness examples anywhere)</a></li>
+    </ul>
+
+    <h3>Which track modules this capstone exercises</h3>
+    <p>Every phase maps onto modules you have already worked through. If a phase stalls, the row below tells you which page to reread rather than which Stack Overflow answer to paste.</p>
+    <table>
+      <caption>Build phase to course module map</caption>
+      <thead><tr><th>Phase</th><th>Modules it puts to work</th></tr></thead>
+      <tbody>
+        <tr><td>1 · Shell, routing, theming</td><td><a href="../angular-basics/01-intro-setup.html">Angular Basics 01 — Intro and Setup</a>, <a href="../angular-basics/02-components-templates.html">02 — Components and Templates</a>, <a href="../angular-advanced/01-routing-fundamentals.html">Angular Advanced 01 — Routing Fundamentals</a>, <a href="../angular-advanced/13-libraries-build.html">13 — Libraries and Build</a></td></tr>
+        <tr><td>2 · Auth, interceptors, guards, RBAC</td><td><a href="../angular-advanced/02-routing-advanced.html">Angular Advanced 02 — Routing Advanced</a>, <a href="../angular-advanced/05-advanced-http.html">05 — Advanced HTTP</a>, <a href="../angular-advanced/12-security.html">12 — Angular Security</a>, <a href="../secure-coding/05-authn-authz.html">Secure Coding 05 — Authentication and Authorization</a>, <a href="../spring-boot/09-security-starter.html">Spring Boot 09 — Security Starter</a></td></tr>
+        <tr><td>3 · Metrics overview and charts</td><td><a href="../angular-basics/05-component-communication.html">Angular Basics 05 — Component Communication</a>, <a href="../angular-basics/04-pipes.html">04 — Pipes</a>, <a href="../angular-advanced/06-content-projection.html">Angular Advanced 06 — Content Projection</a></td></tr>
+        <tr><td>4 · Server-driven table, URL query state</td><td><a href="../angular-basics/07-signals.html">Angular Basics 07 — Signals</a>, <a href="../angular-basics/10-http-observables.html">10 — HTTP and Observables</a>, <a href="../angular-advanced/03-rxjs-observables.html">Angular Advanced 03 — RxJS Observables</a>, <a href="../spring-boot/05-data-access.html">Spring Boot 05 — Data Access</a>, <a href="../spring-boot/04-web.html">04 — Spring Boot Web</a></td></tr>
+        <tr><td>5 · Drawers and typed reactive forms</td><td><a href="../angular-basics/09-forms.html">Angular Basics 09 — Forms</a>, <a href="../angular-basics/03-directives.html">03 — Directives</a>, <a href="../angular-advanced/07-dynamic-components.html">Angular Advanced 07 — Dynamic Components</a></td></tr>
+        <tr><td>State design across phases 2–7</td><td><a href="../angular-state/01-communication-matrix.html">Angular State 01 — Communication Matrix</a>, <a href="../angular-state/02-service-state.html">02 — Service-Based State</a>, <a href="../angular-state/07-signal-store.html">07 — SignalStore</a>, <a href="../angular-state/08-state-strategy.html">08 — State Strategy</a>, <a href="../angular-basics/06-services-di.html">Angular Basics 06 — Services and DI</a></td></tr>
+        <tr><td>6 · User and role administration</td><td><a href="../secure-coding/10-api-security-review.html">Secure Coding 10 — API Security Review</a>, <a href="../angular-advanced/08-advanced-directives.html">Angular Advanced 08 — Advanced Directives</a></td></tr>
+        <tr><td>7 · Audit trail</td><td><a href="../spring-boot/05-data-access.html">Spring Boot 05 — Data Access</a>, <a href="../secure-coding/04-xss-csp.html">Secure Coding 04 — XSS and CSP</a> (rendering stored diffs safely)</td></tr>
+        <tr><td>8 · Testing pass</td><td><a href="../frontend-testing/03-testbed.html">Frontend Testing 03 — TestBed</a>, <a href="../frontend-testing/04-component-testing.html">04 — Component Testing</a>, <a href="../frontend-testing/05-service-http-testing.html">05 — Service and HTTP Testing</a>, <a href="../frontend-testing/06-directives-store-testing.html">06 — Directive and Store Testing</a>, <a href="../frontend-testing/07-e2e-playwright.html">07 — E2E with Playwright</a>, <a href="../frontend-testing/08-testing-strategy.html">08 — Testing Strategy</a></td></tr>
+        <tr><td>9 · Stretch goals</td><td><a href="../angular-advanced/09-performance.html">Angular Advanced 09 — Performance</a> (virtual scrolling, change detection), <a href="../angular-advanced/11-i18n-a11y.html">11 — i18n and Accessibility</a>, <a href="../angular-basics/08-lifecycle-change-detection.html">Angular Basics 08 — Lifecycle and Change Detection</a></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="01-expense-tracker.html">← Expense Tracker</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="03-inventory-system.html">Inventory System →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer who sees "Admin Dashboard (Angular, SignalStore, RBAC)" on your CV will not ask you what a component is — they will ask why you built it this way. These are the questions that actually come, weighted toward Indian product and service-company rounds where a project walkthrough is a full round of its own:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through the architecture of this dashboard in two minutes.</summary>
+      <div class="answer"><p>Lead with the shape, not the feature list: a standalone-component Angular app with feature-based folders and one lazy route per feature; a core layer holding auth, functional interceptors and theming; a shared UI library of presentational components; smart containers that inject stores and dumb children that only take inputs; NgRx SignalStore for shared feature state, plain signals for component-local state, and the router's query params for table query state. Backend is a small Spring Boot API returning a uniform paged envelope. Then offer one decision you would happily go deeper on.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why standalone components and lazy routes instead of NgModules?</summary>
+      <div class="answer"><p>Standalone components declare their own dependencies, so there is no indirection between a component and what it uses, and no shared "everything module" that quietly grows. Lazy routes mean a user who never opens the audit feature never downloads it — which on an admin console with six features is a real first-paint win. NgModules still work, but new Angular applications default to standalone and the ecosystem has moved with them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a smart and a presentational component here, and why did you bother?</summary>
+      <div class="answer"><p>Smart containers inject services and stores, read signals, and orchestrate; presentational components inject nothing, take inputs and emit outputs. The payoff is testing and reuse: the stat tile, the chart wrapper and the data table can be rendered in a test with a fixed array and no HTTP mock, and the same table serves expenses, users and audit events. It also localises change — a change to the API shape touches containers only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why NgRx SignalStore rather than a plain service with a BehaviorSubject or a signal?</summary>
+      <div class="answer"><p>Because on this project I needed things a hand-rolled service makes me rewrite badly: immutable updates via patchState, computed selectors that memoise, rxMethod for cancellable async flows so a fast-typing filter does not race, withEntities for keyed collections, and lifecycle hooks tied to where the store is provided. It stays signal-native, so there is no manual subscription management and no async pipe noise. For genuinely trivial state a service with a signal is the right answer and I used exactly that for the theme — the store earns its place only where the extra machinery is used.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you decide what is global state, feature state and component state?</summary>
+      <div class="answer"><p>By lifetime and readership. Global: the session — identity, permissions, theme — read by guards, interceptors and many features, written once at bootstrap, must survive navigation, so it is a root-provided store. Feature: the expense list, its loading and error flags, the selection set — read by several components within one feature and should die on navigation away, so the store is provided on the feature's lazy route. Component: drawer open, active tab, pre-debounce input — plain signal(). Anything that fails the "more than one component reads this" test does not go in a store.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why did you keep the table's page, sort and filters in the URL instead of in the store?</summary>
+      <div class="answer"><p>Because it is navigation state, not application state. Putting it in the URL buys three things at once: the filtered view is shareable by copying the address bar, it survives reload and the browser back button without any restore logic, and deep links from mail or bookmarks work for free. It also removes a whole class of bug — with the URL as the single source of truth there is no synchronisation code to get wrong between the address bar, the paginator and the store. The filter bar navigates; the container derives a typed query from queryParams and feeds the store.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Server-side or client-side filtering for the table, and what breaks if you choose wrong?</summary>
+      <div class="answer"><p>Server-side, because the client only ever holds one page. Filtering the page you already have filters twenty-five rows out of four thousand, and the total count, the pagination and any aggregate you show all become wrong — the UI confidently lies. Client-side filtering is only correct when the entire dataset is small enough to ship in one response and you have said so deliberately.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How is RBAC enforced in this application?</summary>
+      <div class="answer"><p>In four places, three of them cosmetic and one of them real. Permissions arrive as a flat set from /me at bootstrap (or from token claims). Functional route guards block navigation per permission, so lazy feature code is never even fetched. A structural directive or signal-driven control flow hides actions the user cannot perform. An HTTP interceptor distinguishes 401 from 403 so the app logs out on one and shows a not-permitted surface on the other. The real enforcement is server-side method-level authorization — the UI checks exist so users are not shown doors they cannot open.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why permissions rather than roles in the component checks?</summary>
+      <div class="answer"><p>Roles change with the org chart; permissions do not. If a template says "show this if role is MANAGER", then the day finance leads also need to approve expenses you edit templates. If it says "show this if the user has expense:approve", you change one role definition in the database and every screen is correct. Roles remain the administrative grouping; the UI codes against the atoms.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which charting library did you choose and what was the tradeoff?</summary>
+      <div class="answer"><p>Name the choice and the losing alternatives. ngx-charts is Angular-native and declarative, easiest to test, smallest chart vocabulary. Chart.js behind a thin wrapper is small and canvas-fast with a huge community, but you own the wrapper lifecycle — destroy and re-render on input change. ECharts has the widest vocabulary and the best very-large-series behaviour at the cost of bundle size and configuration complexity. For a dashboard with a trend line, a breakdown and stat tiles, the first two are proportionate; picking ECharts without naming a capability you needed reads as over-engineering.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you test the data table?</summary>
+      <div class="answer"><p>In layers. The query parser — query string to typed query object — is pure, so plain Vitest unit tests cover coercion, defaults and rubbish input. The container is a TestBed test with a stubbed store and a fake ActivatedRoute, asserting that a filter change triggers navigation with the right params and that a params change triggers a load. Rendering assertions use Angular Material component harnesses instead of CSS selectors, so a Material upgrade does not break every test. Finally one Playwright happy path drives the real thing: log in, filter, sort, page, open a row, edit, assert the audit entry.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain optimistic updates in your bulk-approve action and how rollback works.</summary>
+      <div class="answer"><p>On submit, patch the selected rows to APPROVED in the store immediately and keep a snapshot of their previous state, so the table reacts instantly. Fire the request; on success reconcile with the server's per-id outcomes, because a bulk endpoint can partially succeed. On failure — or for the ids the server rejected — restore from the snapshot and surface a specific error rather than a generic toast. The two traps are assuming all-or-nothing semantics from an endpoint that returns per-id results, and letting a second optimistic action start before the first resolves; either serialise them or key the snapshots per operation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your table hides the Delete button for users without expense:delete. Is that secure?</summary>
+      <div class="answer"><p>No, and it was never meant to be. Hiding a control is user experience: it stops people trying things they cannot do. The bundle is on the client, the permission set is in memory, and the endpoint is one curl away — anyone can flip a signal in DevTools or call the API directly. Authorization must be enforced on the server for every mutating endpoint, deny-by-default, and ideally checked against the same permission names the UI uses so the two never drift. The correct answer to this question is always "the server enforces it; the UI only reflects it".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A filtered table URL is pasted by a user without permission to see those records. What happens?</summary>
+      <div class="answer"><p>The route guard runs first and blocks navigation if the feature permission is missing. If the feature is permitted but the rows are not — a manager scoped to one department, say — the guard cannot help, because scoping is data-level, not route-level. The server must apply the scope to the query itself and return only the rows that user may see, with the totals computed over the same restricted set. Filtering after the fact on the client, or trusting a departmentId sent from the browser, is exactly the broken-object-level-authorization failure that tops the OWASP API list.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> The table jitters and the whole page re-renders on every keystroke in the search box. Diagnose it.</summary>
+      <div class="answer"><p>Likely three things stacked. The search input is navigating on every keystroke, so debounce before navigating and only push a distinct value. Each navigation is producing a new query object identity even when nothing changed, so the store's rxMethod refires — compare structurally or derive with computed so the reference is stable. And the row components are re-rendering because the list is rebuilt with new object identities and there is no track expression on the loop; track by id and keep children presentational with OnPush (or run zoneless) so a parent signal change does not walk the whole tree.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> If you rebuilt this project today, what would you change?</summary>
+      <div class="answer"><p>A strong answer names a real regret, not a humble brag. Good candidates: generating the TypeScript models from the OpenAPI document from day one instead of hand-writing DTOs that drifted; introducing the generic table abstraction after the second table rather than designing it up front for one; putting the permission names in a single shared constant so the server and UI could not diverge; and writing the Playwright happy path in phase 4 rather than phase 8, because it would have caught the URL-state regressions immediately.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.adm.brief — Feature outline, Angular architecture, state design and RBAC model</li>
+      <li>prj.adm.build — Suggested build phases, reference implementations, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Capstone brief: decompose the capstone-08 modular monolith into catalog, inventory, order, payment and customer services — Spring Cloud Gateway, Kafka with a transactional outbox, the place-order saga, Resilience4j, OpenTelemetry tracing and contract tests — as ten strangler-fig migration phases that each leave a shippable system.">
+  <title>Capstone: Microservices Refactor — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 09: Microservices Refactor</h1>
+  <p class="standfirst">You are not starting a new system. You are taking the working e-commerce monolith from capstone 08 and cutting it apart while it stays in production — one seam at a time, with a deployable build at the end of every phase. The hardest engineering here is not the services; it is the order you do things in.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Real-World Projects → Microservices Refactor</nav>
+
+  <section id="intro">
+    <h2>What this capstone builds</h2>
+    <p>Capstone 08 left you with a modular monolith: one Spring Boot application, one PostgreSQL schema, clean package boundaries for catalog, inventory, order, payment and customer, and one deployment pipeline. This capstone decomposes it into five independently deployable services behind a Spring Cloud Gateway, with Kafka as the event backbone, a saga replacing the checkout transaction, Resilience4j guarding the remaining synchronous hops, and OpenTelemetry stitching one customer checkout back into one trace.</p>
+    <p>The brief is deliberately a <em>migration</em> brief, not an architecture brief. Anyone can draw five boxes. The skill this capstone teaches — and the skill an interviewer is actually probing — is sequencing the cuts so that the system is releasable at every commit, the database split happens in the safest possible order, and you can stop halfway and still have something better than what you started with.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Why this refactor is justified — and the reader who should stop here</h3>
+    <p>Start by being honest: the monolith was fine. It served real traffic, it was easy to reason about, a single transaction gave you consistency for free, and one deploy shipped the whole product. Nothing about "microservices" made it worse. If your reason for this refactor is that microservices are modern, close this page and go make capstone 08 faster instead — that is the better engineering decision and, said out loud in an interview, the better answer.</p>
+    <p>Three pressures do justify it, and you should be able to state which ones apply to you. <strong>Independent scaling</strong>: catalog browsing is read-heavy and bursty (a sale, a marketing email, a bot crawl) while checkout is write-heavy and comparatively low-volume — in one process you must scale the whole JVM, and its whole connection pool, to absorb a read spike. <strong>Independent deploy cadence</strong>: catalog copy and pricing rules change several times a day, the payment integration changes twice a year and every change needs sign-off; one artifact forces the cautious code to ride the reckless code's release train. <strong>Team autonomy</strong>: past roughly three teams in one codebase, merge queues, shared migrations and cross-team regression risk cost more coordination than the architecture saves.</p>
+    <p>What you are buying it with is also concrete, and you must price it before phase 1: no more distributed transactions, so checkout becomes eventually consistent and needs compensations; joins across the seam become network calls that can fail; local debugging becomes distributed tracing; one CI pipeline becomes five; one schema migration becomes five, coordinated. Chris Richardson's dark-energy/dark-matter framing is the cleanest way to talk about this in a design round — the forces pushing services apart and the forces pulling them back together, both real at the same time.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/bliki/MonolithFirst.html" rel="noopener">MonolithFirst — Martin Fowler (why almost every successful microservice system started as a monolith)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/microservice-trade-offs.html" rel="noopener">Microservice Trade-Offs — Martin Fowler (the bill that comes with the benefits)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/MicroservicePremium.html" rel="noopener">Microservice Premium — Martin Fowler</a></li>
+      <li>[Article] <a href="https://microservices.io/post/microservices/2021/11/30/dark-matter-dark-energy.html" rel="noopener">Designing an architecture using dark energy and dark matter — Chris Richardson</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GBTdnfD6s5Q" rel="noopener">When To Use Microservices (And When Not To!) — Sam Newman &amp; Martin Fowler, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>Target architecture: five services, one gateway, one event backbone</h3>
+    <p>The end state is five services, each owning its own database and its own deployment: <strong>catalog</strong> (products, categories, prices, search projection), <strong>inventory</strong> (stock levels, reservations), <strong>order</strong> (orders, order lines, order state machine), <strong>payment</strong> (authorizations, captures, refunds, gateway integration) and <strong>customer</strong> (profiles, addresses, identity mapping). Spring Cloud Gateway sits at the edge doing routing, authentication token validation, rate limiting and request-id injection, so the browser and mobile clients keep talking to one origin and never learn that the backend split. Service-to-service addressing uses Kubernetes DNS if you are already on Kubernetes and a registry (Eureka or Consul) if you are not — pick one and do not build both.</p>
+    <p>Kafka carries every fact that another service needs to know about but must not block on. Configuration is centralized (Spring Cloud Config or a Kubernetes ConfigMap/Secret pair), Resilience4j wraps the few synchronous calls that survive, and an OpenTelemetry agent on every service exports traces to a collector so one checkout renders as one trace across the gateway and all five services.</p>
+    <pre class="code-block" data-label="Architecture"><code>                    browser / mobile
+                           |
+                  [ Spring Cloud Gateway ]   auth, routing, rate limit, request-id
+                           |
+     +---------+-----------+-----------+-----------+
+     |         |           |           |           |
+  catalog  inventory     order      payment    customer
+     |         |           |           |           |
+   [ db ]   [ db ]      [ db ]      [ db ]      [ db ]      one schema each, no sharing
+     |         |           |           |           |
+     +----+----+-----------+-----------+-----------+
+          |            Kafka (event backbone)
+          |   product.changed / stock.reserved / stock.released
+          |   order.placed / order.cancelled / payment.authorized
+          |   payment.failed / customer.updated
+          |
+   [ OpenTelemetry collector ] <- traces, metrics, logs from every hop</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/" rel="noopener">Spring Cloud Gateway — reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webmvc.html" rel="noopener">Spring Cloud Gateway Server MVC — reference documentation (the blocking flavour, if you are not on WebFlux)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-config/reference/" rel="noopener">Spring Cloud Config — reference documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/" rel="noopener">DNS for Services and Pods — Kubernetes documentation (why you may not need a registry at all)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/apigateway.html" rel="noopener">Pattern: API Gateway — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/service-registry.html" rel="noopener">Pattern: Service Registry — microservices.io</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2AtL7qvTjOg" rel="noopener">Spring Boot Microservices Tutorial: Spring Cloud Gateway MVC — Programming Techie</a></li>
+    </ul>
+
+    <h3>The decomposition plan: which seam to cut, and in what order</h3>
+    <p>You already have the seams. Capstone 08's modules were drawn along business capabilities, and those package boundaries — not technical layers — are your service boundaries. Do not re-derive them; do audit them. For each module, list the classes outside it that reference its entities directly, and the database tables it writes that another module also writes. Those two lists are the actual cost of extracting it. A module with a long "other writers" list is not ready to leave; fix that inside the monolith first, where a refactor is a compile error rather than a production incident.</p>
+    <p>The extraction order follows from that audit, and the principle is <em>most read-heavy and least coupled first</em>. <strong>Catalog</strong> goes first: it is mostly reads, almost nothing writes into it from elsewhere, and its failure mode is degraded browsing rather than lost money — a perfect place to make your gateway, deployment pipeline, tracing and contract-test machinery real while the stakes are low. <strong>Inventory</strong> goes next because the order module needs a reservation API from it before order can leave. <strong>Payment</strong> follows: it is naturally isolated (it already talks to an external gateway) and it has the cleanest interface. <strong>Order</strong> goes last, because order owns the invariants — a line item must reference a real product, stock must not be oversold, an order must not exist without an authorized payment — and once order is out you have no shared transaction left to enforce them. You want the saga machinery, the outbox, the tracing and the contract tests all working before you take that step, not during it. <strong>Customer</strong> can move any time after catalog; it is small and mostly read.</p>
+    <pre class="code-block" data-label="Extraction order"><code>1. catalog    read-heavy, low coupling, safe failure mode   -> proves the machinery
+2. customer   small, mostly read, no invariants at risk     -> optional, low risk
+3. inventory  needed by order; publishes reservation API    -> introduces reservations
+4. payment    already isolated behind an external gateway   -> introduces async auth
+5. order      owns every invariant; needs the saga first    -> the real graduation
+
+Rule: never extract a module whose invariants you cannot yet enforce
+      without a database transaction.</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://microservices.io/patterns/decomposition/decompose-by-business-capability.html" rel="noopener">Pattern: Decompose by business capability — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/break-monolith-into-microservices.html" rel="noopener">How to break a Monolith into Microservices — Zhamak Dehghani on martinfowler.com</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/microservices.html" rel="noopener">Pattern: Microservice Architecture — microservices.io (the pattern language index)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/dark-energy-matter-microservices/" rel="noopener">Dark Energy, Dark Matter and the Microservices Patterns — Chris Richardson on InfoQ (full talk and transcript)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MjEKuHwrwl8" rel="noopener">Dark Energy, Dark Matter and the Microservices Patterns?! — InfoQ</a></li>
+    </ul>
+
+    <h3>Splitting the database: shared tables, foreign keys and reference data</h3>
+    <p>This is the part people underestimate. Extracting a Spring Boot module into its own process takes a day; giving it its own database takes a month, because the single schema is where all the hidden coupling actually lives. Three transformations do most of the work. <strong>Shared tables become owned tables</strong>: exactly one service may write a table, everyone else reads through that service's API or its events. <strong>Foreign keys across the seam become identifiers</strong>: <code>order_line.product_id</code> stops being a constrained reference to <code>product.id</code> and becomes a plain column plus, at write time, a validation call or an event-fed local copy — the database will no longer stop you inserting a line for a product that does not exist, so the order service must. <strong>Reference data gets replicated rather than joined</strong>: the order service keeps a small denormalized copy of the product name, SKU and the price at the time of purchase, fed by <code>product.changed</code> events, because an order confirmation must render even when catalog is down, and because the price on a two-year-old invoice must be the price that was charged, not today's price.</p>
+    <p>Do the split in the monolith first. Introduce separate schemas inside the same PostgreSQL instance, remove cross-schema foreign keys, and let the code fail its integration tests until every cross-boundary read goes through a module interface. Only then move the schema to its own instance. Splitting a schema you can still test with one transaction is an afternoon of red tests; splitting one across two live services is an outage. Expect to give up some normalization permanently: an order line that stores the purchased price is not denormalization for performance, it is a correctness requirement, and framing it that way is a strong interview answer.</p>
+    <pre class="code-block" data-label="Ownership model"><code>catalog     OWNS  product, category, price, product_search_projection
+inventory   OWNS  stock_level, reservation, reservation_line
+order       OWNS  customer_order, order_line, outbox
+                  + replica: product_snapshot(sku, name, price_at_purchase)
+payment     OWNS  payment_intent, authorization, capture, refund, outbox
+customer    OWNS  customer, address, contact_preference
+
+Cross-seam rules
+  - one writer per table; readers use API or events, never a second connection
+  - order_line.product_id : identifier only, no FK, validated at write time
+  - price_at_purchase     : copied at checkout, never re-read from catalog
+  - no cross-service JOIN  -> API composition or a local read model instead</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://microservices.io/patterns/data/database-per-service.html" rel="noopener">Pattern: Database per service — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/api-composition.html" rel="noopener">Pattern: API Composition — microservices.io (querying across the seam)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/cqrs.html" rel="noopener">Pattern: CQRS — microservices.io (when a read model beats a composition)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/microservices-db-design" rel="noopener">Database Design in a Microservices Architecture — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/transactions-across-microservices" rel="noopener">Transactions Across Microservices — Baeldung</a></li>
+    </ul>
+
+    <h3>Contracts at the seams: what each service promises</h3>
+    <p>Every seam gets two contracts, and you should write both before you write any extraction code. The <strong>synchronous contract</strong> is the REST API the service exposes: resource paths, request and response schemas, error shapes, idempotency semantics and a version. The <strong>asynchronous contract</strong> is the set of events it publishes: topic name, key, schema, and — the part people forget — the delivery guarantee (at-least-once, so consumers must be idempotent) and the ordering guarantee (per key only).</p>
+    <p>Keep the synchronous surface deliberately small. Catalog exposes product lookup and search. Inventory exposes reserve, confirm and release — never "set stock to N" from outside, because that hands your invariant to a caller. Payment exposes authorize, capture and refund, all keyed by an idempotency key the caller generates. Order exposes place, cancel and read. Customer exposes profile read and address read. Everything else that another service wants to know arrives as an event. When you are tempted to add a sixth synchronous endpoint, ask whether the caller needs an answer <em>now</em> or merely needs to know eventually — the second case is an event, and events do not fail your checkout when the callee is restarting.</p>
+    <pre class="code-block" data-label="HTTP"><code>POST /inventory/reservations        Idempotency-Key: &lt;uuid&gt;
+  { "orderId": "...", "lines": [ { "sku": "...", "qty": 2 } ] }
+  201 { "reservationId": "...", "expiresAt": "..." }
+  409 { "code": "INSUFFICIENT_STOCK", "sku": "..." }
+
+POST /inventory/reservations/{id}/confirm    -> 200 | 404 | 410 (expired)
+POST /inventory/reservations/{id}/release    -> 204, safe to call twice
+
+POST /payments/authorizations       Idempotency-Key: &lt;uuid&gt;
+  { "orderId": "...", "amount": { "value": 249900, "currency": "INR" } }
+  201 { "authorizationId": "...", "status": "AUTHORIZED" }
+  402 { "code": "DECLINED", "reason": "..." }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-openfeign/reference/" rel="noopener">Spring Cloud OpenFeign — reference documentation (declarative clients for the surviving synchronous hops)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/domain-event.html" rel="noopener">Pattern: Domain event — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/consumerDrivenContracts.html" rel="noopener">Consumer-Driven Contracts: A Service Evolution Pattern — Ian Robinson on martinfowler.com</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/event-driven-architecture.html" rel="noopener">Pattern: Event-driven architecture — microservices.io</a></li>
+    </ul>
+
+    <h3>Events with Kafka: what each service publishes</h3>
+    <p>Fix the event catalogue early, because it is harder to change than any API. Catalog publishes <code>product.changed</code> and <code>product.price.changed</code>, keyed by product id. Inventory publishes <code>stock.reserved</code>, <code>stock.released</code> and <code>stock.level.changed</code>, keyed by SKU. Order publishes <code>order.placed</code>, <code>order.confirmed</code> and <code>order.cancelled</code>, keyed by order id. Payment publishes <code>payment.authorized</code>, <code>payment.failed</code> and <code>payment.refunded</code>, keyed by order id. Customer publishes <code>customer.updated</code>. Keying by the aggregate id is what buys you per-entity ordering, since Kafka orders within a partition only — two events about the same order will never be processed out of sequence, while events about different orders are free to run in parallel.</p>
+    <p>The catalog-to-search case is where you choose between the two event styles, and it is a favourite interview question. A <strong>notification</strong> event carries only <code>{ productId, version }</code> and the search indexer calls back to catalog for the details: small payloads, no stale data in the message, but every event becomes an HTTP call and search now fails when catalog is down — you have coupled them again through the back door. An <strong>event-carried state transfer</strong> event carries the whole product document, so the indexer needs no callback at all and keeps working through a catalog outage: bigger messages, a real risk of processing a stale version if you ignore ordering, and the consumer holds a copy of data it does not own. For search indexing, take state transfer — the whole point of the read model is availability independent of catalog, and the version field plus per-key ordering handles staleness. For something like an audit trigger where payload size matters more than availability, notification is the right call. Say which you chose and why; "it depends" without the reasoning scores nothing.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/documentation.html" rel="noopener">Apache Kafka 4.3 documentation — design, delivery semantics, partitions and ordering</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/" rel="noopener">Spring for Apache Kafka — reference documentation</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/201701-event-driven.html" rel="noopener">What do you mean by "Event-Driven"? — Martin Fowler (notification vs event-carried state transfer)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/spring-kafka-can-your-kafka-consumers-handle-a-poison-pill/" rel="noopener">Spring for Apache Kafka: can your consumers handle a poison pill? — Confluent Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SqVfCyfCJqw" rel="noopener">Kafka Tutorial: Spring Boot Microservices — Amigoscode</a></li>
+    </ul>
+
+    <h3>The transactional outbox, consumer idempotency and schema evolution</h3>
+    <p>The moment order writes a row and publishes an event, you have a dual write, and dual writes diverge. Commit the transaction and crash before the Kafka send: the order exists and nobody was told. Send to Kafka and roll back the transaction: everyone was told about an order that does not exist. There is no arrangement of these two statements that is safe, and wrapping them in <code>@Transactional</code> does not help because Kafka is not in the transaction. The <strong>transactional outbox</strong> is the fix: in the same local transaction that writes the order, insert a row into an <code>outbox</code> table in the same database. One commit, one atomic outcome. A separate relay then reads the outbox and publishes to Kafka — either a poller that selects unpublished rows, or, better, Debezium reading the PostgreSQL write-ahead log via change data capture, which adds no query load and no polling latency. Debezium even ships an outbox event router SMT that turns outbox rows into properly keyed topic messages.</p>
+    <p>The relay guarantees at-least-once delivery, never exactly-once, so <strong>every consumer must be idempotent</strong>. Give each event a stable id in the outbox row, and have the consumer record processed ids in a <code>processed_event</code> table written in the same transaction as its business change; a duplicate then hits a primary key violation and is dropped. Where the business operation is naturally idempotent — setting stock to a value, upserting a product projection — lean on that instead and skip the table. Finally, register your event schemas: with a schema registry and Avro or Protobuf you get compile-time-ish enforcement that a producer cannot ship a breaking change, and backward-compatible evolution rules (add optional fields, never remove or retype a field, never reuse a field number) so a consumer written last quarter keeps working.</p>
+    <pre class="code-block" data-label="SQL"><code>-- written in the SAME transaction as the order insert
+CREATE TABLE outbox (
+  id            uuid        PRIMARY KEY,
+  aggregate_type text       NOT NULL,   -- 'order'
+  aggregate_id   text       NOT NULL,   -- becomes the Kafka key
+  event_type     text       NOT NULL,   -- 'order.placed'
+  payload        jsonb      NOT NULL,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- consumer side: at-least-once means duplicates WILL arrive
+CREATE TABLE processed_event (
+  event_id   uuid PRIMARY KEY,
+  handled_at timestamptz NOT NULL DEFAULT now()
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html" rel="noopener">Outbox Event Router — Debezium reference documentation</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html" rel="noopener">Schema Evolution and Compatibility — Confluent Schema Registry documentation</a></li>
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/index.html" rel="noopener">Debezium reference documentation (change data capture from the PostgreSQL WAL)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional outbox — microservices.io</a></li>
+      <li>[Article] <a href="https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/" rel="noopener">Reliable Microservices Data Exchange With the Outbox Pattern — Debezium blog</a></li>
+      <li>[Article] <a href="https://www.morling.dev/blog/revisiting-the-outbox-pattern/" rel="noopener">Revisiting the Outbox Pattern — Gunnar Morling</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/microservices/the-transactional-outbox-pattern/" rel="noopener">The Transactional Outbox Pattern — Confluent Developer</a></li>
+    </ul>
+
+    <h3>The place-order saga: choreography versus orchestration</h3>
+    <p>This is the centrepiece. In capstone 08 checkout was one method with one <code>@Transactional</code> annotation: reserve stock, charge the card, write the order, commit. Now those three steps live in three services with three databases and there is no distributed transaction — two-phase commit is available in theory, unavailable in practice against a third-party payment gateway, and a coordinator outage locks every participant. So checkout becomes a saga: a sequence of local transactions, each publishing an event that triggers the next, with a compensating action defined for every step that has already committed.</p>
+    <p>In the <strong>choreographed</strong> version there is no coordinator. Order writes a PENDING order and publishes <code>order.placed</code>; inventory consumes it, reserves stock and publishes <code>stock.reserved</code>; payment consumes that, authorizes and publishes <code>payment.authorized</code>; order consumes that and moves to CONFIRMED. Failures flow backwards through <code>payment.failed</code> and <code>stock.released</code>. It is beautifully decoupled and genuinely painful to operate: the flow exists nowhere in the code, so understanding it means reading four services and a topic list, and cyclic dependencies creep in as steps are added.</p>
+    <p>In the <strong>orchestrated</strong> version an order-saga component inside the order service owns an explicit state machine and issues commands — <code>ReserveStock</code>, <code>AuthorizePayment</code>, <code>ConfirmStock</code> — reacting to replies. The whole flow is one readable class, the saga's current step is a column you can query during an incident, adding a step (fraud check, loyalty points) is a local change, and the participants stay dumb. The cost is a component that knows about all three services and the discipline to keep it a coordinator rather than letting business logic leak into it.</p>
+    <p><strong>Recommendation: orchestrate the place-order saga.</strong> It has five-plus steps, real money, compensations that must fire in a specific order, and a customer-visible state that support staff will be asked about at 11pm — every one of those argues for a flow you can read in one file and a state you can query in one table. Keep choreography for the simple fan-outs where nobody needs to coordinate anything: <code>order.confirmed</code> triggering the email, the analytics write and the loyalty accrual, none of which needs a reply or a compensation.</p>
+    <pre class="code-block" data-label="Saga"><code>ORCHESTRATED place-order saga (state lives in order service)
+
+  step            forward action              compensation
+  ----            --------------              ------------
+  1 order         create order PENDING        mark order CANCELLED
+  2 inventory     reserve stock               release reservation
+  3 payment       authorize payment           refund / void authorization
+  4 inventory     confirm reservation         (nothing: stock is committed)
+  5 order         mark order CONFIRMED        -
+
+  failure at step 3  -> compensate 2, then 1   (release, then cancel)
+  failure at step 4  -> compensate 3, then 2, then 1
+  compensations run in REVERSE order and must be idempotent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/saga" rel="noopener">Saga design pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/data/saga.html" rel="noopener">Pattern: Saga — microservices.io (Chris Richardson's canonical treatment)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/saga-pattern-microservices" rel="noopener">Saga Pattern in Microservices — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6O5iJ7PKUhs" rel="noopener">Microservices Architecture Patterns: SAGA Choreography Implementation, live coding — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JtTIXwZtScY" rel="noopener">Saga Orchestration in Microservices Explained with a Real Booking Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Compensating actions, semantic locks and what the customer sees</h3>
+    <p>A compensation is not a rollback. A rollback erases history; a compensation is a new business fact that undoes the effect of an old one, and it is visible. Releasing a reservation returns stock but the reservation happened. Refunding a payment does not un-charge the card — it puts a debit and a credit on the customer's statement, and on an Indian debit card that money may be gone for three to five working days. Cancelling an order leaves a cancelled order in the customer's history. Write each compensation deliberately: <em>release the reservation</em> (idempotent, safe to call twice, and it must also be triggered by a reservation expiry timer in case the saga itself dies), <em>void or refund the authorization</em> (void it if you have not captured, refund if you have — and always with the same idempotency key so a retry cannot double-refund), <em>cancel the order</em> with a reason code the support team can read.</p>
+    <p>Some steps have no compensation at all, and you must design around that instead of pretending otherwise. A dispatched shipment cannot be un-dispatched; a sent email cannot be unsent. The standard move is to order the saga so that the irreversible step is last (a <em>pivot</em> transaction: everything before it is compensatable, everything after it is a retriable step that must eventually succeed), and to make the truly irreversible actions consume a confirmed event rather than participate in the saga.</p>
+    <p>Then there is the <strong>semantic lock</strong>, the problem an interviewer will push you on. Between step 1 and step 5 the order exists in PENDING state. The customer refreshes and sees an order that is not really an order yet. Support sees it too. A reporting job might count it as revenue. There is no database lock protecting you here — the local transaction committed. The fix is to make the intermediate state explicit and honest at every layer: an <code>order.status</code> of PENDING that the UI renders as "confirming your order", an API that never returns a PENDING order as placed, reports that filter on CONFIRMED, and a timeout that moves an order stuck in PENDING to a terminal state so it cannot sit there forever. Reserved stock is the same problem seen from inventory's side: a reservation with an expiry, not a decrement.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction" rel="noopener">Compensating Transaction pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/two-phase-commit-vs-saga-pattern" rel="noopener">Difference Between Two-Phase Commit and Saga Pattern — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/saga-orchestration-outbox/" rel="noopener">Saga Orchestration for Microservices Using the Outbox Pattern — InfoQ</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/eventuate-tram-transactional-messaging" rel="noopener">Transactional Messaging for Microservices Using Eventuate Tram — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/orkes-conductor-saga-pattern-spring-boot" rel="noopener">Saga Pattern in a Microservices Architecture with Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Resilience on the synchronous calls that survive</h3>
+    <p>Most cross-service traffic is now events, which fail politely — the consumer lags, the broker retains, nothing cascades. The synchronous calls that remain are the dangerous ones, and each needs four decisions: a timeout, a circuit breaker, a retry policy and a fallback. Wrap the gateway-to-service hops and the few service-to-service hops with Resilience4j, and be specific about the fallback: catalog unavailable during browsing degrades to a cached product list or an honest "temporarily unavailable" panel; customer profile unavailable degrades to the identity token's name; inventory unavailable during browsing shows the product without a stock badge rather than showing zero, because a false out-of-stock loses a sale.</p>
+    <p>Budget the timeouts across the chain rather than setting each one to a comfortable number. If the gateway gives the browser 3s, the order service cannot spend 2s on inventory and 2s on payment; the inner budgets plus retries must fit inside the outer one, or the client times out while your services are still hopefully working, which produces the worst possible outcome — the customer sees a failure and the charge goes through anyway. Retries need exponential backoff with jitter so a wobbling downstream is not finished off by a synchronized retry storm. And the payment call is the exception that proves the rule: <strong>never blindly retry an authorization</strong>. A timeout there is ambiguous — the request may have reached the gateway and the response may have been lost — so retrying can charge the customer twice. Send an idempotency key with the original request, and on timeout do not retry the charge; query the payment's status by that key and act on the answer.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/circuitbreaker" rel="noopener">CircuitBreaker — Resilience4j official documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-circuitbreaker/reference/" rel="noopener">Spring Cloud Circuit Breaker — reference documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" rel="noopener">Timeouts, retries and backoff with jitter — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/reliability/circuit-breaker.html" rel="noopener">Pattern: Circuit Breaker — microservices.io</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2BcmN6TG_No" rel="noopener">Microservices: Spring Cloud Eureka, API Gateway and circuit breaking, part 1 — Java Techie</a></li>
+    </ul>
+
+    <h3>Observability: one checkout is one trace</h3>
+    <p>The debugging you took for granted is gone. In the monolith a failing checkout was one stack trace in one log file. Now it is five services, a broker and a gateway, and "the order failed" tells you nothing about where. Distributed tracing is not a nice-to-have on this project, it is the replacement for the stack trace, and you should not extract the order service until it works. Run the OpenTelemetry Java agent (or Micrometer Tracing on Spring Boot) on every service so a trace id is created at the gateway and propagated on every HTTP hop through W3C <code>traceparent</code> headers — and, crucially, on every Kafka message through record headers, so an asynchronous saga step joins the same trace rather than starting a new one. That propagation across the broker is the piece most teams miss and the detail that impresses in an interview.</p>
+    <p>Put the same correlation id into every log line (an MDC field populated from the trace context) so that one grep in your aggregated logs returns the whole checkout across five services. Then give each service its own dashboard — request rate, error rate, latency percentiles, JVM and pool health — plus the ones that are new in this architecture: consumer lag per topic and consumer group, outbox backlog depth and age, saga step durations and the count of sagas stuck in a non-terminal state. Alert on symptoms customers feel (checkout success rate, gateway error rate, p99 latency) rather than on causes; a single pod restarting is not an incident, a falling checkout success rate is.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/languages/java/getting-started/" rel="noopener">Getting Started with OpenTelemetry Java — OpenTelemetry documentation</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/zero-code/java/agent/" rel="noopener">Java agent (zero-code instrumentation) — OpenTelemetry documentation</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/context-propagation/" rel="noopener">Context propagation — OpenTelemetry concepts (how the trace crosses a process, and a broker)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/tracing.html" rel="noopener">Tracing — Spring Boot Actuator reference documentation</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/observability/distributed-tracing.html" rel="noopener">Pattern: Distributed tracing — microservices.io</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-opentelemetry-setup" rel="noopener">Guide to OpenTelemetry With Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jx_-0qfn-hc" rel="noopener">Spring Boot + Micrometer + Zipkin: Distributed Tracing in Microservices — Codefarm</a></li>
+    </ul>
+
+    <h3>Testing the seams: consumer-driven contracts</h3>
+    <p>Independent deployability is the entire point of this refactor, and it is also the thing that breaks you. The day catalog ships a change that renames a JSON field, order's client breaks in production — and nobody's test suite caught it, because catalog's tests pass and order's tests use a mock catalog that still returns the old shape. The mock is the problem: it encodes your <em>belief</em> about the provider, and beliefs go stale silently.</p>
+    <p>Consumer-driven contract testing fixes that. Each consumer declares what it needs — this request produces this response shape — and that contract is verified twice. On the provider's build, generated tests replay the contract against the real controller, so catalog's pipeline goes red the moment it breaks a consumer. On the consumer's build, the same contract generates a stub the consumer tests against, so the mock can never drift from what the provider actually promises. Spring Cloud Contract does both from one Groovy or YAML file, and it covers messaging as well as HTTP: you can write a contract asserting the exact shape of <code>order.placed</code> and have inventory's test suite verify its consumption of it. Add these before you extract the order service — that is the phase where the contracts start earning their keep.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/" rel="noopener">Spring Cloud Contract — reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/getting-started/first-application.html" rel="noopener">Your first Spring Cloud Contract application — reference documentation</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/contract-rest/" rel="noopener">Getting Started: Consumer Driven Contracts — Spring guide</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/testing/service-integration-contract-test.html" rel="noopener">Pattern: Service Integration Contract Test — microservices.io</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-contract" rel="noopener">An Intro to Spring Cloud Contract — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ki54FB2B25U" rel="noopener">Spring Cloud Contract (HTTP) — SpringDeveloper</a></li>
+    </ul>
+
+    <h3>Testing the seams: Testcontainers and a thin end-to-end suite</h3>
+    <p>The second half of the testing story is integration tests that use real infrastructure. Embedded Kafka and H2 will happily pass tests that fail in production — different SQL dialect, different rebalance behaviour, different serialization. Testcontainers starts a real PostgreSQL and a real Kafka in Docker for the duration of the test class, so your outbox relay, your consumer group configuration, your Avro serializers and your actual migrations are all exercised. Spring Boot 3's Testcontainers support and <code>@ServiceConnection</code> wire the container's URL and credentials into the context automatically, which removes the property-plumbing boilerplate that used to make these tests unpleasant. Each service owns tests like this for its own seam: publish an event, assert the projection updated; call the reservation API, assert the row and the emitted event.</p>
+    <p>Above that, keep the end-to-end suite deliberately <em>thin</em>. It is the slowest, flakiest and most expensive layer, and every scenario you add there is a scenario you should have caught in a contract or integration test. Three or four journeys are enough: a successful checkout end to end, a checkout that fails at payment and compensates correctly, a checkout that fails at reservation, and a catalog change propagating to search. Run them against a Compose or ephemeral-namespace deployment in CI, and treat a flaky end-to-end test as a bug to fix or a test to delete — never as noise to retry.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/modules/kafka/" rel="noopener">Kafka module — Testcontainers for Java documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://testcontainers.com/guides/testing-spring-boot-kafka-listener-using-testcontainers/" rel="noopener">Testing Spring Boot Kafka Listener using Testcontainers — official Testcontainers guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-kafka-testing" rel="noopener">Testing Kafka and Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/spring-boot-integration-testing-using-testcontainers-starter/" rel="noopener">SpringBoot Integration Testing using Testcontainers Starter — SivaLabs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UvTXArpgrtY" rel="noopener">Mastering Kafka E2E Integration Testing in Spring Boot with Testcontainers — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9jZInwFtp44" rel="noopener">Testing Kafka and RabbitMQ Messaging Workflows using Testcontainers — SivaLabs</a></li>
+    </ul>
+
+    <h3>The migration: ten phases, each one shippable</h3>
+    <p>This is the build plan, and the constraint that governs it is absolute: <strong>every phase ends with a system you could deploy to production and walk away from</strong>. No phase leaves a half-extracted service, a table with two writers, or a branch that must be finished before release. That is what makes this a strangler fig rather than a rewrite — the new system grows around the old one, traffic moves across seam by seam, and the monolith is removed only when nothing routes to it any more. It also means you can stop after phase 4 if priorities change and still be better off, which is the honest way to sell a migration to a product manager.</p>
+    <ol>
+      <li><strong>Gateway in front, nothing else changes.</strong> Put Spring Cloud Gateway between clients and the monolith. All routes proxy to the one backend. Add authentication, rate limiting and request-id injection here. Point DNS at the gateway. Ship it. You now have the single place through which you will later reroute traffic, and you have proved it under production load before it matters.</li>
+      <li><strong>Kafka and the outbox, inside the monolith.</strong> Stand up Kafka (and a schema registry). Add the <code>outbox</code> table and a relay — poller or Debezium — and have the monolith publish its first domain events in the same transactions that already write the data. Nothing consumes them yet except a logging sink. Ship it. The riskiest infrastructure is now live and observed with no service extracted.</li>
+      <li><strong>Extract catalog as a read-only service.</strong> A new catalog service reads a replica or subscribes to catalog events; the monolith remains authoritative and still handles writes. Route only <code>GET /products/**</code> at the gateway to the new service, behind a flag you can flip back in seconds. Ship it. You have a second deployable, a second pipeline, and a rollback that is one route change.</li>
+      <li><strong>Flip catalog ownership.</strong> Move catalog writes to the catalog service, give it its own database, and delete the product tables from the monolith. The monolith now consumes <code>product.changed</code> for whatever it still needs. Ship it. This is the first true database split and the first module gone for good.</li>
+      <li><strong>Extract inventory with the reservation API.</strong> Move stock tables out, expose reserve/confirm/release with idempotency keys and reservation expiry, publish <code>stock.reserved</code> and <code>stock.released</code>. The monolith's checkout now calls inventory over HTTP inside its existing transaction — still consistent, because order and payment have not moved. Ship it.</li>
+      <li><strong>Extract payment.</strong> Move authorizations, captures and refunds to their own service and database, keyed by idempotency key, with the external gateway integration behind it. Publish <code>payment.authorized</code> and <code>payment.failed</code>. The monolith still orchestrates checkout. Ship it.</li>
+      <li><strong>Extract order and implement the saga.</strong> The big one. Order gets its own database and the orchestrated saga replaces the transaction, with PENDING state, compensations and expiry timers. Run both paths behind a percentage flag at the gateway and compare outcomes before shifting traffic. Ship it — and expect this phase to take as long as phases 1 to 6 combined.</li>
+      <li><strong>Resilience and tracing throughout.</strong> Circuit breakers, timeout budgets, retries with jitter and designed fallbacks on every synchronous hop; OpenTelemetry on every service with trace context propagated across Kafka; correlation ids in logs; per-service dashboards and symptom-based alerts. Ship it. (In practice you add these incrementally from phase 3; this phase is where you make them complete and consistent.)</li>
+      <li><strong>Contract tests everywhere.</strong> Spring Cloud Contract for every HTTP and messaging seam, wired into each service's pipeline so a provider cannot merge a breaking change. Testcontainers integration tests per service, plus the thin end-to-end suite. Ship it. Only now is "deploy any service independently" actually true rather than aspirational.</li>
+      <li><strong>Decommission the monolith path.</strong> Move customer out, remove the last gateway routes pointing at the monolith, verify with traces that nothing reaches it, keep it running and idle for a release cycle, then delete it — code, pipeline, database and all. Ship it. A migration that leaves a dormant monolith running "just in case" has not finished; it has doubled your surface area.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/bliki/StranglerFigApplication.html" rel="noopener">StranglerFigApplication — Martin Fowler (the pattern this whole plan is an instance of)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/strangler-fig" rel="noopener">Strangler Fig pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/refactoring/strangler-application.html" rel="noopener">Pattern: Strangler application — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/refactoring/" rel="noopener">Refactoring a monolith to microservices — microservices.io (the full refactoring track)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9I9GdSQ1bbM" rel="noopener">Monolith Decomposition Patterns — Sam Newman, GOTO 2019</a></li>
+    </ul>
+
+    <h3>Reference implementations worth reading before you write code</h3>
+    <p>Read at least two of these end to end before phase 3. Not to copy them — their business domains differ from yours — but to see how a working system arranges packages, wires the saga, structures its tests and lays out its Compose or Kubernetes manifests. FTGO is the highest-value read here: it is Chris Richardson's companion to <em>Microservices Patterns</em> and implements the saga, outbox, CQRS and API composition patterns in Java for a food-delivery domain that maps almost one-to-one onto this brief. The Eventuate Tram sagas example is much smaller and is the fastest way to understand orchestrated sagas concretely. Spring PetClinic Microservices shows the Spring Cloud infrastructure — gateway, discovery, config, tracing — in idiomatic, current Spring, and is the cleanest thing to imitate for your phase 1 and 2 wiring.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/microservices-patterns/ftgo-application" rel="noopener">microservices-patterns/ftgo-application — GitHub (companion code for Chris Richardson's Microservices Patterns: sagas, outbox, CQRS)</a></li>
+      <li>[Official] <a href="https://github.com/eventuate-tram/eventuate-tram-sagas-examples-customers-and-orders" rel="noopener">eventuate-tram-sagas-examples-customers-and-orders — GitHub (a minimal orchestrated saga in Spring Boot)</a></li>
+      <li>[Official] <a href="https://github.com/spring-petclinic/spring-petclinic-microservices" rel="noopener">spring-petclinic/spring-petclinic-microservices — GitHub (gateway, discovery, config and tracing, idiomatic Spring Cloud)</a></li>
+      <li>[Article] <a href="https://github.com/piomin/sample-spring-microservices-new" rel="noopener">piomin/sample-spring-microservices-new — GitHub (Piotr Mińkowski's long-maintained Spring Cloud sample estate)</a></li>
+      <li>[Article] <a href="https://github.com/GoogleCloudPlatform/microservices-demo" rel="noopener">GoogleCloudPlatform/microservices-demo — GitHub (Online Boutique: polyglot e-commerce, strong Kubernetes and observability manifests)</a></li>
+      <li>[Article] <a href="https://github.com/dotnet/eShop" rel="noopener">dotnet/eShop — GitHub (a different stack, but an unusually well-documented e-commerce reference architecture)</a></li>
+    </ul>
+
+    <h3>Which track modules this exercises</h3>
+    <p>This capstone is the integration exam for most of the Enterprise course. Work the linked modules alongside the phase they belong to rather than reading them all up front — the material lands far better when you have a failing build in front of you.</p>
+    <p><strong>Microservices track</strong> — the spine of the project. <a href="../microservices/01-monolith-vs-microservices.html">Monolith vs Microservices</a> and <a href="../microservices/02-decomposition.html">Decomposition</a> for the justification and the seams; <a href="../microservices/03-data-per-service.html">Data per Service</a> and <a href="../microservices/09-distributed-data.html">Distributed Data Patterns</a> for the database split and the saga; <a href="../microservices/04-inter-service-communication.html">Inter-Service Communication</a> for the synchronous-versus-event choice; <a href="../microservices/05-api-gateway.html">API Gateway</a> for phase 1; <a href="../microservices/06-service-discovery.html">Service Discovery</a> and <a href="../microservices/07-centralized-config.html">Centralized Configuration</a> for the platform; <a href="../microservices/08-resilience.html">Resilience with Resilience4j</a> for phase 8; <a href="../microservices/10-cqrs-event-sourcing.html">CQRS and Event Sourcing</a> for the search read model; <a href="../microservices/11-tracing-debugging.html">Tracing and Debugging</a> and <a href="../microservices/12-versioning-testing.html">Versioning and Testing</a> for phases 8 and 9.</p>
+    <p><strong>Messaging track</strong> — everything from phase 2 onwards. <a href="../messaging/02-kafka-architecture.html">Kafka Architecture</a> and <a href="../messaging/03-kafka-clients.html">Kafka Clients</a> for partitions, keys and consumer groups; <a href="../messaging/04-kafka-advanced.html">Kafka Advanced</a> for delivery semantics and transactions; <a href="../messaging/05-spring-kafka.html">Spring for Apache Kafka</a> for the producer and listener code; <a href="../messaging/08-dlq-retries.html">DLQ and Retries</a> for poison messages in the saga; <a href="../messaging/09-ordering-concurrency.html">Ordering and Concurrency</a> for why you key by aggregate id; <a href="../messaging/10-event-driven-architecture.html">Event-Driven Architecture</a> for the outbox and the state-transfer decision.</p>
+    <p><strong>Spring Boot track</strong> — the code you actually write. <a href="../spring-boot/02-externalized-config.html">Externalized Configuration</a> for five services' worth of properties; <a href="../spring-boot/04-web.html">Web</a> for the APIs at each seam; <a href="../spring-boot/06-actuator.html">Actuator</a> and <a href="../spring-boot/07-observability.html">Observability</a> for health, metrics and Micrometer Tracing; <a href="../spring-boot/11-packaging-deployment.html">Packaging and Deployment</a> for five images instead of one.</p>
+    <p><strong>Observability track</strong> — phase 8 in depth. <a href="../observability/03-log-aggregation.html">Log Aggregation</a> for the correlation-id search that replaces your log file; <a href="../observability/04-metrics.html">Metrics</a> and <a href="../observability/07-tracing.html">Tracing</a> for the instrumentation; <a href="../observability/08-alerting-slo.html">Alerting and SLOs</a> for alerting on checkout success rate rather than on pod restarts.</p>
+    <p><strong>Backend testing track</strong> — phase 9. <a href="../backend-testing/07-spring-integration-testing.html">Spring Integration Testing</a>, <a href="../backend-testing/08-testcontainers.html">Testcontainers</a> for real Postgres and Kafka in tests, and <a href="../backend-testing/09-api-contract-testing.html">API Contract Testing</a> for Spring Cloud Contract.</p>
+    <p><strong>DevOps track</strong> — the multiplication of everything operational. <a href="../devops/09-docker-compose.html">Docker Compose</a> for a local estate you can actually run; <a href="../devops/10-kubernetes-basics.html">Kubernetes Basics</a> and <a href="../devops/11-kubernetes-production.html">Kubernetes in Production</a> for DNS-based discovery, probes and resource limits; <a href="../devops/13-github-actions.html">GitHub Actions</a> for five pipelines; <a href="../devops/14-deployment-strategies.html">Deployment Strategies</a> for the percentage flag in phase 7 and the rollbacks in phases 3 and 4.</p>
+    <p><strong>System design track</strong> — the vocabulary interviewers use. <a href="../system-design/08-consistency-availability.html">Consistency and Availability</a> for what you gave up at checkout; <a href="../system-design/10-async-architectures.html">Asynchronous Architectures</a> for the event backbone; <a href="../system-design/14-enterprise-design.html">Enterprise Design</a> for presenting the whole thing in a design round.</p>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="08-ecommerce-application.html">← E-Commerce Application</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="10-cloud-deployment.html">Cloud Enterprise Deployment →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees "migrated a monolith to microservices" on your CV and will spend twenty minutes on exactly this. These are the questions Indian product and service companies actually ask about a project like this — and the last one is the one that separates a senior engineer from a resume:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why did you split the monolith? Give me a reason that is not "microservices are better".</summary>
+      <div class="answer"><p>Three specific pressures: catalog reads and checkout writes needed to scale independently — a browse spike forced us to scale the whole JVM and its pool; catalog changed several times a day while payment changed twice a year and needed sign-off, so one artifact forced cautious code onto a reckless release train; and past three teams the merge and migration coordination cost more than the architecture saved. If none of those had been true, keeping the modular monolith would have been the better decision.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which service did you extract first, and why that one?</summary>
+      <div class="answer"><p>Catalog. It was the most read-heavy and least coupled module, almost nothing else wrote into it, and its worst failure mode is degraded browsing rather than lost money. That made it the right place to prove the gateway, the pipelines, tracing and contract tests while the stakes were low. Order went last because it owns every invariant, and I did not want to remove the shared transaction until the saga machinery already existed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What did the API gateway do for you in phase 1, before anything was extracted?</summary>
+      <div class="answer"><p>It gave clients one stable origin and gave me one place to reroute traffic later. Authentication, rate limiting and request-id injection moved there, and it went into production under real load while it was still just a proxy to the monolith — so by the time it mattered, it was already proven. Every subsequent extraction became a route change I could flip back in seconds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you split a single database with foreign keys everywhere?</summary>
+      <div class="answer"><p>Three transformations. Shared tables got exactly one writer, with everyone else reading through that service's API or its events. Foreign keys across the seam became plain identifier columns plus validation in code, so order_line.product_id no longer constrains to catalog. Reference data got replicated instead of joined — order keeps a snapshot of the SKU, name and price at purchase, fed by product.changed events, which is also a correctness requirement since an old invoice must show the price charged. I did all of it as separate schemas inside the same instance first, where a broken boundary was a red test rather than an outage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your service writes a row and publishes an event. How do you stop those two diverging?</summary>
+      <div class="answer"><p>You cannot, with two separate writes — commit then crash means the order exists and nobody knows; publish then roll back means everyone knows about an order that does not exist. The fix is a transactional outbox: insert the event into an outbox table in the same local transaction as the business write, so there is one commit and one atomic outcome, then have a relay publish from the outbox to Kafka. I used Debezium reading the write-ahead log, which adds no query load and no polling latency, with its outbox event router producing correctly keyed messages.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> The outbox relay gives at-least-once delivery. How do consumers cope?</summary>
+      <div class="answer"><p>They have to be idempotent, because duplicates are guaranteed rather than possible. Each event carries a stable id from the outbox row, and the consumer inserts that id into a processed_event table in the same transaction as its business change — a duplicate hits the primary key and is dropped. Where the operation is naturally idempotent, like upserting a product projection or setting a stock level, I relied on that instead. Exactly-once at the broker is not a substitute, because the side effect usually lands outside Kafka.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Catalog changes need to reach the search index. Notification event or event-carried state transfer?</summary>
+      <div class="answer"><p>State transfer, and here is the trade-off. A notification carrying just the product id keeps messages tiny and always fresh, but every event becomes a callback to catalog, so search now fails when catalog is down — the coupling comes back through the side door. Carrying the whole product document means the indexer needs no callback and survives a catalog outage, which is the entire reason the read model exists. The costs are bigger messages and possible staleness, handled by keying on product id for per-key ordering plus a version field the consumer checks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Checkout spans order, inventory and payment across three databases. Why not two-phase commit?</summary>
+      <div class="answer"><p>Because it is unavailable and undesirable here. The payment gateway is a third party with an HTTP API and no XA participation, so there is nothing to enlist. Even where XA is possible it holds locks across the network for the duration of the whole flow, and a coordinator failure leaves every participant blocked — availability collapses to the product of all participants. A saga trades atomicity for availability: local transactions, each committed independently, with compensations for the ones already done.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Choreography or orchestration for the place-order saga? Defend your choice.</summary>
+      <div class="answer"><p>Orchestration. The saga has five steps, real money, compensations that must run in reverse order, and a customer-visible intermediate state support will be asked about at 11pm — so I want the flow readable in one class and the current step queryable in one column. Choreography is more decoupled and I kept it for the fan-out after order.confirmed, where email, analytics and loyalty need no coordination and no compensation. The cost of orchestration is a component that knows all three participants; the discipline is keeping business logic in the services and only sequencing in the orchestrator.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Payment fails at step three. Walk me through exactly what compensates, and what the customer sees.</summary>
+      <div class="answer"><p>Compensations run in reverse: release the inventory reservation, then cancel the order with a reason code. Nothing needs refunding because the authorization never succeeded — if it had succeeded and a later step failed, I would void an uncaptured authorization or refund a captured one, always with the original idempotency key so a retry cannot double-refund. The customer sees the order move from "confirming your order" to cancelled with a payment-declined reason, and their card is untouched. A compensation is a new business fact, not a rollback: the cancelled order stays in their history, and a real refund takes three to five working days to appear.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> During the saga the customer refreshes and sees a PENDING order that is not really placed. What is that problem called and how did you handle it?</summary>
+      <div class="answer"><p>That is the semantic lock — the intermediate state is committed and visible, and no database lock protects it. I made it explicit and honest at every layer rather than hiding it: an order status of PENDING rendered as "confirming your order" in the UI, an API that never reports a PENDING order as placed, revenue reports filtered to CONFIRMED, and a timeout that moves a stuck PENDING order to a terminal state so it cannot sit there forever. Inventory has the same shape from its side, which is why stock is a reservation with an expiry rather than a decrement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A call to the payment service times out. Do you retry?</summary>
+      <div class="answer"><p>No — not blindly. A timeout is ambiguous: the request may have reached the gateway and the response been lost, so a retry can charge the customer twice. I send an idempotency key with the original authorization, and on timeout I query the payment's status by that key and act on the answer rather than re-sending the charge. Everywhere else — catalog lookups, inventory reads — I retry with exponential backoff and jitter, and the retry budget fits inside the enclosing timeout so the client never gives up while my services are still working.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you stop an independently deployed catalog release from breaking the order service?</summary>
+      <div class="answer"><p>Consumer-driven contract tests. Mocks encode my belief about the provider and go stale silently, which is how a renamed JSON field reaches production green. With Spring Cloud Contract, order declares what it needs from catalog; catalog's pipeline generates tests that replay that contract against its real controller and goes red on a breaking change, while order's build gets a stub generated from the same file so its tests cannot drift. It covers messaging too, so the shape of order.placed is verified on both sides. Without this, "independently deployable" is aspirational rather than true.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A checkout failed in production. Show me how you debug it now that the stack trace is gone.</summary>
+      <div class="answer"><p>One trace. The gateway starts a trace id, propagated on every HTTP hop via W3C traceparent and — the part teams miss — on every Kafka message via record headers, so the asynchronous saga steps join the same trace instead of starting new ones. I open the trace and see the whole checkout across the gateway and five services with per-hop latency and the failing span. The same correlation id is in the MDC of every log line, so one search returns every log across all services. Then the saga's own state table tells me which step it stopped on and whether compensations ran.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Knowing what you know now, would you do this refactor again?</summary>
+      <div class="answer"><p>For catalog and payment, yes without hesitation — independent scaling for the read path and an independent, sign-off-gated release cadence for the payment integration were both worth the cost, and both were achievable in the first six phases. For order, honestly, I would think much harder. Extracting order cost more than phases one to six combined, turned one transaction into a saga with compensations, semantic locks and expiry timers, and every bug since that touches consistency traces back to that decision. If the team had been small enough to keep shipping in one codebase, the right answer would have been to leave order and checkout inside a modular monolith and extract only the parts with genuinely different scaling and release profiles. The lesson I took away is that the migration is worth doing incrementally precisely because it lets you stop when the remaining moves stop paying for themselves — and knowing where to stop is the actual skill.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.msv.brief — Decomposition plan, gateway, Kafka events, sagas, resilience and tracing</li>
+      <li>prj.msv.build — Strangler-fig migration phases, reference implementations, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

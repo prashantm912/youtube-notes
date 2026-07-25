@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Capstone brief for a warehouse inventory system: SKUs, locations, an append-only stock movement ledger, reservations with expiry, the lost-update problem solved four ways, Spring transaction boundaries, SQL reporting with window functions, nine build phases and the full test pyramid on Testcontainers.">
+  <title>Capstone: Inventory System — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 03: Inventory System</h1>
+  <p class="standfirst">Two warehouse clerks issue stock for the same SKU at the same instant and the database ends up one unit richer than reality. This capstone is where you stop writing CRUD and start defending correctness — with a ledger, a lock, an isolation level you chose deliberately, and a test that proves it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Inventory System</nav>
+
+  <section id="intro">
+    <h2>What you are building</h2>
+    <p>A warehouse inventory system: products identified by SKU, several physical locations, and a stock level for every product at every location. Stock changes only through recorded movements — receipts in, issues out, transfers between locations, and adjustments after a count. On top of that sit reservations that hold stock for a pending order until they expire, low-stock alerts, and a reporting surface: stock on hand, movement history, inventory valuation and slow-moving lines.</p>
+    <p>The domain is deliberately small so the hard parts stand out. This project is the transactions, concurrency and testing flagship of the track. Every interesting decision in it is a correctness decision: whether current quantity is a column you update or a number you derive; whether you take an optimistic version check or a database row lock; whether the alert email goes out inside the transaction or after it commits; and how you write a test that reliably reproduces two threads racing on the same stock line.</p>
+    <p>Treat this page as a specification, not a tutorial. It tells you what to build, what the design choices are, and which decision you should be able to defend in an interview. The implementation is yours.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Feature outline: the MVP you must ship, and the stretch goals</h3>
+    <p>Scope the MVP so it is finishable in a fortnight of evenings and still contains every hard problem. Products carry a SKU (unique, immutable, human-meaningful), a name, a unit of measure and a reorder threshold. Locations are physical places stock can sit — a warehouse, an aisle, a bin; one flat level is enough to start. Stock movements are the only way quantity changes: <code>RECEIPT</code> (in), <code>ISSUE</code> (out), <code>TRANSFER</code> (out of one location, into another, as a linked pair) and <code>ADJUSTMENT</code> (signed correction with a mandatory reason). Reservations hold a quantity at a location for a named order until an expiry instant, and either get committed into an issue or released. Low-stock alerts fire when available quantity crosses the reorder threshold. Reporting covers stock on hand per SKU per location, movement history with a running balance, valuation at cost, and slow-moving lines with no outbound movement in N days.</p>
+    <p>Deliberately out of the MVP, and available as stretch goals once the core is solid: batch and lot tracking with expiry dates (which turns issuing into a FEFO — first-expiry-first-out — allocation problem), serial-number tracking for individually identified units (which makes quantity always one and the ledger a location history per serial), stock-take reconciliation (freeze a location, count it, generate the adjustment movements from the variance), and multi-currency valuation with FIFO or weighted-average costing. Each stretch goal is a genuine escalation in modelling difficulty, not extra screens — pick one and do it properly rather than half-building three.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.inventree.org/en/latest/" rel="noopener">InvenTree documentation — a production open-source inventory domain, feature by feature</a></li>
+      <li>[Reference] <a href="https://github.com/inventree/InvenTree" rel="noopener">inventree/InvenTree — GitHub (actively maintained inventory management system; read its stock-item and stock-tracking models)</a></li>
+      <li>[Reference] <a href="https://github.com/openboxes/openboxes" rel="noopener">openboxes/openboxes — GitHub (warehouse management system with transactions, lots and stock counts)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/apsupp/accounting.pdf" rel="noopener">Accounting Patterns — Martin Fowler (entries, accounts and posting rules; the vocabulary a stock ledger borrows)</a></li>
+    </ul>
+
+    <h3>Architecture sketch: one Boot service, one Postgres, one Angular app</h3>
+    <p>Resist the urge to make this microservices. A single Spring Boot service with clean internal module boundaries teaches more about transactions than five services teach about distributed transactions, and you can always split it later — capstone 09 exists for exactly that. Inside the service, keep four packages per bounded area (<code>catalog</code>, <code>stock</code>, <code>reservation</code>, <code>reporting</code>) rather than four technical layers across the whole app; the stock module is the only one allowed to write movement rows.</p>
+    <p>The one architectural rule that matters here: reporting reads must not go through the write model. Movement writes are narrow, transactional and locked; report queries are wide, read-only aggregates over the same table. Give reporting its own read-only repositories with projections and native SQL, mark those service methods <code>readOnly = true</code>, and never let a report accidentally load thousands of managed entities into the persistence context.</p>
+    <pre class="code-block" data-label="Architecture"><code>  Angular SPA
+   |  stock grid, movement form, reservation panel, report views
+   v
+  REST API  (Spring MVC controllers - no @Transactional here)
+   |
+   v
+  Application services  (@Transactional boundary lives HERE)
+   |
+   +-- catalog      products, SKUs, locations
+   +-- stock        movement ledger + stock_level projection  <-- all writes
+   +-- reservation  hold / release / commit + expiry sweeper
+   +-- reporting    read-only projections, native aggregate SQL
+   |
+   v
+  Spring Data JPA repositories  --->  PostgreSQL
+                                       stock_movement  (append-only)
+                                       stock_level     (derived, @Version)
+                                       stock_reservation
+   |
+   +-- Flyway migrations (schema is code, versioned in git)
+   +-- Application events -> low-stock alerts (AFTER_COMMIT only)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/using/structuring-your-code.html" rel="noopener">Structuring your code — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/index.html" rel="noopener">Spring Modulith reference documentation (enforcing module boundaries inside one deployable)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-modulith" rel="noopener">Introduction to Spring Modulith — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hexagonal-architecture-ddd-spring" rel="noopener">Hexagonal Architecture, DDD and Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Gx4iBLKLVHk" rel="noopener">Spring Boot Full Stack and Angular — Full Course — Amigoscode</a></li>
+    </ul>
+
+    <h3>Data model: an append-only movement ledger, not a mutable quantity column</h3>
+    <p>This is the central design decision of the capstone, so make it consciously and be ready to defend it. The naive model is a <code>stock_level</code> row per product per location with a <code>quantity</code> column that every operation reads, modifies and writes back. It is simple, it is what most tutorial inventory apps do, and it is wrong for three separate reasons. First, it destroys history: after the update you cannot answer "who moved these forty units, when, and why", which is the single most-asked question of any real inventory system and a hard audit requirement in regulated warehouses. Second, an <code>UPDATE</code> of a shared row is a contention point — every clerk touching that SKU serialises on one row. Third, and worst, read-then-write on that column is the lost-update bug described in the next section: two transactions both read 100, both write 90, and ten units evaporate.</p>
+    <p>The ledger model instead makes <code>stock_movement</code> the source of truth and append-only: every row is an immutable fact with a signed quantity, a type, a location, a timestamp, an actor and a reference to whatever caused it. Nothing is ever updated or deleted — a mistake is corrected by posting a compensating <code>ADJUSTMENT</code>, exactly as an accounting ledger posts a reversing entry. Current quantity then becomes a <em>projection</em> of the ledger: either computed on read as <code>SUM(quantity)</code>, or maintained in a <code>stock_level</code> row that is only ever changed by an atomic <code>UPDATE ... SET quantity = quantity + :delta</code>, never by read-then-write. Inserts do not contend with each other, so the write path stays fast; the projection carries a <code>@Version</code> column so that the rare update conflict is detected rather than silently lost. Keep the invariant enforced in the database too — a <code>CHECK (quantity &gt;= 0)</code> on the projection means no application bug can ever leave negative stock on hand.</p>
+    <pre class="code-block" data-label="SQL"><code>-- the source of truth: immutable facts, never UPDATEd, never DELETEd
+CREATE TABLE stock_movement (
+  id            BIGSERIAL PRIMARY KEY,
+  product_id    BIGINT      NOT NULL REFERENCES product(id),
+  location_id   BIGINT      NOT NULL REFERENCES location(id),
+  movement_type VARCHAR(16) NOT NULL,           -- RECEIPT|ISSUE|TRANSFER|ADJUSTMENT
+  quantity      NUMERIC(14,3) NOT NULL,         -- signed: + in, - out
+  unit_cost     NUMERIC(14,4),                  -- captured at receipt, for valuation
+  reference     VARCHAR(64),                    -- order no, transfer pair id, count id
+  reason        VARCHAR(255),                   -- mandatory for ADJUSTMENT
+  created_by    VARCHAR(64)  NOT NULL,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  CONSTRAINT nonzero_qty CHECK (quantity &lt;&gt; 0)
+);
+CREATE INDEX ix_movement_prod_loc_time ON stock_movement (product_id, location_id, created_at);
+
+-- the projection: derived, guarded, and only ever changed by an atomic delta
+CREATE TABLE stock_level (
+  product_id   BIGINT NOT NULL REFERENCES product(id),
+  location_id  BIGINT NOT NULL REFERENCES location(id),
+  quantity     NUMERIC(14,3) NOT NULL DEFAULT 0,
+  reserved     NUMERIC(14,3) NOT NULL DEFAULT 0,
+  version      BIGINT NOT NULL DEFAULT 0,       -- JPA @Version
+  PRIMARY KEY (product_id, location_id),
+  CONSTRAINT no_negative_stock CHECK (quantity &gt;= 0),
+  CONSTRAINT reserved_within_stock CHECK (reserved &gt;= 0 AND reserved &lt;= quantity)
+);
+
+CREATE TABLE stock_reservation (
+  id          BIGSERIAL PRIMARY KEY,
+  product_id  BIGINT NOT NULL, location_id BIGINT NOT NULL,
+  quantity    NUMERIC(14,3) NOT NULL CHECK (quantity &gt; 0),
+  order_ref   VARCHAR(64) NOT NULL,
+  status      VARCHAR(16) NOT NULL,             -- HELD|COMMITTED|RELEASED|EXPIRED
+  expires_at  TIMESTAMPTZ NOT NULL,
+  UNIQUE (order_ref, product_id, location_id)   -- idempotent re-submits
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-constraints.html" rel="noopener">Constraints — PostgreSQL documentation (CHECK, UNIQUE and exclusion constraints as last-line invariants)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/datatype-numeric.html" rel="noopener">Numeric types — PostgreSQL documentation (why quantities and money are NUMERIC, never double precision)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/eaaDev/AccountingTransaction.html" rel="noopener">Accounting Transaction — Martin Fowler (the balanced, immutable entry pair a transfer maps onto)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/eaaDev/EventSourcing.html" rel="noopener">Event Sourcing — Martin Fowler (state as a fold over an append-only log, and when to keep a snapshot)</a></li>
+      <li>[Reference] <a href="https://github.com/frappe/erpnext/tree/develop/erpnext/stock/doctype/stock_ledger_entry" rel="noopener">Stock Ledger Entry — frappe/erpnext on GitHub (a battle-tested ledger with running qty_after_transaction)</a></li>
+    </ul>
+
+    <h3>API contract: the endpoints worth building</h3>
+    <p>The API shape follows the data model: you never <code>PUT</code> a quantity, you post a movement. That single decision removes an entire class of client-side race — there is no "set stock to 90" call for two clients to issue simultaneously, only "remove 10", which is commutative and safe to apply in either order. Movement creation takes an idempotency key (reuse <code>reference</code>, backed by a unique index) so a retried request from a flaky mobile scanner does not double-post.</p>
+    <p>Return errors as RFC 9457 problem details rather than ad-hoc JSON: Spring MVC gives you <code>ProblemDetail</code> out of the box, and a stock system has several genuinely distinct failure modes the client must distinguish — insufficient stock, unknown SKU, reservation expired, and version conflict. Map the version conflict to HTTP 409 with a machine-readable type so the UI can offer "reload and retry" rather than showing a generic 500.</p>
+    <table>
+      <caption>Core endpoints for the MVP</caption>
+      <thead>
+        <tr><th>Method</th><th>Path</th><th>Purpose</th><th>Design notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>POST</td><td>/api/products</td><td>Create a product</td><td>SKU unique; 409 on duplicate SKU</td></tr>
+        <tr><td>GET</td><td>/api/products</td><td>List / search products</td><td>Paged; projection DTO, not the entity</td></tr>
+        <tr><td>POST</td><td>/api/locations</td><td>Create a location</td><td>Code unique; soft-deactivate, never delete</td></tr>
+        <tr><td>POST</td><td>/api/movements</td><td>Post receipt, issue or adjustment</td><td>Signed quantity; reason mandatory for ADJUSTMENT; idempotent on reference</td></tr>
+        <tr><td>POST</td><td>/api/movements/transfer</td><td>Move stock between locations</td><td>Writes the out/in pair in one transaction or neither</td></tr>
+        <tr><td>GET</td><td>/api/movements</td><td>Movement history</td><td>Filter by sku, location, type, date range; keyset paging, newest first</td></tr>
+        <tr><td>GET</td><td>/api/stock</td><td>Current on-hand and available</td><td>available = quantity − reserved; served from the projection</td></tr>
+        <tr><td>POST</td><td>/api/reservations</td><td>Hold stock for an order</td><td>422 when available is insufficient; sets expires_at</td></tr>
+        <tr><td>POST</td><td>/api/reservations/{id}/commit</td><td>Turn a hold into an issue</td><td>409 if already expired or committed</td></tr>
+        <tr><td>DELETE</td><td>/api/reservations/{id}</td><td>Release a hold early</td><td>Idempotent; releasing twice is not an error</td></tr>
+        <tr><td>GET</td><td>/api/reports/stock-on-hand</td><td>On-hand by SKU and location</td><td>Aggregate SQL, read-only transaction</td></tr>
+        <tr><td>GET</td><td>/api/reports/movement-history</td><td>Ledger with running balance</td><td>Window function over the movement rows</td></tr>
+        <tr><td>GET</td><td>/api/reports/valuation</td><td>Inventory value at cost</td><td>Costing method is an explicit query parameter</td></tr>
+        <tr><td>GET</td><td>/api/reports/slow-moving</td><td>No outbound movement in N days</td><td>Anti-join or NOT EXISTS; needs the movement index</td></tr>
+        <tr><td>GET</td><td>/api/alerts/low-stock</td><td>Lines below reorder threshold</td><td>Same predicate the event listener uses</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html" rel="noopener">Error Responses and ProblemDetail — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9457.html" rel="noopener">RFC 9457: Problem Details for HTTP APIs — IETF</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/bean-validation/3.0/" rel="noopener">Jakarta Bean Validation 3.0 specification (the constraints your movement DTO declares)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/repositories/query-methods-details.html" rel="noopener">Defining query methods, paging and sorting — Spring Data JPA reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-bean-validation" rel="noopener">Validation in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>The lost update: why read-then-write is the bug at the centre of this project</h3>
+    <p>Two clerks issue stock for the same SKU at the same location within the same few milliseconds. Each request runs the obvious code: load the stock level, check that quantity is at least the amount requested, subtract, save. Both transactions read 100. Both compute 90. Both write 90. One issue of ten units has vanished, the database says 90 when the shelf holds 80, and nothing anywhere logged an error. This is the lost update phenomenon, and it is the canonical concurrency bug — it appears in ticket booking, seat allocation, wallet balances and inventory alike, which is exactly why interviewers reach for it.</p>
+    <p>What makes it nasty is that it does not look like a bug. The code reads correctly, the tests pass, and on a laptop with one user it never reproduces. It only shows up under real concurrency, it corrupts data silently rather than failing loudly, and — critically — no isolation level below <code>SERIALIZABLE</code> prevents it when the read and the write are two separate statements, because in <code>READ COMMITTED</code> each statement simply sees the latest committed snapshot and neither transaction has any way of noticing the other. You have four defences, and you should be able to argue for and against each: optimistic locking with a version column, pessimistic locking with a row lock, an atomic delta <code>UPDATE</code> that never reads first, and a stricter isolation level. The next four sections take them in turn.</p>
+    <pre class="code-block" data-label="Java"><code>// WRONG - the lost update, in five lines. Do not ship this.
+@Transactional
+public void issue(Long productId, Long locationId, BigDecimal qty) {
+    StockLevel level = repo.findByProductAndLocation(productId, locationId); // both read 100
+    if (level.getQuantity().compareTo(qty) &lt; 0) throw new InsufficientStockException();
+    level.setQuantity(level.getQuantity().subtract(qty));                    // both compute 90
+    repo.save(level);                                                        // last writer wins
+}
+
+// RIGHT (one of four options) - never read the value you are about to change:
+// the database applies the delta atomically under its own row lock.
+@Modifying
+@Query("""
+    update StockLevel s set s.quantity = s.quantity - :qty
+    where s.product.id = :p and s.location.id = :l and s.quantity &gt;= :qty
+    """)
+int decrementIfAvailable(@Param("p") Long p, @Param("l") Long l, @Param("qty") BigDecimal qty);
+// returns 0 rows updated =&gt; insufficient stock OR someone beat you to it. Both are a clean failure.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/mvcc.html" rel="noopener">Concurrency Control and MVCC — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-database-locking-and-the-lost-update-phenomena/" rel="noopener">A beginner's guide to database locking and the lost update phenomena — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://martinfowler.com/eaaCatalog/optimisticOfflineLock.html" rel="noopener">Optimistic Offline Lock — Martin Fowler, Patterns of Enterprise Application Architecture</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lR6y-0RC5cc" rel="noopener">Optimistic &amp; Pessimistic Locking Explained with a Concurrent Seat Booking Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Optimistic locking with @Version, and what to do with OptimisticLockException</h3>
+    <p>Add a <code>@Version</code> field to <code>StockLevel</code> and JPA stops issuing a bare <code>UPDATE</code>. Every flush becomes <code>UPDATE stock_level SET quantity = ?, version = version + 1 WHERE product_id = ? AND location_id = ? AND version = ?</code>, and the provider checks the affected row count. Zero rows means somebody else committed in between, and Hibernate throws — <code>OptimisticLockException</code> from the JPA layer, surfaced by Spring as <code>ObjectOptimisticLockingFailureException</code>. Nothing is lost; the conflict is detected instead of silently absorbed. The cost is zero at read time and near-zero at write time, which is why it is the right default for a system where two people rarely touch the same line at the same moment.</p>
+    <p>The real design work is what you do when it throws, and this is where interviews probe. Retry when the operation is naturally re-runnable and the user does not need to know: an issue of ten units can be replayed on fresh data because the delta is still valid. Do it with bounded exponential backoff — two or three attempts, jitter, then give up — using Spring Retry or a small loop, and note the trap that the retry must live <em>outside</em> the transaction boundary, because a transaction that has already thrown is marked rollback-only and re-running inside it achieves nothing. Surface it to the user when the operation was a decision made against stale data: a stock-take adjustment that says "set this to 42" was based on a screen the user has now been told is out of date, so re-running it silently would overwrite a colleague's correction. Return 409 with the current values and let a human decide. Two smaller notes worth knowing: a version column also gives you a free ETag for HTTP conditional requests, and <code>OPTIMISTIC_FORCE_INCREMENT</code> lets a change to a child row bump the parent's version when the invariant spans an aggregate.</p>
+    <pre class="code-block" data-label="Java"><code>@Entity
+class StockLevel {
+    @Version private long version;   // JPA appends "and version = ?" to every update
+    // ...
+}
+
+// Retry OUTSIDE the transaction: the failed one is already rollback-only.
+@Retryable(retryFor = ObjectOptimisticLockingFailureException.class,
+           maxAttempts = 3, backoff = @Backoff(delay = 50, multiplier = 2, random = true))
+public MovementResult issue(IssueCommand cmd) {
+    return stockService.issueInNewTransaction(cmd);   // @Transactional lives on the callee
+}
+
+@Recover
+public MovementResult giveUp(ObjectOptimisticLockingFailureException e, IssueCommand cmd) {
+    throw new ConflictException("Stock line is busy, please retry", e);   // -&gt; HTTP 409
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html" rel="noopener">Locking — Spring Data JPA reference documentation (@Lock on repository methods)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/3.2/" rel="noopener">Jakarta Persistence 3.2 specification (@Version semantics, LockModeType, OptimisticLockException)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jpa-entity-version-property-hibernate/" rel="noopener">How to use the JPA entity version property with Hibernate — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://thorben-janssen.com/hibernate-tips-use-timestamp-versioning-optimistic-locking/" rel="noopener">Using a timestamp for versioning and optimistic locking — Thorben Janssen (and why a numeric version is safer)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-optimistic-locking" rel="noopener">Optimistic Locking in JPA — Baeldung</a></li>
+      <li>[Reference] <a href="https://github.com/spring-projects/spring-retry" rel="noopener">spring-projects/spring-retry — GitHub (@Retryable, @Recover, backoff policies)</a></li>
+    </ul>
+
+    <h3>Pessimistic locking, SELECT … FOR UPDATE, and what it costs</h3>
+    <p>The pessimistic route takes the row lock up front. <code>LockModeType.PESSIMISTIC_WRITE</code> on a Spring Data repository method emits <code>SELECT … FOR UPDATE</code>, and PostgreSQL then blocks any other transaction that tries to lock or update that row until yours commits or rolls back. The lost update becomes structurally impossible: the second clerk's transaction waits, then reads the already-decremented 90 and correctly refuses or succeeds against real data. There is no conflict exception to handle and no retry logic to write, which is why it feels attractive.</p>
+    <p>The costs are real and you must be able to state them. Throughput collapses on hot rows: every transaction touching a popular SKU serialises, and the lock is held for the whole transaction, so any slow work inside that boundary — a large report, a validation call, an unlucky garbage collection — is time every other clerk spends waiting. Deadlocks appear as soon as one transaction locks A then B while another locks B then A, which a stock transfer does naturally; PostgreSQL detects the cycle and kills one transaction with a deadlock error, so you either enforce a global lock ordering (always lock the lower location id first) or you handle and retry the failure. Locks are also invisible to your own tests unless you deliberately write concurrent ones. Always pair a pessimistic lock with a lock timeout so a wedged transaction degrades into a fast error rather than an unbounded hang, and always keep the transaction that holds it as short as humanly possible.</p>
+    <pre class="code-block" data-label="Java"><code>public interface StockLevelRepository extends JpaRepository&lt;StockLevel, StockLevelId&gt; {
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)                 // -&gt; SELECT ... FOR UPDATE
+    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "3000"))
+    @Query("select s from StockLevel s where s.product.id = :p and s.location.id = :l")
+    Optional&lt;StockLevel&gt; findForUpdate(@Param("p") Long p, @Param("l") Long l);
+}
+
+// Transfers lock TWO rows - always in the same order, or you will deadlock in production.
+List&lt;Long&gt; ordered = Stream.of(fromLocationId, toLocationId).sorted().toList();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/explicit-locking.html" rel="noopener">Explicit Locking — PostgreSQL documentation (row-level lock modes, deadlock detection)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT — PostgreSQL documentation (the FOR UPDATE / FOR NO KEY UPDATE / SKIP LOCKED clause)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/optimistic-vs-pessimistic-locking/" rel="noopener">Optimistic vs pessimistic locking — Vlad Mihalcea (the decision framed by conflict probability)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/eaaCatalog/pessimisticOfflineLock.html" rel="noopener">Pessimistic Offline Lock — Martin Fowler, Patterns of Enterprise Application Architecture</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-pessimistic-locking" rel="noopener">Pessimistic Locking in JPA — Baeldung (the three pessimistic lock modes compared)</a></li>
+    </ul>
+
+    <h3>Isolation levels: what READ COMMITTED does and does not prevent here</h3>
+    <p>PostgreSQL defaults to <code>READ COMMITTED</code>, and so does your Boot application unless you say otherwise. Be precise about what that buys you. It guarantees you never read uncommitted data, and each statement sees a snapshot taken at the start of <em>that statement</em>. It does not give repeatable reads: two <code>SELECT</code>s in one transaction can legitimately return different quantities. And it does not prevent the lost update in the read-then-write shape, because both transactions read a valid committed snapshot and both write valid rows — no constraint is violated, so the database has nothing to complain about. The subtlety worth memorising: a single <code>UPDATE … SET quantity = quantity - 10</code> <em>is</em> safe even at <code>READ COMMITTED</code>, because PostgreSQL re-reads the row under its lock and re-evaluates the expression against the latest committed version. The danger lives in the gap between two statements, not inside one.</p>
+    <p>Stepping up costs something specific. <code>REPEATABLE READ</code> in PostgreSQL is snapshot isolation: your transaction sees one consistent snapshot throughout, and a conflicting concurrent update aborts your transaction with a serialization failure that you must catch and retry — so it converts a silent corruption into a loud, retryable error. <code>SERIALIZABLE</code> adds predicate-level conflict detection, which is what you would need to make "check available across all locations, then reserve" genuinely safe, at the price of more aborts under load. In practice the pragmatic answer for this project is to keep <code>READ COMMITTED</code> globally and reach for a targeted <code>SELECT … FOR UPDATE</code> exactly where an invariant spans a read and a later write in the same transaction: committing a reservation (read the hold, verify it is unexpired, then decrement) and reconciling a stock take are the two places where you genuinely need it. Raising the isolation level for the whole application to fix two methods is the answer that gets marked down.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/transaction-iso.html" rel="noopener">Transaction Isolation — PostgreSQL documentation (what each level actually guarantees, with the update-conflict rules)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-set-transaction.html" rel="noopener">SET TRANSACTION — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-transaction-isolation-levels-in-enterprise-java/" rel="noopener">A beginner's guide to transaction isolation levels in enterprise Java — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/hibernate-application-level-repeatable-reads/" rel="noopener">Hibernate application-level repeatable reads — Vlad Mihalcea (why the persistence context is not an isolation level)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=a9z9x4bxmK4" rel="noopener">Spring Boot Transaction Isolation Explained — Java Techie</a></li>
+    </ul>
+
+    <h3>Transaction boundaries in Spring: where @Transactional goes, and where it silently does nothing</h3>
+    <p>Put <code>@Transactional</code> on the application service, not the controller and not the repository. The service method is the unit of business work — "post this transfer" means two movement rows and two projection updates commit together or none of them do — and that is precisely what a transaction boundary should express. On the controller it is wrong in both directions: it stretches the transaction across request deserialisation and response serialisation, and it makes the boundary a property of the delivery mechanism rather than the domain, so a scheduled job calling the same service gets no transaction at all. On the repository it is too narrow: each save commits independently and a failure halfway leaves the ledger inconsistent with the projection.</p>
+    <p>Learn the self-invocation trap before it costs you an afternoon. Spring's declarative transactions are implemented by a proxy, so the annotation is honoured only when the call arrives from outside the bean. A public method calling <code>this.otherAnnotatedMethod()</code> bypasses the proxy entirely and runs with no transaction and no error message. The same applies to private, final and static methods, and to calls made from a constructor. The fix is to move the annotated method into a separate collaborator and inject it — which is also why the retry example above delegates to another bean. Three more rules complete the picture. Mark every query method <code>readOnly = true</code>: Hibernate skips dirty-checking and flushes, and PostgreSQL can route the transaction to a replica, which matters a great deal on the reporting endpoints. Choose propagation deliberately on the alert path — the low-stock notification must not be able to roll back the movement that triggered it, so it runs either in <code>REQUIRES_NEW</code> or, better, from an <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code>. And never let a transaction span an external HTTP call: a payment gateway or a supplier API that takes eight seconds is eight seconds of held row locks and a database connection pinned out of the pool, and if it times out you cannot roll back the remote side anyway. Commit first, then call, and reconcile with an outbox or a retry.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+class StockService {
+
+    @Transactional                                  // boundary = one business operation
+    public MovementResult issue(IssueCommand cmd) {
+        movementRepo.save(Movement.issue(cmd));     // append to the ledger
+        int updated = levelRepo.decrementIfAvailable(cmd.productId(), cmd.locationId(), cmd.qty());
+        if (updated == 0) throw new InsufficientStockException(cmd);
+        events.publishEvent(new StockChanged(cmd.productId(), cmd.locationId()));
+        return MovementResult.of(cmd);              // NO http call inside this method
+    }
+
+    @Transactional(readOnly = true)                 // no dirty checking, replica-routable
+    public StockView currentStock(Long productId) { ... }
+
+    // this.issue(...) from another method of THIS class would skip the proxy and run
+    // with no transaction at all - inject a collaborator instead.
+}
+
+@Component
+class LowStockAlerts {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Async
+    public void onStockChanged(StockChanged e) {    // runs after commit: cannot roll it back
+        notifier.sendIfBelowThreshold(e);           // the external call lives HERE, not above
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html" rel="noopener">Using @Transactional — Spring Framework reference (proxy semantics, self-invocation, readOnly)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html" rel="noopener">Transaction propagation — Spring Framework reference (REQUIRED, REQUIRES_NEW, NESTED)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/event.html" rel="noopener">Transaction-bound events — Spring Framework reference (@TransactionalEventListener phases)</a></li>
+      <li>[Article] <a href="https://www.marcobehler.com/guides/spring-transaction-management-transactional-in-depth" rel="noopener">Spring Transaction Management: @Transactional In-Depth — Marco Behler</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/spring-read-only-transaction-hibernate-optimization/" rel="noopener">The best way to use read-only Spring transactions — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-transactional-propagation-isolation" rel="noopener">Transaction Propagation and Isolation in Spring @Transactional — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4BD6pF7dkkc" rel="noopener">Spring Transaction Management: Finally Understandable — Marco Behler</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NKuo8hyIwgQ" rel="noopener">Spring Boot Transaction Propagation Explained — Java Techie</a></li>
+    </ul>
+
+    <h3>Reservations with expiry, and the low-stock alert path</h3>
+    <p>A reservation is a promise: this quantity at this location belongs to order X until it expires. It introduces a second number alongside on-hand quantity — <code>reserved</code> — and the value customers actually care about becomes <code>available = quantity − reserved</code>. Every reservation transition must be atomic with the projection update, so holding stock increments <code>reserved</code> in the same transaction that inserts the reservation row, and committing one decrements both <code>reserved</code> and <code>quantity</code> while appending the <code>ISSUE</code> movement. Make the hold idempotent on <code>(order_ref, product_id, location_id)</code> with a unique index, so a client that retries a timed-out request gets its existing hold back rather than a second one.</p>
+    <p>Expiry is where the design gets interesting. A scheduled sweeper that releases expired holds is the obvious answer and the right one — but run it with <code>FOR UPDATE SKIP LOCKED</code> so several instances can process disjoint batches without blocking each other, and guard it with a distributed lock (ShedLock is the standard answer) so a two-replica deployment does not double-release. Do the sweep in bounded batches inside short transactions rather than one heroic transaction over ten thousand rows. Separately, decide whether an expired hold is <em>lazily</em> ignored at read time as well: a sweeper that runs every minute means a hold can be up to a minute stale, so the availability query should also exclude holds whose <code>expires_at</code> has passed. Low-stock alerting hangs off the same event stream — publish a domain event on every stock change, listen after commit, and debounce so a receipt of a hundred units followed by ten issues does not fire ten emails.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Framework reference (@Scheduled, fixed delay vs cron)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/index.html" rel="noopener">Actuator — Spring Boot reference (health and metrics for the sweeper job)</a></li>
+      <li>[Reference] <a href="https://github.com/lukas-krecan/ShedLock" rel="noopener">lukas-krecan/ShedLock — GitHub (stopping a scheduled task running twice across replicas)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-events" rel="noopener">Spring Events — Baeldung (publishing and consuming application events)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-scheduled-tasks" rel="noopener">The @Scheduled Annotation in Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Reporting: aggregates, window functions, indexes, and read-time versus a maintained summary</h3>
+    <p>Four reports, four different SQL shapes, and that is the point of building them. Stock on hand is a plain <code>GROUP BY</code> aggregate over the ledger or a straight read of the projection. Movement history with a running balance is the window-function report: <code>SUM(quantity) OVER (PARTITION BY product_id, location_id ORDER BY created_at, id)</code> gives you the balance after every row without a self-join or a loop in Java, and adding <code>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code> makes the frame explicit rather than relying on the default. Valuation multiplies quantity by cost, which forces you to state your costing method — weighted average is a window aggregate over receipts, FIFO needs a lot-level allocation. Slow-moving stock is an anti-join: lines with no <code>ISSUE</code> movement in the last N days, expressed as <code>NOT EXISTS</code>.</p>
+    <p>Two engineering decisions sit underneath. Indexing: every one of these reports filters by product, location and a date range, so a composite index on <code>(product_id, location_id, created_at)</code> serves them all, and column order matters — equality predicates first, the range last. Run <code>EXPLAIN (ANALYZE, BUFFERS)</code> on each report against a seeded table of a few hundred thousand movements and read the plan; a sequential scan on the ledger is the signal that your index is wrong, not that Postgres is slow. Second, computed-on-read versus a maintained summary table. Deriving everything from the ledger is always correct and never stale, but the cost grows without bound as history accumulates. A maintained <code>stock_level</code> projection is O(1) to read but can drift from the ledger if any write path forgets to update it. The professional answer is to do both and reconcile: read from the projection, and run a scheduled job that recomputes <code>SUM(quantity)</code> from the ledger and alerts on any discrepancy. For the heavier historical reports, a materialised view refreshed nightly is the middle ground worth knowing about — and worth naming in an interview, along with the fact that <code>REFRESH MATERIALIZED VIEW CONCURRENTLY</code> needs a unique index to avoid locking readers out.</p>
+    <pre class="code-block" data-label="SQL"><code>-- movement history with a running balance: one pass, no self-join
+SELECT m.created_at, m.movement_type, m.quantity, m.reference,
+       SUM(m.quantity) OVER (PARTITION BY m.product_id, m.location_id
+                             ORDER BY m.created_at, m.id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS balance_after
+FROM   stock_movement m
+WHERE  m.product_id = :productId AND m.location_id = :locationId
+  AND  m.created_at &gt;= :from
+ORDER  BY m.created_at, m.id;
+
+-- slow moving: nothing went out in the last :days days, but we still hold stock
+SELECT l.product_id, l.location_id, l.quantity
+FROM   stock_level l
+WHERE  l.quantity &gt; 0
+  AND  NOT EXISTS (
+        SELECT 1 FROM stock_movement m
+        WHERE  m.product_id = l.product_id AND m.location_id = l.location_id
+          AND  m.movement_type = 'ISSUE'
+          AND  m.created_at &gt;= now() - make_interval(days =&gt; :days));
+
+-- the reconciliation job: projection must equal the fold of the ledger
+SELECT l.product_id, l.location_id, l.quantity AS projected, COALESCE(SUM(m.quantity), 0) AS ledger
+FROM   stock_level l LEFT JOIN stock_movement m
+       ON m.product_id = l.product_id AND m.location_id = l.location_id
+GROUP  BY l.product_id, l.location_id, l.quantity
+HAVING l.quantity &lt;&gt; COALESCE(SUM(m.quantity), 0);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/tutorial-window.html" rel="noopener">Window Functions — PostgreSQL tutorial (the clearest short introduction there is)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/functions-window.html" rel="noopener">Window Functions — PostgreSQL function reference (row_number, lag, first_value, frames)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/using-explain.html" rel="noopener">Using EXPLAIN — PostgreSQL documentation (reading the plan your report actually runs)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/rules-materializedviews.html" rel="noopener">Materialized Views — PostgreSQL documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-index-only-scans.html" rel="noopener">Index-Only Scans and Covering Indexes — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/where-clause/the-equals-operator/concatenated-keys" rel="noopener">Concatenated (composite) indexes and column order — Use The Index, Luke!</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-jpa-projections" rel="noopener">Spring Data JPA Projections — Baeldung (returning report DTOs instead of entities)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4V4pQ7V2M2A" rel="noopener">Visualizing SQL window functions — Oracle Developers</a></li>
+    </ul>
+  </section>
+
+  <section id="build">
+    <h2>Building it</h2>
+
+    <h3>Build phases: nine steps, each independently runnable and demoable</h3>
+    <p>Every phase below ends with something you can start, hit with a request and show to somebody. Resist merging phases; the value of this sequence is that phase 4 fails loudly if phases 2 and 3 were sloppy, and that is the lesson.</p>
+    <ol>
+      <li><strong>Schema and catalog.</strong> Spring Boot with PostgreSQL in Docker Compose, Flyway from the first commit — no <code>ddl-auto: update</code>, ever. Migration V1 creates <code>product</code> and <code>location</code> with their unique constraints. Demo: create a product and a location through REST, restart the app, see the data survive and the Flyway history table filled in.</li>
+      <li><strong>The movement ledger and the derived quantity.</strong> Migration V2 adds <code>stock_movement</code> and <code>stock_level</code> with their CHECK constraints and the version column. Write only the domain calculation first: given a list of movements, what is the balance? Pure Java, no Spring, unit-tested. Demo: a repository test that inserts movements and reads back a correct on-hand figure.</li>
+      <li><strong>The movement API with validation.</strong> Controllers for receipt, issue, transfer and adjustment; Bean Validation on the request DTOs; RFC 9457 problem responses; reason mandatory for adjustments; transfer writes its out/in pair inside one transaction. Demo: post a receipt then an issue and watch on-hand change; post an issue for more than you hold and get a clean 422.</li>
+      <li><strong>Concurrency, test first.</strong> Write the failing test before the fix: two threads, a <code>CountDownLatch</code>, both issuing from the same stock line, asserting that the final quantity equals the arithmetic. Watch it fail against the naive read-then-write implementation. Then fix it — atomic delta update plus <code>@Version</code> — and watch it pass. Add a second test that asserts the conflict surfaces as a 409 rather than corrupt data. Demo: the test run itself, red then green.</li>
+      <li><strong>Reservations with expiry.</strong> Hold, release and commit endpoints; <code>reserved</code> maintained atomically with the projection; unique index for idempotent holds; a scheduled sweeper with <code>SKIP LOCKED</code> and ShedLock; availability excludes already-expired holds. Demo: hold stock, watch available drop, wait for expiry, watch it come back.</li>
+      <li><strong>Reporting endpoints and indexes.</strong> The four reports, seeded with a few hundred thousand movements so the numbers mean something. Add the composite index, capture <code>EXPLAIN (ANALYZE, BUFFERS)</code> before and after, and record both plans in the repository README. Demo: the running-balance report, and the before/after timings.</li>
+      <li><strong>The full test pyramid pass.</strong> Go back over everything and fill the gaps: domain unit tests, <code>@DataJpaTest</code> with Testcontainers for repositories and locking, <code>@WebMvcTest</code> for controllers, one <code>@SpringBootTest</code> slice end to end, one contract test. Add JaCoCo and look at what is genuinely uncovered rather than chasing a percentage. Demo: a green build with a coverage report.</li>
+      <li><strong>Angular UI.</strong> A stock grid with location filter, a movement form, a movement history view with the running balance, and a reservation panel. Typed reactive forms, an HTTP interceptor for errors that renders the problem-detail payload, and an optimistic-lock conflict handled as "this line changed, reload?" rather than a toast saying "error". Demo: two browser tabs issuing from the same SKU, one of them getting the conflict dialog.</li>
+      <li><strong>One stretch goal, done properly.</strong> Batch/lot tracking with FEFO allocation, or serial numbers, or stock-take reconciliation, or multi-currency valuation. Pick the one you would most want to be asked about.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://documentation.red-gate.com/flyway" rel="noopener">Flyway documentation — Redgate (migration naming, versioning, repeatable migrations, baselines)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/data-initialization.html" rel="noopener">Database initialization — Spring Boot how-to guides (Flyway and Liquibase wiring)</a></li>
+      <li>[Article] <a href="https://reflectoring.io/database-migration-spring-boot-flyway/" rel="noopener">One-stop guide to database migration with Flyway and Spring Boot — Reflectoring</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-migrations-with-flyway" rel="noopener">Database Migrations with Flyway — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=w12DsiqpxEg" rel="noopener">Spring Boot Database Migrations with Flyway — Java Techie</a></li>
+    </ul>
+
+    <h3>The test pyramid for this project, and why Testcontainers rather than H2</h3>
+    <p>This capstone is the one where you build the whole pyramid, because it is the one where each layer catches a different class of bug. At the base, plain JUnit 5 unit tests over the stock-calculation domain: given these movements, what is the balance; does a transfer balance to zero; does an adjustment require a reason; is available correctly reduced by an unexpired hold. No Spring context, milliseconds to run, and this is where the arithmetic edge cases belong. Above that, <code>@DataJpaTest</code> against a real PostgreSQL container for repository behaviour, constraint violations and locking semantics. Then <code>@WebMvcTest</code> with the service mocked for the controller layer: status codes, validation messages, problem-detail bodies, JSON shape. Then a small number of <code>@SpringBootTest</code> tests covering one full slice — receive, reserve, commit, report — proving the wiring holds. Then one contract test so the Angular client and the API cannot drift apart silently.</p>
+    <p>Use Testcontainers and not H2, and know exactly why, because it is a favourite follow-up question. H2 is a different database with a different SQL dialect: its PostgreSQL compatibility mode is an approximation, not an implementation. It handles <code>SELECT … FOR UPDATE</code>, <code>SKIP LOCKED</code>, lock timeouts and deadlock detection differently or not at all; its MVCC behaviour and isolation-level semantics differ; window-function and interval syntax diverge; and native SQL that works on Postgres routinely fails on H2 and vice versa. Since the entire point of this project is locking and isolation behaviour, testing it on an engine with different locking and isolation behaviour tests nothing — you would get a green build for code that loses updates in production. Testcontainers spins up the real image, so what you assert is what you ship. Use a singleton container or Spring Boot's <code>@ServiceConnection</code> support to keep startup cost off every test class.</p>
+    <pre class="code-block" data-label="Java"><code>@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)  // keep the real DB
+@Testcontainers
+class ConcurrentIssueTest {
+
+    @Container @ServiceConnection
+    static PostgreSQLContainer&lt;?&gt; db = new PostgreSQLContainer&lt;&gt;("postgres:16-alpine");
+
+    @Test
+    void two_threads_issuing_the_same_line_must_not_lose_an_update() throws Exception {
+        seedStock(SKU, LOC, new BigDecimal("100"));
+        var start = new CountDownLatch(1);
+        var done  = new CountDownLatch(2);
+        var pool  = Executors.newFixedThreadPool(2);
+
+        Runnable issueTen = () -&gt; {
+            try { start.await(); stockService.issue(new IssueCommand(SKU, LOC, TEN)); }
+            catch (Exception ignored) { /* a conflict is acceptable; a lost update is not */ }
+            finally { done.countDown(); }
+        };
+        pool.submit(issueTen); pool.submit(issueTen);
+        start.countDown();                     // release both at the same instant
+        done.await(10, TimeUnit.SECONDS);
+
+        // projection must equal the fold of the ledger, always
+        assertThat(onHand(SKU, LOC)).isEqualByComparingTo(ledgerSum(SKU, LOC));
+        // 80 = both issues applied; 90 = one lost the race and was REJECTED.
+        // Anything else - notably 90 with two ISSUE rows in the ledger - is a lost update.
+        assertThat(issueRowCount(SKU, LOC) * 10 + onHand(SKU, LOC).intValue()).isEqualTo(100);
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html" rel="noopener">Testing Spring Boot Applications — Spring Boot reference (@SpringBootTest and every test slice)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers support — Spring Boot reference (@ServiceConnection, dev services)</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/modules/databases/postgres/" rel="noopener">PostgreSQL module — Testcontainers for Java documentation</a></li>
+      <li>[Official] <a href="https://testcontainers.com/guides/testing-spring-boot-rest-api-using-testcontainers/" rel="noopener">Testing a Spring Boot REST API using Testcontainers — Testcontainers guides</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/practical-test-pyramid.html" rel="noopener">The Practical Test Pyramid — Ham Vocke on martinfowler.com</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-testing-tutorial/" rel="noopener">Spring Boot Testing Tutorial — SivaLabs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-testcontainers-integration-test" rel="noopener">Testing Spring Boot Applications with Testcontainers — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q-0Z6KZF1xM" rel="noopener">Spring Boot 3 Integration Testing With Testcontainers — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=q2LSz7cnC1g" rel="noopener">Modern Spring Boot Application Development using Testcontainers — SivaLabs</a></li>
+    </ul>
+
+    <h3>The controller slice and the contract test</h3>
+    <p><code>@WebMvcTest</code> loads only the web layer, so the service is a mock and the tests run fast enough to be exhaustive about the things the web layer owns: does an insufficient-stock failure become 422 and not 500; does a version conflict become 409 with a problem-detail body the UI can branch on; does a negative quantity get rejected by validation before the service is ever called; is the movement-history response paged and sorted as documented. Assert on the JSON, not on the object, because the JSON is the contract.</p>
+    <p>Then add one genuine contract test so that contract cannot drift. Consumer-driven contracts with Pact are the usual choice when the Angular app is the consumer — the client test declares the interactions it needs, and the provider build replays them against the real controller, so a field rename in the API breaks the backend build rather than the browser. Spring Cloud Contract is the equivalent when the provider owns the contract. Either way, the value is the same and worth saying out loud in an interview: a contract test fails at build time in CI instead of at runtime in front of a warehouse clerk.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/testing/mockmvc.html" rel="noopener">MockMvc — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://docs.junit.org/current/user-guide/" rel="noopener">JUnit 5 User Guide (parameterized tests, nested tests, lifecycle, timeouts)</a></li>
+      <li>[Official] <a href="https://docs.pact.io/" rel="noopener">Pact documentation — consumer-driven contract testing</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/" rel="noopener">Spring Cloud Contract reference documentation</a></li>
+      <li>[Article] <a href="https://reflectoring.io/spring-boot-data-jpa-test/" rel="noopener">Testing JPA Queries with Spring Boot and @DataJpaTest — Reflectoring</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/pact-junit-consumer-driven-contracts" rel="noopener">Consumer-Driven Contracts with Pact — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=41Ry2ojnJFM" rel="noopener">Spring Boot 3 Integration Testing With Testcontainers — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Module map: which course modules this capstone exercises</h3>
+    <p>Every design decision above has a module behind it. If a phase stalls, the map tells you which page to reread rather than which tutorial to search for.</p>
+    <ul>
+      <li>Schema, constraints and the ledger table: <a href="../databases/02-ddl.html">Databases 02 — DDL</a>, <a href="../databases/11-normalization-design.html">Databases 11 — Normalization and Design</a>, <a href="../databases/01-relational-model.html">Databases 01 — The Relational Model</a></li>
+      <li>Transactions, isolation and locking at the database level: <a href="../databases/10-transactions.html">Databases 10 — Transactions</a></li>
+      <li>Reporting SQL: <a href="../databases/05-aggregation.html">Databases 05 — Aggregation</a>, <a href="../databases/07-window-functions.html">Databases 07 — Window Functions</a>, <a href="../databases/06-subqueries-cte.html">Databases 06 — Subqueries and CTEs</a></li>
+      <li>Index design and plan reading for the reports: <a href="../databases/08-indexing.html">Databases 08 — Indexing</a>, <a href="../databases/09-query-optimization.html">Databases 09 — Query Optimization</a></li>
+      <li>Entities, the version column and locking in JPA: <a href="../jpa/12-transactions-concurrency.html">JPA 12 — Transactions and Concurrency</a>, <a href="../jpa/07-persistence-context.html">JPA 07 — The Persistence Context</a>, <a href="../jpa/03-identifiers.html">JPA 03 — Identifiers</a></li>
+      <li>Repositories, projections and query writing: <a href="../jpa/10-spring-data-repositories.html">JPA 10 — Spring Data Repositories</a>, <a href="../jpa/09-queries.html">JPA 09 — Queries</a>, <a href="../jpa/08-fetching-nplus1.html">JPA 08 — Fetching and N+1</a></li>
+      <li>Service wiring, web layer and configuration: <a href="../spring-boot/05-data-access.html">Spring Boot 05 — Data Access</a>, <a href="../spring-boot/04-web.html">Spring Boot 04 — Web</a>, <a href="../spring-boot/02-externalized-config.html">Spring Boot 02 — Externalized Configuration</a></li>
+      <li>Scheduling the expiry sweeper and watching the job: <a href="../spring-boot/10-caching-messaging-scheduling.html">Spring Boot 10 — Caching, Messaging and Scheduling</a>, <a href="../spring-boot/06-actuator.html">Spring Boot 06 — Actuator</a></li>
+      <li>The pyramid, layer by layer: <a href="../backend-testing/01-junit5-basics.html">Backend Testing 01 — JUnit 5 Basics</a>, <a href="../backend-testing/03-assertj.html">Backend Testing 03 — AssertJ</a>, <a href="../backend-testing/04-mockito-basics.html">Backend Testing 04 — Mockito Basics</a>, <a href="../backend-testing/06-tdd.html">Backend Testing 06 — TDD</a></li>
+      <li>Slices, containers and contracts: <a href="../backend-testing/07-spring-integration-testing.html">Backend Testing 07 — Spring Integration Testing</a>, <a href="../backend-testing/08-testcontainers.html">Backend Testing 08 — Testcontainers</a>, <a href="../backend-testing/09-api-contract-testing.html">Backend Testing 09 — API and Contract Testing</a>, <a href="../backend-testing/10-coverage-mutation.html">Backend Testing 10 — Coverage and Mutation</a></li>
+      <li>The reasoning behind the correctness choices: <a href="../system-design/08-consistency-availability.html">System Design 08 — Consistency and Availability</a>, <a href="../system-design/09-api-design.html">System Design 09 — API Design</a>, <a href="../system-design/06-database-scaling.html">System Design 06 — Database Scaling</a></li>
+      <li>The Angular front end: <a href="../angular-basics/10-http-observables.html">Angular Basics 10 — HTTP and Observables</a>, <a href="../angular-basics/09-forms.html">Angular Basics 09 — Forms</a>, <a href="../angular-basics/06-services-di.html">Angular Basics 06 — Services and DI</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="02-admin-dashboard.html">← Admin Dashboard</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="04-job-portal.html">Job Portal →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees "Inventory System" on your CV and knows exactly where to push. These are the questions Indian product and service companies actually ask about this project — the design decisions, not the framework trivia:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through your inventory system in two minutes.</summary>
+      <div class="answer"><p>Products with SKUs, multiple warehouse locations, and stock levels per product per location. The key decision is that stock never changes by editing a quantity — every change is an immutable movement row in an append-only ledger (receipt, issue, transfer, adjustment), and current quantity is a projection maintained by an atomic delta update. On top sit reservations with expiry, low-stock alerts, and four reports. The hard parts were concurrency on a stock line and getting the transaction boundaries right, and both are covered by tests including a genuine two-thread concurrency test on a real Postgres container.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why a movement ledger instead of a quantity column you update?</summary>
+      <div class="answer"><p>Three reasons. Audit: a ledger answers "who moved what, when and why", which an updated column destroys and which every real warehouse needs. Correctness: inserts do not contend, so the write path has no shared row to race on, whereas read-modify-write on a shared column is the lost-update bug. Reporting: history, running balances, valuation and slow-moving analysis all fall out of the ledger for free. The cost is that current quantity must be derived, which is why I keep a projection and reconcile it against the ledger on a schedule.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where do you put @Transactional, and why not on the controller?</summary>
+      <div class="answer"><p>On the application service method, because that is the unit of business work — a transfer is two movement rows and two projection updates, all or nothing. On the controller it would stretch the transaction across request deserialisation and response serialisation, hold a connection longer than necessary, and tie the boundary to HTTP so a scheduled job calling the same service would get no transaction at all. On the repository it would be too narrow: each save commits separately, so a half-finished transfer would persist.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Two users issue stock for the same SKU at the same moment. Show me the bug and your fix.</summary>
+      <div class="answer"><p>The bug is the lost update: both transactions read quantity 100, both compute 90, both write 90 — one issue of ten units disappears with no error anywhere. My fix has two parts. The write never reads the value it changes: a single <code>UPDATE stock_level SET quantity = quantity - :qty WHERE ... AND quantity &gt;= :qty</code>, which the database evaluates atomically under its own row lock, and zero rows affected means insufficient stock or a race — either way a clean failure, not corruption. Second, the projection carries a <code>@Version</code> column so any path that does load an entity gets a conflict exception rather than a silent overwrite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Optimistic or pessimistic locking — which did you choose here and why?</summary>
+      <div class="answer"><p>Optimistic by default, because conflicts on a given stock line are rare and the cost of a version check is essentially zero, while a pessimistic lock serialises every clerk touching a popular SKU. I use pessimistic <code>PESSIMISTIC_WRITE</code> in two specific places where an invariant spans a read and a later write in the same transaction: committing a reservation, and stock-take reconciliation. The general rule I apply is conflict probability against retry cost — high contention or expensive-to-redo work favours pessimistic, low contention and cheap replays favour optimistic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does READ COMMITTED prevent, and what does it not prevent in this project?</summary>
+      <div class="answer"><p>It prevents dirty reads — you never see uncommitted data — and each statement sees a snapshot as of that statement's start. It does not give repeatable reads, and crucially it does not prevent the lost update when the read and the write are separate statements: both transactions read valid committed data and write valid rows, so the database has no conflict to detect. The important nuance is that a single <code>UPDATE ... SET quantity = quantity - 10</code> is safe even at READ COMMITTED, because Postgres re-reads the row under lock and re-evaluates the expression. The danger lives in the gap between two statements.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You catch an OptimisticLockException. Retry it or show it to the user?</summary>
+      <div class="answer"><p>It depends on whether the operation is a delta or a decision. "Issue ten units" is a delta and stays valid on fresh data, so I retry it — bounded attempts, exponential backoff with jitter, and the retry sits outside the transaction boundary because the failed transaction is already rollback-only. "Set the count to 42" is a decision made against a screen that is now stale, so retrying would silently overwrite a colleague's correction; that one returns 409 with the current values and lets a human choose. Blanket retry-everything is the answer that gets marked down.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you actually test a concurrency bug? Tests are usually single-threaded.</summary>
+      <div class="answer"><p>An executor with two threads, a <code>CountDownLatch</code> to release them at the same instant, and a second latch to wait for both, running against a real PostgreSQL container. The assertion is not "no exception" — a version conflict is an acceptable outcome — the assertion is that the projection equals the fold of the ledger and that the final quantity is arithmetically possible. I wrote the test first and watched it fail against the naive implementation, which matters: a concurrency test that has never gone red is a test you cannot trust.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why Testcontainers rather than H2 for the repository tests?</summary>
+      <div class="answer"><p>Because the whole point of the project is locking and isolation, and H2 is a different engine with a different dialect. Its PostgreSQL compatibility mode approximates syntax, not semantics: <code>SELECT ... FOR UPDATE</code>, <code>SKIP LOCKED</code>, lock timeouts, deadlock detection, MVCC behaviour and window-function and interval syntax all differ. A green build on H2 would tell me nothing about whether the code loses updates on Postgres. Testcontainers runs the real image, so the assertions reflect production. I keep it fast with a reused container and Spring Boot's @ServiceConnection support.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your low-stock alert sends an email. Where does that call go, and why not inside the transaction?</summary>
+      <div class="answer"><p>Outside it — published as a domain event and consumed by a <code>@TransactionalEventListener</code> in the AFTER_COMMIT phase. Three reasons. A transaction holding row locks while an SMTP or HTTP call takes several seconds is a throughput disaster and pins a pooled connection. The external call cannot be rolled back, so sending inside the transaction risks emailing about a movement that then rolls back. And a failure of the notifier must never fail the stock movement — the business operation is more important than the alert. If delivery has to be guaranteed I would use a transactional outbox: write the intent in the same transaction, dispatch it afterwards.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain the self-invocation trap and how it could have bitten this codebase.</summary>
+      <div class="answer"><p>Spring's declarative transactions are proxy-based, so <code>@Transactional</code> is only honoured when the call comes in through the proxy from outside the bean. If my service had a public method calling <code>this.issueInternal()</code>, the annotation on <code>issueInternal</code> would be ignored completely — no transaction, no warning, and the ledger insert and projection update would commit independently. The same applies to private, final and static methods. The fix is to move the annotated method into a separate injected collaborator, which is exactly why my retry wrapper delegates to another bean rather than calling itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What breaks first when this system reaches ten thousand movements a minute, and what do you change?</summary>
+      <div class="answer"><p>The projection row becomes the hot spot: a popular SKU at one location is a single row every write must update, and that serialises. The ledger insert scales fine because inserts do not contend. Options in order of preference: shard the projection into per-partition rows summed on read so writes spread across many rows; drop the projection for hot SKUs and compute on read from a partitioned ledger with a periodic snapshot; or batch the deltas and apply them asynchronously, accepting eventual consistency on the displayed number while keeping the ledger authoritative. I would also partition <code>stock_movement</code> by month once history dominates the table size.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Computed-on-read versus a maintained summary table for the reports — defend your choice.</summary>
+      <div class="answer"><p>I do both, deliberately. The ledger is authoritative and always correct but its cost grows with history; the maintained projection is O(1) to read but can drift if any write path forgets it. So reads go to the projection, and a scheduled reconciliation job recomputes <code>SUM(quantity)</code> from the ledger and alerts on any mismatch — that job is what makes the projection trustworthy. For heavier historical reports I would use a materialised view refreshed nightly, remembering that <code>REFRESH MATERIALIZED VIEW CONCURRENTLY</code> requires a unique index or it locks readers out. The general principle is that a derived value needs a reconciliation story, not just a maintenance path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A transfer locks two rows. What can go wrong, and how did you prevent it?</summary>
+      <div class="answer"><p>Deadlock. One transaction locks location A then B while a concurrent one locks B then A, and each waits for the other; PostgreSQL detects the cycle and kills one with a deadlock error after its timeout. I prevent it by enforcing a global lock ordering — always acquire the lower location id first, regardless of transfer direction — so a cycle cannot form. I also set an explicit lock timeout so a wedged transaction fails fast instead of hanging, and I keep the locking transaction short with no external calls inside it. The residual risk is handled by retrying the deadlock error, since a deadlock victim is safe to replay.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you add batch and expiry-date tracking without rewriting the ledger?</summary>
+      <div class="answer"><p>The ledger stays; the grain gets finer. Add a <code>batch</code> table with lot number, expiry date and received cost, add a nullable <code>batch_id</code> to <code>stock_movement</code>, and make the projection key include it. Issuing stops being a simple decrement and becomes an allocation: pick batches first-expiry-first-out, possibly splitting one issue across several batches, which means one logical issue produces several movement rows sharing a reference. That in turn changes the concurrency profile — you now allocate across multiple rows, so I would take a pessimistic lock over the candidate batches ordered by expiry, or use <code>FOR UPDATE SKIP LOCKED</code> to let concurrent pickers take different batches. Valuation becomes exact FIFO because each movement carries its batch cost.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.inv.brief — Feature outline, transaction and concurrency design, reporting model</li>
+      <li>prj.inv.build — Suggested build phases, the full testing pyramid, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

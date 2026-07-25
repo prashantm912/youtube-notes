@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Banking Application capstone brief: a retail banking core built as a learning project — double-entry ledger modelling, money as integer minor units, atomic transfers with consistent lock ordering, idempotency keys, a transfer state machine, security architecture, ten runnable build phases and a map of the course modules it exercises.">
+  <title>Capstone: Banking Application — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 07: Banking Application</h1>
+  <p class="standfirst">The security and correctness flagship of the track. Nothing else you build will punish sloppiness the way a ledger does: a rounding error is a lost rupee, a retried request is a duplicated payment, and two threads reading the same balance is a hole in the bank.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Banking Application</nav>
+
+  <section id="intro">
+    <h2>What this capstone is — and what it is not</h2>
+    <p>Read this first. <strong>This is a learning project, not a production banking system.</strong> Real banking runs on regulatory compliance, licensed and certified infrastructure, externally audited controls, settlement networks you cannot simulate, and a legal perimeter that has nothing to do with your code quality. Build this to learn the engineering — the ledger, the concurrency, the idempotency, the authorization model — and then leave it in your portfolio. Do not run other people's money through it.</p>
+    <p>What you are building is a <em>retail banking core</em>: customers with KYC-style profile data, several accounts each, balance enquiry, internal transfers, scheduled and standing instructions, a paginated statement with a running balance, beneficiary management with a cooling-off period, and an audit trail that explains every rupee that moved and every request that was refused.</p>
+    <p>The two lessons this brief exists to teach are <strong>double-entry ledger modelling</strong> and <strong>idempotency</strong>. Everything else in the feature list is scaffolding around those two. If you finish the project and can defend those two designs in an interview, the capstone has done its job.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Feature outline, ledger modelling, idempotent transfers and security architecture</h3>
+    <p>The specification below is deliberately small in surface area and deep in correctness. A banking core with eight endpoints that never loses money is a far stronger portfolio piece than one with forty endpoints and a <code>double</code> balance field. Scope ruthlessly: the MVP is the part you must get exactly right, the stretch goals are the part you add once the invariants hold under a concurrency test.</p>
+
+    <h4>MVP scope</h4>
+    <p>Ship these, in this order of importance. Each is small; the difficulty lives in the guarantees, not the feature count.</p>
+    <ul>
+      <li><strong>Customers</strong> — profile with name, date of birth, government-ID reference (store a hash or a tokenised reference, never a raw ID number in plain text), address, contact details, and a KYC status field (<code>PENDING</code>, <code>VERIFIED</code>, <code>REJECTED</code>) that gates what the customer may do.</li>
+      <li><strong>Accounts</strong> — many per customer, each with a type (savings, current), a currency, a status (active, frozen, closed), and a balance that is <em>derived from the ledger</em>, not typed in.</li>
+      <li><strong>Balance enquiry</strong> — current balance plus an available balance (current minus holds), returned with the currency and the minor-unit scale, never as a bare number.</li>
+      <li><strong>Internal transfers</strong> — account to account, atomic, idempotent, never permitted to drive an account negative.</li>
+      <li><strong>Scheduled and standing transfers</strong> — a one-off future-dated instruction and a recurring one, executed by a scheduler that is itself idempotent (a missed run must be catch-up-able without double-posting).</li>
+      <li><strong>Statement</strong> — a paginated list of ledger entries for one account with a running balance, ordered newest first, filterable by date range.</li>
+      <li><strong>Beneficiaries</strong> — a payee list with a cooling-off period: a newly added beneficiary cannot receive money until a fixed delay has elapsed and the addition has been confirmed.</li>
+      <li><strong>Audit trail</strong> — an append-only record of every money movement, every authorization denial, every beneficiary change and every login attempt.</li>
+    </ul>
+
+    <h4>Stretch goals</h4>
+    <p>Add these only after phase 5 is green. Each is a genuinely different engineering problem rather than more of the same.</p>
+    <ul>
+      <li><strong>Multi-currency accounts with FX</strong> — a transfer across currencies becomes a four-entry posting (debit source, credit an FX position, debit the FX position, credit destination) so the ledger still sums to zero in every currency independently.</li>
+      <li><strong>Interest accrual</strong> — a daily job that posts interest as ordinary ledger entries, with the rounding policy written down and the residual paisa accounted for rather than lost.</li>
+      <li><strong>Statement export</strong> — a generated PDF for a date range, produced from the same query as the API so the two can never disagree.</li>
+      <li><strong>Spending analytics</strong> — categorised aggregates over the statement, computed with window functions rather than in application memory.</li>
+      <li><strong>Card-block simulation</strong> — a card entity with a block/unblock lifecycle, demonstrating that a blocked card rejects an authorisation attempt and that the rejection is audited.</li>
+    </ul>
+
+    <h4>Architecture sketch</h4>
+    <p>A modular monolith is the right shape here. Splitting a ledger across services is how you turn a database transaction into a distributed transaction, which is a different (and much harder) capstone — that is project 09. Keep the money in one database, keep the boundaries as packages, and enforce them with an architecture test.</p>
+    <pre class="code-block" data-label="Architecture"><code>  Angular SPA
+      |  HTTPS, Bearer access token (short expiry) + refresh cookie
+      v
+  +---------------------------------------------------------------+
+  |  API layer      controllers, DTOs, bean validation            |
+  |                 rate limit filter, idempotency filter          |
+  +---------------------------------------------------------------+
+  |  Application    TransferService     ScheduleRunner             |
+  |                 StatementService    BeneficiaryService         |
+  |                 (transaction boundary lives HERE, once)        |
+  +---------------------------------------------------------------+
+  |  Domain         Money  Account  LedgerEntry  Posting           |
+  |                 TransferStateMachine  invariants               |
+  +---------------------------------------------------------------+
+  |  Infrastructure  JPA repositories   AuditWriter   Vault client |
+  +---------------------------------------------------------------+
+      |                        |                    |
+      v                        v                    v
+  PostgreSQL              Redis (rate limit,     Structured logs
+  (accounts, ledger,       idempotency cache)    -> metrics, traces
+   idempotency_key,
+   audit_event)</code></pre>
+
+    <h4>Data model</h4>
+    <p>Eight tables carry the whole MVP. The one that matters is <code>ledger_entry</code>: it is append-only, it has no <code>UPDATE</code> path in the application at all, and every row belongs to a <code>posting</code> whose entries sum to zero.</p>
+    <pre class="code-block" data-label="SQL"><code>customer(id, full_name, dob, id_ref_hash, kyc_status, created_at)
+
+account(id, customer_id, currency CHAR(3), account_type, status,
+        balance_minor BIGINT NOT NULL DEFAULT 0,   -- cached, reconciled
+        version INT NOT NULL DEFAULT 0,
+        CONSTRAINT balance_non_negative CHECK (balance_minor &gt;= 0))
+
+posting(id, kind, transfer_id, posted_at, description)   -- the "journal"
+
+ledger_entry(id, posting_id, account_id,
+             amount_minor BIGINT NOT NULL,   -- signed: debit &lt; 0, credit &gt; 0
+             currency CHAR(3) NOT NULL,
+             entry_seq BIGINT,               -- per-account monotonic sequence
+             created_at TIMESTAMPTZ NOT NULL)
+  -- append-only; no UPDATE, no DELETE granted to the app role
+
+transfer(id, source_account_id, target_account_id, amount_minor, currency,
+         state, reversal_of_transfer_id, created_at, completed_at)
+
+idempotency_key(key, user_id, endpoint, request_fingerprint,
+                state, response_status, response_body,
+                locked_at, created_at, expires_at,
+                PRIMARY KEY (key, user_id))
+
+beneficiary(id, customer_id, target_account_ref, nickname,
+            state, activates_at, created_at)
+
+standing_instruction(id, source_account_id, beneficiary_id, amount_minor,
+                     cadence, next_run_on, last_run_key, active)
+
+audit_event(id, occurred_at, actor_id, actor_ip, action, subject_type,
+            subject_id, outcome, detail_json)   -- append-only</code></pre>
+
+    <h4>API contract</h4>
+    <p>Version the path from day one, return money as an object rather than a number, and make the idempotency key a required header on every endpoint that moves money. That last decision is the one interviewers pull on.</p>
+    <table>
+      <thead>
+        <tr><th>Method</th><th>Path</th><th>Purpose</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>POST</td><td>/api/v1/customers</td><td>Register a customer</td><td>KYC status starts PENDING</td></tr>
+        <tr><td>POST</td><td>/api/v1/accounts</td><td>Open an account</td><td>Rejected unless KYC is VERIFIED</td></tr>
+        <tr><td>GET</td><td>/api/v1/accounts</td><td>List my accounts</td><td>Ownership filter in the query, not in Java</td></tr>
+        <tr><td>GET</td><td>/api/v1/accounts/{id}/balance</td><td>Balance enquiry</td><td>Returns amount, currency, scale, asOf</td></tr>
+        <tr><td>GET</td><td>/api/v1/accounts/{id}/statement</td><td>Statement page</td><td>Keyset cursor + limit; running balance included</td></tr>
+        <tr><td>POST</td><td>/api/v1/transfers</td><td>Internal transfer</td><td><code>Idempotency-Key</code> header required</td></tr>
+        <tr><td>GET</td><td>/api/v1/transfers/{id}</td><td>Transfer status</td><td>Exposes the state machine value</td></tr>
+        <tr><td>POST</td><td>/api/v1/transfers/{id}/reversal</td><td>Reverse a posted transfer</td><td>Creates compensating entries; never deletes</td></tr>
+        <tr><td>POST</td><td>/api/v1/beneficiaries</td><td>Add a payee</td><td>Enters PENDING with an activates-at timestamp</td></tr>
+        <tr><td>POST</td><td>/api/v1/beneficiaries/{id}/confirm</td><td>Confirm a payee</td><td>Step-up auth; still blocked until cooling-off elapses</td></tr>
+        <tr><td>POST</td><td>/api/v1/standing-instructions</td><td>Schedule a recurring transfer</td><td>Each run derives a deterministic idempotency key</td></tr>
+        <tr><td>GET</td><td>/api/v1/audit-events</td><td>Audit query</td><td>Admin scope only; read-only projection</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaCatalog/money.html" rel="noopener">Money — Martin Fowler, Patterns of Enterprise Application Architecture catalog</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-constraints.html" rel="noopener">Constraints — PostgreSQL documentation (CHECK, exclusion and foreign-key constraints)</a></li>
+      <li>[Article] <a href="https://www.moderntreasury.com/journal/accounting-for-developers-part-i" rel="noopener">Accounting for Developers, Part I — Modern Treasury Journal</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-bigdecimal-biginteger" rel="noopener">BigDecimal and BigInteger in Java — Baeldung (scale, rounding modes, equals vs compareTo)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AfkWaDALUsM" rel="noopener">Banking Ledger: System Design Interview with a senior FAANG Engineer — interviewing.io</a></li>
+    </ul>
+
+    <h4>Ledger modelling: double-entry, done properly</h4>
+    <p>A bank account balance is not a field you edit. It is a <em>conclusion</em> drawn from a list of immutable facts. Double-entry bookkeeping is the five-hundred-year-old encoding of that idea, and it survives because it makes an entire class of bug structurally impossible: every movement of money is recorded as two or more entries whose signed amounts sum to exactly zero. Money is never created or destroyed by a posting, only relocated. If a bug ever produces entries that do not sum to zero, a single <code>SELECT</code> finds it — which is why the invariant is worth the extra table.</p>
+    <p>Four rules make the model work, and you should be able to recite all four. <strong>One:</strong> entries are immutable and append-only — the application's database role gets <code>INSERT</code> and <code>SELECT</code> on <code>ledger_entry</code> and nothing else, so "fixing" a bad entry is not even physically available. <strong>Two:</strong> a correction is a new posting, not an edit; you reverse with compensating entries and keep both rows, because the audit story is "we moved it, then we moved it back", not "it never happened". <strong>Three:</strong> the balance is derived — <code>SELECT SUM(amount_minor) FROM ledger_entry WHERE account_id = ?</code> is the definition of truth, and the <code>balance_minor</code> column on <code>account</code> is a cache maintained in the same transaction as the entries, reconciled by a scheduled job that compares the two and screams on a mismatch. <strong>Four:</strong> a posting is the unit of atomicity — either all of its entries commit or none do.</p>
+    <p>Two ledgers are worth naming for interviews. In a <em>single-entry</em> design each transfer writes one row per account with no linkage; nothing forces the two sides to agree, and a partial failure silently destroys money. In a <em>double-entry</em> design the linkage is the point. Real systems go further and model the bank's own accounts explicitly (a cash account, a fees account, an FX position account) so that even a fee or an interest payment has a counterparty inside the ledger rather than appearing from nowhere.</p>
+    <pre class="code-block" data-label="SQL"><code>-- One transfer of 250.00 INR = 25000 paisa: two entries, sum zero.
+INSERT INTO posting (id, kind, transfer_id, posted_at, description)
+VALUES ('p-1', 'TRANSFER', 't-1', now(), 'UPI to beneficiary');
+
+INSERT INTO ledger_entry (posting_id, account_id, amount_minor, currency) VALUES
+  ('p-1', 'acct-source', -25000, 'INR'),   -- debit
+  ('p-1', 'acct-target',  25000, 'INR');   -- credit
+
+-- The invariant, checkable at any time over the whole database:
+SELECT posting_id, SUM(amount_minor) AS imbalance
+FROM ledger_entry GROUP BY posting_id HAVING SUM(amount_minor) &lt;&gt; 0;
+-- must return zero rows, forever
+
+-- Truth vs cache: this must also return zero rows.
+SELECT a.id FROM account a
+JOIN (SELECT account_id, SUM(amount_minor) s FROM ledger_entry GROUP BY account_id) l
+  ON l.account_id = a.id
+WHERE a.balance_minor &lt;&gt; l.s;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/AccountingEntry.html" rel="noopener">Accounting Entry — Martin Fowler, Analysis Patterns (the entry as an immutable record)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/AccountingTransaction.html" rel="noopener">Accounting Transaction — Martin Fowler (the balanced multi-entry posting)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/AccountingNarrative.html" rel="noopener">Accounting Narrative — Martin Fowler (why the trail matters more than the total)</a></li>
+      <li>[Article] <a href="https://www.moderntreasury.com/journal/accounting-for-developers-part-ii" rel="noopener">Accounting for Developers, Part II — Modern Treasury Journal (ledgers in practice)</a></li>
+      <li>[Reference] <a href="https://github.com/formancehq/ledger" rel="noopener">formancehq/ledger — GitHub (an actively developed open-source programmable financial ledger)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=knnSIKCsX34" rel="noopener">Double-entry accounting at scale — Alex Mooney, fintech_devcon (Moov Financial)</a></li>
+    </ul>
+
+    <h4>Money: integer minor units, an explicit currency, and never a float</h4>
+    <p>Store an amount as a <code>BIGINT</code> count of the currency's minor unit — paisa for INR, cents for USD — paired with an ISO-4217 currency code. Two hundred and fifty rupees is <code>25000</code> paisa and the string <code>"INR"</code>. Never <code>double</code> or <code>float</code>: binary floating point cannot represent 0.1 exactly, so <code>0.1 + 0.2</code> is not <code>0.3</code>, and the error compounds across a million rows into a real, reportable discrepancy. If you must use <code>BigDecimal</code> — for an interest calculation, say — construct it from a string or an integer (never from a <code>double</code>), pin an explicit scale, and pass an explicit <code>RoundingMode</code> to every division. A <code>BigDecimal</code> with an implicit scale is the same bug wearing a suit.</p>
+    <p>Wrap the pair in a <code>Money</code> value object and make it the only money type in the domain: immutable, currency-checked on every operation (adding INR to USD must throw, not coerce), with a documented allocation method for splitting an amount that does not divide evenly. Splitting 100 paisa three ways gives 34, 33, 33 — not 33.33 three times — and deciding who gets the extra paisa is a business rule you write down, not a rounding accident. Currencies also differ in scale: JPY has zero decimal places, most have two, a few have three, so hard-coding "multiply by 100" is a bug waiting for your first international customer.</p>
+    <pre class="code-block" data-label="Java"><code>public record Money(long minor, Currency currency) {
+    public Money {
+        Objects.requireNonNull(currency);
+    }
+    public Money plus(Money other) {
+        if (!currency.equals(other.currency))
+            throw new CurrencyMismatchException(currency, other.currency);
+        return new Money(Math.addExact(minor, other.minor), currency);  // overflow throws
+    }
+    public boolean isNegative() { return minor &lt; 0; }
+}
+// Never: double balance; Never: new BigDecimal(0.1); Never: amount / 3 without RoundingMode</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/datatype-numeric.html" rel="noopener">Numeric Types — PostgreSQL documentation (why numeric, not float, and what bigint costs)</a></li>
+      <li>[Official] <a href="https://javamoney.github.io/" rel="noopener">JavaMoney — the JSR-354 Money and Currency API reference site</a></li>
+      <li>[Reference] <a href="https://github.com/JavaMoney/jsr354-api" rel="noopener">JavaMoney/jsr354-api — GitHub (the Money and Currency API, if you prefer not to hand-roll)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-money-and-currency" rel="noopener">Java Money and the Currency API — Baeldung</a></li>
+      <li>[Reference] <a href="https://github.com/beancount/beancount" rel="noopener">beancount/beancount — GitHub (a mature plain-text double-entry engine worth reading for its invariants)</a></li>
+    </ul>
+
+    <h4>Transactions, locking, and the negative-balance invariant</h4>
+    <p>A transfer touches two accounts and must be all-or-nothing. That means one database transaction, opened once at the application-service boundary, containing the balance check, both ledger entries, both cached-balance updates and the transfer row. The single most common bug in student banking projects is reading the balance in one transaction and writing the debit in another: between the read and the write, a concurrent transfer spends the same money, and both requests succeed. The check and the debit must be in the same transaction, and the row must be locked for the duration.</p>
+    <p>Lock with <code>SELECT ... FOR UPDATE</code> (JPA's <code>PESSIMISTIC_WRITE</code>) on both account rows before touching anything. Two concurrent transfers between the same pair of accounts in opposite directions will deadlock if each locks its own source first — A→B locks A then B while B→A locks B then A, and the database kills one of them. The fix is <strong>consistent lock ordering</strong>: sort the two account ids and always acquire in that order, regardless of which is the source. It costs three lines and removes the deadlock class entirely. Keep the locked section short, never call a remote service inside it, and set a lock timeout so a stuck transaction fails loudly rather than hanging the pool.</p>
+    <p>On isolation: PostgreSQL's default <code>READ COMMITTED</code> is sufficient <em>because</em> you hold row locks — the lock, not the isolation level, is what serialises the two transfers. <code>REPEATABLE READ</code> or <code>SERIALIZABLE</code> buy you protection against phantoms and write skew at the cost of serialisation failures your code must catch and retry; they are the right answer when the invariant spans rows you cannot lock individually (a per-customer daily limit across many accounts, for instance). Being able to explain that trade-off — locks versus isolation level, and when each is the right tool — is a senior-level answer.</p>
+    <p>Finally, enforce the negative-balance invariant <strong>twice</strong>. In the service, so the caller gets a clean <code>422</code> with a business error code. In the database, as a <code>CHECK (balance_minor &gt;= 0)</code> constraint, so that a bug, a bad migration, a manual fix or a future code path that forgot the rule fails with a constraint violation instead of quietly overdrawing an account. Belt and braces is not redundancy here; the database constraint is the one that survives your refactors.</p>
+    <pre class="code-block" data-label="Java"><code>@Transactional  // one transaction: check + debit + credit + entries, or nothing
+public TransferResult transfer(TransferCommand cmd) {
+    // Consistent lock ordering by id kills the A->B / B->A deadlock class.
+    List&lt;UUID&gt; ids = Stream.of(cmd.sourceId(), cmd.targetId()).sorted().toList();
+    Account first  = accounts.findByIdForUpdate(ids.get(0));   // PESSIMISTIC_WRITE
+    Account second = accounts.findByIdForUpdate(ids.get(1));
+
+    Account source = first.getId().equals(cmd.sourceId()) ? first : second;
+    Account target = source == first ? second : first;
+
+    if (source.balance().minor() &lt; cmd.amount().minor())
+        throw new InsufficientFundsException(source.getId());   // -&gt; 422, audited
+
+    ledger.post(Posting.transfer(source, target, cmd.amount()));  // two entries, sum 0
+    source.debit(cmd.amount());   // cached balance, same transaction
+    target.credit(cmd.amount());  // DB CHECK constraint is the second line of defence
+    return TransferResult.posted(cmd.transferId());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/transaction-iso.html" rel="noopener">Transaction Isolation — PostgreSQL documentation (read committed, repeatable read, serializable)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/explicit-locking.html" rel="noopener">Explicit Locking — PostgreSQL documentation (row locks, FOR UPDATE, deadlock detection)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction.html" rel="noopener">Transaction Management — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html" rel="noopener">Locking — Spring Data JPA reference (@Lock and the LockModeType values)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/optimistic-vs-pessimistic-locking/" rel="noopener">Optimistic vs Pessimistic Locking — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-pessimistic-locking" rel="noopener">Pessimistic Locking in JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lR6y-0RC5cc" rel="noopener">Optimistic &amp; Pessimistic Locking Explained with a Concurrent Seat Booking Example — Java Techie</a></li>
+    </ul>
+
+    <h4>Idempotent transfers: the retry that must not move money twice</h4>
+    <p>Here is the scenario the whole design exists for. A customer taps "Send". The request reaches your server, the transfer commits, and then the response is lost — a flaky mobile network, a load-balancer timeout, a client that gave up at four seconds. The app shows an error. The customer taps "Send" again. A timeout is <em>ambiguous</em>: the client cannot distinguish "never arrived" from "succeeded but the answer was lost". If your API is not idempotent, the customer has now paid twice, and you will find out from a support ticket rather than from your monitoring.</p>
+    <p>The fix is an idempotency key carried end to end. <strong>The client generates it</strong> — a UUID, created once per user intent and reused across every retry of that intent (this is the part people get wrong: a key generated fresh on each retry is not a key, it is a nonce). The client sends it as an <code>Idempotency-Key</code> header. The server stores the key together with a <em>fingerprint</em> of the request (a hash of the canonical body plus the authenticated user) and, once complete, the full response status and body. Then four rules follow:</p>
+    <ul>
+      <li><strong>Replay</strong> — same key, same fingerprint, request already completed: return the <em>stored</em> response verbatim, with the same status code, and do not touch the ledger. The client cannot tell it was a replay, which is exactly the point.</li>
+      <li><strong>Concurrent duplicate</strong> — same key arrives while the first is still in flight: return <code>409 Conflict</code> and let the client poll. Do not queue behind it and do not execute; the unique constraint on the key is what makes this race safe, so insert the key row first and let the database referee.</li>
+      <li><strong>Key reuse with a different body</strong> — same key, different fingerprint: reject with <code>422</code> and a distinct error code. Silently returning the first response would be worse than failing, because the client believes a payment it never authorised has succeeded.</li>
+      <li><strong>Expiry</strong> — keys are kept for a bounded window (24 hours is a common choice) and then purged. A key is a deduplication device with a lifetime, not permanent storage; document the window in your API docs so clients know when a retry stops being safe.</li>
+    </ul>
+    <p>Store the key row in the <em>same database transaction</em> as the ledger entries. If the key lives in Redis and the money lives in PostgreSQL, a crash between the two commits leaves you with a key that claims success and a ledger that disagrees — you have moved the race, not removed it. Redis is fine as a fast pre-check in front of the durable record; it is not fine as the record.</p>
+    <pre class="code-block" data-label="Java"><code>// Insert-first: the unique constraint, not application logic, decides the race.
+try {
+    keys.insertInProgress(key, userId, endpoint, fingerprint(request));
+} catch (DuplicateKeyException e) {
+    IdempotencyRecord existing = keys.require(key, userId);
+    if (!existing.fingerprint().equals(fingerprint(request)))
+        throw new IdempotencyKeyReusedException();          // 422, different body
+    if (existing.isInProgress())
+        throw new RequestInFlightException();               // 409, retry later
+    return existing.storedResponse();                       // replay: byte-identical
+}
+// same @Transactional scope as the ledger write; response is persisted on commit</code></pre>
+
+    <h4>The transfer state machine: reverse, never delete</h4>
+    <p>Give the transfer an explicit lifecycle and store it: <code>INITIATED</code> (accepted, key recorded, nothing posted) → <code>POSTED</code> (entries written, money moved) or <code>FAILED</code> (rejected for insufficient funds, a frozen account, a failed limit check — recorded with a reason, never silently dropped) → <code>REVERSED</code> (a compensating posting has undone it). Transitions are a small table you can test exhaustively, and every transition writes an audit event.</p>
+    <p>The rule that matters: <strong>you reverse, you do not delete</strong>. A reversal is a new posting with the opposite entries, linked to the original by <code>reversal_of_transfer_id</code>. Both survive in the statement, and the customer sees the debit and the credit — which is what every real bank statement shows, and what a regulator or an auditor requires. Deleting a row destroys the answer to "what happened here", and once you have deleted it you can never prove the system behaved correctly. The same discipline explains why the ledger has no <code>UPDATE</code>: an append-only history is the only history you can trust.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/api/idempotent_requests" rel="noopener">Idempotent requests — Stripe API reference (the canonical contract: header, storage window, conflict behaviour)</a></li>
+      <li>[Official] <a href="https://stripe.com/blog/idempotency" rel="noopener">Designing robust and predictable APIs with idempotency — Stripe engineering blog</a></li>
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/EventSourcing.html" rel="noopener">Event Sourcing — Martin Fowler (the append-only-history idea a ledger is a special case of)</a></li>
+      <li>[Article] <a href="https://brandur.org/idempotency-keys" rel="noopener">Implementing Stripe-like Idempotency Keys in Postgres — Brandur Leach</a></li>
+      <li>[Article] <a href="https://brandur.org/http-transactions" rel="noopener">Using Atomic Transactions to Power an Idempotent API — Brandur Leach</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=J2IcD9FZvZU" rel="noopener">Designing Idempotent API Endpoints for Payments at Stripe — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m6DtqSb1BDM" rel="noopener">Build a robust Payments service using Idempotency Keys — Arpit Bhayani</a></li>
+    </ul>
+
+    <h4>Security architecture</h4>
+    <p>Treat this section as an integration exercise: the depth lives in the <a href="../secure-coding/index.html">Secure Coding</a> and <a href="../spring-security/index.html">Spring Security</a> tracks, and this project is where you assemble it. The shape to build:</p>
+    <ul>
+      <li><strong>Tokens</strong> — short-lived access tokens (five to fifteen minutes) plus a refresh token with <em>rotation</em> and reuse detection: each refresh issues a new refresh token and invalidates the old one, and presenting an already-used refresh token revokes the whole family, because that is the signature of a stolen token. Configure the app as an OAuth2 resource server rather than hand-rolling a filter; opaque tokens with introspection are the more conservative choice for a bank because they can be revoked instantly, while JWTs trade revocability for statelessness — pick one deliberately and be able to say why.</li>
+      <li><strong>Authorization</strong> — method-level rules with <code>@PreAuthorize</code>, but the ownership predicate belongs <em>in the query</em>: <code>findByIdAndCustomerId(accountId, principal)</code>, not "load the account, then check". Filtering after loading is how insecure direct object reference bugs are born, and it leaks existence through timing and error differences. Return the same <code>404</code> for "does not exist" and "not yours".</li>
+      <li><strong>Step-up for high value</strong> — a transfer above a configured threshold, or to a beneficiary added recently, requires a fresh second factor or a signed confirmation. Model it as a challenge the API issues and the client answers, and record the challenge in the audit trail.</li>
+      <li><strong>Rate limiting</strong> — on login (per account and per IP, with progressive delay and lockout) and on the transfer endpoint (per user). Login limiting blunts credential stuffing; transfer limiting blunts an attacker who already has a token.</li>
+      <li><strong>Audit logging</strong> — every money movement, every authorization <em>denial</em>, every beneficiary change, every login success and failure. Denials matter as much as successes: a burst of denials is the clearest signal you have that something is being probed. Log structurally, never log a token or a full account number, and make the audit table append-only like the ledger.</li>
+      <li><strong>Secrets and transport</strong> — no credentials in <code>application.yml</code> and none in the repository; a vault or a cloud secret manager, injected at runtime, rotated on a schedule. TLS on every hop including service-to-database. Encrypt sensitive PII columns at rest and store identity documents as tokenised references or hashes rather than plaintext.</li>
+    </ul>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html" rel="noopener">OAuth2 Resource Server — Spring Security reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html" rel="noopener">OAuth2 Resource Server JWT — Spring Security reference (decoders, validators, claim mapping)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html" rel="noopener">Method Security — Spring Security reference (@PreAuthorize and authorization managers)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/exploits/headers.html" rel="noopener">Security HTTP Response Headers — Spring Security reference</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html" rel="noopener">Authorization Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP Cheat Sheet Series (what to record, what never to record)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html" rel="noopener">Cryptographic Storage Cheat Sheet — OWASP (encryption at rest for PII)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html" rel="noopener">Secrets Management Cheat Sheet — OWASP</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wp4h_wYXqmU" rel="noopener">Spring Boot Security — JWT Refresh Token Explained In Detail — Java Techie</a></li>
+    </ul>
+
+    <h3>Suggested build phases, reference implementations and the module map</h3>
+    <p>Every phase below ends in something you can run and show. That constraint is not decoration: it is what stops a capstone from becoming a half-finished schema with no demo. Commit at the end of each phase, write the test named in the phase before you move on, and resist adding features until phase 5 is green.</p>
+
+    <h4>The ten phases</h4>
+    <ol>
+      <li><strong>Schema and skeleton.</strong> Customer, account and the ledger tables, created by versioned migrations (Flyway or Liquibase) — never by <code>ddl-auto</code>. Add the <code>CHECK (balance_minor &gt;= 0)</code> constraint now, before any code can violate it. <em>Demo:</em> migrations run clean on an empty database, and an <code>INSERT</code> with a negative balance is rejected by PostgreSQL.</li>
+      <li><strong>Ledger service.</strong> Double-entry posting and balance derivation, with no HTTP layer yet. <em>Demo:</em> a test posts a balanced entry pair, derives the balance from the entries, and proves an unbalanced posting is refused. <em>Test:</em> the sum-to-zero invariant over a randomly generated posting set.</li>
+      <li><strong>Transfer use case.</strong> Locking with consistent id ordering, the balance check inside the transaction, the negative-balance invariant enforced in both service and database. <em>Demo:</em> a transfer moves money and an over-limit transfer returns a clean business error.</li>
+      <li><strong>Concurrency proof.</strong> The phase that makes the project worth talking about. Fire N parallel transfers out of one account with a real PostgreSQL container, then assert that the ledger still sums to zero, the account never went negative, and exactly the expected number succeeded. <em>Demo:</em> a red test on the naive implementation, green on the locked one. Keep the naive version on a branch so you can show the failure.</li>
+      <li><strong>Idempotency.</strong> Key storage, fingerprinting, replay, conflict and expiry, written in the same transaction as the ledger. <em>Demo:</em> the same request sent three times moves money once and returns three identical responses; a different body with the same key is rejected.</li>
+      <li><strong>Authentication and authorization.</strong> Resource-server configuration, refresh rotation, ownership pushed into the query, login rate limiting. <em>Demo:</em> customer A cannot see, or transfer from, customer B's account, and the denial is audited.</li>
+      <li><strong>Statements.</strong> Keyset (seek) pagination on <code>(created_at, id)</code> rather than <code>OFFSET</code>, with the running balance computed by a window function in SQL. <em>Demo:</em> stable pagination over a hundred thousand seeded entries, with the query plan showing an index scan.</li>
+      <li><strong>Beneficiaries with cooling-off.</strong> Pending state, an activates-at timestamp, confirmation with step-up, and a transfer to a not-yet-active beneficiary refused. <em>Demo:</em> the refusal, then the same transfer succeeding after the clock is advanced.</li>
+      <li><strong>Audit and observability.</strong> Append-only audit events, structured logs with a correlation id, metrics for transfer volume and failure rate, traces across the request. <em>Demo:</em> a dashboard panel showing transfers per minute and a trace of one transfer end to end.</li>
+      <li><strong>Angular UI.</strong> Login, account list, balance, statement with infinite scroll over the keyset cursor, and a transfer form with an idempotency key generated once per submission attempt and reused on retry. <em>Demo:</em> the full customer journey in a browser.</li>
+    </ol>
+    <p>Then <strong>phase 11: one stretch goal</strong>, chosen for the engineering you want to learn rather than the screenshot. Multi-currency FX teaches you the four-entry posting; interest accrual teaches you rounding policy and residuals. Both are better interview material than a PDF exporter.</p>
+
+    <h4>Reference implementations worth reading</h4>
+    <p>Read production ledgers before you invent one. The value is not in copying code — most of these are not Java — but in seeing which invariants real systems chose to enforce in the database and which they left to the application, and in noticing how small the core of a correct ledger actually is.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html" rel="noopener">Testing Spring Boot Applications — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/" rel="noopener">Testcontainers for Java — official documentation (real PostgreSQL for the concurrency test)</a></li>
+      <li>[Reference] <a href="https://github.com/tigerbeetle/tigerbeetle" rel="noopener">tigerbeetle/tigerbeetle — GitHub (a purpose-built double-entry accounting database; the design docs are the draw)</a></li>
+      <li>[Reference] <a href="https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/" rel="noopener">Books: an immutable double-entry accounting database service — Square engineering blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MgjhxCw9Ro8" rel="noopener">Building &amp; Scaling a Ledger Database — Modern Treasury tech talk</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5i379k0Xh_s" rel="noopener">Banking Application using Spring Boot, Spring Data JPA and MySQL — Java Guides (a conventional CRUD baseline to improve on)</a></li>
+    </ul>
+
+    <h4>Which track modules this exercises</h4>
+    <p>Use this as a study map: when a phase stalls, the linked module is where the explanation lives. If several of these are unread, build phases 1 to 3 first and read as you go — the material lands better against a problem you already have.</p>
+    <ul>
+      <li><strong>Ledger, schema and queries</strong> — <a href="../databases/10-transactions.html">Databases: Transactions</a>, <a href="../databases/11-normalization-design.html">Databases: Normalization and Design</a>, <a href="../databases/08-indexing.html">Databases: Indexing</a>, <a href="../databases/07-window-functions.html">Databases: Window Functions</a> (the running balance).</li>
+      <li><strong>Persistence and concurrency</strong> — <a href="../jpa/12-transactions-concurrency.html">JPA: Transactions and Concurrency</a>, <a href="../jpa/03-identifiers.html">JPA: Identifiers</a>, <a href="../jpa/10-spring-data-repositories.html">JPA: Spring Data Repositories</a>, <a href="../jpa/08-fetching-nplus1.html">JPA: Fetching and N+1</a>.</li>
+      <li><strong>Authentication and authorization</strong> — <a href="../spring-security/02-authentication.html">Spring Security: Authentication</a>, <a href="../spring-security/04-authorization.html">Spring Security: Authorization</a>, <a href="../spring-security/07-oauth2-oidc.html">Spring Security: OAuth2 and OIDC</a>, <a href="../spring-security/08-jwt-resource-server.html">Spring Security: JWT and Resource Server</a>.</li>
+      <li><strong>Secure design</strong> — <a href="../secure-coding/05-authn-authz.html">Secure Coding: Authentication and Authorization Flaws</a>, <a href="../secure-coding/07-secrets-crypto.html">Secure Coding: Secrets and Cryptography</a>, <a href="../secure-coding/08-input-validation.html">Secure Coding: Input Validation</a>, <a href="../secure-coding/02-owasp-top-10.html">Secure Coding: OWASP Top 10</a>.</li>
+      <li><strong>Proving it works</strong> — <a href="../backend-testing/08-testcontainers.html">Backend Testing: Testcontainers</a>, <a href="../backend-testing/07-spring-integration-testing.html">Backend Testing: Spring Integration Testing</a>, <a href="../backend-testing/06-tdd.html">Backend Testing: TDD</a>.</li>
+      <li><strong>Design decisions</strong> — <a href="../system-design/09-api-design.html">System Design: API Design</a>, <a href="../system-design/08-consistency-availability.html">System Design: Consistency and Availability</a>, <a href="../system-design/05-rate-limiting.html">System Design: Rate Limiting</a>.</li>
+      <li><strong>Running it</strong> — <a href="../observability/02-logging.html">Observability: Logging</a>, <a href="../observability/07-tracing.html">Observability: Tracing</a>, <a href="../observability/08-alerting-slo.html">Observability: Alerting and SLOs</a>.</li>
+      <li><strong>The UI</strong> — <a href="../angular-basics/09-forms.html">Angular: Forms</a>, <a href="../angular-basics/10-http-observables.html">Angular: HTTP and Observables</a>, <a href="../angular-basics/06-services-di.html">Angular: Services and DI</a>.</li>
+    </ul>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/sql-select.html" rel="noopener">SELECT — PostgreSQL documentation (window functions, ordering, FETCH FIRST for keyset pages)</a></li>
+      <li>[Official] <a href="https://hibernate.org/orm/envers/" rel="noopener">Hibernate Envers — entity auditing and revision history</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/index.html" rel="noopener">Spring Boot Actuator — production-ready features reference</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/no-offset" rel="noopener">We need tool support for keyset pagination — Use The Index, Luke! (why OFFSET is the wrong tool)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/sql-seek-keyset-pagination/" rel="noopener">SQL Seek (keyset) pagination — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-auditing-jpa" rel="noopener">Auditing with JPA, Hibernate and Spring Data JPA — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=VGb54yNQrHM" rel="noopener">Designing a Modern Ledger Database with Michael Parsons — The Geek Narrator</a></li>
+    </ul>
+
+    <h4>Definition of done</h4>
+    <p>The capstone is finished when all of the following hold, and not before. Each one is a sentence you can say in an interview.</p>
+    <ul>
+      <li>Every posting in the database sums to zero, and a test asserts it after a randomised workload.</li>
+      <li>The cached balance on every account equals the sum of its ledger entries, checked by a reconciliation job.</li>
+      <li>A parallel-transfer test against a real PostgreSQL container never overdraws an account and never loses a rupee.</li>
+      <li>Sending the same transfer request three times moves money exactly once and returns three identical responses.</li>
+      <li>No <code>float</code>, <code>double</code> or scale-less <code>BigDecimal</code> appears anywhere in the money path.</li>
+      <li>The application's database role has no <code>UPDATE</code> or <code>DELETE</code> grant on <code>ledger_entry</code> or <code>audit_event</code>.</li>
+      <li>Customer A receives an identical <code>404</code> whether customer B's account exists or not, and the denial is in the audit log.</li>
+      <li>No secret is in the repository, and the README explains where secrets actually come from.</li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="06-stock-dashboard.html">← Stock Market Dashboard</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="08-ecommerce-application.html">E-Commerce Application →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees "banking application" on your CV and immediately knows which questions separate a CRUD project from an engineered one. These are the ones asked in Indian product and service-company rounds — the ledger and the retry questions come up almost every time:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you store a monetary amount, and why not a double?</summary>
+      <div class="answer"><p>As a signed integer count of the currency's minor unit — paisa, cents — in a <code>BIGINT</code>, paired with an ISO-4217 currency code. Binary floating point cannot represent decimal fractions like 0.1 exactly, so arithmetic drifts and the error compounds across millions of rows into a reportable discrepancy. If a calculation genuinely needs decimals, use <code>BigDecimal</code> constructed from a string or integer, with an explicit scale and an explicit <code>RoundingMode</code> on every division. Also: currencies differ in scale, so hard-coding a factor of 100 breaks on JPY.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why did you model the ledger as double-entry instead of just updating a balance column?</summary>
+      <div class="answer"><p>Because it makes an entire class of bug structurally impossible. Every movement is two or more entries whose signed amounts sum to zero, so money cannot be created or destroyed by a posting, and a one-line query over the whole database finds any violation. It also gives a complete, immutable history: the balance is a conclusion derived from the entries rather than a field someone can overwrite. A single mutable balance column has no counterparty, no audit story, and no way to prove after the fact that it is correct.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Where is the transaction boundary in your transfer, and why there?</summary>
+      <div class="answer"><p>One transaction opened at the application-service method, containing the row locks, the balance check, both ledger entries, both cached-balance updates, the transfer row and the idempotency key record. It is there because the balance check and the debit must be atomic — if they are in separate transactions, a concurrent transfer spends the same money between them and both succeed. The boundary is not in the controller and not in the repository; putting it in either is a classic review finding.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why is the account balance both derived from the ledger and stored in a column?</summary>
+      <div class="answer"><p>The sum over the ledger entries is the definition of truth, but summing millions of rows on every balance enquiry does not scale. So the column is a cache, updated inside the same transaction as the entries, and a scheduled reconciliation job compares the two and alerts on any mismatch. That gives fast reads plus a continuous, automated proof that the cache has not drifted — which is exactly the answer an interviewer is fishing for.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A client times out and retries a transfer. How do you guarantee the money moves once?</summary>
+      <div class="answer"><p>An idempotency key generated by the client once per user intent and reused on every retry, sent as a header. The server inserts the key row first — the unique constraint referees the race — storing the key, the authenticated user, and a fingerprint of the request. If the key already exists and the request completed, return the stored response verbatim without touching the ledger. If it is still in flight, return 409 and let the client poll. If the fingerprint differs, reject with 422. Keys expire after a documented window. Critically, the key row is written in the same database transaction as the ledger entries.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why store a request fingerprint alongside the key rather than just the key?</summary>
+      <div class="answer"><p>To catch key reuse with a different payload. A buggy or malicious client can send the same key with a different amount or destination; without a fingerprint you would return the first response and the client would believe a transfer it never requested has succeeded. Comparing a hash of the canonical body plus the authenticated principal lets you reject that with a distinct error code, which is both safer and far easier to debug than a silent replay.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you avoid deadlocks between two concurrent transfers?</summary>
+      <div class="answer"><p>Consistent lock ordering. A transfer from A to B and a simultaneous transfer from B to A will deadlock if each locks its own source first, because each holds what the other needs. So before locking anything I sort the two account ids and acquire the row locks in that fixed order regardless of direction. Every transaction in the system therefore takes account locks in the same global order, which makes a cycle impossible. Beyond that: keep the locked section short, never make a remote call while holding a lock, and set a lock timeout so a stuck transaction fails loudly.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Which isolation level did you choose, and why was it sufficient?</summary>
+      <div class="answer"><p>PostgreSQL's default READ COMMITTED, because the correctness here comes from the explicit row locks, not the isolation level — <code>SELECT ... FOR UPDATE</code> serialises the two transfers touching the same account. I would move to REPEATABLE READ or SERIALIZABLE for an invariant that spans rows I cannot lock individually, such as a per-customer daily limit computed across many accounts, where write skew is possible. That choice costs serialisation failures the application has to catch and retry, so it is a deliberate trade, not a default.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Where do you enforce that an account cannot go negative?</summary>
+      <div class="answer"><p>In both places. In the service, inside the locked transaction, so the caller gets a clean business error with a specific code rather than a constraint-violation stack trace. And as a database <code>CHECK (balance_minor &gt;= 0)</code> constraint, so that any future code path, migration or manual fix that forgets the rule fails hard instead of quietly overdrawing. The database constraint is the one that survives refactoring, which is why it is not redundant.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does your statement endpoint use a cursor instead of a page number?</summary>
+      <div class="answer"><p>Because <code>OFFSET</code> makes the database count and discard every skipped row, so page 5000 gets progressively slower, and because new entries arriving between requests shift the offsets and cause rows to be duplicated or skipped across pages. Keyset pagination seeks on the last row's <code>(created_at, id)</code> with a matching composite index, so every page costs the same and the result set is stable under concurrent inserts. It also composes naturally with the infinite scroll in the Angular client.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How would you prove to an auditor that no money was lost?</summary>
+      <div class="answer"><p>Three checks, all runnable on demand. First, group every ledger entry by posting and assert the signed sum is zero — a non-empty result means a bug created or destroyed money. Second, reconcile every account's cached balance against the sum of its entries. Third, since the ledger is append-only and the application role has no UPDATE or DELETE grant, the history itself is evidence: every reversal exists alongside the original, so the trail explains each state change rather than hiding it. I would run the first two as a scheduled job with alerting, and back them with a randomised concurrency test in CI that asserts the same invariants after a parallel workload.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why reverse a transaction instead of deleting or editing the row?</summary>
+      <div class="answer"><p>Because deleting destroys the answer to "what happened here", and after a delete you can never prove the system behaved correctly. A reversal is a new posting with the opposite entries, linked to the original, so both survive on the statement — which is what a real bank statement shows and what an auditor requires. Editing is worse still: it means a mutable ledger, which means every historical balance you ever reported is unverifiable. The same reasoning is why the application's database role has insert and select on the ledger and nothing more.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How did you test that concurrent transfers cannot double-spend?</summary>
+      <div class="answer"><p>An integration test against a real PostgreSQL instance in Testcontainers — an in-memory database will not reproduce real locking behaviour. Seed an account with a known balance, then fire N parallel transfers out of it from a fixed thread pool with a latch so they start together. Assert three things afterwards: exactly the expected number succeeded, the account never went negative, and every posting still sums to zero. I keep the naive unlocked implementation on a branch so the test can be shown failing, which is far more convincing in an interview than a passing test alone.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> JWT or opaque tokens for a banking API — defend your choice.</summary>
+      <div class="answer"><p>The trade is revocability against statelessness. A JWT is validated locally with no round trip, which scales well, but it stays valid until it expires — so revoking a compromised session means a short expiry plus a denylist, which reintroduces the state you were avoiding. Opaque tokens with introspection are revocable instantly, at the cost of a call to the authorization server on each request, usually mitigated by a short-lived cache. For money movement I lean opaque, or JWTs with a very short expiry plus refresh rotation and reuse detection: a refresh token can only be used once, and presenting a used one revokes the whole family because that is the signature of theft.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why is the ownership check inside the query rather than after loading the entity?</summary>
+      <div class="answer"><p>Loading first and checking afterwards is how insecure direct object reference bugs happen: one missed check on one code path exposes another customer's data, and the "not found" versus "forbidden" difference leaks whether an account exists. Putting the predicate in the repository method — find by id and owning customer — means the unauthorised row is never in memory, the rule cannot be forgotten on a new endpoint, and the same 404 is returned either way. Method-level annotations layer on top of that, they do not replace it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your scheduler runs a standing instruction. How do you stop a double-posting after a missed run or a redeploy?</summary>
+      <div class="answer"><p>Derive a deterministic idempotency key from the instruction id and the scheduled run date rather than generating a random one, so a catch-up run for a missed day produces the same key as the original attempt and the second execution replays instead of posting again. Combine that with a scheduler lock so only one instance runs a given job, and store the last successfully executed run date on the instruction. That way a redeploy mid-run, a duplicate trigger and a manual catch-up are all safe by construction rather than by luck.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why did you build this as a modular monolith rather than microservices?</summary>
+      <div class="answer"><p>Because the invariant that matters — a posting sums to zero and commits atomically — is enforced by a single database transaction, and splitting the ledger across services replaces that with a distributed transaction, sagas and compensating actions. That is a real design (it is the next capstone), but it buys operational complexity to solve a scaling problem this system does not have. Keeping the money in one database and the boundaries as packages, enforced by an architecture test, preserves the option to split later without paying for it now.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.bnk.brief — Feature outline, ledger modelling, idempotent transfers, security architecture</li>
+      <li>prj.bnk.build — Suggested build phases, reference implementations, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

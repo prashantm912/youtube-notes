@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="E-Commerce Application capstone brief: a modular-monolith storefront and admin back office in Spring Boot and Angular — feature outline, module boundaries, catalog and variant data model, cart design, checkout state machine, inventory reservation, sandbox payments with webhooks, eleven runnable build phases, reference implementations and the course modules it exercises.">
+  <title>Capstone: E-Commerce Application — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 08: E-Commerce Application</h1>
+  <p class="standfirst">The flagship build — catalog to cart to checkout to money, in one deployable unit. It is a monolith on purpose, and a <em>modular</em> one on purpose: capstone 09 splits these same modules into services, so every boundary you draw here is a boundary you will later cut along.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → E-Commerce Application</nav>
+
+  <section id="intro">
+    <h2>What you are building</h2>
+    <p>A working online store: a public storefront where a visitor browses categories, filters a catalog, opens a product, picks a size and colour, fills a cart, checks out with an address and a shipping option, pays in a gateway's test mode and later tracks the order — plus an admin back office where staff manage products, variants, stock and order fulfilment. One codebase, one deployable artifact, one PostgreSQL database.</p>
+    <p>This is the largest single-deployable project in the track, and the three genuinely hard parts are not the CRUD: the product-versus-variant data model, the oversell problem at checkout, and asynchronous payment confirmation over webhooks. Everything else in the brief is scaffolding around those three. Budget your time accordingly — a beautiful product grid with a broken stock decrement is a project you cannot talk about in an interview.</p>
+    <p>Read the brief end to end before writing code. Each build phase is designed to leave you with something you can run and demo, so you always have a working store rather than eleven half-finished features.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Feature outline: the MVP, and the stretch goals that come after</h3>
+    <p>Scope the MVP as the shortest path from "a stranger lands on the home page" to "money has moved and an order exists". That path is: product catalog with categories, variants and images; search with faceted filtering; product detail; cart; checkout capturing address and shipping option; payment in sandbox; order placement with inventory decrement; order history and status tracking; and an admin back office for products and orders. Nothing else is in v1. Notably out of scope: multi-currency, tax engines beyond a flat rate, shipping-carrier integrations, and anything involving a real card.</p>
+    <p>Stretch goals, in the order they add the most learning per hour: reviews and ratings (a second write-heavy aggregate and a moderation workflow), wishlists (trivially easy, good for a rest), discount codes and promotions (surprisingly hard — stacking rules, per-customer limits, and a second place where price is computed), recommendations ("customers also bought", a batch job over order lines), returns and refunds (the payment flow in reverse, including partial refunds), and multi-vendor (which forces a seller dimension through catalog, inventory, orders and payouts, and is really a different product). Pick <em>one</em> stretch goal. Finishing one properly beats starting four.</p>
+    <p>A scoping habit worth forming: write the MVP list on one side of a page and, beside each item, the single question an interviewer would ask about it. If you cannot think of a question, the feature is probably not earning its place in a portfolio project.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.saleor.io/developer/products/overview" rel="noopener">Products overview — Saleor documentation (how a production storefront models the catalog domain)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/BoundedContext.html" rel="noopener">BoundedContext — Martin Fowler bliki (why "product" means different things in catalog and in orders)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/monolith-defense-part-1/" rel="noopener">In Defence of the Monolith, Part 1 — InfoQ</a></li>
+      <li>[Reference] <a href="https://github.com/saleor/saleor" rel="noopener">saleor/saleor — GitHub (open-source commerce platform; read the schema, not the code)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4npG3sAMT5I" rel="noopener">Build a Full Stack E-commerce app with Spring Boot 3, PostgreSQL, Angular 18 and Tailwind CSS — Cyril from CodeCake</a></li>
+    </ul>
+
+    <h3>Architecture: a deliberately modular monolith</h3>
+    <p>One Spring Boot application, one database, one deployment — and inside it, six modules that behave like services without being services: <strong>catalog</strong>, <strong>cart</strong>, <strong>order</strong>, <strong>inventory</strong>, <strong>payment</strong>, <strong>customer</strong>. Each module is a top-level Java package, owns its own tables, and exposes exactly one public interface (plus its events and its DTOs). Everything else in the module is package-private. Modules never read each other's tables and never join across a boundary; when catalog data is needed inside an order, it is <em>copied</em> into the order at placement time, not referenced live.</p>
+    <p>Communication between modules is an in-process event: <code>order</code> publishes <code>OrderPlaced</code>, and <code>inventory</code> and <code>payment</code> listen. That looks like a needless indirection in a monolith — it is not. It is the seam. In capstone 09 an in-process <code>ApplicationEventPublisher</code> becomes a Kafka producer and the listener becomes a consumer, and the calling code does not change. Direct method calls between modules would have to be rewritten as HTTP clients with retries, timeouts and failure handling; events would not. That is the whole argument for building the monolith this way first.</p>
+    <p>Enforce the boundary mechanically or it will rot within a fortnight. Spring Modulith detects the module structure from your package layout and fails a test when one module reaches into another's internals; ArchUnit does the same thing as plain assertions if you prefer no extra framework. Put that verification test in the build on day one, before there is anything to violate.</p>
+    <pre class="code-block" data-label="Architecture"><code>          Angular storefront                 Angular admin (lazy route)
+                  |                                    |
+                  +------------------+-----------------+
+                                     |  HTTPS / JSON
+                  +------------------v-----------------+
+                  |     Spring Boot  (one artifact)    |
+                  |   web layer: controllers + DTOs    |
+                  +------------------+-----------------+
+                                     |
+        in-process events (ApplicationEventPublisher / Spring Modulith)
+                                     |
+   +---------+  +------+  +-------+  +-----------+  +---------+  +----------+
+   | catalog |  | cart |  | order |  | inventory |  | payment |  | customer |
+   +---------+  +------+  +-------+  +-----------+  +---------+  +----------+
+    product_*    cart_*    order_*     stock_*       payment_*    customer_*
+        |           |         |            |             |            |
+        +-----------+---------+------------+-------------+------------+
+                                     |
+        PostgreSQL (one DB, one schema per module, no cross-module joins)
+        Redis (cart TTL, catalog cache)      Object store (product images)
+
+   Rule: a module may depend on another module's PUBLIC interface or its
+   EVENTS. Never on its tables, its entities, or its internal packages.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html" rel="noopener">Fundamentals — Spring Modulith reference documentation (module detection, allowed dependencies)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/events.html" rel="noopener">Working with Application Events — Spring Modulith reference documentation</a></li>
+      <li>[Official] <a href="https://www.archunit.org/userguide/html/000_Index.html" rel="noopener">ArchUnit User Guide (package-dependency rules as ordinary tests)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/MonolithFirst.html" rel="noopener">MonolithFirst — Martin Fowler bliki (why the boundaries are only trustworthy once you have used them)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FkP2aZiBrhg" rel="noopener">Spring Modulith Crash Course: Building Modular Monoliths using Spring Boot — SivaLabs</a></li>
+    </ul>
+
+    <h3>The API surface: pin these contracts down before you build screens</h3>
+    <p>Fix the endpoint list early, because the Angular app and the back end will be written in parallel and every renamed field costs both sides. Two conventions save the most pain later. First, money is an integer in the smallest currency unit (paise, cents) plus a currency code — never a floating-point rupee amount, and never a <code>double</code> anywhere in the stack. Second, order creation carries an <code>Idempotency-Key</code> header supplied by the client so a double-tapped "Place order" button cannot create two orders.</p>
+    <p>Note what the cart endpoints do <em>not</em> accept: a price. The client sends a variant id and a quantity; the server resolves the price. This is not a style preference, it is the fix for the single most common vulnerability in student e-commerce projects.</p>
+    <table>
+      <thead>
+        <tr><th>Method</th><th>Path</th><th>Purpose</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GET</td><td>/api/catalog/products</td><td>Paged listing with query, category and facet params</td><td>Public, cacheable, returns facet counts</td></tr>
+        <tr><td>GET</td><td>/api/catalog/products/{slug}</td><td>Product detail with all variants and images</td><td>Public, cacheable</td></tr>
+        <tr><td>GET</td><td>/api/catalog/categories</td><td>Category tree</td><td>Public, heavily cached</td></tr>
+        <tr><td>GET</td><td>/api/cart</td><td>Current cart with freshly resolved prices</td><td>Guest via anon token cookie, or authenticated</td></tr>
+        <tr><td>POST</td><td>/api/cart/items</td><td>Add a variant and quantity</td><td>Server resolves price; client price is ignored</td></tr>
+        <tr><td>PATCH</td><td>/api/cart/items/{id}</td><td>Change quantity</td><td>Quantity zero means remove</td></tr>
+        <tr><td>POST</td><td>/api/cart/merge</td><td>Merge the guest cart into the account cart</td><td>Called once, immediately after login</td></tr>
+        <tr><td>GET</td><td>/api/checkout/shipping-options</td><td>Shipping quotes for a destination pincode</td><td>Flat-rate table in the MVP</td></tr>
+        <tr><td>POST</td><td>/api/orders</td><td>Create the order, reserve stock, freeze prices</td><td>Requires Idempotency-Key; returns state PENDING_PAYMENT</td></tr>
+        <tr><td>POST</td><td>/api/orders/{id}/payment-intent</td><td>Create the provider intent or order object</td><td>Returns the client secret or provider order id only</td></tr>
+        <tr><td>POST</td><td>/api/payments/webhook</td><td>Asynchronous provider confirmation</td><td>Unauthenticated, signature-verified, idempotent</td></tr>
+        <tr><td>GET</td><td>/api/orders</td><td>Order history for the signed-in customer</td><td>Paged, newest first</td></tr>
+        <tr><td>GET</td><td>/api/orders/{id}</td><td>Order detail plus the status timeline</td><td>Ownership check, not just authentication</td></tr>
+        <tr><td>POST</td><td>/api/admin/products</td><td>Create a product with its option types and variants</td><td>Admin role; the whole aggregate in one request</td></tr>
+        <tr><td>PATCH</td><td>/api/admin/orders/{id}/status</td><td>Fulfil, ship or cancel an order</td><td>Admin role; validated against the state machine</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc.html" rel="noopener">Spring Web MVC — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://springdoc.org/" rel="noopener">springdoc-openapi — generate the OpenAPI description from your controllers</a></li>
+      <li>[Official] <a href="https://swagger.io/specification/" rel="noopener">OpenAPI Specification (the contract format the Angular client can be generated from)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/http/interceptors" rel="noopener">HTTP interceptors — Angular documentation (auth headers, the anon cart token, error mapping)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-bean-validation" rel="noopener">Validation in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Catalog and variants: product is not the thing you sell</h3>
+    <p>This is where most people build themselves into a corner, so slow down. A <strong>product</strong> is the marketing entity — a name, a description, a brand, a category, a gallery. A <strong>variant</strong> (or SKU) is the sellable entity — one specific combination of options, with its own barcode, its own price and its own stock row. "Nike Air Zoom" is a product; "Nike Air Zoom, Navy, UK 9" is a variant. Price lives on the variant, never on the product, because the extra-large costs more and the limited colourway costs more still. Stock lives on the variant too, for the obvious reason.</p>
+    <p>Model the options explicitly rather than stuffing "Navy / UK 9" into a string. A product declares its <em>option types</em> ("Colour", "Size"); each option type has <em>option values</em>; a variant is a set of chosen option values, joined through a link table with a composite primary key. That structure lets the product page render a colour swatch row and a size row generically, disable combinations that do not exist, and add a third dimension (fit, material) later without a migration. Free-form attributes that are informational rather than selectable — fabric, care instructions, warranty — can go in a JSONB column, but keep anything you filter or price on in real columns with real indexes.</p>
+    <p>The catalog is read-heavy in the extreme: thousands of reads per write, and the writes come from a handful of admin users. That asymmetry is what justifies the caching and the denormalised search projection in the next topic, and it is worth stating out loud in an interview — an optimisation you can justify by access pattern reads very differently from one you added because it seemed clever.</p>
+    <pre class="code-block" data-label="Schema sketch"><code>category(id, parent_id, name, slug)                    -- adjacency list, shallow
+product(id, name, slug UNIQUE, description, brand,
+        category_id, status, attributes JSONB, created_at)
+product_image(id, product_id, url, alt, sort_order)
+
+option_type(id, product_id, name, position)            -- 'Colour', 'Size'
+option_value(id, option_type_id, value, position)      -- 'Navy', 'UK 9'
+
+variant(id, product_id, sku UNIQUE, price_minor BIGINT, currency CHAR(3),
+        weight_g, status)                              -- the thing you actually sell
+variant_option(variant_id, option_value_id,
+               PRIMARY KEY (variant_id, option_value_id))
+   -- one row per chosen option; a UNIQUE index over the sorted set of
+   -- option_value_ids per product stops duplicate combinations.
+
+stock(variant_id PRIMARY KEY, on_hand INT, reserved INT, version BIGINT)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://shopify.dev/docs/api/admin-graphql/latest/objects/ProductVariant" rel="noopener">ProductVariant — Shopify Admin API (the canonical product/variant split, field by field)</a></li>
+      <li>[Official] <a href="https://docs.medusajs.com/resources/commerce-modules/product" rel="noopener">Product Module — Medusa documentation (options, values and variant generation)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/datatype-json.html" rel="noopener">JSON Types — PostgreSQL documentation (where JSONB is right, and where it is a trap)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-constraints.html" rel="noopener">Constraints — PostgreSQL documentation (unique SKUs, check constraints on quantities)</a></li>
+      <li>[Reference] <a href="https://github.com/shopizer-ecommerce/shopizer" rel="noopener">shopizer-ecommerce/shopizer — GitHub (a Java e-commerce platform; compare its catalog model with yours)</a></li>
+    </ul>
+
+    <h3>The storefront read path: search, faceted filtering and caching</h3>
+    <p>Listing pages need three things at once: a text query, a set of filters (category, brand, colour, size, price band), and the counts beside each filter option. Build it in two stages. Stage one is honest SQL — Spring Data JPA <code>Specification</code> composed from the query parameters, with pagination and a sort. That gets you correct results and teaches you dynamic predicate building, which is a common interview topic in its own right. Stage two is the projection: a flattened, denormalised read model of the catalog, refreshed when catalog events fire, so a listing page is one indexed query rather than a five-table join per request.</p>
+    <p>PostgreSQL's full-text search with a GIN index over a <code>tsvector</code> column is comfortably enough for a project of this size — reach for a search engine only when you can say what Postgres failed to do. For facet counts, a grouped aggregate over the filtered set is fine at this scale; cache the result. Speaking of which: the category tree and the product detail payload are near-immutable and read constantly, so put them behind Spring's cache abstraction backed by Redis, and be explicit about invalidation — evict on the catalog event, not on a timer you hope is short enough.</p>
+    <p>Do the N+1 pass here too. A listing that lazily loads images and variants per product will issue a hundred queries for a twenty-item page; catch it by logging SQL counts in a test rather than by noticing the page is slow in production.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch.html" rel="noopener">Full Text Search — PostgreSQL documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/indexes-types.html" rel="noopener">Index Types — PostgreSQL documentation (B-tree, GIN and when each applies)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/cache.html" rel="noopener">Cache Abstraction — Spring Framework reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-search-language-spring-data-specifications" rel="noopener">REST Query Language with Spring Data JPA Specifications — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vpe4aDu5ixI" rel="noopener">Spring Boot: Spring Data Redis as Cache — Cacheable, CacheEvict, CachePut — Java Techie</a></li>
+    </ul>
+
+    <h3>Cart: guest versus authenticated, where it lives, and the price rule</h3>
+    <p>Three decisions, each of which an interviewer will ask you to defend. <strong>Guest or authenticated?</strong> Force a login before the cart and you lose conversions; support both and you inherit the merge problem. Support both. A guest cart is keyed by an opaque anonymous token in an HttpOnly cookie; when that visitor logs in, the guest cart is merged into their account cart — and "merge" needs a rule you have actually chosen: sum the quantities for a variant present in both, cap at available stock, and prefer the guest cart's line when the two disagree, because it reflects what the user was doing thirty seconds ago. Merge exactly once, then delete the guest cart, or a stale token will resurrect old lines on the next login.</p>
+    <p><strong>Where does it live?</strong> Client-side (localStorage) is free and instant but does not survive a device switch and cannot be analysed for abandoned-cart work. A database table is durable, queryable and joins to your other data, but it is a write on every quantity tweak and it accumulates dead rows. Redis with a TTL is fast, self-cleaning and ideal for guest carts that mostly get abandoned — at the cost of a second datastore and of carts that vanish silently. The defensible answer for this project: guest carts in Redis with a TTL of a few days, authenticated carts in PostgreSQL, one interface over both so the rest of the code cannot tell.</p>
+    <p><strong>What does a cart line store?</strong> A variant id and a quantity. Not a price. Prices are re-resolved from the catalog every time the cart is read and again at checkout, and the price the client sends is ignored entirely. If the price changed while the item sat in the cart, say so in the response and let the user re-confirm. A cart that trusts a client-supplied price is a shop where anyone with the browser dev tools can buy a laptop for one rupee — it is the classic mass-assignment and business-logic flaw, and it has shipped in real stores more than once. Price is frozen exactly once, into the order line, at order creation.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/redis/reference/index.html" rel="noopener">Spring Data Redis — reference documentation</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/expire/" rel="noopener">EXPIRE — Redis command reference (TTL semantics for abandoned guest carts)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-session/reference/index.html" rel="noopener">Spring Session — reference documentation (session-scoped state without sticky sessions)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/signals" rel="noopener">Signals — Angular documentation (a reactive cart badge that every component can read)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html" rel="noopener">Mass Assignment Cheat Sheet — OWASP (why the client never supplies the price)</a></li>
+    </ul>
+
+    <h3>Checkout and the order state machine</h3>
+    <p>Checkout is a short sequence with a long tail of failure modes: collect or select a shipping address, quote shipping options for that destination, show the totals, then create the order. The rule that organises everything: <strong>the order is created before payment is attempted.</strong> Persist an order in <code>PENDING_PAYMENT</code>, with its lines and frozen prices and its stock reservation, and only then ask the gateway for a payment intent. The reason is reconciliation — if you create the order after the payment succeeds and your process dies in between, you have taken money with no record of what it was for, and no way to find out except by trawling the provider's dashboard. With the order first, every payment has something to attach to and a nightly job can reconcile the two sets.</p>
+    <p>Model the lifecycle as an explicit state machine rather than a pile of boolean flags. Legal transitions only, every transition appended to an <code>order_event</code> table with a reason and a timestamp, and the admin status endpoint validated against the same machine so staff cannot mark a cancelled order as shipped. That event log is also, for free, the "track your order" timeline the customer sees.</p>
+    <p>Two smaller decisions worth making deliberately. Totals — subtotal, shipping, tax, grand total — are stored on the order, not recomputed on read, because the tax rate will change and old orders must not. And the customer-facing order number is a separate, non-guessable value from the primary key: sequential integers in URLs let anyone enumerate your order volume, and combined with a missing ownership check they let anyone read other people's orders.</p>
+    <pre class="code-block" data-label="Order lifecycle"><code>  CART  --(POST /api/orders: lines frozen, stock reserved)-->  PENDING_PAYMENT
+
+  PENDING_PAYMENT --(webhook: payment succeeded)-->  PAID
+  PENDING_PAYMENT --(webhook: payment failed)----->  CANCELLED   (release reservation)
+  PENDING_PAYMENT --(reservation TTL expires)----->  CANCELLED   (release reservation)
+
+  PAID       --(admin packs and hands to courier)-->  FULFILLED
+  PAID       --(admin or customer cancels)--------->  REFUNDED   (restock, refund API)
+  FULFILLED  --(return accepted, stretch goal)----->  REFUNDED
+
+  Illegal by construction: CART to PAID, CANCELLED to anything,
+  FULFILLED to CANCELLED. Every arrow writes one order_event row.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-statemachine/docs/current/reference/" rel="noopener">Spring Statemachine — reference documentation</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/forms/reactive-forms" rel="noopener">Reactive forms — Angular documentation (the multi-step checkout form)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/routing/route-guards" rel="noopener">Route guards — Angular documentation (stop a user deep-linking into step three)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-state-machine" rel="noopener">A Guide to the Spring State Machine Project — Baeldung</a></li>
+      <li>[Article] <a href="https://owasp.org/API-Security/editions/2023/en/0xa6-unrestricted-access-to-sensitive-business-flows/" rel="noopener">Unrestricted Access to Sensitive Business Flows — OWASP API Security Top 10</a></li>
+    </ul>
+
+    <h3>Inventory: the oversell problem and reserve-then-confirm</h3>
+    <p>Two customers, one unit left, both click "Place order" in the same millisecond. Both transactions read <code>on_hand = 1</code>, both decide it is available, both write <code>on_hand = 0</code>, and you have sold stock you do not have. That is oversell, it is a lost-update race, and "wrap it in a transaction" does not fix it — under read-committed isolation both transactions read a consistent snapshot and neither notices the other. There are three real answers and you should be able to argue all three.</p>
+    <p><strong>Optimistic concurrency</strong> puts a <code>version</code> column on the stock row: read it, decide, then update <code>WHERE variant_id = ? AND version = ?</code>; if zero rows changed, someone beat you, so re-read and retry. It is cheap, it holds no locks, and it degrades badly under genuinely high contention on one hot row — every loser retries, and during a flash sale on one SKU the retry storm can be worse than a lock. <strong>Pessimistic locking</strong> takes <code>SELECT ... FOR UPDATE</code> on the stock row and serialises the contenders; it is simple, always correct, and it holds a database lock for the duration of the transaction, so it must never be held across a network call to a payment gateway. <strong>Reserve-then-confirm</strong> splits the problem in time: at order creation, atomically move quantity from <code>on_hand</code> into <code>reserved</code> and write a <code>stock_reservation</code> row with an <code>expires_at</code> a few minutes out; on payment success the reservation is consumed and <code>reserved</code> drops; on failure or expiry a scheduled sweeper releases it back.</p>
+    <p>The recommendation for this project: <strong>reserve-then-confirm, with the reservation write itself protected by optimistic locking on the stock row</strong>. It is the only option that behaves correctly across the minutes-long gap between "order created" and "webhook arrives", which is exactly the window a pure lock cannot cover. Be honest about its failure modes: a reservation sweeper that stops running silently strangles your available stock; a TTL that is too short cancels orders whose payment was merely slow; and a webhook that arrives after expiry means you have taken money for stock you released — which is precisely why the order still exists in <code>PENDING_PAYMENT</code> and can be flagged for manual resolution rather than lost. Write the concurrency test before the feature: twenty threads, one unit of stock, assert exactly one order succeeds.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html" rel="noopener">Locking — Spring Data JPA reference documentation (OPTIMISTIC and PESSIMISTIC lock modes)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/explicit-locking.html" rel="noopener">Explicit Locking — PostgreSQL documentation (row locks, FOR UPDATE, deadlock behaviour)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/transaction-iso.html" rel="noopener">Transaction Isolation — PostgreSQL documentation (why read-committed does not save you)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/eaaCatalog/optimisticOfflineLock.html" rel="noopener">Optimistic Offline Lock — Martin Fowler, Patterns of Enterprise Application Architecture</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lR6y-0RC5cc" rel="noopener">Spring Boot: Optimistic and Pessimistic Locking Explained with a Concurrent Seat Booking Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Payments: sandbox only, and never a raw card number</h3>
+    <p>State this plainly, because it is the fastest way to fail a security screen: <strong>if a card number reaches your server, your server is in PCI DSS scope.</strong> Accepting, transmitting or storing a primary account number drags your application, your database, your logs, your backups and your entire deployment into a compliance regime built for payment processors. No portfolio project should do this, and no interviewer wants to hear that you built a card form that POSTs to your controller.</p>
+    <p>The correct architecture keeps the card outside your perimeter entirely. Either you <strong>redirect</strong> to the provider's hosted checkout page, or you embed the provider's <strong>hosted fields</strong> — an iframe served by the gateway, rendered inside your page, into which the card is typed. In both cases the card data goes from the browser to the gateway directly; your server receives only an opaque token or intent identifier. Stripe Checkout, Stripe Elements, and Razorpay's standard checkout all work this way. Build against the provider's <strong>test mode</strong> with their published test card numbers, and keep the secret key in an environment variable or a secrets manager — never in <code>application.yml</code>, never in the repository. The publishable or key id is the only credential the Angular app ever sees.</p>
+    <p>An India-relevant note worth having an opinion on: Razorpay is the natural choice for an INR store and supports UPI, netbanking and cards through the same integration; Stripe's documentation is the better teaching material. Either is fine for this capstone. What matters is that the flow is identical in shape — create an intent or order server-side, hand a token to the browser, let the provider collect the money, and confirm asynchronously.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/security/guide" rel="noopener">Security at Stripe — integration security guide (PCI scope and why tokenisation removes it)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/payments/checkout" rel="noopener">Stripe Checkout — hosted payment page documentation</a></li>
+      <li>[Official] <a href="https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/" rel="noopener">Standard Web Integration — Razorpay documentation (checkout, test mode, UPI and cards)</a></li>
+      <li>[Official] <a href="https://www.pcisecuritystandards.org/standards/pci-dss/" rel="noopener">PCI DSS — PCI Security Standards Council (what you are opting out of)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=t574YTo7HEw" rel="noopener">Spring Boot with Payment Gateway: Step by Step Guide — Razorpay Integration — Ashok IT</a></li>
+    </ul>
+
+    <h3>Webhooks, idempotency and reconciliation</h3>
+    <p>The browser telling your server "payment succeeded" is a claim from an untrusted client, and it is also unreliable — users close the tab, phones lose signal, UPI apps take their time. The authoritative confirmation is the provider's <strong>webhook</strong>: a server-to-server callback that arrives when the payment actually settles, possibly seconds later, possibly minutes. Your finalisation logic — mark the order <code>PAID</code>, consume the stock reservation, send the confirmation email — belongs in the webhook handler, not in the redirect handler. The redirect only updates the UI.</p>
+    <p>Four properties the handler must have. <strong>Signature verification</strong> first: the endpoint is unauthenticated and publicly reachable, so verify the provider's HMAC signature over the exact raw request body before parsing anything, and reject on mismatch. Read the body as bytes — a JSON round-trip through Jackson changes whitespace and breaks the signature. <strong>Duplicate tolerance</strong> next: providers retry until they get a 2xx, and "at least once" means you will see the same event twice. Store <code>provider_event_id</code> with a unique constraint and treat the constraint violation as success; that one index turns duplicate delivery into a no-op. <strong>Out-of-order tolerance</strong> third: <code>payment.captured</code> can arrive before <code>payment.authorized</code>, so drive state from the event's own type and the order's current state rather than assuming a sequence, and ignore events that would move the machine backwards. And <strong>fast acknowledgement</strong>: verify, persist the raw event, return 200, and do the work from the stored event — a slow handler earns you a retry storm on top of whatever was already slow.</p>
+    <p>Finally, <strong>reconciliation</strong>. The provider is the source of truth about money; your database is a cache of their state. Run a scheduled job that fetches payments from the provider API for a recent window and compares them against your orders, and alert on the two asymmetries: a captured payment with no <code>PAID</code> order (a missed or dropped webhook — you have their money and they have no order) and a <code>PAID</code> order with no captured payment (a bug or a manual edit). Every real payments team runs this job. Being able to say you built one puts you ahead of most candidates with an e-commerce project on the CV.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.stripe.com/payments/paymentintents/lifecycle" rel="noopener">The PaymentIntent object lifecycle — Stripe documentation (every state and what moves between them)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/webhooks" rel="noopener">Webhooks — Stripe documentation (delivery guarantees, retries, signature verification)</a></li>
+      <li>[Official] <a href="https://razorpay.com/docs/webhooks/validate-test/" rel="noopener">Validate and Test Webhooks — Razorpay documentation (HMAC verification over the raw body)</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/api/idempotent_requests" rel="noopener">Idempotent requests — Stripe API reference</a></li>
+      <li>[Article] <a href="https://brandur.org/idempotency-keys" rel="noopener">Implementing Stripe-like Idempotency Keys in Postgres — Brandur Leach</a></li>
+    </ul>
+
+    <h3>Suggested build phases</h3>
+    <p>Eleven phases, each ending in something you can run, screenshot and explain. Resist the urge to build all the entities first — a vertical slice that works beats a horizontal layer that does not.</p>
+    <ol>
+      <li><strong>Catalog schema and admin CRUD.</strong> Products, option types, option values, variants, images, categories. Flyway or Liquibase migrations from day one. Admin endpoints to create a product with its full variant matrix in one request. Demo: create a t-shirt with three colours and four sizes and see twelve variants with distinct SKUs and prices. Put the Spring Modulith or ArchUnit boundary test in the build now, while there is one module.</li>
+      <li><strong>Storefront listing, search and product detail.</strong> Public read endpoints, pagination, sorting, category filter, text search, facet counts. The Angular shell: routing, product grid, product page with a working size and colour selector that disables combinations which do not exist. Demo: browse and filter a catalog of a few hundred seeded products.</li>
+      <li><strong>Cart with guest and authenticated merge.</strong> Anonymous token cookie, cart endpoints, Redis for guest carts, PostgreSQL for account carts, and the merge on login with the rule you chose. Demo: fill a cart signed out, log in, watch it merge; then tamper with the price in the request body and watch the server ignore it.</li>
+      <li><strong>Checkout and the order state machine.</strong> Address capture, shipping options, totals, order creation with frozen prices, order-event log, admin transition validation. No payment yet — a fake "mark as paid" endpoint stands in. Demo: place an order and walk it through the lifecycle.</li>
+      <li><strong>Inventory reservation with a concurrency test.</strong> Reserve on order creation, sweeper for expiry, release on cancellation, optimistic locking on the stock row. Write the test first: N threads, one unit, exactly one winner. Demo: run the test and show the losers failing cleanly rather than overselling.</li>
+      <li><strong>Payment integration in sandbox with webhooks.</strong> Provider intent creation, hosted checkout or hosted fields in Angular, the webhook endpoint with signature verification and the unique event id, finalisation moving the order to PAID and consuming the reservation. Use the provider's CLI or dashboard to replay a webhook twice and prove the second one changes nothing. Demo: a real sandbox payment, end to end.</li>
+      <li><strong>Order history and status tracking.</strong> Customer order list and detail with the timeline built from the event log, ownership checks on every read, non-guessable order numbers. Demo: two accounts, and account B cannot fetch account A's order even with the id.</li>
+      <li><strong>Admin back office.</strong> A lazily loaded Angular area behind a role guard: product and variant management with image upload, stock adjustments, order queue with fulfilment actions, basic sales figures. Demo: fulfil an order from the admin and see the customer's timeline update.</li>
+      <li><strong>Caching and performance pass.</strong> Redis-backed caching on the category tree and product detail with event-driven eviction, the denormalised listing projection, index review against real query plans, and an N+1 hunt with SQL-count assertions. Measure before and after; a number you can quote is worth more than the optimisation itself.</li>
+      <li><strong>Test pyramid pass.</strong> Unit tests on pricing, merge rules and state transitions; slice tests on controllers and repositories; integration tests on PostgreSQL and Redis via Testcontainers; the concurrency test from phase five in CI; a webhook replay test; and one end-to-end happy path. Add the module-boundary verification test to the same run.</li>
+      <li><strong>One stretch goal, finished.</strong> Reviews, wishlists, discount codes, recommendations, returns or multi-vendor — pick the one you would most enjoy defending, and complete it including its tests and its admin surface.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/index.html" rel="noopener">Testing — Spring Boot reference documentation (slices, test slices and integration testing)</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/" rel="noopener">Testcontainers for Java (real PostgreSQL and Redis in your test run)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/testing.html" rel="noopener">Testing Application Modules — Spring Modulith reference documentation</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/tomato-architecture-pragmatic-approach-to-software-design/" rel="noopener">Tomato Architecture: A Pragmatic Approach to Software Design — SivaLabs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UXe6xuV-URY" rel="noopener">Spring Modulith Workshop: Convert a Monolithic Application into a Modular Monolith — SivaLabs</a></li>
+    </ul>
+
+    <h3>Reference implementations worth reading</h3>
+    <p>Read the schema and the module layout, not every line of code. The most useful exercise is to open each project's product and order tables and ask why their choices differ from yours — where they carry a concept you skipped, they usually learned it from a support ticket. Two of these are deliberately not Java: a commerce data model is a commerce data model regardless of language, and reading one in TypeScript keeps you focused on the design rather than the syntax.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/spring-projects/spring-modulith" rel="noopener">spring-projects/spring-modulith — GitHub (the example applications under the examples directory)</a></li>
+      <li>[Reference] <a href="https://github.com/sivaprasadreddy/spring-modular-monolith" rel="noopener">sivaprasadreddy/spring-modular-monolith — GitHub (a Spring Boot bookstore built exactly as this brief recommends)</a></li>
+      <li>[Reference] <a href="https://github.com/broadleafcommerce/BroadleafCommerce" rel="noopener">broadleafcommerce/BroadleafCommerce — GitHub (a mature Java commerce framework; the catalog and pricing model is the part to study)</a></li>
+      <li>[Reference] <a href="https://github.com/medusajs/medusa" rel="noopener">medusajs/medusa — GitHub (modular commerce engine; read the module contracts and the cart-to-order flow)</a></li>
+      <li>[Reference] <a href="https://github.com/vendurehq/vendure" rel="noopener">vendurehq/vendure — GitHub (clean variant, stock and order state modelling)</a></li>
+    </ul>
+
+    <h3>Module map: which track modules this exercises</h3>
+    <p>Every part of this capstone maps back to a module you have already worked through. Use it in reverse too: when a phase stalls, the linked module is where the explanation lives.</p>
+    <ul>
+      <li><strong>Application structure, web layer and configuration</strong> — <a href="../spring-boot/01-fundamentals-autoconfig.html">Spring Boot fundamentals and auto-configuration</a>, <a href="../spring-boot/04-web.html">Spring Boot web</a>, <a href="../spring-boot/05-data-access.html">data access</a>, <a href="../spring-boot/10-caching-messaging-scheduling.html">caching, messaging and scheduling</a> (the reservation sweeper and the reconciliation job live here).</li>
+      <li><strong>Catalog and order persistence</strong> — <a href="../jpa/02-entity-mapping.html">entity mapping</a>, <a href="../jpa/04-relationships.html">relationships</a> (product to variant to option value), <a href="../jpa/10-spring-data-repositories.html">Spring Data repositories</a>, <a href="../jpa/08-fetching-nplus1.html">fetching and the N+1 problem</a> (phase nine), <a href="../jpa/12-transactions-concurrency.html">transactions and concurrency</a> (phase five), <a href="../jpa/13-caching.html">JPA caching</a>.</li>
+      <li><strong>Schema, indexes and isolation</strong> — <a href="../databases/11-normalization-design.html">normalization and design</a>, <a href="../databases/08-indexing.html">indexing</a>, <a href="../databases/09-query-optimization.html">query optimization</a>, <a href="../databases/10-transactions.html">transactions and isolation levels</a> (the oversell discussion), <a href="../databases/13-redis.html">Redis</a> (guest carts and the catalog cache).</li>
+      <li><strong>Authentication, roles and ownership</strong> — <a href="../spring-security/02-authentication.html">authentication</a>, <a href="../spring-security/04-authorization.html">authorization</a> (the admin back office and per-order ownership checks), <a href="../spring-security/08-jwt-resource-server.html">JWT resource server</a>, <a href="../spring-security/05-csrf-cors-headers.html">CSRF, CORS and security headers</a> (the webhook endpoint must be exempt from CSRF and protected by signature instead).</li>
+      <li><strong>The vulnerabilities this project attracts</strong> — <a href="../secure-coding/02-owasp-top-10.html">OWASP Top 10</a>, <a href="../secure-coding/05-authn-authz.html">authentication and authorization flaws</a> (broken object-level authorization on order ids), <a href="../secure-coding/08-input-validation.html">input validation</a> (quantity, coupon codes, address fields), <a href="../secure-coding/07-secrets-crypto.html">secrets and cryptography</a> (gateway keys and the webhook signing secret).</li>
+      <li><strong>Storefront UI</strong> — <a href="../angular-basics/07-signals.html">signals</a> (cart state), <a href="../angular-basics/09-forms.html">forms</a> (checkout and admin product forms), <a href="../angular-basics/10-http-observables.html">HTTP and observables</a>.</li>
+      <li><strong>Routing, interceptors and front-end performance</strong> — <a href="../angular-advanced/01-routing-fundamentals.html">routing fundamentals</a>, <a href="../angular-advanced/02-routing-advanced.html">advanced routing</a> (guards and resolvers for the checkout steps and the lazy admin area), <a href="../angular-advanced/05-advanced-http.html">advanced HTTP</a> (the auth and cart-token interceptors), <a href="../angular-advanced/09-performance.html">performance</a> (deferred loading on a long product grid).</li>
+      <li><strong>Proving it works</strong> — <a href="../backend-testing/04-mockito-basics.html">Mockito basics</a>, <a href="../backend-testing/07-spring-integration-testing.html">Spring integration testing</a>, <a href="../backend-testing/08-testcontainers.html">Testcontainers</a> (the concurrency and webhook tests need a real database), <a href="../backend-testing/09-api-contract-testing.html">API and contract testing</a>.</li>
+      <li><strong>The design conversation</strong> — <a href="../system-design/09-api-design.html">API design</a>, <a href="../system-design/04-caching.html">caching</a>, <a href="../system-design/06-database-scaling.html">database scaling</a> (what you would do when the catalog outgrows one node), <a href="../system-design/08-consistency-availability.html">consistency and availability</a> (the reservation window is an availability-for-consistency trade you made deliberately).</li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="07-banking-application.html">← Banking Application</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="09-microservices-refactor.html">Microservices Refactor →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees "E-Commerce Application" on your CV and assumes it is a CRUD tutorial until you prove otherwise. These are the questions that decide which it was — weighted to Indian product and service-company rounds, where the concurrency and payments follow-ups are where the offer is won or lost:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through your schema. Why is there a product table and a variant table?</summary>
+      <div class="answer"><p>Product is the marketing entity — name, description, brand, category, images. Variant is the sellable entity — one specific combination of options, with its own SKU, its own price and its own stock row. A navy shirt in medium and the same shirt in large are two variants of one product; they can differ in price and certainly differ in stock. Option types and option values are modelled explicitly and joined to variants through a link table, so the product page can render the selectors generically and a third option can be added without a migration.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Where does price live, and why not on the product?</summary>
+      <div class="answer"><p>On the variant, as an integer in the smallest currency unit plus a currency code. Sizes and colourways are priced differently in the real world, so a price on the product cannot express what a shop needs. Integer minor units avoid floating-point rounding on money, which is a bug you cannot argue your way out of in an interview.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> A guest fills a cart and then logs in. What happens?</summary>
+      <div class="answer"><p>The guest cart is keyed by an opaque token in an HttpOnly cookie and stored in Redis with a TTL. On login it is merged into the account cart with an explicit rule: sum quantities for a variant present in both, cap at available stock, prefer the guest line on conflict because it is the most recent intent. The merge runs exactly once and the guest cart is then deleted, otherwise a stale token resurrects old lines on the next login.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is the price re-resolved at checkout instead of read from the cart?</summary>
+      <div class="answer"><p>Because a price sent by the client is attacker-controlled. Cart lines store only a variant id and a quantity; the server resolves the price from the catalog on every cart read and again when the order is created. If the catalog price changed while the item sat in the cart, the response says so and the user re-confirms. Trusting a client-supplied price is the classic mass-assignment flaw that lets someone buy a laptop for one rupee, and it has shipped in production stores more than once. The price is frozen exactly once, into the order line, at order creation — so historical orders remain correct when the catalog price later changes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Where does the cart live — database, Redis or the browser? Defend the choice.</summary>
+      <div class="answer"><p>Guest carts in Redis with a TTL, authenticated carts in PostgreSQL, behind one interface. Guest carts are mostly abandoned, so a self-expiring store avoids accumulating dead rows and a write per quantity tweak. Authenticated carts need durability, cross-device continuity and joins against customer data, so they belong in the relational store. Pure localStorage is rejected because it does not survive a device switch and gives you nothing to analyse; pure database is rejected because of the write volume and the garbage.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Two customers buy the last unit at the same instant. How did you stop overselling?</summary>
+      <div class="answer"><p>It is a lost-update race, and a transaction alone does not fix it — under read-committed both transactions read the same snapshot. Three options: optimistic concurrency with a version column and a conditional update plus retry; pessimistic <code>SELECT ... FOR UPDATE</code> serialising the contenders; or reserve-then-confirm, moving quantity from on_hand into reserved with an expiring reservation. I used reserve-then-confirm with optimistic locking on the stock row, because the gap between order creation and payment confirmation is minutes long and no database lock should be held across a call to a payment gateway. I proved it with a test: twenty threads, one unit of stock, assert exactly one order succeeds.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does the order exist before the payment is attempted?</summary>
+      <div class="answer"><p>So there is always something to reconcile against. The order is persisted in PENDING_PAYMENT with its frozen lines and its stock reservation, and only then is a provider intent created. If you create the order after payment succeeds and the process dies in between, you have taken money with no record of what it was for — recoverable only by trawling the provider's dashboard. Order-first also gives the webhook handler a target to attach to, gives the customer something to see if they refresh, and gives the nightly reconciliation job both sides of the comparison.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is your monolith split into modules if it deploys as one artifact?</summary>
+      <div class="answer"><p>Because the boundaries are the point, not the deployment. Each module owns its tables, exposes one interface and communicates by in-process events; no module reads another's tables or joins across a boundary. That keeps the codebase navigable at size, and it means the next capstone is a migration rather than a rewrite — an in-process event publisher becomes a Kafka producer and the calling code is unchanged. I enforce it with Spring Modulith's verification test in CI, because a boundary that is only a convention is gone within a fortnight.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> The same payment webhook arrives three times. What happens each time?</summary>
+      <div class="answer"><p>The first time: verify the HMAC signature over the raw body, insert the event with its provider_event_id under a unique constraint, finalise the order, return 200. The second and third: the same signature check passes, the insert violates the unique constraint, and the handler treats that violation as success and returns 200 without touching the order. Providers retry until they see a 2xx, so at-least-once delivery is guaranteed and duplicates are normal rather than exceptional. The unique index is what turns a duplicate into a no-op; without it you double-decrement stock or send two confirmation emails.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your webhook signature check keeps failing even though the secret is right. Why?</summary>
+      <div class="answer"><p>Almost always because the body was parsed and re-serialised before verification. The signature is an HMAC over the exact bytes the provider sent; deserialising to a POJO and re-serialising changes key order and whitespace and invalidates it. Read the raw request body as bytes, verify against it, and only then parse. The other usual causes are a trailing newline added by a proxy, the wrong secret for the environment (test versus live secrets differ), and comparing with string equality instead of a constant-time comparison — the last one works but leaks timing.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Events can arrive out of order. How does your order state machine cope?</summary>
+      <div class="answer"><p>State is driven by the event type combined with the order's current state, never by an assumed sequence. Each transition is validated against the machine, so an authorized event arriving after a captured event is recognised as a backwards move and ignored rather than applied. Every accepted transition appends to an order_event log with the provider event id and a reason, which is both the audit trail and the customer-facing tracking timeline. Illegal transitions — cancelled to paid, fulfilled to cancelled — are impossible by construction rather than by an if-statement someone will forget.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Did you store card details? What would it mean if you had?</summary>
+      <div class="answer"><p>No, and deliberately. A card number touching the server puts the application, the database, the logs and the backups into PCI DSS scope, which is a compliance regime no side project should enter. The card is collected by the provider — either a redirect to their hosted checkout or their hosted fields in an iframe — so it goes from the browser to the gateway and my server only ever sees an opaque intent or token. The secret key lives in an environment variable or a secrets manager; the browser only receives the publishable key. Everything runs against the provider's test mode with their published test cards.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A customer says they paid but the order shows unpaid. How do you find out what happened?</summary>
+      <div class="answer"><p>The provider is the source of truth for money; my database is a cache of their state. I run a scheduled reconciliation job over a recent window that fetches payments from the provider API and compares them with my orders, alerting on both asymmetries — a captured payment with no PAID order, meaning a webhook was dropped or my handler failed, and a PAID order with no captured payment, meaning a bug or a manual edit. For this specific customer I look up the order, find its stored payment intent id, query the provider for that intent, and either replay the webhook or finalise from the reconciliation path. Because the order was created before payment, there is always a record to attach the answer to.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What breaks first when this store gets a hundred times the traffic, and what would you do?</summary>
+      <div class="answer"><p>Not the catalog — that is read-heavy, cacheable and horizontally scalable behind Redis and a read replica. It is the hot rows: a flash sale on one SKU concentrates every write on a single stock row, and optimistic retries turn into a retry storm while pessimistic locks turn into a queue. The mitigations are sharding the counter across several rows and summing, admitting a bounded number of buyers into checkout at all, or moving the decrement to a single-writer queue per SKU. Second to break is the reservation sweeper, whose failure silently strangles available stock, so it needs a metric on reservations released per run and an alert when it reaches zero unexpectedly.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How would you split this into microservices, and what becomes hard?</summary>
+      <div class="answer"><p>The service boundaries are already drawn: catalog, cart, order, inventory, payment and customer, each owning its tables and already talking only through events. The mechanical part is replacing the in-process publisher with a broker and putting an HTTP or gRPC facade on each module's existing interface. What becomes hard is what the single database was hiding — placing an order and reserving stock stop being one transaction, so the flow becomes a saga with compensations, and the outbox pattern is needed so a state change and its published event cannot diverge. Read paths that used to join now need either duplication or composition, and every call gains a timeout, a retry and a failure mode. That is capstone 09.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.ecm.brief — feature outline and scope, catalog and variant design, storefront read path, cart design, checkout and the order state machine, payments and inventory reservation</li>
+      <li>prj.ecm.build — suggested build phases, reference implementations, and the module map back to the course tracks</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Capstone 08 of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

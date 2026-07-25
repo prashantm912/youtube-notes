@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Job Portal capstone brief: a two-sided job board with multi-criteria search taught as a progression from SQL LIKE to PostgreSQL full-text search to Elasticsearch, faceted filtering, offset versus keyset pagination, safe CV upload and storage, asynchronous transactional email and a scheduled saved-search digest — with a data model, API contract, ten build phases and a module map.">
+  <title>Capstone: Job Portal — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 04: Job Portal</h1>
+  <p class="standfirst">The search, file handling and email capstone. Everything a candidate types into a search box has to become an index-friendly query, every CV they upload is an untrusted binary from the public internet, and every alert email you promise has to arrive exactly once even when four copies of your application are running.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Job Portal</nav>
+
+  <section id="intro">
+    <h2>What this capstone is</h2>
+    <p>This is a buildable specification, not a tutorial. It gives you the scope, an architecture sketch, a data model, an API contract and ten build phases — each phase independently runnable and demoable — then points at the documentation and reference implementations that carry the detail. You write the code.</p>
+    <p>Three things make this project worth building rather than a fourth CRUD app. First, <em>search</em>: a job board is a search product wearing a CRUD costume, and the honest progression from <code>LIKE</code> to PostgreSQL full-text search to Elasticsearch is one of the best design conversations you can have in an interview. Second, <em>file handling</em>: a CV upload endpoint is an attacker's favourite door, and doing it properly touches validation, storage, authorization and streaming. Third, <em>email</em>: transactional mail plus a scheduled digest forces you to confront asynchrony, retries, and the duplicate-send problem that appears the moment you run more than one instance.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Scope: two user types and the MVP cut</h3>
+    <p>Two roles share one application. <strong>Employers</strong> register a company, post job listings, edit and close them, and review incoming applications through a small status pipeline. <strong>Candidates</strong> build a profile, upload a CV, search and filter listings, apply with one click, and track the status of everything they have applied to. An admin role exists only to moderate — do not let it grow into a third product.</p>
+    <p>The MVP is deliberately narrow: multi-criteria search (keyword, location, salary range, experience level, remote flag, posted-within), sorted and paginated results, applications with a status pipeline, saved searches with an emailed digest, and an employer dashboard showing listing performance and the application funnel. Ship those and you have a genuinely complete product. The stretch goals — full-text relevance ranking beyond a naive rank, candidate recommendations, resume parsing that pre-fills a profile, and scheduled listing expiry — are each a self-contained second act you can add without rewriting anything, which is exactly how you should scope features in real work.</p>
+    <p>What you are explicitly <em>not</em> building: messaging between employer and candidate, payments for premium listings, or a recruiter CRM. Each is a different product. Note the boundary in your README; interviewers respect a candidate who can say what they left out and why.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/servlet.html" rel="noopener">Servlet web applications — Spring Boot reference documentation</a></li>
+      <li>[Reference] <a href="https://github.com/cncf/gitjobs" rel="noopener">cncf/gitjobs — GitHub (an actively maintained open-source job board; read its schema and search design)</a></li>
+      <li>[Reference] <a href="https://github.com/opencats/OpenCATS" rel="noopener">opencats/OpenCATS — GitHub (a long-lived open-source applicant tracking system; the domain model is the value here)</a></li>
+    </ul>
+
+    <h3>Architecture sketch</h3>
+    <p>A modular monolith is the right shape. One Spring Boot application, one PostgreSQL database, packages organised by feature rather than by layer, and object storage held behind an interface so a local filesystem implementation in development can become S3 in production without touching a controller. Angular is a separate build served as static assets or from its own dev server during development.</p>
+    <p>The only two components that must sit outside the request thread are mail delivery and the digest scheduler. Everything else — search, filtering, uploads, applications — is a plain synchronous HTTP request. Resist adding a message broker, a search cluster or a second service until a build phase forces the question; the point of the exercise is to feel where the pressure actually arrives.</p>
+    <pre class="code-block" data-label="TEXT"><code>            Angular SPA (candidate + employer UIs)
+                        |  JSON over HTTPS, bearer token
+                        v
+  +-----------------------------------------------------+
+  |            Spring Boot modular monolith             |
+  |                                                     |
+  |  auth/       jobs/       search/      applications/ |
+  |  profiles/   files/      alerts/      dashboard/    |
+  |                                                     |
+  |  files/  -> StorageService (interface)              |
+  |  alerts/ -> MailService  -> @Async executor         |
+  |  alerts/ -> DigestJob    -> @Scheduled + lock       |
+  +----------+---------------------------+--------------+
+             |                           |
+             v                           v
+     PostgreSQL 16                Object storage
+     - relational tables          - local dir (dev)
+     - tsvector + GIN index       - S3 bucket (prod)
+     - shedlock table             - presigned GET URLs
+             |
+             v
+        SMTP relay (provider sandbox in dev)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/data/sql.html" rel="noopener">SQL databases — Spring Boot reference documentation</a></li>
+      <li>[Reference] <a href="https://github.com/sivaprasadreddy/spring-modular-monolith" rel="noopener">sivaprasadreddy/spring-modular-monolith — GitHub (package-by-feature structure with enforced module boundaries)</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-application-configuration-tutorial/" rel="noopener">Spring Boot Application Configuration Tutorial — SivaLabs (profiles for the dev/prod storage and mail split)</a></li>
+    </ul>
+
+    <h3>Data model</h3>
+    <p>Nine tables carry the MVP. The shape worth arguing about is the search column: <code>job.search_doc</code> is a stored generated <code>tsvector</code> built from title, description and company name with weights, so the database maintains it on every write and you never have to remember to refresh it. That single decision is what turns the search phase from a chore into a two-line change later.</p>
+    <p>Note the deliberate denormalisations. <code>application.applied_cv_id</code> pins the CV version that was actually submitted, because a candidate who uploads a new CV must not retroactively change an application an employer already reviewed. <code>job.posted_at</code> is separate from <code>created_at</code> so a draft that is published later sorts by publication, not authorship. And salary is stored as two integers plus a currency, never as a string, so range filters are index-friendly.</p>
+    <pre class="code-block" data-label="SQL"><code>company(id, name, website, logo_key, created_at)
+app_user(id, email UNIQUE, password_hash, role, enabled, created_at)
+employer_profile(user_id PK/FK, company_id FK, job_title)
+candidate_profile(user_id PK/FK, full_name, headline, location,
+                  years_experience, open_to_remote, current_cv_id FK)
+
+job(id, company_id FK, posted_by FK, title, description,
+    location, remote_flag, employment_type, experience_level,
+    salary_min INT, salary_max INT, currency CHAR(3),
+    status, posted_at, expires_at, created_at,
+    search_doc tsvector GENERATED ALWAYS AS (
+      setweight(to_tsvector('english', coalesce(title,'')),       'A') ||
+      setweight(to_tsvector('english', coalesce(location,'')),    'B') ||
+      setweight(to_tsvector('english', coalesce(description,'')), 'C')
+    ) STORED)
+
+cv_document(id, candidate_id FK, storage_key, original_filename,
+            content_type, size_bytes, checksum_sha256, scan_status,
+            uploaded_at)
+
+application(id, job_id FK, candidate_id FK, applied_cv_id FK,
+            cover_note, status, created_at, updated_at,
+            UNIQUE (job_id, candidate_id))
+application_event(id, application_id FK, from_status, to_status,
+                  actor_id FK, note, occurred_at)
+
+saved_search(id, candidate_id FK, name, criteria_json JSONB,
+             frequency, last_notified_at, active)
+
+-- indexes that earn their keep
+CREATE INDEX job_search_idx   ON job USING GIN (search_doc);
+CREATE INDEX job_live_idx     ON job (status, posted_at DESC) WHERE status = 'PUBLISHED';
+CREATE INDEX job_salary_idx   ON job (salary_min, salary_max);
+CREATE INDEX app_by_job_idx   ON application (job_id, status, created_at DESC);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/ddl-generated-columns.html" rel="noopener">Generated Columns — PostgreSQL documentation (the STORED tsvector column)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/" rel="noopener">Jakarta Persistence — specification page (the mapping contract behind Spring Data JPA)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/bean-validation/" rel="noopener">Jakarta Validation — specification page (constraints on the request DTOs)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/9-postgresql-high-performance-performance-tips/" rel="noopener">9 High-Performance Tips when using PostgreSQL with JPA and Hibernate — Vlad Mihalcea</a></li>
+    </ul>
+
+    <h3>API contract</h3>
+    <p>Design the search endpoint first, because it constrains everything else. It takes filter parameters as flat query parameters (not a JSON body — search results must be linkable and cacheable), returns a page envelope with total count and facet counts, and accepts a <code>sort</code> parameter whose value you validate against an allow-list rather than passing to the database. Everything else is ordinary REST.</p>
+    <p>Two authorization rules cut across the whole contract and belong in your notes: an employer may only touch jobs and applications belonging to their own company, and a CV may only be fetched by its owner or by an employer who has a live application from that candidate. Both are object-level checks — the kind of broken-object-level-authorization bug that tops every API security list — so write them as explicit tests, not as comments.</p>
+    <table>
+      <thead><tr><th>Method and path</th><th>Who</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>POST /api/auth/register</code></td><td>public</td><td>Role chosen at registration; employer also creates or joins a company</td></tr>
+        <tr><td><code>POST /api/auth/login</code></td><td>public</td><td>Returns access token; refresh token as an HttpOnly cookie</td></tr>
+        <tr><td><code>GET /api/jobs</code></td><td>public</td><td>The search endpoint: <code>q</code>, <code>location</code>, <code>remote</code>, <code>minSalary</code>, <code>maxSalary</code>, <code>experience</code>, <code>postedWithinDays</code>, <code>sort</code>, <code>page</code>, <code>size</code></td></tr>
+        <tr><td><code>GET /api/jobs/{id}</code></td><td>public</td><td>Full listing; increments a view counter out of band</td></tr>
+        <tr><td><code>POST /api/jobs</code></td><td>employer</td><td>Creates a draft; publishing is a separate transition</td></tr>
+        <tr><td><code>PATCH /api/jobs/{id}</code></td><td>employer</td><td>Own company only; status transitions validated server-side</td></tr>
+        <tr><td><code>GET /api/me/profile</code></td><td>candidate</td><td>Profile plus current CV metadata</td></tr>
+        <tr><td><code>POST /api/me/cv</code></td><td>candidate</td><td><code>multipart/form-data</code>; size and sniffed content type validated before anything is written</td></tr>
+        <tr><td><code>GET /api/cv/{id}/download</code></td><td>owner or entitled employer</td><td>Redirect to a short-lived presigned URL, or stream with <code>Content-Disposition: attachment</code></td></tr>
+        <tr><td><code>POST /api/jobs/{id}/applications</code></td><td>candidate</td><td>Idempotent by the unique job plus candidate constraint; pins the CV version</td></tr>
+        <tr><td><code>GET /api/employer/applications</code></td><td>employer</td><td>Filter by job and status; the review queue</td></tr>
+        <tr><td><code>PATCH /api/applications/{id}/status</code></td><td>employer</td><td>Writes an <code>application_event</code> row and queues a candidate email</td></tr>
+        <tr><td><code>GET /api/me/applications</code></td><td>candidate</td><td>Application tracker with the event timeline</td></tr>
+        <tr><td><code>POST /api/me/saved-searches</code></td><td>candidate</td><td>Stores the criteria as JSONB plus a digest frequency</td></tr>
+        <tr><td><code>GET /api/employer/dashboard</code></td><td>employer</td><td>Views, applications per listing, funnel counts by status</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/commons/reference/repositories/query-methods-details.html" rel="noopener">Defining query methods — Spring Data reference (Pageable, Sort and the page envelope)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html" rel="noopener">Authorization Cheat Sheet — OWASP Cheat Sheet Series (object-level checks)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-pagination-in-spring" rel="noopener">REST Pagination in Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Search, step one: LIKE, and exactly where it stops working</h3>
+    <p>Start here, honestly, because this is what everyone writes first: <code>WHERE lower(title) LIKE lower('%' || :q || '%')</code>. It works on your seed data and it teaches you three lessons fast. A leading wildcard cannot use a normal B-tree index, so every query is a sequential scan of the whole table. There is no linguistic knowledge, so a search for "developers" misses "developer" and a search for "manage" matches "management" only by accident. And there is no <em>ranking</em>: a listing that mentions the term once in a footer scores identically to one with it in the title, so your result order is whatever the planner felt like returning.</p>
+    <p>Do not skip this step and do not leave it in. Build it in phase four, feel it, and let phase five replace it — that arc is worth more in an interview than arriving with Elasticsearch and no explanation. (If you ever do need substring matching for real — an autocomplete on company names, say — the right tool is a trigram index from <code>pg_trgm</code>, which makes <code>LIKE '%foo%'</code> indexable. That is a different problem from relevance search, and knowing the difference is the point.)</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch-intro.html" rel="noopener">Full Text Search: Introduction — PostgreSQL documentation (why LIKE is not text search)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/pgtrgm.html" rel="noopener">pg_trgm — PostgreSQL documentation (indexable substring matching, for autocomplete)</a></li>
+      <li>[Article] <a href="https://rachbelaid.com/postgres-full-text-search-is-good-enough/" rel="noopener">Postgres full-text search is Good Enough — Rachid Belaid (the essay that framed this whole decision)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q4e_GydUjbs" rel="noopener">Spring Data JPA Filter / Search Examples — Code Java</a></li>
+    </ul>
+
+    <h3>Search, step two: PostgreSQL full-text search and ts_rank</h3>
+    <p>This is the step that actually matters, and for a portfolio-scale job board it is where you should stop. PostgreSQL parses text into a <code>tsvector</code> of normalised lexemes with positions, parses the user's input into a <code>tsquery</code>, and matches them with the <code>@@</code> operator. Stemming means "developers" finds "developer"; stop words are dropped; <code>setweight</code> lets a term in the title count for more than the same term in a description. <code>ts_rank</code> and <code>ts_rank_cd</code> then turn a match into a score you can order by, and <code>ts_headline</code> gives you the highlighted snippet users expect under each result.</p>
+    <p>Two practical notes. Choose the input parser deliberately: <code>plainto_tsquery</code> for naive user input, <code>websearch_to_tsquery</code> when you want quoted phrases and <code>OR</code>/<code>-</code> to behave the way people expect from a search engine. And combine relevance with recency rather than sorting on rank alone — a perfect match from eight months ago is a worse result than a good match from yesterday, so a blended score, or "sort by relevance" as one option alongside "sort by date", is the honest product answer.</p>
+    <pre class="code-block" data-label="SQL"><code>SELECT j.id, j.title, j.company_id,
+       ts_rank(j.search_doc, q) AS relevance,
+       ts_headline('english', j.description, q) AS snippet
+FROM   job j, websearch_to_tsquery('english', :q) AS q
+WHERE  j.status = 'PUBLISHED'
+  AND  j.search_doc @@ q
+  AND  (:location IS NULL OR j.location = :location)
+  AND  (:minSalary IS NULL OR j.salary_max &gt;= :minSalary)
+ORDER  BY relevance DESC, j.posted_at DESC, j.id DESC
+LIMIT  :size OFFSET :offset;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch.html" rel="noopener">Full Text Search — PostgreSQL documentation (the whole chapter; read it once end to end)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch-controls.html" rel="noopener">Controlling Text Search — PostgreSQL documentation (tsquery parsers, ts_rank, ts_headline)</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch-tables.html" rel="noopener">Searching Tables — PostgreSQL documentation (weights and a stored search column)</a></li>
+      <li>[Article] <a href="https://www.crunchydata.com/blog/postgres-full-text-search-a-search-engine-in-a-database" rel="noopener">Postgres Full-Text Search: A Search Engine in a Database — Crunchy Data</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4c0vjXR9Ip4" rel="noopener">PostgreSQL Full Text Search Tutorial — Redhwan Nacef</a></li>
+    </ul>
+
+    <h3>Indexing the search: GIN, and keeping the vector fresh</h3>
+    <p>A <code>tsvector</code> match without an index is still a sequential scan — you have bought linguistics, not speed. The index you want is GIN (Generalized Inverted Index): it maps each lexeme to the rows containing it, which is exactly the access pattern of "find every job mentioning kubernetes". GIN is slower to update and larger on disk than GiST, and for a job board that is precisely the right trade, because listings are read thousands of times and written once.</p>
+    <p>Keeping the vector current is where implementations rot. The three options are a trigger, an application-side recompute on save, and a <code>GENERATED ALWAYS AS ... STORED</code> column. Prefer the generated column: PostgreSQL maintains it, it cannot drift, and it needs no Hibernate involvement beyond mapping the field as <code>insertable = false, updatable = false</code>. Then verify with <code>EXPLAIN (ANALYZE, BUFFERS)</code> that your query actually reaches a Bitmap Index Scan on the GIN index — an index nobody checks is an index that is quietly not being used.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/gin.html" rel="noopener">GIN Indexes — PostgreSQL documentation</a></li>
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/textsearch-indexes.html" rel="noopener">Preferred Index Types for Text Search — PostgreSQL documentation (GIN versus GiST)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/postgresql-index-types/" rel="noopener">PostgreSQL Index Types — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://supabase.com/docs/guides/database/full-text-search" rel="noopener">Full Text Search — Supabase docs (a practical end-to-end recipe on Postgres)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GRwIa-ce7RA" rel="noopener">Master Postgres Full-text Search in 5 Minutes — Supabase</a></li>
+    </ul>
+
+    <h3>Search, step three: when Elasticsearch earns its operational cost</h3>
+    <p>Elasticsearch is a genuinely better search engine than PostgreSQL. It is also a second datastore: a cluster to size and patch, an indexing pipeline to build, a dual-write or change-data-capture path to keep in sync, a reindex procedure for every mapping change, and a whole new class of "the search index is stale" bug. For a job board with tens of thousands of listings, that cost buys you almost nothing, and an interviewer who hears "I used Elasticsearch because it is what you use for search" will ask what it cost you.</p>
+    <p>Name the thresholds instead. Reach for a dedicated engine when you need typo tolerance and fuzzy matching, per-field boosting and tunable relevance you tweak without a migration, aggregations that power facet counts across millions of documents, synonym and multi-language analysis chains, or search-as-you-type at a latency Postgres cannot hold. If you do add it, add it as a read model fed asynchronously from the database — the database stays the source of truth, and search staleness becomes a measurable lag rather than a data-loss risk. Hibernate Search is the middle path worth knowing: Lucene-grade indexing driven from your JPA entities.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/solutions/search" rel="noopener">Search solutions — Elastic documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/elasticsearch/reference/" rel="noopener">Spring Data Elasticsearch — reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-elasticsearch-tutorial" rel="noopener">A Guide to Elasticsearch in Java — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/hibernate-search" rel="noopener">Introduction to Hibernate Search — Baeldung (the middle path between Postgres and a cluster)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c8IrUHV70KQ" rel="noopener">The State of (Full) Text Search in PostgreSQL 12 — Jimmy Angelakos (talk hosted by Peter Cooper)</a></li>
+    </ul>
+
+    <h3>Faceted filtering and the combinatorial index problem</h3>
+    <p>Six independent filters give sixty-four possible filter combinations, and you cannot build a composite index for each. This is the moment to understand what an index actually buys: a composite index on <code>(status, posted_at)</code> serves the common "live jobs, newest first" path; the GIN index serves keyword; a range index on salary serves salary. Everything else is filtered after the driving index has cut the candidate set down, and that is fine, because the driving predicate — published status plus a keyword or a recency window — usually reduces millions of rows to hundreds before any other filter runs.</p>
+    <p>Facet counts ("Remote (412)") are the second half of the problem. Computing them by re-running the query once per facet value is the naive approach and it will be your slowest endpoint. Do it in one pass with conditional aggregation or <code>GROUPING SETS</code> over the filtered set, cache the counts for the unfiltered default view, and accept approximate counts for large result sets — no user has ever noticed the difference between 412 and "400+", and <code>count(*)</code> over a huge filtered set is often more expensive than the page of results itself.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/specifications.html" rel="noopener">Specifications — Spring Data JPA reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html" rel="noopener">JPA Query Methods — Spring Data JPA reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-api-search-language-spring-data-specifications" rel="noopener">REST Query Language with Spring Data JPA Specifications — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=r4R4M3Br2o8" rel="noopener">Search/Filter REST API using Spring Data JPA and Specifications, Part 1 — Tech Pulse Labs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NGVWHdGNbiI" rel="noopener">Spring Data JPA Query By Example: Write 10x Less Code for Dynamic Searches — Dan Vega</a></li>
+    </ul>
+
+    <h3>Building the query dynamically — and the sort-column allow-list</h3>
+    <p>Three routes, and you should be able to defend the one you picked. The <strong>JPA Criteria API</strong> (through Spring Data <code>Specification</code>) composes typed predicates and is parameterised by construction, so injection is impossible; the cost is verbosity and a query you cannot read at a glance. <strong>QueryDSL</strong> gives you the same safety with a fluent, generated, refactor-safe DSL — worth the annotation-processor setup on anything with more than a handful of filters. A <strong>hand-built native query</strong> is the most honest option for a search that already relies on <code>tsvector</code> and <code>ts_rank</code>, which the Criteria API cannot express cleanly; you append <code>AND</code> clauses conditionally and bind every value as a parameter.</p>
+    <p>The trap in the third route is <code>ORDER BY</code>. Bind parameters work for values, never for identifiers — you cannot write <code>ORDER BY :sort</code> — so the sort column has to be concatenated into the SQL string, and a request of <code>?sort=(CASE WHEN (SELECT ...) THEN ...)</code> becomes a blind SQL injection oracle that will happily leak your password hashes one boolean at a time. The fix is an allow-list, not escaping and not a regex: map a small fixed set of client-facing sort keys to known column expressions and reject anything else with a 400. Do the same for the sort direction. This is the single most common injection hole in real search endpoints, and being able to explain it is worth more than any framework name.</p>
+    <pre class="code-block" data-label="Java"><code>// Values are bound. Identifiers are allow-listed. Never the other way round.
+private static final Map&lt;String, String&gt; SORTABLE = Map.of(
+    "relevance", "relevance DESC",
+    "date",      "j.posted_at DESC",
+    "salary",    "j.salary_max DESC NULLS LAST",
+    "title",     "j.title ASC");
+
+String orderBy = SORTABLE.get(request.sort());
+if (orderBy == null) {
+    throw new BadRequestException("Unsupported sort: " + request.sort());
+}
+
+StringBuilder sql = new StringBuilder(BASE_SELECT);
+if (request.location() != null)  sql.append(" AND j.location = :location");
+if (request.remoteOnly())        sql.append(" AND j.remote_flag = true");
+if (request.minSalary() != null) sql.append(" AND j.salary_max &gt;= :minSalary");
+sql.append(" ORDER BY ").append(orderBy).append(", j.id DESC");   // safe: from the map</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html" rel="noopener">SQL Injection Prevention Cheat Sheet — OWASP (see the allow-list rule for ORDER BY)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Query_Parameterization_Cheat_Sheet.html" rel="noopener">Query Parameterization Cheat Sheet — OWASP</a></li>
+      <li>[Reference] <a href="https://github.com/OpenFeign/querydsl" rel="noopener">OpenFeign/querydsl — GitHub (the actively maintained QueryDSL fork most projects now use)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-data-criteria-queries" rel="noopener">Spring Data JPA and Criteria Queries — Baeldung</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/a-beginners-guide-to-sql-injection-and-how-you-should-prevent-it/" rel="noopener">A beginner's guide to SQL injection and how you should prevent it — Vlad Mihalcea</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=W6wiTGYkCbo" rel="noopener">Advance Search/Filter using Criteria API, Spring Data JPA and Spring Boot — DevRCode</a></li>
+    </ul>
+
+    <h3>Pagination at scale: offset versus keyset</h3>
+    <p><code>LIMIT 20 OFFSET 780</code> asks the database to produce eight hundred rows in sorted order and then throw seven hundred and eighty away. Cost grows linearly with the page number, so page 40 is forty times the work of page 1, and because the query re-runs against live data, a listing inserted between requests shifts every subsequent row — users see duplicates across pages and miss others entirely. Keyset (seek) pagination fixes both: instead of an offset you carry the sort key of the last row seen and ask for rows after it, which the index can jump straight to in constant time regardless of depth.</p>
+    <p>The honest caveat, and you should say it out loud in an interview: on a job board almost nobody visits page 40, so offset pagination is very likely fine and keyset costs you the ability to jump to an arbitrary page. What matters is that the choice is deliberate — that you chose offset because the depth distribution is shallow, not because you had never heard of the alternative. Two details apply either way: always include a unique tiebreaker (<code>, j.id DESC</code>) or your ordering is non-deterministic and pages overlap; and cap <code>size</code> server-side so <code>?size=100000</code> cannot become a denial of service.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Offset: simple, jumpable, degrades with depth
+ORDER BY j.posted_at DESC, j.id DESC
+LIMIT 20 OFFSET 780;
+
+-- Keyset: constant cost at any depth, stable under concurrent inserts,
+-- but only "next page" -- the client sends back the last row's sort key
+WHERE (j.posted_at, j.id) &lt; (:lastPostedAt, :lastId)
+ORDER BY j.posted_at DESC, j.id DESC
+LIMIT 20;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-limit.html" rel="noopener">LIMIT and OFFSET — PostgreSQL documentation</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/no-offset" rel="noopener">We need tool support for keyset pagination (No Offset) — Markus Winand</a></li>
+      <li>[Article] <a href="https://use-the-index-luke.com/sql/partial-results/fetch-next-page" rel="noopener">Paging Through Results — Use The Index, Luke!</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/keyset-pagination-spring/" rel="noopener">Keyset Pagination with Spring — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://blog.jooq.org/faster-sql-paging-with-jooq-using-the-seek-method/" rel="noopener">Faster SQL Paging with the Seek Method — jOOQ blog</a></li>
+      <li>[Article] <a href="https://reflectoring.io/spring-boot-paging/" rel="noopener">Paging with Spring Boot — Reflectoring</a></li>
+    </ul>
+
+    <h3>CV upload: accepting an untrusted binary from the internet</h3>
+    <p>Every rule here exists because someone skipped it. Cap the size in two places — <code>spring.servlet.multipart.max-file-size</code> and a reverse-proxy body limit — so a hostile upload is rejected before it reaches your heap. Validate the content type by <em>sniffing the bytes</em>, not by trusting the filename extension or the client-supplied <code>Content-Type</code> header, both of which the uploader controls completely; Apache Tika reading the magic bytes is the standard answer, and you allow-list the results (PDF, DOCX) rather than block-listing the ones you fear.</p>
+    <p>Never reuse the client's filename. It arrives with path traversal sequences, null bytes, right-to-left override characters and Windows reserved names, and rendering it later is a stored-XSS vector. Generate a UUID key, store the original name as a plain database column for display, and escape it on output. Stream the upload to storage rather than calling <code>getBytes()</code> — a handful of concurrent multi-megabyte uploads read fully into memory is a trivially reachable out-of-memory error. Finally, record a <code>scan_status</code> even if your MVP sets it to <code>SKIPPED</code>: knowing that a real system routes uploads through a virus scanner such as ClamAV before an employer can download them is the answer an interviewer is listening for.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/multipart.html" rel="noopener">Multipart Resolver — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/uploading-files" rel="noopener">Getting Started: Uploading Files — Spring guide</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html" rel="noopener">File Upload Cheat Sheet — OWASP Cheat Sheet Series (read this before writing the endpoint)</a></li>
+      <li>[Official] <a href="https://tika.apache.org/" rel="noopener">Apache Tika — project site (content type detection from the bytes themselves)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-file-upload" rel="noopener">Uploading Files with Spring MVC — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7L1BSy5pnGo" rel="noopener">Spring Boot File Upload and Download REST API: Store images in File System — Java Techie</a></li>
+    </ul>
+
+    <h3>Storing and serving the CV: outside the web root, behind an authorization check</h3>
+    <p>The file must not be reachable by URL guessing, which rules out writing it anywhere the web server will serve statically. Two acceptable designs: object storage (S3 or MinIO) with a private bucket, where downloads go through a short-lived presigned URL your application mints only after an authorization check; or a directory outside the deployment root, served by a controller that authorizes first and then streams. Either way the storage key is a UUID that reveals nothing, and the key never appears in a client-facing URL that bypasses the check.</p>
+    <p>Get the response headers right. Send <code>Content-Disposition: attachment; filename="..."</code> so a malicious HTML or SVG file downloads instead of executing in your origin, and <code>X-Content-Type-Options: nosniff</code> so the browser does not helpfully re-interpret the bytes as something executable. Stream with <code>InputStreamResource</code> or a presigned redirect rather than materialising the file in memory. And keep the authorization rule explicit: the owning candidate always; an employer only while an application from that candidate to one of their jobs is live — which means revoking access is a status change, not a file move.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ShareObjectPreSignedURL.html" rel="noopener">Sharing objects with presigned URLs — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Disposition" rel="noopener">Content-Disposition — MDN HTTP reference</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Content-Type-Options" rel="noopener">X-Content-Type-Options — MDN HTTP reference</a></li>
+      <li>[Official] <a href="https://docs.clamav.net/" rel="noopener">ClamAV documentation — the scanner most upload pipelines call</a></li>
+      <li>[Article] <a href="https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload" rel="noopener">Unrestricted File Upload — OWASP community page</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vY7c7k8xmKE" rel="noopener">Spring Boot with Amazon S3: File Upload and Download Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Transactional email: templates that are not string concatenation</h3>
+    <p>Four emails carry the MVP: application confirmation to the candidate, new-application notification to the employer, status-change notification to the candidate, and the saved-search digest. Build them with Thymeleaf templates rendered to HTML with a plain-text alternative part, not with string concatenation — you will want a shared layout, a footer with an unsubscribe link, and locale support, and none of that survives concatenation. Escape every user-supplied value in the template; a job title is attacker-controlled text arriving in someone's inbox.</p>
+    <p>Configure <code>JavaMailSender</code> through <code>spring.mail.*</code> and keep credentials out of the repository. In development, point it at a capture tool such as MailHog or a provider sandbox so you can see rendered output without sending real mail, and make the from-address, reply-to and a stable message identifier explicit — deliverability is a real constraint, and mail that lands in spam is mail you did not send.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/email.html" rel="noopener">Email — Spring Framework reference documentation (JavaMailSender, MimeMessageHelper)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/io/email.html" rel="noopener">Sending Email — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/mail/" rel="noopener">Jakarta Mail — specification page</a></li>
+      <li>[Official] <a href="https://www.thymeleaf.org/documentation.html" rel="noopener">Thymeleaf documentation — including the text and HTML email templating guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-email" rel="noopener">Guide to Spring Email — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ThOdWjAz5cw" rel="noopener">Send Emails in Spring Boot Like a Pro: Java Mail and SMTP Explained — Code Decode</a></li>
+    </ul>
+
+    <h3>Sending asynchronously, with retries and a visible failure path</h3>
+    <p>An SMTP handshake takes hundreds of milliseconds on a good day and can hang for the full socket timeout on a bad one. If your <code>POST /applications</code> handler sends mail inline, the candidate's apply button spins for as long as your mail provider feels like taking, and a provider outage turns into an application outage. Move the send off the request thread: annotate the send method <code>@Async</code> with a dedicated bounded <code>TaskExecutor</code> (never the default unbounded one), and enable it with <code>@EnableAsync</code>.</p>
+    <p>Two subtleties separate a working implementation from a correct one. First, ordering: publish the mail as a Spring application event and consume it with <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code>, otherwise you will cheerfully email "your application was received" for a transaction that then rolls back. Second, failure: an async void method swallows its exception into a log line nobody reads. Give mail a small outbox table — row inserted in the same transaction as the business change, a worker picks it up, retries with exponential backoff, and moves it to a failed state after N attempts — so "did that email go?" is a query rather than a guess. That outbox is also the exact pattern you would reuse later for a message broker.</p>
+    <pre class="code-block" data-label="Java"><code>@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+@Async("mailExecutor")                       // bounded pool, never the default
+public void onApplicationSubmitted(ApplicationSubmitted event) {
+    try {
+        mailService.sendApplicationConfirmation(event.applicationId());
+        outbox.markSent(event.outboxId());
+    } catch (MailException e) {
+        outbox.markForRetry(event.outboxId(), e.getMessage());   // visible failure
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Framework reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/task-execution-and-scheduling.html" rel="noopener">Task Execution and Scheduling — Spring Boot reference documentation (executor auto-configuration)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-async" rel="noopener">How To Do @Async in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=W59SaJxrUjU" rel="noopener">Spring Boot: Sending Email with a Freemarker HTML Template Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Saved searches, the scheduled digest, and the duplicate-send problem</h3>
+    <p>A saved search stores the criteria a candidate used, as JSONB, plus a frequency and a <code>last_notified_at</code> watermark. The digest job wakes on a cron schedule, re-runs each active saved search restricted to jobs posted since that watermark, and mails a batch of new matches. Two details make it behave: advance the watermark <em>after</em> a successful send, not before, and skip empty results — an alert email with nothing in it trains people to ignore your alerts.</p>
+    <p>Now the interesting failure. <code>@Scheduled</code> is per JVM. Deploy three replicas and all three fire at the same instant, and every candidate receives three identical digests; during a rolling deploy they might get four. The fix is a distributed lock: ShedLock is the standard Spring answer, storing a lock row in the same PostgreSQL database you already have, so exactly one instance runs the job and the others skip it. The alternatives worth naming are leader election (Spring Integration's <code>LockRegistryLeaderInitiator</code>, or Kubernetes lease objects), a Quartz cluster with a shared job store, or moving the trigger out of the application entirely into a Kubernetes <code>CronJob</code> that hits an internal endpoint. Whichever you pick, make the per-recipient send idempotent too — a unique constraint on saved search plus digest window means even a double-run cannot double-send.</p>
+    <pre class="code-block" data-label="Java"><code>@Scheduled(cron = "0 0 7 * * *", zone = "Asia/Kolkata")
+@SchedulerLock(name = "savedSearchDigest",
+               lockAtMostFor = "PT30M",     // released if the instance dies
+               lockAtLeastFor = "PT5M")     // guards against clock skew re-runs
+public void sendDailyDigests() {
+    savedSearches.findActiveDaily()
+                 .forEach(digestService::sendIfNewMatches);   // advances the watermark
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/guides/gs/scheduling-tasks" rel="noopener">Getting Started: Scheduling Tasks — Spring guide</a></li>
+      <li>[Reference] <a href="https://github.com/lukas-krecan/ShedLock" rel="noopener">lukas-krecan/ShedLock — GitHub (distributed lock for scheduled tasks; JDBC, Redis and more)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/shedlock-spring" rel="noopener">Guide to ShedLock with Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-scheduled-tasks" rel="noopener">The @Scheduled Annotation in Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=L6hYN21AV2U" rel="noopener">Spring Boot ShedLock in Action: Prevent Duplicate Scheduled Jobs — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DSl4xF5itaE" rel="noopener">Distributed Locks in Spring with ShedLock — Bayonne Sensei</a></li>
+    </ul>
+  </section>
+
+  <section id="build">
+    <h2>Building it</h2>
+
+    <h3>Ten build phases, each independently runnable and demoable</h3>
+    <p>Every phase ends with something you can show on screen and commit. Do not start phase five until phase four demonstrably works — the whole value of the search progression is that you felt the previous version fail. Write the tests for each phase as you go rather than as a final chapter; a phase is not done when it compiles, it is done when a test proves it.</p>
+    <ol>
+      <li><strong>Schema, roles and authentication.</strong> Flyway or Liquibase migrations for the core tables, the two user types with role-based authorization, registration and login, and a protected endpoint that proves the role split works. Demo: an employer token opens the employer endpoint and a candidate token gets a 403.</li>
+      <li><strong>Job CRUD for employers.</strong> Create, edit, publish, close. Company scoping enforced server-side, status transitions validated, and a test that proves employer A cannot edit employer B's listing. Demo: post a job through the API, list it, close it.</li>
+      <li><strong>Candidate profile and CV upload.</strong> Profile fields, multipart upload with size and sniffed-content-type validation, generated storage key, and a download endpoint behind an authorization check. Demo: upload a PDF, try to upload a renamed executable, watch it be rejected.</li>
+      <li><strong>Basic search and filtering with pagination.</strong> The naive version: <code>LIKE</code> on title and description, the six filters, sorting, offset paging with a server-side size cap. Demo: search, filter, page. Then run <code>EXPLAIN</code> and look at the sequential scan you just created.</li>
+      <li><strong>Upgrade to full-text search with ranking.</strong> The generated <code>tsvector</code> column, the GIN index, <code>websearch_to_tsquery</code>, <code>ts_rank</code>, snippets, and relevance as a sort option. Demo: the same searches from phase four returning better results, plus the <code>EXPLAIN</code> output showing the index scan.</li>
+      <li><strong>Applications and the status pipeline.</strong> Apply (idempotent, pinning the CV version), the employer review queue, status transitions writing <code>application_event</code> rows, and the candidate's tracker view. Demo: the full apply-to-hire path for one candidate.</li>
+      <li><strong>Email notifications, sent asynchronously.</strong> Thymeleaf templates, <code>JavaMailSender</code>, an <code>@Async</code> bounded executor, <code>AFTER_COMMIT</code> event publication, and the outbox with retries. Demo: apply for a job and watch the confirmation appear in MailHog while the HTTP response returns immediately.</li>
+      <li><strong>Saved searches and the scheduled digest.</strong> Persist criteria as JSONB, the cron job, the watermark, and ShedLock. Demo: run two instances locally on different ports and show exactly one digest going out.</li>
+      <li><strong>Angular UI.</strong> Search page with filters and facet counts, listing detail, apply flow with upload, candidate tracker, employer dashboard. Reactive forms for the search panel, query parameters synced to the URL so results are shareable, and an interceptor attaching the token.</li>
+      <li><strong>One stretch goal, finished.</strong> Pick a single item — resume parsing with Tika, recommendations from profile-to-listing similarity, a scheduled expiry job that closes stale listings, or blended relevance-plus-recency ranking — and complete it properly. One finished stretch goal reads far better than four abandoned ones.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/getting-started.html" rel="noopener">Getting Started — Spring Data JPA reference documentation</a></li>
+      <li>[Reference] <a href="https://github.com/spring-projects/spring-petclinic" rel="noopener">spring-projects/spring-petclinic — GitHub (the canonical Spring reference application layout)</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-testing/" rel="noopener">Testing SpringBoot Applications — SivaLabs (how to test each slice as you finish it)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1aWhYEynZQw" rel="noopener">Java and Spring Boot Microservices: 10 Hour Full Course — Amigoscode</a></li>
+    </ul>
+
+    <h3>Reference implementations worth reading</h3>
+    <p>Read code before you write it, but read it for structure rather than copying. GitJobs and OpenCATS (linked in the scope section above) are the two live open-source products closest to this brief — GitJobs for a modern job-board schema and search implementation, OpenCATS for how a real applicant tracking system models candidates, pipelines and activity history. The Spring reference projects below are where you look for structure, and the library repositories are where you go when the documentation is ambiguous.</p>
+    <p>One habit worth forming: when you copy an approach, open the project's issue tracker and search for the thing you copied. The unresolved issues around a feature tell you more about its real-world cost than any README.</p>
+    <ul class="resources">
+      <li>[Reference] <a href="https://github.com/spring-projects/spring-data-elasticsearch" rel="noopener">spring-projects/spring-data-elasticsearch — GitHub (if you take the stretch path to a search cluster)</a></li>
+      <li>[Reference] <a href="https://github.com/querydsl/querydsl" rel="noopener">querydsl/querydsl — GitHub (upstream QueryDSL; the reference for the fluent query DSL)</a></li>
+      <li>[Reference] <a href="https://github.com/sivaprasadreddy/spring-boot-microservices-course" rel="noopener">sivaprasadreddy/spring-boot-microservices-course — GitHub (an actively maintained multi-module Spring Boot codebase to read for conventions)</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/spring-boot-jooq-tutorial-getting-started/" rel="noopener">Spring Boot and jOOQ Tutorial: Getting Started — SivaLabs (the typed-SQL alternative to Criteria API)</a></li>
+    </ul>
+
+    <h3>Which track modules this exercises</h3>
+    <p>This capstone is deliberately positioned after the data and security tracks. If a phase stalls, the fastest fix is usually to go back to the module below rather than to search for a snippet.</p>
+    <table>
+      <thead><tr><th>Phase</th><th>Modules to have open</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Schema, roles, auth</td>
+          <td><a href="../databases/11-normalization-design.html">Normalization and Design</a>, <a href="../databases/02-ddl.html">DDL</a>, <a href="../spring-security/02-authentication.html">Authentication</a>, <a href="../spring-security/04-authorization.html">Authorization</a>, <a href="../spring-security/08-jwt-resource-server.html">JWT and Resource Server</a></td>
+        </tr>
+        <tr>
+          <td>Job CRUD and the domain model</td>
+          <td><a href="../jpa/02-entity-mapping.html">Entity Mapping</a>, <a href="../jpa/04-relationships.html">Relationships</a>, <a href="../jpa/10-spring-data-repositories.html">Spring Data Repositories</a>, <a href="../spring-boot/04-web.html">Spring Boot Web</a>, <a href="../spring-boot/05-data-access.html">Data Access</a></td>
+        </tr>
+        <tr>
+          <td>Search and filtering</td>
+          <td><a href="../databases/03-dml-queries.html">DML and Queries</a>, <a href="../databases/04-joins.html">Joins</a>, <a href="../databases/05-aggregation.html">Aggregation</a>, <a href="../databases/08-indexing.html">Indexing</a>, <a href="../databases/09-query-optimization.html">Query Optimization</a>, <a href="../jpa/09-queries.html">JPA Queries</a>, <a href="../jpa/11-spring-data-advanced.html">Spring Data Advanced</a></td>
+        </tr>
+        <tr>
+          <td>Pagination and performance</td>
+          <td><a href="../jpa/08-fetching-nplus1.html">Fetching and the N+1 Problem</a>, <a href="../jpa/14-performance.html">JPA Performance</a>, <a href="../system-design/06-database-scaling.html">Database Scaling</a>, <a href="../system-design/04-caching.html">Caching</a></td>
+        </tr>
+        <tr>
+          <td>Dynamic queries and injection safety</td>
+          <td><a href="../secure-coding/03-injection.html">Injection</a>, <a href="../secure-coding/08-input-validation.html">Input Validation</a>, <a href="../advanced-java/09-regex-text.html">Regex and Text</a></td>
+        </tr>
+        <tr>
+          <td>CV upload, storage and download</td>
+          <td><a href="../advanced-java/06-io-nio.html">IO and NIO</a>, <a href="../secure-coding/05-authn-authz.html">Authentication and Authorization Flaws</a>, <a href="../secure-coding/10-api-security-review.html">API Security Review</a>, <a href="../system-design/11-storage-systems.html">Storage Systems</a></td>
+        </tr>
+        <tr>
+          <td>Email, async and the digest job</td>
+          <td><a href="../spring-boot/10-caching-messaging-scheduling.html">Caching, Messaging and Scheduling</a>, <a href="../spring-boot/02-externalized-config.html">Externalized Configuration</a>, <a href="../system-design/10-async-architectures.html">Async Architectures</a>, <a href="../system-design/07-coordination.html">Coordination</a></td>
+        </tr>
+        <tr>
+          <td>API shape and contract</td>
+          <td><a href="../system-design/09-api-design.html">API Design</a>, <a href="../spring-boot/08-testing.html">Spring Boot Testing</a></td>
+        </tr>
+        <tr>
+          <td>Angular UI</td>
+          <td><a href="../angular-basics/09-forms.html">Forms</a>, <a href="../angular-basics/10-http-observables.html">HTTP and Observables</a>, <a href="../angular-basics/06-services-di.html">Services and DI</a>, <a href="../angular-basics/07-signals.html">Signals</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="03-inventory-system.html">← Inventory System</a>
+    <a href="index.html">All Real-World Projects</a>
+    <a href="05-hr-management.html">HR Management System →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer who sees "Job Portal" on your CV will not ask you what Spring Boot is — they will ask why your search works the way it does. These are the questions this project attracts in Indian product and service-company rounds, from the screening call to the design round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through what happens when a candidate types "java developer bangalore" into your search box.</summary>
+      <div class="answer"><p>The Angular search panel puts the terms and active filters into query parameters so the URL is shareable. The controller binds them to a request record, validates the page size against a cap and the sort key against an allow-list, and hands them to the search service. The service builds one SQL statement: <code>websearch_to_tsquery</code> over the stored <code>tsvector</code> column for the keyword, conditional AND clauses for location, salary, remote and recency, ranking by <code>ts_rank</code> blended with recency, then LIMIT and OFFSET. PostgreSQL uses the GIN index on the tsvector to find candidate rows and filters the rest. The response is a page envelope with results, snippets, total count and facet counts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why did you not just use LIKE with wildcards?</summary>
+      <div class="answer"><p>Three reasons. A leading wildcard cannot use a B-tree index, so every search is a full table scan. There is no stemming or stop-word handling, so "developers" misses "developer". And there is no ranking, so results come back in whatever order the planner produced — a term in the title scores the same as a term buried in the description. I built it that way first deliberately, saw all three in <code>EXPLAIN</code> and in the result order, and replaced it in the next phase.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does your CV upload validate that the file is really a PDF?</summary>
+      <div class="answer"><p>By sniffing the bytes, not by trusting the extension or the client-supplied Content-Type header — both are attacker-controlled. Apache Tika reads the magic bytes and returns a detected type, which I check against an allow-list of PDF and DOCX. I also cap the size at the multipart layer and again at the reverse proxy, generate a UUID storage key instead of reusing the client's filename, and store the original name as data to be escaped on display.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your search endpoint takes a <code>sort</code> parameter. How is that not a SQL injection hole?</summary>
+      <div class="answer"><p>Because it never reaches the SQL as user input. Bind parameters only work for values, not identifiers, so a sort column has to be concatenated into the statement — which is exactly the hole. I map a small fixed set of client-facing keys ("relevance", "date", "salary", "title") to known column expressions in code; an unrecognised key gets a 400 and nothing is concatenated. Same for direction. Escaping or regex-filtering the input would be the wrong answer: allow-listing is the only approach that is safe by construction.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Six filters means sixty-four combinations. How do you index for that?</summary>
+      <div class="answer"><p>You do not — you index the driving predicate and let the rest filter afterwards. A partial index on <code>(status, posted_at DESC) WHERE status = 'PUBLISHED'</code> serves the default browse; the GIN index on the tsvector serves keyword search; a range index covers salary. Whichever of those runs first typically cuts millions of rows to hundreds, and filtering the remainder in memory is cheap. Building a composite index per combination costs write throughput and disk for indexes the planner will mostly ignore.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you compute facet counts without running one query per facet?</summary>
+      <div class="answer"><p>Conditional aggregation in a single pass over the filtered set — <code>count(*) FILTER (WHERE remote_flag)</code> and friends, or <code>GROUPING SETS</code> when the facets are dimensions of the same column. The unfiltered default view's counts are cached, since they change only when listings do. For very large result sets I would show approximate counts rather than pay for an exact <code>count(*)</code>, which is often more expensive than fetching the page itself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Offset pagination degrades with depth. Why is it still in your project?</summary>
+      <div class="answer"><p>Because the depth distribution on a job board is shallow — almost nobody goes past page three — and offset gives users the ability to jump to an arbitrary page, which keyset cannot. I know the cost: <code>OFFSET 780</code> makes the database produce and discard 780 rows, and concurrent inserts shift rows between requests so users see duplicates. If deep paging mattered, or if this were an infinite-scroll feed, I would switch to keyset with the sort key carried in the cursor. Either way I include <code>id</code> as a tiebreaker so ordering is deterministic, and I cap the page size server-side.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where is the CV stored, and how do you stop someone downloading another candidate's CV?</summary>
+      <div class="answer"><p>Never under the web root. In production it goes to a private object-storage bucket under a UUID key; downloads run through a controller that performs the authorization check and then either streams the object or issues a short-lived presigned URL. The rule is object-level: the owning candidate always, and an employer only while that candidate has a live application to one of their company's jobs. Responses carry <code>Content-Disposition: attachment</code> and <code>X-Content-Type-Options: nosniff</code> so a hostile HTML or SVG file cannot execute in my origin. I test the negative case explicitly — employer B fetching candidate X's CV must get a 403.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is the confirmation email not sent inside the apply request?</summary>
+      <div class="answer"><p>Because an SMTP round trip is slow and can hang, and the user should not wait on a third party to see their application succeed. The send runs on a bounded <code>@Async</code> executor, triggered by a Spring application event consumed at <code>AFTER_COMMIT</code> so no email is ever sent for a transaction that rolls back. Failures are not swallowed into a log line: the message is written to an outbox row in the same transaction as the application, and a worker retries with backoff and marks it failed after N attempts, so "did that email go?" is a query.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You run three instances. Why doesn't every candidate get three digest emails?</summary>
+      <div class="answer"><p>They would, because <code>@Scheduled</code> is per JVM and all three fire on the same cron tick — during a rolling deploy it could be four. I use ShedLock with a lock table in the PostgreSQL database I already run: the first instance to acquire the named lock runs the job and the others skip. <code>lockAtMostFor</code> releases the lock if an instance dies mid-run; <code>lockAtLeastFor</code> stops a fast job re-running on a second instance under clock skew. Alternatives I considered: leader election via Spring Integration or a Kubernetes lease, a clustered Quartz job store, or moving the trigger out to a Kubernetes CronJob hitting an internal endpoint. Belt and braces, the per-recipient send is idempotent on saved search plus digest window, so even a double-run cannot double-send.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you actually move this search to Elasticsearch, and what would it cost you?</summary>
+      <div class="answer"><p>When I need something Postgres genuinely cannot do well: typo tolerance and fuzzy matching, per-field boosting tuned without a migration, facet aggregations across millions of documents, synonym and multi-language analysis chains, or search-as-you-type latency. The cost is a second stateful system — cluster sizing and patching, an indexing pipeline, a dual-write or CDC path, a reindex procedure for every mapping change, and a permanent class of staleness bugs. I would introduce it as a read model fed asynchronously, keeping Postgres as the source of truth so search lag is a measurable number rather than a data-loss risk. At this project's scale it would be cost without benefit, and Hibernate Search is the cheaper middle step if I only need Lucene-grade matching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Criteria API, QueryDSL or a native query for the search — defend your choice.</summary>
+      <div class="answer"><p>I used a native query, because the search depends on <code>tsvector</code>, <code>ts_rank</code> and <code>ts_headline</code>, which the Criteria API cannot express without vendor-specific escape hatches that end up uglier than the SQL. Every value is bound as a parameter and the only identifier that varies — the sort column — comes from an allow-list. For the employer dashboard's simpler dynamic filters I used Spring Data <code>Specification</code>, which is parameterised by construction. QueryDSL would be my choice on a codebase with many dynamic queries: same safety, far better readability, refactor-safe generated metamodel, at the cost of an annotation-processor build step.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A candidate uploads a new CV after applying. What does the employer see, and why?</summary>
+      <div class="answer"><p>The employer still sees the CV that was submitted with that application. <code>application.applied_cv_id</code> pins the specific <code>cv_document</code> row, so uploading a new one creates a new version rather than mutating what an employer may already have read and made notes against. This is the same immutability argument as storing the price on an order line instead of joining to the product: the record of what happened must not change when the underlying entity does. New applications pick up the current CV.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you keep the search-relevance ordering from being useless as the board grows?</summary>
+      <div class="answer"><p>By not ranking on <code>ts_rank</code> alone. Raw relevance rewards keyword density, so a stale listing that repeats a term outranks a fresh, better match — and users judge a job board on recency. I blend the score with a recency decay on <code>posted_at</code>, weight title matches above description matches with <code>setweight</code>, and expose "sort by date" as a first-class option so users can bypass the blend. Beyond that, the honest answer is that relevance tuning needs feedback data: click-through and application rate per result position, which is exactly the signal a learning-to-rank stage would consume later.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.job.brief — Feature outline, search and filtering architecture, file and email handling</li>
+      <li>prj.job.build — Suggested build phases, reference implementations, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="HR Management System capstone brief: feature outline and MVP boundary, architecture sketch, data model, API contract, an explicit leave-request state machine with transition history, approval chains with delegation, relationship-based authorization beyond RBAC, field-level sensitivity, an immutable audit trail, ten runnable build phases and a map of the course modules it exercises.">
+  <title>Capstone: HR Management System — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone 05: HR Management System</h1>
+  <p class="standfirst">Every company you will ever work for runs one of these, and almost every one of them is a mess — because a leave request looks like a CRUD row until the day it has to travel through five states, two approvers, one holidaying manager and an auditor who wants to know who changed the salary field last March. This capstone is about building the version that does not rot.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → HR Management System</nav>
+
+  <section id="intro">
+    <h2>What this capstone is</h2>
+    <p>An HR system for a mid-sized company — say eight hundred employees across six departments — covering employee records and the reporting hierarchy, departments, leave requests with a multi-step approval workflow, timesheets, performance review cycles, document management, and an audit trail over every sensitive change. It is deliberately the least glamorous project in this track and the most interviewable, because it forces three things that a to-do app never will: an explicit workflow, authorization that role checks alone cannot express, and a record of who did what.</p>
+    <p>This is a brief, not a tutorial. It gives you the scope, the architecture, the data model, the contract and a build order where every phase ends with something you can demonstrate. The engineering judgement — a hand-rolled state machine instead of a workflow engine, an ownership predicate pushed into the query instead of a filter after the fetch, an audit table nothing may update — is the actual deliverable. Build it in Spring Boot with PostgreSQL and an Angular front end; substitute your own stack freely, the design decisions survive the swap.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Scope: the MVP boundary and the stretch goals</h3>
+    <p>The failure mode of this project is breadth. An HR suite has infinite surface — recruitment, onboarding, payroll, benefits, learning, exit — and a candidate who ships a shallow slice of all of it has demonstrated nothing. Cut hard. The MVP is <strong>employees, departments, hierarchy, leave requests with a real approval workflow, and an audit trail</strong>. Everything else is a stretch goal you attempt only once those five are genuinely finished, tested and defensible.</p>
+    <p>The scoped MVP, in the order they become useful: employee records with a manager relationship forming an organizational hierarchy; departments with a head; leave requests carrying a type, a date range, a computed working-day count and a lifecycle; a multi-step approval workflow driven by the hierarchy; and audit rows for every sensitive create, update and delete. Then the second tier, still core but buildable later: timesheets (weekly entries against projects or cost centres, submitted and approved), performance review cycles (a cycle window, self-assessment, manager assessment, calibration, publication) and document management (offer letters, ID proofs, appraisal PDFs with strict access control and virus-scanned uploads).</p>
+    <p>The stretch goals, each of which adds one distinct hard problem rather than more screens: a <em>payroll summary export</em> (an aggregation report with money in it, so rounding, currency scale and access control all bite at once); an <em>org-chart visualisation</em> (recursive traversal and a tree render that survives a thousand nodes); <em>delegation of approval authority</em> while a manager is away (the most interesting one — it changes who counts as the approver, without changing the workflow definition); and an <em>employee self-service portal</em> (the same data through a narrower lens, which is a pure authorization exercise). Pick one. Two if the first went quickly.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://spec.openapis.org/oas/latest.html" rel="noopener">OpenAPI Specification — the current version (write the contract before the code)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-modulith/reference/index.html" rel="noopener">Spring Modulith — reference documentation (keeping a modular monolith modular)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/DomainDrivenDesign.html" rel="noopener">Domain-Driven Design — Martin Fowler bliki (why the HR domain deserves a model, not a schema)</a></li>
+      <li>[Reference] <a href="https://github.com/frappe/hrms" rel="noopener">frappe/hrms — GitHub (an actively maintained, full-featured open-source HRMS; read its leave and approval modules for scope calibration)</a></li>
+      <li>[Reference] <a href="https://github.com/OrangeHRM/orangehrm" rel="noopener">OrangeHRM/orangehrm — GitHub (a long-lived commercial-grade open-source HR product; useful purely as a feature map)</a></li>
+    </ul>
+
+    <h3>Architecture sketch: one deployable, four bounded slices</h3>
+    <p>Build a modular monolith. There is no distributed-systems problem here worth the operational cost of microservices — the entities are densely joined, the transactions are naturally local, and splitting leave requests from employees would only convert a foreign key into a network call. What you do need is <em>internal</em> boundaries, so that the workflow package never reaches into JPA entities owned by the people package, and the audit module has exactly one way in.</p>
+    <p>The shape below is the whole system. Note the two rules encoded in it: nothing calls a repository directly from a controller, and every write to a sensitive entity passes through the audit interceptor. Both rules are cheap to hold on day one and impossible to retrofit on day ninety.</p>
+    <pre class="code-block" data-label="Architecture"><code>  Angular SPA (role-driven navigation, route guards, self-service views)
+        |  REST + JWT bearer token
+        v
+  +-------------------------------------------------------------+
+  |  API layer     controllers  ->  request/response DTOs only   |
+  |                                 (never expose entities)      |
+  +-------------------------------------------------------------+
+  |  SERVICE layer   @PreAuthorize + PermissionService           |
+  |                                                              |
+  |   people/          workflow/         time/        docs/      |
+  |   - Employee       - LeaveRequest    - Timesheet  - Document |
+  |   - Department     - StateMachine    - Entry      - Storage  |
+  |   - Hierarchy      - ApprovalChain   - ReviewCycle           |
+  |                    - Delegation                              |
+  +-------------------------------------------------------------+
+  |  cross-cutting:  AuditAspect (@Audited)  |  PermissionService |
+  +-------------------------------------------------------------+
+  |  PERSISTENCE   Spring Data JPA repositories                  |
+  |                ownership predicate lives IN the query        |
+  +-------------------------------------------------------------+
+        |                                   |
+        v                                   v
+   PostgreSQL (append-only audit_log)   Object store / filesystem (documents)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html" rel="noopener">Error responses in Spring MVC — Spring Framework reference (RFC 9457 problem details)</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9457.html" rel="noopener">RFC 9457: Problem Details for HTTP APIs — IETF (one error shape for the whole API)</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-rest-api-best-practices-part-2/" rel="noopener">Spring Boot REST API Best Practices, Part 2 — SivaLabs (validation and error handling in layered Boot apps)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/apsupp/roles.pdf" rel="noopener">Dealing With Roles — Martin Fowler (the modelling paper behind employee/manager/HR role design)</a></li>
+    </ul>
+
+    <h3>The data model</h3>
+    <p>Three decisions dominate the schema. First, the hierarchy: model it as an <em>adjacency list</em> — a nullable <code>manager_id</code> self-reference on <code>employee</code> — and query ancestors and descendants with a recursive CTE. It is the simplest model, the cheapest to reorganise (a manager change is one row update), and PostgreSQL's <code>WITH RECURSIVE</code> handles both directions. Reach for a closure table only if you measure the recursive query as a real bottleneck; for eight hundred employees you will not.</p>
+    <p>Second, the leave request carries its state as a column plus a separate <code>leave_transition</code> history table — the current state answers "what now?", the history answers "how did it get here?", and an auditor will ask both. Third, <code>audit_log</code> is append-only and stores a before and after snapshot as JSON, keyed by entity type and id rather than by foreign key, so it can outlive the row it describes.</p>
+    <pre class="code-block" data-label="SQL"><code>employee(id, employee_code UNIQUE, full_name, work_email UNIQUE,
+         department_id FK, manager_id FK -&gt; employee.id NULL,   -- adjacency list
+         designation, date_of_joining, employment_status, date_of_exit NULL)
+
+employee_compensation(employee_id PK/FK, ctc_amount, currency,
+         effective_from, effective_to NULL)   -- separate table = separate access rule
+
+department(id, name UNIQUE, head_employee_id FK NULL, parent_department_id FK NULL)
+
+app_user(id, employee_id FK UNIQUE, password_hash, enabled)
+app_role(id, code UNIQUE)                     -- EMPLOYEE, MANAGER, HR, ADMIN
+user_role(user_id FK, role_id FK, PRIMARY KEY(user_id, role_id))
+
+leave_type(id, code, annual_quota_days, requires_hr_approval BOOLEAN, is_paid)
+leave_balance(employee_id FK, leave_type_id FK, cycle_year, entitled, consumed)
+leave_request(id, employee_id FK, leave_type_id FK, start_date, end_date,
+         working_days NUMERIC(4,1), reason,
+         state VARCHAR NOT NULL,               -- current state, indexed
+         current_approver_id FK NULL, version INT)    -- optimistic locking
+leave_transition(id, leave_request_id FK, from_state, to_state, action,
+         actor_user_id FK, acted_on_behalf_of FK NULL, comment, occurred_at)
+
+approval_step(id, leave_request_id FK, step_order, approver_id FK,
+         role_required, decision, decided_at NULL)
+approval_delegation(id, delegator_id FK, delegate_id FK,
+         valid_from, valid_to, scope)          -- "cover for me while I am away"
+
+timesheet(id, employee_id FK, week_start_date, state, submitted_at)
+timesheet_entry(id, timesheet_id FK, work_date, project_code, hours NUMERIC(4,2))
+
+review_cycle(id, name, opens_on, closes_on, state)
+review(id, cycle_id FK, employee_id FK, reviewer_id FK, kind, rating, state)
+
+employee_document(id, employee_id FK, doc_type, storage_key, content_sha256,
+         uploaded_by FK, uploaded_at, visibility)
+
+audit_log(id BIGSERIAL, occurred_at, actor_user_id, actor_role, action,
+         entity_type, entity_id, before_value JSONB, after_value JSONB,
+         source_ip, request_id)                -- INSERT only; no UPDATE, no DELETE</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.postgresql.org/docs/current/queries-with.html" rel="noopener">WITH queries (Common Table Expressions) — PostgreSQL documentation (recursive hierarchy traversal)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/specifications/persistence/" rel="noopener">Jakarta Persistence — specification page (the mapping contract underneath your entities)</a></li>
+      <li>[Official] <a href="https://jakarta.ee/learn/docs/jakartaee-tutorial/current/persist/persistence-intro/persistence-intro.html" rel="noopener">Introduction to Jakarta Persistence — Jakarta EE Tutorial</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Hierarchical_and_recursive_queries_in_SQL" rel="noopener">Hierarchical and recursive queries in SQL — Wikipedia (adjacency list, closure table, path enumeration compared)</a></li>
+      <li>[Reference] <a href="https://github.com/hibernate/hibernate-orm" rel="noopener">hibernate/hibernate-orm — GitHub (the ORM source, and where the Envers module lives)</a></li>
+    </ul>
+
+    <h3>API contract: the endpoints that pin down the design</h3>
+    <p>Write the contract before the code — the endpoint list is where the workflow design becomes visible. Notice what is <em>not</em> here: there is no <code>PUT /leave-requests/{id}</code> that lets a caller set <code>state</code> to whatever it likes. State changes happen through named action endpoints, each of which maps to exactly one declared transition. That single choice removes an entire class of bug, and it is the first thing a good reviewer will look for.</p>
+    <table>
+      <caption>Core endpoints and the authorization rule each one carries</caption>
+      <thead>
+        <tr><th>Method and path</th><th>Purpose</th><th>Who may call it</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>GET /api/employees/{id}</code></td><td>Employee record</td><td>Self, any manager in that employee's management chain, HR, admin</td></tr>
+        <tr><td><code>GET /api/employees/{id}/compensation</code></td><td>Salary and CTC</td><td>Self and HR only — <em>not</em> the reporting manager by default</td></tr>
+        <tr><td><code>GET /api/employees/{id}/reports?depth=all</code></td><td>Direct or full reporting tree</td><td>Self (own reports), HR, admin</td></tr>
+        <tr><td><code>POST /api/leave-requests</code></td><td>Create a draft request</td><td>Any authenticated employee, for themselves only</td></tr>
+        <tr><td><code>POST /api/leave-requests/{id}/submit</code></td><td>draft to submitted</td><td>Owner of the request</td></tr>
+        <tr><td><code>POST /api/leave-requests/{id}/approve</code></td><td>Advance one approval step</td><td>Current approver, or an active delegate of the current approver</td></tr>
+        <tr><td><code>POST /api/leave-requests/{id}/reject</code></td><td>Terminal rejection with a reason</td><td>Current approver or delegate</td></tr>
+        <tr><td><code>POST /api/leave-requests/{id}/cancel</code></td><td>Withdraw before or after approval</td><td>Owner, or HR for an already-approved request</td></tr>
+        <tr><td><code>GET /api/leave-requests/{id}/history</code></td><td>Full transition trail</td><td>Owner, any approver on the chain, HR</td></tr>
+        <tr><td><code>GET /api/approvals/pending</code></td><td>My queue, including delegated items</td><td>Any manager or HR user</td></tr>
+        <tr><td><code>POST /api/delegations</code></td><td>Delegate approval authority for a date range</td><td>The delegating manager, or HR on their behalf</td></tr>
+        <tr><td><code>POST /api/timesheets/{id}/submit</code></td><td>Submit a week for approval</td><td>Owner</td></tr>
+        <tr><td><code>GET /api/documents/{id}/content</code></td><td>Download a stored document</td><td>Owner, HR, or an explicitly granted role — never by guessable id alone</td></tr>
+        <tr><td><code>GET /api/audit?entityType=&amp;entityId=</code></td><td>Audit trail for one entity</td><td>HR and admin only, and the read itself is audited</td></tr>
+      </tbody>
+    </table>
+    <p>Return RFC 9457 problem details for every failure, and be careful with the difference between <code>403 Forbidden</code> and <code>404 Not Found</code>: telling an unauthorised caller that employee 5182 exists but is off-limits is itself a small information leak. For records outside the caller's visibility scope, prefer a 404. Reserve 403 for the case where the caller can legitimately see the resource but not perform this action on it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html" rel="noopener">Query methods — Spring Data JPA reference (derived queries, projections, specifications)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html" rel="noopener">Insecure Direct Object Reference Prevention Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html" rel="noopener">Mass Assignment Cheat Sheet — OWASP (why the request DTO must never accept a state field)</a></li>
+      <li>[Reference] <a href="https://openapi-generator.tech/" rel="noopener">OpenAPI Generator — generate the Angular client from your contract</a></li>
+    </ul>
+
+    <h2>The three hard parts</h2>
+
+    <h3>The workflow engine: modelling the leave request lifecycle</h3>
+    <p>This is the heart of the project. A leave request moves through <code>DRAFT</code>, <code>SUBMITTED</code>, <code>MANAGER_APPROVED</code>, <code>HR_APPROVED</code>, <code>REJECTED</code> and <code>CANCELLED</code>. The naive implementation — a <code>String status</code> column, and an <code>if/else</code> chain over it inside whichever service happens to be touching the row — is exactly what makes these systems unmaintainable. The rules end up scattered across five classes, nobody can answer "what can happen next?" without reading all of them, and the sixth developer to add a state forgets one branch. Six months later a request sits in <code>MANAGER_APPROVED</code> that was never submitted, and no one can explain how.</p>
+    <p>The alternative is an <strong>explicit state machine</strong>: the set of legal transitions declared in exactly one place, so that adding a state is a one-file change and an illegal move is impossible by construction rather than by discipline. Each transition carries a <em>guard</em> (a boolean precondition — does the employee have the balance? is the actor the current approver? is the date range still in the future?) and an optional <em>entry action</em> (send the notification, decrement the balance, write the history row). Persist two things: the current state on the aggregate, and an append-only transition history recording who moved it, from what, to what, when, and why.</p>
+    <p>How to build it: for a domain this size, hand-roll it. An enum of states, each holding the set of actions it permits, with a service that looks up the transition, evaluates the guard, applies the action and records history — roughly eighty lines, no dependency, fully unit-testable, and readable by anyone joining the team. <a href="https://docs.spring.io/spring-statemachine/docs/current/reference/" rel="noopener">Spring Statemachine</a> exists and is genuinely good at hierarchical states, regions, forks and persisted machine contexts; know it by name, and note honestly that its GitHub repository is now archived, which is a real consideration before adopting it. Full BPMN engines — <a href="https://docs.camunda.io/" rel="noopener">Camunda</a>, <a href="https://documentation.flowable.com/latest/" rel="noopener">Flowable</a> — are the right tool when non-developers must draw and change processes, when you need timers, compensation and human task queues out of the box, and when a process spans systems. For one leave workflow inside one application they are overkill; say so in the interview, and then show that you can name what they buy.</p>
+    <pre class="code-block" data-label="Java"><code>public enum LeaveState {
+    DRAFT, SUBMITTED, MANAGER_APPROVED, HR_APPROVED, REJECTED, CANCELLED
+}
+
+public record Transition(LeaveState from, LeaveAction action, LeaveState to,
+                         Predicate&lt;LeaveContext&gt; guard) { }
+
+// The single place the workflow is defined. Nothing else may change state.
+private static final List&lt;Transition&gt; TABLE = List.of(
+  new Transition(DRAFT,            SUBMIT,      SUBMITTED,        Guards::ownerAndBalanceAvailable),
+  new Transition(SUBMITTED,        APPROVE,     MANAGER_APPROVED, Guards::actorIsManagerOrDelegate),
+  new Transition(SUBMITTED,        REJECT,      REJECTED,         Guards::actorIsManagerOrDelegate),
+  new Transition(SUBMITTED,        CANCEL,      CANCELLED,        Guards::actorIsOwner),
+  new Transition(MANAGER_APPROVED, APPROVE,     HR_APPROVED,      Guards::actorIsHrAndTypeNeedsHr),
+  new Transition(MANAGER_APPROVED, REJECT,      REJECTED,         Guards::actorIsHr),
+  new Transition(MANAGER_APPROVED, CANCEL,      CANCELLED,        Guards::ownerBeforeStartDate),
+  new Transition(HR_APPROVED,      CANCEL,      CANCELLED,        Guards::hrOnlyWithReason));
+
+public LeaveRequest apply(LeaveRequest req, LeaveAction action, Actor actor) {
+    LeaveContext ctx = new LeaveContext(req, actor);
+    Transition t = TABLE.stream()
+        .filter(x -&gt; x.from() == req.getState() &amp;&amp; x.action() == action)
+        .findFirst()
+        .orElseThrow(() -&gt; new IllegalTransitionException(req.getState(), action));
+    if (!t.guard().test(ctx)) throw new TransitionNotPermittedException(action);
+
+    LeaveState previous = req.getState();
+    req.setState(t.to());                       // 1. move
+    history.record(req, previous, t.to(), action, actor);   // 2. remember, always
+    events.publish(new LeaveStateChanged(req, previous, t.to(), actor)); // 3. react
+    return req;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-statemachine/docs/current/reference/" rel="noopener">Spring Statemachine — reference documentation (states, transitions, guards, actions, persistence)</a></li>
+      <li>[Official] <a href="https://github.com/spring-projects/spring-statemachine" rel="noopener">spring-projects/spring-statemachine — GitHub (samples, and the archive notice worth reading before you adopt it)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-enum-simple-state-machine" rel="noopener">Implementing Simple State Machines with Java Enums — Baeldung (the hand-rolled approach, done well)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-state-machine" rel="noopener">A Guide to the Spring State Machine Project — Baeldung</a></li>
+      <li>[Article] <a href="https://refactoring.guru/design-patterns/state" rel="noopener">State pattern — Refactoring Guru (the object-oriented alternative to the transition table)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=M4Aa45Gpc4w" rel="noopener">Spring Tips: Spring Statemachine — SpringDeveloper (Josh Long)</a></li>
+    </ul>
+
+    <h3>Approval chains, delegation and escalation</h3>
+    <p>The state machine says <em>what</em> may happen. The approval chain says <em>who</em> may make it happen, and it is a separate concern that beginners routinely fuse into the state enum. Two designs are worth knowing. A <strong>fixed chain</strong> hard-codes the steps — manager, then HR — which is trivial to implement and fine for one leave type. A <strong>rules-driven chain</strong> computes the steps when the request is submitted, from the request's own attributes: duration above ten working days adds an HR step; unpaid or sabbatical leave adds a department-head step; a requester who is themselves a department head skips the manager step and goes straight to HR. Materialise the computed chain into <code>approval_step</code> rows at submission time rather than recomputing it on every read — otherwise a policy change next quarter silently rewrites the approval history of a request from last quarter, which is precisely the kind of thing auditors hate.</p>
+    <p>Then the two cases that make this an interview-worthy design. <strong>Delegation:</strong> a manager going on holiday assigns their approval authority to a peer for a date range. Model it as its own entity with a validity window and a scope, and resolve it at decision time — "may this actor act on this step?" becomes "is the actor the assigned approver, <em>or</em> an active delegate of the assigned approver for this scope right now?". Never rewrite <code>approval_step.approver_id</code> to the delegate: the record must still show who was accountable, and the transition history must record both the acting user and the person on whose behalf they acted. <strong>Escalation:</strong> a step that sits undecided past its service-level window gets escalated to the approver's own manager by a scheduled job, which writes a normal transition row with a system actor. Both features are pure additions if the chain is a first-class entity, and both are painful rewrites if approval is an <code>if</code> statement inside the leave service.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.omg.org/spec/BPMN/2.0/" rel="noopener">BPMN 2.0 — OMG specification (the vocabulary of tasks, gateways and events, worth reading once)</a></li>
+      <li>[Official] <a href="https://docs.camunda.io/" rel="noopener">Camunda 8 documentation — the mainstream BPMN engine (Camunda 7 CE is end-of-life)</a></li>
+      <li>[Reference] <a href="https://github.com/flowable/flowable-engine" rel="noopener">flowable/flowable-engine — GitHub (an actively maintained, embeddable Java BPMN/CMMN engine)</a></li>
+      <li>[Reference] <a href="https://github.com/camunda/camunda" rel="noopener">camunda/camunda — GitHub (the current Camunda 8 platform source)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sgcSm7YneTs" rel="noopener">Camunda Platform 7 Tutorial: How to Build an Application with Spring Boot — Camunda</a></li>
+    </ul>
+
+    <h3>Authorization depth: roles are the easy half</h3>
+    <p>Start with roles — <code>EMPLOYEE</code>, <code>MANAGER</code>, <code>HR</code>, <code>ADMIN</code> — because they answer the coarse question cleanly: only HR may open a review cycle, only admin may deactivate a user. Wire them with Spring Security method security (<code>@EnableMethodSecurity</code>, then <code>@PreAuthorize</code> at the service layer, not the controller — the service is the real security boundary, and a scheduled job or a message consumer reaching the same method must hit the same check).</p>
+    <p>Then confront the half that RBAC cannot express, which is the whole point of this capstone. "A manager may view their reports' records but not a peer's" is not a role, it is a <em>relationship</em> between the actor and the specific record. So is "an employee may view only themselves". <code>hasRole('MANAGER')</code> is true for every manager in the company; it says nothing about whether <em>this</em> manager owns <em>this</em> record. The fix is a permission decision that takes both the principal and the target: a <code>PermissionService</code> consulted from the service layer, or — the idiomatic Spring version — a custom <code>PermissionEvaluator</code> registered with the method security expression handler so that <code>@PreAuthorize("hasPermission(#employeeId, 'Employee', 'READ')")</code> compiles down to your relationship logic. Spring Security's ACL module is the heavyweight option; it is worth knowing, and usually more machinery than a manager-chain lookup deserves.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+public class EmployeeService {
+
+    // Coarse role gate AND fine-grained relationship check, both before the method runs.
+    @PreAuthorize("hasAnyRole('HR','ADMIN') or hasPermission(#employeeId, 'Employee', 'READ')")
+    public EmployeeView get(Long employeeId) { ... }
+}
+
+@Component
+public class HrPermissionEvaluator implements PermissionEvaluator {
+
+    @Override
+    public boolean hasPermission(Authentication auth, Serializable targetId,
+                                 String targetType, Object permission) {
+        Long actorId = ((AppPrincipal) auth.getPrincipal()).employeeId();
+        Long targetEmployeeId = (Long) targetId;
+        if (actorId.equals(targetEmployeeId)) return true;            // self
+        // relationship: is the target anywhere in the actor's reporting subtree?
+        return hierarchy.isInReportingChainOf(targetEmployeeId, actorId);
+    }
+}</code></pre>
+    <p>Two implementation details separate a working design from a correct one. First, <code>isInReportingChainOf</code> must be a recursive query, not a loop that fetches a manager, then their manager, then theirs — that is N round trips and it will be the slowest endpoint you own. Second, write the tests that prove the negative: a manager reading a peer's record must get a denial, and that test is more valuable than any of the happy-path tests in the project. Use Spring Security's test support to run each service method as several different principals in one test class.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html" rel="noopener">Method Security — Spring Security reference (@PreAuthorize, @PostAuthorize, custom expressions)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/architecture.html" rel="noopener">Authorization Architecture — Spring Security reference (authorities, managers, decision flow)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/acls.html" rel="noopener">Domain Object Security (ACLs) — Spring Security reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/test/method.html" rel="noopener">Testing Method Security — Spring Security reference (@WithMockUser and friends)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html" rel="noopener">Authorization Cheat Sheet — OWASP (deny by default, enforce at the trusted layer)</a></li>
+      <li>[Article] <a href="https://www.osohq.com/academy/relationship-based-access-control-rebac" rel="noopener">Relationship-Based Access Control (ReBAC) — Oso Authorization Academy</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=I5nU_R_UnUw" rel="noopener">Spring Boot Security (Part 9): Method Security, Role-based Authorization, @PreAuthorize and @PostAuthorize — Concept &amp;&amp; Coding by Shrayansh</a></li>
+    </ul>
+
+    <h3>Field-level sensitivity, and why you must not over-fetch then trim</h3>
+    <p>Not every field on an employee record has the same access rule. Name, designation, department and work email are effectively internal-public. Salary and CTC are visible to HR and to the employee themselves — and specifically <em>not</em> to a peer manager, or even, in most companies, to the employee's own reporting manager. Home address, personal phone, bank details, date of birth and identity numbers each carry their own rule. Role-level checks are the wrong granularity here; the decision is per field, and sometimes per field per relationship.</p>
+    <p>The tempting shortcut is to load the full entity, serialise it, and strip the fields the caller may not see — with <code>@PostAuthorize</code>, a JSON view, or a mapper that nulls things out. Resist it. Every one of those trims happens after the sensitive value has already been read out of the database, copied into the heap, and very likely logged by a debug statement, an APM tracer or an exception message on the way. It is one refactor, one <code>toString()</code>, one new logging aspect away from a leak, and it fails open: forget to add the new column to the strip list and it ships to everyone. Push the decision earlier instead — model compensation as a separate table and a separate repository method with its own authorization, and use projections so that the query for a peer-visible view never selects the salary column at all. Then the sensitive value is not in memory to leak.</p>
+    <p>Do the same at the collection boundary. "Show me my team's leave requests" must be a query filtered by the manager's reporting subtree in SQL, not a fetch-all followed by an in-memory filter: the latter is slow, it breaks pagination (page one of a hundred rows filtered down to four), and it means the unauthorised rows were in your process anyway. Spring Security's Spring Data integration lets the principal appear directly in a query with <code>?#{ principal.employeeId }</code>, which keeps the predicate where it belongs.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/integrations/data.html" rel="noopener">Spring Data Integration — Spring Security reference (the principal inside a query)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html" rel="noopener">Authorize HttpServletRequests — Spring Security reference (the coarse outer gate)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html" rel="noopener">Access Control Cheat Sheet — OWASP</a></li>
+      <li>[Article] <a href="https://owasp.org/Top10/A01_2021-Broken_Access_Control/" rel="noopener">A01:2021 Broken Access Control — OWASP Top 10 (the most common category, by measurement)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-create-new-custom-security-expression" rel="noopener">A Custom Security Expression with Spring Security — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-security-expressions" rel="noopener">Intro to Spring Security Expressions — Baeldung</a></li>
+    </ul>
+
+    <h3>The audit trail: what to record, how to capture it, why it is immutable</h3>
+    <p>An audit row answers six questions and it is worthless if it drops any of them: <em>who</em> (the authenticated actor, plus the effective role used and, for delegated actions, the person on whose behalf they acted), <em>what</em> (the action, in domain terms — <code>LEAVE_APPROVED</code>, not <code>UPDATE</code>), <em>which</em> (entity type and id, stored as loose values so the row survives the entity's deletion), <em>before and after</em> (the changed fields only, as a diff), <em>when</em> (a server-side timestamp with a time zone, never a client-supplied one) and <em>whence</em> (source address, correlation or request id, client type). Record reads too, for the genuinely sensitive endpoints — knowing that someone opened forty compensation records in an afternoon is the entire point of having an audit log.</p>
+    <p>Two capture mechanisms, and the tradeoff is real. <strong>JPA entity listeners or Hibernate Envers</strong> hook the persistence layer, so nothing can slip past: turn on <code>@Audited</code> and every change to that entity, from any code path, produces a revision. That completeness is the strength. The weakness is vocabulary — the persistence layer sees "the state column changed from SUBMITTED to MANAGER_APPROVED", not "the reporting manager approved a leave request", and it cannot record intent, the reason text, or the fact that a delegate acted. <strong>Explicit service-layer audit events</strong> have exactly the opposite profile: rich, business-meaningful, and easy to forget on the one new code path nobody remembered to instrument. The mature answer is both — Envers as the low-level safety net on entities like <code>employee_compensation</code>, and explicit domain events for the workflow.</p>
+    <p>A neat middle path, and a legitimate use of the reflection and annotation material from the Advanced Java track: a custom <code>@Audited</code> annotation on service methods, processed by a Spring AOP aspect that reads the annotation's metadata, resolves the actor from the security context, computes the field diff and writes the audit row. It keeps the audit call out of the business method while staying in business vocabulary — and it demonstrates that you understand annotations as a design tool rather than as decoration.</p>
+    <pre class="code-block" data-label="Java"><code>@Target(ElementType.METHOD) @Retention(RetentionPolicy.RUNTIME)
+public @interface Audited {
+    String action();
+    String entityType();
+    boolean captureDiff() default true;
+}
+
+@Aspect @Component
+public class AuditAspect {
+
+    @AfterReturning(pointcut = "@annotation(audited)", returning = "result")
+    public void record(JoinPoint jp, Audited audited, Object result) {
+        AuditEntry entry = AuditEntry.builder()
+            .occurredAt(Instant.now())                      // server clock, always
+            .actorUserId(SecurityUtils.currentUserId())
+            .actorRole(SecurityUtils.effectiveRole())
+            .action(audited.action())                       // LEAVE_APPROVED
+            .entityType(audited.entityType())
+            .entityId(EntityIds.of(result))
+            .requestId(MDC.get("requestId"))
+            .beforeValue(Redactor.redact(diff.before()))    // never store the raw secret
+            .afterValue(Redactor.redact(diff.after()))
+            .build();
+        auditWriter.append(entry);   // append-only; no update path exists in the repository
+    }
+}</code></pre>
+    <p>Finally, the two rules that get asked about most. <strong>The audit table is immutable.</strong> Insert only — no update path in the repository, no delete, and enforce it in the database as well as the code: revoke <code>UPDATE</code> and <code>DELETE</code> on <code>audit_log</code> from the application role, or add a trigger that raises on either. A log that the application can rewrite proves nothing, and the whole value of the table is that it is evidence. Retention and archival are a separate, deliberate process with its own privileges. <strong>The audit log must not leak the values it guards.</strong> If salary is restricted to HR, an audit row containing the old and new salary is a copy of that restricted data sitting in a table that more people can read — so redact or hash sensitive values, store field names rather than field contents where a change indicator suffices, and put the audit-read endpoint behind its own authorization. Never write passwords, tokens, full identity numbers or bank details into it at all.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://hibernate.org/orm/envers/" rel="noopener">Hibernate Envers — official project page (entity versioning and auditing)</a></li>
+      <li>[Official] <a href="https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html" rel="noopener">Hibernate ORM User Guide — the Envers chapter, revision entities and audit queries</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/jpa/reference/auditing.html" rel="noopener">Auditing — Spring Data JPA reference (@CreatedBy, @LastModifiedDate, AuditorAware)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/core/aop.html" rel="noopener">Aspect Oriented Programming with Spring — Spring Framework reference</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP (what to log, what never to log, and protecting the log itself)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/the-best-way-to-implement-an-audit-log-using-hibernate-envers/" rel="noopener">The best way to implement an audit log using Hibernate Envers — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-auditing-jpa" rel="noopener">Auditing with JPA, Hibernate, and Spring Data JPA — Baeldung (all three approaches compared)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Pc7Une_5rMs" rel="noopener">Auditing with Spring Data JPA — Java Techie</a></li>
+    </ul>
+
+    <h2>Building it</h2>
+
+    <h3>Build phases: ten increments, each one demoable</h3>
+    <p>Build in this order and every phase ends with something you can run and show. Do not start phase four until phase three has tests that fail when you break authorization — the whole value of this project is that its security is provable, and a state machine bolted onto an unauthorised API is a demo, not a system.</p>
+    <ol>
+      <li><strong>Employees, departments and the hierarchy.</strong> Schema with Flyway or Liquibase, JPA entities, the self-referencing manager relationship, seed data with a realistic tree four levels deep, and a recursive CTE query for ancestors and descendants. Demo: the reporting chain of any employee, and the full subtree under any manager.</li>
+      <li><strong>The role model and method security.</strong> Users, roles, login issuing a JWT, <code>@EnableMethodSecurity</code>, and coarse <code>@PreAuthorize</code> role gates on the service layer. Demo: an employee token is refused on an HR-only endpoint.</li>
+      <li><strong>Relationship-based authorization, with the tests that prove it.</strong> The <code>PermissionService</code> or custom <code>PermissionEvaluator</code>, the recursive reporting-chain check, and a test class that asserts a manager <em>cannot</em> read a peer's record, cannot read a peer's reports, and cannot read anyone's compensation. Demo: run that test class. This is the phase that makes the project worth putting on a CV.</li>
+      <li><strong>The leave request state machine.</strong> States, the transition table, guards, the action endpoints, optimistic locking on the aggregate, and the append-only transition history. Demo: walk a request through the happy path, then show that an illegal transition is rejected with a clean problem-details response.</li>
+      <li><strong>The approval chain with delegation.</strong> Rules-driven step computation materialised at submission, the pending-approvals queue, delegation with a validity window resolved at decision time, and a scheduled escalation job. Demo: a manager delegates, the delegate approves, and the history shows both identities.</li>
+      <li><strong>Audit logging across sensitive entities.</strong> The <code>@Audited</code> annotation and aspect, Envers on compensation, the append-only table with database-level protection, redaction of sensitive values, and the HR-only audit query endpoint. Demo: change a salary, then show the audit row — and show that the application cannot update or delete it.</li>
+      <li><strong>Timesheets and review cycles.</strong> Weekly timesheets with their own small submit-and-approve lifecycle (reuse the transition machinery — if you cannot, your phase-four design was too specific), and review cycles with self-assessment, manager assessment and publication.</li>
+      <li><strong>Document management.</strong> Upload with content-type and size validation, a stored SHA-256 for integrity, opaque storage keys, streaming download behind an authorization check, and per-document visibility. Never serve a document by a guessable sequential id alone.</li>
+      <li><strong>The Angular front end.</strong> Role-driven navigation, functional route guards, an interceptor attaching the token and handling 401 or 403 uniformly, reactive forms for the leave request with date-range and balance validation, the approvals inbox, and the audit viewer for HR. Remember that hiding a menu item is user experience, not security — the server check is the security.</li>
+      <li><strong>One stretch goal.</strong> Payroll summary export, the org-chart visualisation, or the self-service portal. Finish one properly rather than starting three.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/index.html" rel="noopener">Testing — Spring Boot reference documentation (slices, @SpringBootTest, test configuration)</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/modules/databases/postgres/" rel="noopener">PostgreSQL Module — Testcontainers for Java (test the recursive queries against the real database)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-security/reference/servlet/authorization/events.html" rel="noopener">Authorization Events — Spring Security reference (observe denials instead of guessing at them)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-deny-access" rel="noopener">Deny Access on Missing @PreAuthorize to Spring Controller Methods — Baeldung (fail closed by default)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=S-oYPntMGeU" rel="noopener">Angular Functional Route Guards Explained — Web Tech Talk</a></li>
+    </ul>
+
+    <h3>Reference implementations and prior art</h3>
+    <p>Read before you write. Two categories help: complete HR products, which calibrate scope and show you the entities you forgot (leave encashment, comp-off, holiday calendars per location, notice periods); and focused Java examples of the individual mechanisms, which show you idiomatic implementations of auditing, aspects and method security. Nothing here is a template to copy — the point is to see how other people drew the boundaries, then draw yours deliberately.</p>
+    <p>One warning about the many small "leave management system" repositories on GitHub: most are single-developer coursework, with the status string and <code>if/else</code> chain this brief is trying to talk you out of. They are useful as a foil. Read one, list what would break when a sixth state arrives, and you have both a design justification and a good interview answer.</p>
+    <ul class="resources">
+      <li>[Reference] <a href="https://github.com/eugenp/tutorials" rel="noopener">eugenp/tutorials — GitHub (the Baeldung code base; runnable modules for method security, JPA auditing and Envers)</a></li>
+      <li>[Reference] <a href="https://github.com/topics/hr-management-system" rel="noopener">hr-management-system — GitHub topic (survey the field, including what not to do)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/how-to-audit-entity-modifications-using-the-jpa-entitylisteners-embedded-and-embeddable-annotations/" rel="noopener">Auditing entity modifications with @EntityListeners and @Embeddable — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jpa-entity-lifecycle-events" rel="noopener">JPA Entity Lifecycle Events — Baeldung (@PrePersist, @PreUpdate and their limits)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2YTGgHkJg2M" rel="noopener">Spring AOP — Custom annotation to log method execution time (@TrackExecutionTime) — Java Techie</a></li>
+    </ul>
+
+    <h3>Which course modules this capstone exercises</h3>
+    <p>This project is deliberately positioned where the security, persistence and framework tracks meet. If a phase stalls, the module that unblocks it is almost certainly listed below — the authorization phases lean on Spring Security and Secure Coding, the workflow and audit phases on JPA and Spring AOP, and the hierarchy work on the Databases track.</p>
+    <ul class="resources">
+      <li>[Module] <a href="../spring-security/04-authorization.html">Spring Security · Authorization</a> — roles, authorities, method security and the expression layer behind phases 2 and 3.</li>
+      <li>[Module] <a href="../spring-security/02-authentication.html">Spring Security · Authentication</a> — the login and token issuing that phase 2 needs.</li>
+      <li>[Module] <a href="../spring-security/09-testing-exceptions.html">Spring Security · Testing and Exceptions</a> — how to write the phase 3 tests that prove a denial.</li>
+      <li>[Module] <a href="../secure-coding/05-authn-authz.html">Secure Coding · Authentication and Authorization</a> — broken access control, IDOR and failing closed.</li>
+      <li>[Module] <a href="../secure-coding/01-threat-modeling.html">Secure Coding · Threat Modeling</a> — run one over this system before phase 3; the peer-manager case falls straight out.</li>
+      <li>[Module] <a href="../secure-coding/08-input-validation.html">Secure Coding · Input Validation</a> — date ranges, upload types and the mass-assignment trap on the state field.</li>
+      <li>[Module] <a href="../jpa/04-relationships.html">JPA · Relationships</a> — the self-referencing manager association and the department mapping.</li>
+      <li>[Module] <a href="../jpa/08-fetching-nplus1.html">JPA · Fetching and N+1</a> — why the reporting-chain walk must not be a loop of lazy loads.</li>
+      <li>[Module] <a href="../jpa/10-spring-data-repositories.html">JPA · Spring Data Repositories</a> — projections and derived queries for the field-sensitivity work.</li>
+      <li>[Module] <a href="../jpa/11-spring-data-advanced.html">JPA · Spring Data Advanced</a> — specifications, auditing support and custom repository fragments.</li>
+      <li>[Module] <a href="../jpa/12-transactions-concurrency.html">JPA · Transactions and Concurrency</a> — optimistic locking on the leave aggregate so two approvers cannot race.</li>
+      <li>[Module] <a href="../spring/05-aop.html">Spring · AOP</a> — the aspect that implements the audit annotation.</li>
+      <li>[Module] <a href="../spring/12-transactions.html">Spring · Transactions</a> — the transaction boundary around a state transition plus its history row.</li>
+      <li>[Module] <a href="../spring/09-rest-api.html">Spring · REST API</a> — action endpoints, status codes and the problem-details error shape.</li>
+      <li>[Module] <a href="../spring/10-validation.html">Spring · Validation</a> — bean validation and custom constraints for leave date ranges.</li>
+      <li>[Module] <a href="../spring/14-testing.html">Spring · Testing</a> — slice tests and the integration tests for each build phase.</li>
+      <li>[Module] <a href="../advanced-java/01-annotations.html">Advanced Java · Annotations</a> — designing the custom audit annotation and its retention policy.</li>
+      <li>[Module] <a href="../advanced-java/02-reflection.html">Advanced Java · Reflection</a> — computing the field diff generically for the audit row.</li>
+      <li>[Module] <a href="../advanced-java/05-datetime.html">Advanced Java · Date and Time</a> — working-day arithmetic, holiday calendars and time zones on the audit timestamp.</li>
+      <li>[Module] <a href="../advanced-java/06-io-nio.html">Advanced Java · IO and NIO</a> — streaming document uploads and downloads without buffering whole files.</li>
+      <li>[Module] <a href="../databases/11-normalization-design.html">Databases · Normalization and Design</a> — separating compensation from the employee row, and why.</li>
+      <li>[Module] <a href="../databases/06-subqueries-cte.html">Databases · Subqueries and CTEs</a> — the recursive hierarchy queries at the core of authorization.</li>
+      <li>[Module] <a href="../databases/08-indexing.html">Databases · Indexing</a> — indexing the state column, the approver queue and the audit lookups.</li>
+      <li>[Module] <a href="../observability/02-logging.html">Observability · Logging</a> — the correlation id that ends up in every audit row, and keeping secrets out of logs.</li>
+      <li>[Module] <a href="../observability/03-log-aggregation.html">Observability · Log Aggregation</a> — shipping and retaining logs without turning them into a second, unprotected audit trail.</li>
+      <li>[Module] <a href="../angular-basics/06-services-di.html">Angular · Services and DI</a> — the auth service and the HTTP interceptor.</li>
+      <li>[Module] <a href="../angular-basics/09-forms.html">Angular · Forms</a> — the reactive leave-request form with cross-field date validation.</li>
+      <li>[Module] <a href="../angular-basics/10-http-observables.html">Angular · HTTP and Observables</a> — the approvals inbox and error handling for 401 and 403 responses.</li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="04-job-portal.html">← Job Portal</a>
+    <a href="index.html">All capstones</a>
+    <a href="06-stock-dashboard.html">Stock Market Dashboard →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees this project on your CV and will not ask you about CRUD. They will ask how you modelled the approval workflow, how you stop a manager reading a peer's salary, and why the audit table cannot be updated — these are the questions Indian product and service companies use to separate a project you built from a project you followed:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through the states of a leave request in your system.</summary>
+      <div class="answer"><p>Draft, submitted, manager-approved, HR-approved, rejected and cancelled. Draft to submitted is the employee's action; submitted to manager-approved or rejected is the reporting manager's; manager-approved to HR-approved applies only to leave types that require it. Rejected is terminal. Cancelled can be reached by the employee before the leave starts, or by HR afterwards with a recorded reason. Every move is one declared transition with a guard, and every move writes a history row.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why do you have separate approve and reject endpoints instead of a single update endpoint that sets the status?</summary>
+      <div class="answer"><p>Because a generic update endpoint accepts a state value from the client, which means the client decides the workflow. Action endpoints map one-to-one onto declared transitions, so the server decides: it looks up whether that action is legal from the current state, evaluates the guard, and refuses anything else. It also removes the mass-assignment risk of a state field on the request DTO, and it makes the audit action meaningful — "leave approved" rather than "row updated".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How did you model the organizational hierarchy?</summary>
+      <div class="answer"><p>An adjacency list: a nullable manager_id on the employee table that self-references. Reorganisations are a single row update, and both directions of traversal — the chain of command upward and the reporting subtree downward — come from a recursive CTE. I considered a closure table, which makes ancestor queries a single indexed lookup, but it costs extra rows on every hierarchy change and the recursive query is comfortably fast at our scale. I would revisit it if the org-chart or authorization queries showed up in profiling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which roles exist and what does each one gate?</summary>
+      <div class="answer"><p>Employee, manager, HR and admin. Employee is the baseline — self-service on their own records. Manager adds approval and visibility over their reporting subtree. HR gets organization-wide visibility, policy configuration, review cycles and the audit query. Admin handles user lifecycle and configuration. But roles only answer the coarse questions; the interesting rules in this system are relationship-based and roles cannot express them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A manager tries to open a peer's employee record. Trace exactly what stops them.</summary>
+      <div class="answer"><p>The request hits the controller, which delegates to a service method annotated <code>@PreAuthorize("hasAnyRole('HR','ADMIN') or hasPermission(#employeeId, 'Employee', 'READ')")</code>. The role branch fails. The permission branch calls my custom PermissionEvaluator, which resolves the caller's employee id from the principal, sees it does not equal the target, and runs a recursive query asking whether the target sits anywhere in the caller's reporting subtree. A peer is not, so it returns false, Spring Security throws before the method body executes, and no data is loaded at all. I have a test class asserting exactly this denial — it is more important than the happy-path test.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is <code>hasRole('MANAGER')</code> not sufficient for that check?</summary>
+      <div class="answer"><p>Because it is a property of the caller alone, not of the caller and the record together. Every manager in the company satisfies it, so it grants access to every employee's record. The rule I actually need — "this manager, over this employee" — is a relationship, and relationship-based access control needs a decision function that takes the principal and the target object. That is precisely what PermissionEvaluator or a permission service gives you, and it is why role-based access control alone is not enough in any system with an ownership concept.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You need to show a manager their team's leave requests. Why not fetch all requests and filter in Java?</summary>
+      <div class="answer"><p>Three reasons. Correctness: pagination breaks, because page one of a hundred rows might reduce to four after filtering, and total counts become meaningless. Performance: you read the whole table to return a handful of rows. Security: the unauthorised rows were loaded into your process, so any logging, tracing, serialisation bug or error message can leak them. The predicate belongs in the query — a join against the reporting subtree, or Spring Security's Spring Data integration putting the principal directly into the query expression.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does delegation work when a manager goes on holiday?</summary>
+      <div class="answer"><p>A delegation entity holds delegator, delegate, a validity window and a scope. At decision time the guard asks whether the actor is the assigned approver <em>or</em> an active delegate of that approver right now. I never rewrite the approval step's approver id to the delegate, because the record must still show who was accountable; instead the transition history stores both the acting user and the person on whose behalf they acted. Escalation is the same shape: a scheduled job promotes an undecided step to the approver's own manager and writes a normal transition row with a system actor.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What exactly goes into an audit row, and where does the timestamp come from?</summary>
+      <div class="answer"><p>Actor (user id and the effective role, plus the on-behalf-of identity for delegated actions), action in domain vocabulary, entity type and id stored as plain values so the row outlives the entity, the before and after values of the changed fields only, a server-generated timestamp with time zone, and provenance — source address, request or correlation id, client type. The timestamp is always from the server clock, never from the client, because the client is exactly the party an audit log exists to hold accountable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is the audit table immutable, and how do you actually enforce that?</summary>
+      <div class="answer"><p>Because an audit log the application can rewrite proves nothing — its entire value is that it is evidence, and evidence that the accused controls is not evidence. Enforcement is layered: the repository exposes only an append operation and has no update or delete method; the application's database role has UPDATE and DELETE revoked on the audit table, so even a code path that tried would fail at the database; and a trigger can raise on either statement as a belt-and-braces measure. Retention and archival happen through a separate, privileged process on its own schedule, never through application code. If you want stronger guarantees, chain each row's hash to the previous one so tampering is detectable even by someone with database privileges.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Salary is HR-only. Your audit log records salary changes. Isn't the audit log now a copy of the data it is supposed to protect?</summary>
+      <div class="answer"><p>Yes, and that is the trap. An audit trail must not leak the values it guards. I handle it three ways: the audit read endpoint has its own authorization, at least as strict as the data it describes; sensitive values are redacted or hashed, so the row records that compensation changed and by whom without reproducing the figure; and categorically secret values — passwords, tokens, full identity or bank numbers — are never written at all, only the fact that they changed. Where the actual old and new values are legally required, they live in a separately protected column or table with narrower access than the rest of the audit row.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Hibernate Envers or explicit service-layer audit events — which did you choose and why?</summary>
+      <div class="answer"><p>Both, for different jobs. Envers is a completeness guarantee: hook it to an entity and no code path can change that row without producing a revision, which is what I want on compensation. Its weakness is vocabulary — it records that a column changed, not that a delegate approved a leave request on behalf of a holidaying manager, and it cannot capture intent or a reason. Explicit service-layer events are business-meaningful but only as complete as your discipline. So Envers is the safety net on sensitive entities, and a custom annotation plus an AOP aspect emits the domain-level events for the workflow, keeping the audit call out of the business method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why a hand-rolled state machine rather than Spring Statemachine or a BPMN engine?</summary>
+      <div class="answer"><p>Because the domain has six states and one workflow, and a transition table plus guards is roughly eighty lines with no dependency, no extra persistence, and no learning curve for the next developer. Spring Statemachine earns its place when you need hierarchical or orthogonal states, forks and joins, or persisted machine contexts across nodes — and its repository is now archived, which is a real factor in an adoption decision. A BPMN engine like Camunda or Flowable earns its place when non-developers must draw and change the process, when you need timers, human task queues and compensation out of the box, or when a process spans systems. Choosing the smallest thing that makes illegal transitions impossible is the actual engineering judgement here.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Two approvers open the same request and both click approve. What happens?</summary>
+      <div class="answer"><p>The leave request carries a JPA version column, so the second transaction to commit fails with an optimistic locking exception, which I translate into a 409 with a problem-details body telling the caller the request has already moved on. The state machine helps too: the second attempt is evaluated against the state the first one produced, so the transition lookup itself may already be illegal. The important part is that the history contains exactly one approval row — I never want two transition rows claiming to have made the same move, because the history is the audit evidence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Angular app hides the compensation menu for non-HR users. Is that a security control?</summary>
+      <div class="answer"><p>No. It is user experience. The single-page app runs on the user's machine, the bundle is public, and any caller can invoke the endpoint directly with a token. Hiding the menu just avoids showing people buttons that would fail. The security control is the server-side check at the service layer, which runs regardless of which client called, and which I test independently of the front end. Route guards and conditional navigation are built from the same role claims for consistency, but the server is authoritative and the client is a convenience.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you extend this to a rules-driven approval chain without breaking existing requests?</summary>
+      <div class="answer"><p>The chain is already a first-class entity computed at submission time and materialised into approval_step rows, so a policy change only affects requests submitted after it — historical requests keep the chain they were actually judged under, which is what an auditor needs. To make it rules-driven I move step computation behind a policy component that takes the request attributes (duration, leave type, requester's position in the hierarchy) and returns an ordered list of steps, then version the policy and store the policy version on the request. The state machine does not change at all, because it governs what may happen, not who may make it happen — that separation is what makes the extension cheap.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.hr.brief — feature outline and MVP boundary, architecture sketch, data model, API contract, the leave-request state machine and approval chain, the role plus relationship authorization model, field-level sensitivity, and audit logging design.</li>
+      <li>prj.hr.build — ten independently runnable build phases, reference implementations and prior art, and the map of course modules this capstone exercises.</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

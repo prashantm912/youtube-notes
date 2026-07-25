@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Stock Market Dashboard capstone brief: a live market dashboard built on a simulated tick feed — the long-polling vs SSE vs WebSocket decision, a Redis pub/sub backplane for multi-instance fan-out, conflation and backpressure, the data model and API contract, nine independently demoable build phases, and a map of the course modules it exercises.">
+  <title>Capstone: Stock Market Dashboard — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Capstone: Stock Market Dashboard</h1>
+  <p class="standfirst">The real-time capstone. Every earlier project answered a request; this one holds a connection open and pushes. Get the transport decision, the fan-out backplane and the conflation policy right and you have the project that gets you asked about architecture instead of CRUD.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Real-World Projects</a> → Stock Market Dashboard</nav>
+
+  <section id="intro">
+    <h2>What this capstone covers</h2>
+    <p>This is a brief, not a tutorial: a buildable specification for a live market dashboard — a per-user watchlist whose prices tick in front of your eyes, an intraday chart that grows a point at a time instead of refetching, threshold alerts, a top-movers panel and historical candles over selectable ranges. You write the code; this page fixes the scope, the architecture, the contract and the order of work.</p>
+    <p>Three decisions carry the whole project and every one of them is an interview conversation. <em>Which transport</em> pushes prices to the browser — and why the obvious answer (WebSocket, because real-time) is usually the wrong one. <em>How the fan-out survives a second instance</em>, which is where a Redis backplane and sticky routing enter. And <em>what you drop</em>, because a feed can produce far more ticks per second than a browser can render, and choosing what to discard is a correctness decision, not a performance tweak.</p>
+  </section>
+
+  <section id="topics">
+    <h2>The brief</h2>
+
+    <h3>Feature outline: the MVP you must finish, and the stretch goals you may not</h3>
+    <p>Scope this ruthlessly. The MVP is six features and it is already a substantial build: a <strong>watchlist per user</strong> (add, remove, reorder, persisted server-side); <strong>live price ticks streamed to the browser</strong> for exactly the symbols in that watchlist; an <strong>intraday chart</strong> that appends the newest point without refetching the series; <strong>price-movement alerts</strong> that fire when a symbol crosses a user-set threshold; a <strong>market-overview panel</strong> showing top gainers and losers; and <strong>historical candles</strong> over selectable ranges (one day, five days, one month, one year) with a matching candle interval.</p>
+    <p>The stretch goals exist to be left undone until the MVP is demoable end to end: a <strong>paper-trading portfolio</strong> with live position valuation and unrealised profit and loss; <strong>multi-symbol comparison</strong> on one normalised chart; <strong>alert delivery by email or web push</strong> rather than only in-app; and a <strong>session replay</strong> that pumps a recorded trading day back through the same stream at adjustable speed. Replay is the most valuable of the four for your own sanity — it turns "wait for the market to move" into a repeatable test.</p>
+    <p>A word on the chart. Do not build one. Candlestick and line charts with live append are a solved problem, and a purpose-built financial charting library will absorb thousands of bars plus several updates per second without dropping frames, which a general-purpose chart component wrapped in a component template will not.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://tradingview.github.io/lightweight-charts/docs" rel="noopener">Lightweight Charts — official documentation (series types, time scale, update API)</a></li>
+      <li>[Reference] <a href="https://github.com/tradingview/lightweight-charts" rel="noopener">tradingview/lightweight-charts — GitHub (canvas financial charts, actively maintained)</a></li>
+      <li>[Article] <a href="https://www.coinapi.io/blog/why-real-time-crypto-data-is-harder-than-it-looks" rel="noopener">Why real-time market data is harder than it looks — CoinAPI engineering blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Pulk8JrPPoA" rel="noopener">Real time Notification System: WebSocket, Spring Boot and Angular — Ali Bouali</a></li>
+    </ul>
+
+    <h3>Where the market data comes from — and why you must not redistribute it</h3>
+    <p>Read this before you write a line. Real-time exchange data is <em>licensed</em>. NSE, BSE, NYSE and Nasdaq feeds are sold under agreements that restrict redistribution, display and storage, and the commercial vendors who resell them pass those restrictions on to you. Free-tier APIs handle this by giving you data that is delayed (commonly by fifteen minutes) and by rate-limiting you hard — a handful of calls per minute is typical. A learning project that scrapes a live feed and republishes it on a public URL is a licensing violation, not a clever hack.</p>
+    <p>So build against a <strong>simulated feed</strong> and treat that as the primary implementation, not a stopgap. A generator that walks each symbol's price by a small random step around its last value — a random walk with a drift term and occasional volatility spikes — produces ticks that are entirely plausible for the purpose of exercising a streaming architecture, and it has three properties a real feed does not: it runs at three in the morning, it runs at whatever rate you tell it to (crank it to ten thousand ticks a second to test backpressure), and it is deterministic if you seed it. Add a free-tier delayed API as a second implementation once the pipeline works, so you have proven the seam.</p>
+    <p>The seam is the point. Define one interface — something like <code>MarketDataFeed</code> with a method to subscribe to symbols and a callback or reactive stream of ticks — and put <em>every</em> provider behind it: <code>SimulatedFeed</code>, <code>FinnhubFeed</code>, <code>ReplayFeed</code>. Nothing above that interface knows where a price came from. That single decision is what lets you swap providers when a free tier changes its terms, and it is the first thing an interviewer will probe when you say "I used a mock feed".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://finnhub.io/docs/api" rel="noopener">Finnhub API documentation — REST and WebSocket endpoints, free-tier limits</a></li>
+      <li>[Official] <a href="https://www.alphavantage.co/documentation/" rel="noopener">Alpha Vantage API documentation — delayed quotes and historical time series</a></li>
+      <li>[Official] <a href="https://polygon.io/docs" rel="noopener">Polygon.io documentation — aggregates, trades and streaming tiers</a></li>
+      <li>[Reference] <a href="https://github.com/binance/binance-spot-api-docs" rel="noopener">binance/binance-spot-api-docs — GitHub (a real, public, free market-data WebSocket contract worth reading)</a></li>
+      <li>[Article] <a href="https://kb.dxfeed.com/en/faq.html" rel="noopener">Market data FAQ — dxFeed (delayed vs real-time entitlements, conflation, redistribution)</a></li>
+    </ul>
+
+    <h3>The transport decision: long polling vs server-sent events vs WebSocket</h3>
+    <p><strong>Long polling.</strong> The client issues a normal request; the server holds it open until it has something to say or a timeout expires; the client immediately reissues. It works through every proxy, every corporate firewall and every ancient load balancer, needs no new server-side machinery, and is trivially debuggable with the network tab. It is also wasteful: full request and response headers on every cycle, a fresh handler invocation per message batch, and a permanent gap between "server has news" and "client has reconnected". Correct answer for a page that updates every thirty seconds. Wrong answer for a price feed.</p>
+    <p><strong>Server-sent events.</strong> One long-lived HTTP response with content type <code>text/event-stream</code>, over which the server writes newline-delimited events forever. It is one-way, server to client — which is <em>exactly</em> the shape of a price feed. It is plain HTTP, so it inherits compression, authentication cookies and bearer headers, HTTP/2 multiplexing, proxy traversal and your existing observability. The browser's <code>EventSource</code> reconnects automatically when the connection drops, and it replays from the last event id you sent, which is a feature you would otherwise have to build. Its one real constraint: over HTTP/1.1 browsers cap concurrent connections per origin at roughly six, and each open stream burns one — so a user with your dashboard open in four tabs starts starving their own page. Over HTTP/2 the streams are multiplexed on one connection and the limit effectively disappears, which is a good reason to terminate TLS with HTTP/2 enabled.</p>
+    <p><strong>WebSocket.</strong> A protocol upgrade to a full-duplex frame-oriented connection. Frames carry a few bytes of overhead instead of a header block, so at very high message rates it is measurably cheaper, and the client can push too. The costs are real and are what candidates forget: it is a stateful connection outside normal HTTP semantics, so your load balancer needs upgrade support and often sticky routing, your authentication has to happen at or after handshake because browsers cannot set headers on the handshake, your proxies and idle timeouts need configuring, and there is <em>no</em> built-in reconnect — you write the backoff loop, the resubscribe and the gap-fill yourself.</p>
+    <p><strong>The recommendation for this project: use SSE.</strong> The data flows one way, the payloads are small JSON objects, automatic reconnection is free, and everything you already know about HTTP still applies. Adopt WebSocket only when the client genuinely needs to push on the same connection — an order entry panel, a collaborative annotation layer, a chat sidebar — because that is the requirement bidirectionality is worth its operational tax for. Build the SSE version first even if you plan to add WebSocket later; if your feed sits behind an interface and your events are well-shaped, swapping the delivery layer is a day's work.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events" rel="noopener">Using server-sent events — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API" rel="noopener">The WebSocket API — MDN</a></li>
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Connection_management_in_HTTP_1.x" rel="noopener">Connection management in HTTP/1.x — MDN (the per-origin connection cap that constrains SSE)</a></li>
+      <li>[Article] <a href="https://ably.com/blog/websockets-vs-sse" rel="noopener">WebSockets vs Server-Sent Events — Ably engineering</a></li>
+      <li>[Article] <a href="https://ably.com/topic/long-polling" rel="noopener">Long polling: what it is and when it still makes sense — Ably</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8ksWRX4xV-s" rel="noopener">HTTP Request vs Long-Polling vs WebSocket vs Server-Sent Events — Amit Shekhar (Outcome School)</a></li>
+    </ul>
+
+    <h3>Implementing the stream on Spring: SseEmitter, Flux and the wire format</h3>
+    <p>On Spring MVC the primitive is <code>SseEmitter</code>: a controller method returns one, the request thread is released, and you hand the emitter to a registry keyed by user or by symbol. A background publisher calls <code>send()</code> on the emitters that care. Register <code>onCompletion</code>, <code>onTimeout</code> and <code>onError</code> callbacks that remove the emitter from the registry — forget this and you leak an emitter per disconnect, which is the single most common bug in SSE code. Set <code>spring.mvc.async.request-timeout</code> deliberately (or pass a timeout to the constructor); the container default will close your stream out from under you. On WebFlux the same endpoint is a method returning <code>Flux&lt;ServerSentEvent&lt;Tick&gt;&gt;</code> and the framework handles the plumbing, which is why the reactive stack is a genuinely good fit here.</p>
+    <p>Use the wire format properly rather than shipping bare data lines. <code>event:</code> names the event type so the client can attach separate handlers for <code>snapshot</code>, <code>tick</code>, <code>alert</code> and <code>heartbeat</code>. <code>id:</code> lets the browser send <code>Last-Event-ID</code> on reconnect so you can decide what to replay. <code>retry:</code> tells the browser how long to wait before reconnecting. And send a periodic comment line or a <code>heartbeat</code> event roughly every twenty seconds — it keeps intermediary proxies from reaping an idle connection, and it gives the client something to time out against when the feed dies silently.</p>
+    <pre class="code-block" data-label="HTTP"><code>GET /api/stream/prices?symbols=TCS,INFY  HTTP/1.1
+Accept: text/event-stream
+
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+X-Accel-Buffering: no          &lt;- stop nginx buffering the stream
+
+retry: 3000
+
+event: snapshot
+data: {"TCS":{"p":4128.50,"c":-0.42},"INFY":{"p":1594.10,"c":1.13}}
+
+event: tick
+id: 1721890001-17
+data: {"s":"TCS","p":4129.05,"c":-0.41,"t":1721890001432}
+
+: heartbeat</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-async.html" rel="noopener">Asynchronous Requests and SseEmitter — Spring Framework reference (Spring MVC)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webflux.html" rel="noopener">Spring WebFlux — Spring Framework reference (reactive streaming responses)</a></li>
+      <li>[Official] <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" rel="noopener">Server-sent events — HTML Living Standard (field grammar, Last-Event-ID, reconnection)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-server-sent-events" rel="noopener">Server-Sent Events in Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-mvc-sse-streams" rel="noopener">Server-Sent Events (SSE) in Spring MVC — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2To3_mYT2hc" rel="noopener">Spring Tips: Server-Sent Events in Spring MVC and Spring WebFlux — SpringDeveloper (official channel)</a></li>
+    </ul>
+
+    <h3>When WebSocket earns its keep: STOMP with Spring's messaging support</h3>
+    <p>Raw WebSocket gives you a byte pipe and nothing else — no addressing, no subscription model, no acknowledgement. STOMP is a tiny frame-based text protocol that adds exactly those, and Spring's messaging support turns it into something that feels like the rest of the framework: <code>@EnableWebSocketMessageBroker</code>, a simple in-memory broker on destination prefixes such as <code>/topic</code>, <code>@MessageMapping</code> methods that look like controllers, <code>@SendTo</code> for broadcast and <code>SimpMessagingTemplate.convertAndSendToUser</code> for per-user delivery. This is the Java-idiomatic path, and if your dashboard grows a bidirectional feature it is the one to take.</p>
+    <p>Two production notes that separate a demo from a design. First, the in-memory simple broker keeps subscriptions in the JVM heap, so it does not survive a second instance — Spring's answer is the <em>STOMP broker relay</em>, which delegates to a real message broker (RabbitMQ or ActiveMQ speaking STOMP) so every instance shares one destination space. Second, browsers cannot attach an <code>Authorization</code> header to a WebSocket handshake, so authentication is either a cookie carried on the upgrade request, a short-lived ticket in the query string exchanged for a session, or a CONNECT frame carrying the token — pick one deliberately and say which in your README. SockJS remains the fallback shim when a network genuinely blocks upgrades.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/websocket/stomp.html" rel="noopener">STOMP over WebSocket — Spring Framework reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/websocket.html" rel="noopener">WebSocket support — Spring Framework reference (handlers, handshake, SockJS fallback)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/messaging-stomp-websocket" rel="noopener">Using WebSocket to build an interactive web application — Spring official guide</a></li>
+      <li>[Reference] <a href="https://github.com/spring-guides/gs-messaging-stomp-websocket" rel="noopener">spring-guides/gs-messaging-stomp-websocket — GitHub (the guide's complete source)</a></li>
+      <li>[Reference] <a href="https://github.com/stomp-js/stompjs" rel="noopener">stomp-js/stompjs — GitHub (the browser STOMP client, TypeScript typings included)</a></li>
+      <li>[Reference] <a href="https://github.com/sockjs/sockjs-client" rel="noopener">sockjs/sockjs-client — GitHub (the transport-fallback shim Spring integrates with)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/websockets-spring" rel="noopener">Intro to WebSockets with Spring — Baeldung</a></li>
+    </ul>
+
+    <h3>Architecture sketch, and scaling the fan-out past one instance</h3>
+    <p>Here is the shape. A feed adapter ingests ticks, a processor conflates and enriches them, Redis carries the fan-out, and each API instance pushes to the browsers it happens to be holding. Draw this on the whiteboard in the interview; it is the whole answer to "walk me through your architecture".</p>
+    <pre class="code-block" data-label="Architecture"><code>  simulated / vendor feed
+            |
+            v
+  +---------------------+        writes latest price  +-----------+
+  |  ingest + conflate  |------------------------------&gt;|   Redis   |
+  |  (one leader pod)   |  PUBLISH ticks.&lt;SYMBOL&gt;      |  cache +  |
+  +---------------------+------------------------------&gt;|  pub/sub  |
+                                                        |  ZSET     |
+        +----------------+          +----------------+  +-----------+
+        |  api-instance-1 |          | api-instance-2 |       ^  |
+        |  SUBSCRIBE      |&lt;---------+----------------+-------+  |
+        |  emitters: 800  |          | emitters: 950  |&lt;---------+
+        +--------+--------+          +--------+-------+
+                 | SSE                        | SSE
+            browsers A..                 browsers B..
+
+  writes (watchlists, alerts, candles) -&gt; PostgreSQL, not Redis</code></pre>
+    <p>One instance holding every connection is fine — genuinely fine, for far longer than people expect; a well-tuned JVM will hold tens of thousands of idle SSE connections. It stops being fine the moment you deploy a second replica, because a tick that arrives on instance 1 has no way to reach the browsers attached to instance 2. That gap is what a <strong>backplane</strong> closes: the ingest path does one <code>PUBLISH</code> to a Redis channel, every instance holds a <code>SUBSCRIBE</code>, and each one forwards to its own local emitters. The fan-out cost stays O(subscribers per instance) and the publisher stays ignorant of topology. Note that Redis pub/sub is fire-and-forget — a message published while an instance is restarting is simply gone — which for prices is acceptable, because the next tick supersedes it.</p>
+    <p>Two operational consequences. <strong>Routing:</strong> SSE is plain HTTP, so any instance can serve any reconnect and you need no stickiness — one more reason it is the easier default. WebSocket sessions <em>are</em> stateful, so you either configure sticky routing (cookie or IP hash at the load balancer) or move subscription state into the shared broker; nginx additionally needs the upgrade headers set explicitly on the proxy pass and a raised read timeout, or it will cut your connections at sixty seconds. <strong>Capacity:</strong> budget per connection, not per request — a socket, its kernel buffers, the emitter object and the per-user subscription set. Measure it under load rather than guessing, watch file-descriptor limits (<code>ulimit -n</code> is the first thing that bites), and export a gauge of open connections per instance so you can see the imbalance a rolling deploy creates.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/interact/pubsub/" rel="noopener">Redis Pub/Sub — official documentation (channels, patterns, cluster behaviour)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-data/redis/reference/redis/pubsub.html" rel="noopener">Redis Messaging/PubSub — Spring Data Redis reference (listener containers)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/websocket/stomp/handle-broker-relay.html" rel="noopener">Using a full-featured STOMP broker relay — Spring Framework reference</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/websocket.html" rel="noopener">WebSocket proxying — nginx documentation (upgrade headers and timeouts)</a></li>
+      <li>[Article] <a href="https://ably.com/blog/scaling-pub-sub-with-websockets-and-redis" rel="noopener">Scaling pub/sub with WebSockets and Redis — Ably engineering</a></li>
+      <li>[Article] <a href="https://ably.com/topic/the-challenge-of-scaling-websockets" rel="noopener">How to scale WebSockets for high-concurrency systems — Ably</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ugAZsDdmwJQ" rel="noopener">Load balancing WebSocket streams efficiently — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Backpressure, throttling and conflation — the part everyone skips</h3>
+    <p>A liquid symbol can print hundreds of trades a second. A browser renders sixty frames a second at best, and a human reads maybe two price changes a second. If you forward every tick you are not being accurate, you are being <em>rude</em>: the client's event loop saturates, the chart drops frames, memory climbs, and on a slow mobile link the socket's write buffer grows until something dies. Push systems fail on the write side, and the failure is silent until it is catastrophic.</p>
+    <p>Fix it on the server, not the client — by the time bytes are on the wire you have already paid for them. Three tools, in order of importance. <strong>Conflation:</strong> keep a per-symbol "latest tick" slot and flush it on a timer, so a symbol that ticked four hundred times in a second is sent once with its current price. <strong>Throttling:</strong> cap the flush interval per connection, and consider adapting it — a client that is falling behind gets a slower interval rather than a growing queue. <strong>Batching:</strong> send one frame containing every changed symbol in this interval instead of one frame per symbol; for a twenty-symbol watchlist that is a twentyfold reduction in framing and parse overhead.</p>
+    <p>Now the distinction that makes this an architecture answer rather than an optimisation. <strong>Conflation is correct for prices and wrong for trades.</strong> A price is a <em>state</em>: the newest value completely supersedes the previous one, so dropping intermediate values loses nothing the user could act on. A trade, an order fill, an alert firing or a ledger entry is an <em>event</em>: each one is independently meaningful, and dropping one is data loss. So the tick channel conflates freely, and the alert and order channels must not — they need a durable path with at-least-once delivery and client-side de-duplication on an event id. When you drop, drop visibly: expose a "ticks conflated" counter and, if a client is so far behind that you must disconnect it, disconnect it and let it resynchronise from a fresh snapshot rather than serving it stale prices.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/Streams_API" rel="noopener">Streams API — MDN (the platform's own model of backpressure)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/auditTime" rel="noopener">auditTime — RxJS API reference (emit the latest value per interval: conflation as an operator)</a></li>
+      <li>[Article] <a href="https://ably.com/topic/websocket-architecture-best-practices" rel="noopener">WebSocket architecture best practices — Ably (slow consumers, buffering, disconnect policy)</a></li>
+      <li>[Article] <a href="https://www.learnrxjs.io/learn-rxjs/operators/filtering/audittime" rel="noopener">auditTime vs throttleTime vs debounceTime — Learn RxJS</a></li>
+      <li>[Reference] <a href="https://github.com/LMAX-Exchange/disruptor" rel="noopener">LMAX-Exchange/disruptor — GitHub (the canonical JVM study in slow-consumer and batching design)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bbX1mYKs2PY" rel="noopener">WebSockets is not free — Hussein Nasser (what an open connection actually costs)</a></li>
+    </ul>
+
+    <h3>Redis in this project: latest price, top movers, TTL discipline and Streams</h3>
+    <p>Redis does four distinct jobs here and you should be able to name each. <strong>Pub/sub</strong> is the backplane described above. <strong>Latest-price cache:</strong> a hash per symbol holding price, previous close, change and timestamp, written by the ingest path and read by the REST snapshot endpoint — so a browser that connects mid-session gets the current state immediately instead of waiting for the next tick. <strong>Top movers:</strong> a sorted set keyed by percentage change, updated as ticks arrive; the panel is then a single range query for the highest and lowest scores, which is the same shape as a leaderboard and is the answer interviewers are listening for when they ask why you used a ZSET. <strong>Short-horizon aggregates:</strong> the in-progress candle for the current minute, incremented in place until the minute rolls over and the completed candle is written to PostgreSQL.</p>
+    <p>Be disciplined about keys and expiry. Namespace everything (<code>px:{symbol}</code>, <code>movers:nse</code>, <code>candle:{symbol}:1m:{bucket}</code>) so you can reason about, and scan for, one concern at a time. Put a TTL on everything derived — an intraday cache entry that outlives the trading day is a bug that shows a stale price with total confidence — and never put a TTL on the source of truth, which lives in PostgreSQL. Remember Redis is single-threaded per shard: a pattern subscription across thousands of channels, or a <code>KEYS</code> scan in a request path, blocks every other client.</p>
+    <p>Finally, know the alternative you did not pick. Redis <strong>Streams</strong> is an append-only log with consumer groups, offsets and explicit acknowledgement — durable, replayable, and the right tool for the alert and order channels where losing a message matters, or for a replay feature that must reproduce a day exactly. Pub/sub is fire-and-forget and is the right tool for prices. Choosing pub/sub for ticks and Streams for events, and being able to justify the split, is a strong senior signal.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/sorted-sets/" rel="noopener">Sorted sets — Redis documentation (the top-movers and leaderboard pattern)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/data-types/streams/" rel="noopener">Redis Streams — official documentation (consumer groups, acknowledgement, replay)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/commands/expire/" rel="noopener">EXPIRE — Redis command reference (TTL semantics and the volatile key policy)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/io/caching.html" rel="noopener">Caching — Spring Boot reference (the Redis cache manager and per-cache TTL)</a></li>
+      <li>[Reference] <a href="https://github.com/redis/lettuce" rel="noopener">redis/lettuce — GitHub (the Netty-based client Spring Boot autoconfigures; note the dedicated pub/sub connection)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/redis-replication/" rel="noopener">Redis replication internals — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vpe4aDu5ixI" rel="noopener">Spring Data Redis as cache: Cacheable, CacheEvict, CachePut — Java Techie</a></li>
+    </ul>
+
+    <h3>Data model and API contract</h3>
+    <p>Split storage by lifetime, not by convenience. PostgreSQL owns everything a user created or that must survive a restart: users, watchlists, alert definitions, alert firing history, and completed historical candles. Redis owns everything derived and re-computable: the latest price per symbol, the top-movers ranking, the in-progress candle. Individual ticks are owned by nobody — they are transient by design, and storing every tick is how a learning project turns into a hundred-gigabyte table nobody queries.</p>
+    <table>
+      <caption>Core entities</caption>
+      <thead>
+        <tr><th>Entity</th><th>Key fields</th><th>Lives in</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Symbol</td><td>symbol (PK), name, exchange, currency, lot_size, active</td><td>PostgreSQL</td><td>Seeded reference data; cached aggressively, changes rarely</td></tr>
+        <tr><td>Watchlist</td><td>id, user_id, name, created_at</td><td>PostgreSQL</td><td>One default per user in the MVP; multiple lists is a cheap extra</td></tr>
+        <tr><td>WatchlistItem</td><td>watchlist_id + symbol (composite PK), position</td><td>PostgreSQL</td><td>Composite key makes "add" naturally idempotent</td></tr>
+        <tr><td>Quote (latest)</td><td>symbol, price, prev_close, change_pct, ts</td><td>Redis hash <code>px:{symbol}</code></td><td>Written by ingest, read for the snapshot event; TTL past session end</td></tr>
+        <tr><td>Movers ranking</td><td>member = symbol, score = change_pct</td><td>Redis ZSET <code>movers:{exchange}</code></td><td>Top gainers and losers are two range queries</td></tr>
+        <tr><td>Candle</td><td>symbol + interval + bucket_start (PK), o, h, l, c, volume</td><td>PostgreSQL (in-progress one in Redis)</td><td>Index on (symbol, interval, bucket_start); range queries are the hot path</td></tr>
+        <tr><td>Alert</td><td>id, user_id, symbol, direction, threshold, active, cooldown_s</td><td>PostgreSQL</td><td>Direction is above/below; cooldown stops a symbol oscillating on the line from spamming</td></tr>
+        <tr><td>AlertEvent</td><td>id, alert_id, fired_at, price, delivered_at</td><td>PostgreSQL</td><td>Append-only; the client de-duplicates on this id</td></tr>
+        <tr><td>Position <em>(stretch)</em></td><td>id, user_id, symbol, quantity, avg_cost</td><td>PostgreSQL</td><td>Valuation is derived from the live quote, never stored</td></tr>
+      </tbody>
+    </table>
+    <table>
+      <caption>API contract</caption>
+      <thead>
+        <tr><th>Method</th><th>Path</th><th>Purpose</th><th>Contract notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>GET</td><td>/api/symbols?q=</td><td>Type-ahead symbol search</td><td>Cacheable, long max-age; reference data barely moves</td></tr>
+        <tr><td>GET</td><td>/api/watchlists/me</td><td>Current user's watchlist with a price snapshot</td><td>Snapshot read from Redis so the UI paints before the stream opens</td></tr>
+        <tr><td>PUT</td><td>/api/watchlists/me/symbols/{symbol}</td><td>Add a symbol</td><td>PUT, not POST — idempotent by composite key, safe to retry</td></tr>
+        <tr><td>DELETE</td><td>/api/watchlists/me/symbols/{symbol}</td><td>Remove a symbol</td><td>Returns 204 whether or not it was present</td></tr>
+        <tr><td>GET</td><td>/api/candles/{symbol}?range=1D&amp;interval=1m</td><td>Historical candles</td><td>Validate the range/interval pair; ETag on closed ranges</td></tr>
+        <tr><td>GET</td><td>/api/market/movers?exchange=NSE&amp;limit=20</td><td>Top gainers and losers</td><td>Two ZSET range queries; short TTL cache in front</td></tr>
+        <tr><td>GET / POST / DELETE</td><td>/api/alerts</td><td>List, create and remove alert rules</td><td>Reject a threshold on the wrong side of the current price</td></tr>
+        <tr><td>GET</td><td>/api/stream/prices?symbols=</td><td><strong>The feed.</strong> Conflated ticks</td><td>text/event-stream; events: snapshot, tick, heartbeat</td></tr>
+        <tr><td>GET</td><td>/api/stream/alerts</td><td>Alert firings for this user</td><td>Separate stream — must not be conflated; ids for de-duplication</td></tr>
+        <tr><td>WS</td><td>/ws → /topic/prices.{symbol} <em>(stretch)</em></td><td>STOMP alternative to the SSE feed</td><td>Only if the client also needs to publish</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/servlet.html" rel="noopener">Servlet web applications — Spring Boot reference (controllers, async support, error handling)</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/using-commands/keyspace/" rel="noopener">Keys and the keyspace — Redis documentation (naming conventions and expiry)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber" rel="noopener">Publisher-Subscriber pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside" rel="noopener">Cache-Aside pattern — Azure Architecture Center</a></li>
+      <li>[Reference] <a href="https://tradingview.github.io/lightweight-charts/tutorials/demos/realtime-updates" rel="noopener">Realtime updates demo — Lightweight Charts (the exact tick and candle shape the chart consumes)</a></li>
+    </ul>
+
+    <h3>The Angular client: consuming the stream without leaking it</h3>
+    <p>Wrap the transport in an observable and never let a component touch <code>EventSource</code> directly. A service exposes <code>prices$</code>; internally it creates the <code>EventSource</code> on subscribe, pushes parsed events through a subject, and tears the connection down in the teardown function. Getting the teardown right is the entire game: a component that opens a stream and does not close it leaves a live HTTP connection per route change, and because SSE reconnects automatically the leak compounds — five navigations, five open streams, and you have hit the browser's per-origin cap on your own.</p>
+    <p>Use <code>takeUntilDestroyed()</code> from Angular's RxJS interop for every subscription in a component; it wires the unsubscribe to the injection context's <code>DestroyRef</code> so there is no manual <code>ngOnDestroy</code> to forget. Prefer <code>toSignal()</code> where the template just reads the value, which removes the subscription question altogether. And put the reconnect policy in the service, not in each caller: <code>EventSource</code> retries on its own, but a server returning 500 or an authentication failure needs your own backoff — an exponential delay with jitter, capped, so a restarting backend does not get a synchronised stampede from every open tab the instant it comes back.</p>
+    <p>Then surface the truth. Track the timestamp of the last received event; if more than a couple of heartbeat intervals pass with nothing, flip a <code>stale</code> signal and grey the prices with a visible "reconnecting" badge. A dashboard that silently shows a frozen price is worse than one that admits it lost the feed — that is a correctness statement, not a design preference, and saying it out loud in an interview lands well.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.mozilla.org/en-US/docs/Web/API/EventSource" rel="noopener">EventSource — MDN (readyState, onerror, automatic reconnection semantics)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/rxjs-interop/takeUntilDestroyed" rel="noopener">takeUntilDestroyed — Angular API reference</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/signals/rxjs-interop" rel="noopener">RxJS interop with signals — Angular guide (toSignal, toObservable)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/function/retry" rel="noopener">retry — RxJS API reference (delay function, backoff and reset behaviour)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Byttv3YpjQk" rel="noopener">The RxJS operators I actually use to code reactively — Joshua Morony</a></li>
+    </ul>
+
+    <h3>Keeping the UI smooth: change detection, signals and long lists</h3>
+    <p>A high-frequency stream is the fastest way to discover what Angular's change detection actually costs. Under zone-based detection every callback that resolves inside the zone schedules a check of the component tree — so a thousand ticks a second means a thousand tree traversals a second, and your chart animation dies while the profiler shows the framework, not your code, burning the frame budget.</p>
+    <p>Three defences, in order. <strong>Signals with <code>OnPush</code>:</strong> write ticks into signals and mark components <code>OnPush</code> so only the components that read a changed signal are re-rendered — the chart component stops re-rendering because a row three panels away moved. <strong>Escape the zone for the hot path:</strong> run raw tick processing inside <code>NgZone.runOutsideAngular</code> (or adopt zoneless change detection, where the question disappears) and re-enter only to publish the conflated result the UI actually shows. Imperative canvas drawing — the chart's own update call — never needs a change-detection cycle at all. <strong>Virtualise the list:</strong> a five-hundred-symbol watchlist should render the visible twenty rows, so use the CDK's virtual scroll viewport, and give every row a stable <code>track</code> expression on the symbol so the framework updates rows instead of destroying and rebuilding them.</p>
+    <p>Prove it rather than assuming it. Record a profile with the feed at a realistic rate, look at where frames are being spent, then re-record after each change. "I profiled it and change detection was X percent of frame time, so I moved the tick path out of the zone" is a far stronger interview sentence than "I used OnPush".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/best-practices/runtime-performance" rel="noopener">Runtime performance optimization — Angular best practices</a></li>
+      <li>[Official] <a href="https://angular.dev/best-practices/zone-pollution" rel="noopener">Resolving zone pollution — Angular (runOutsideAngular for high-frequency work)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/zoneless" rel="noopener">Zoneless Angular — official guide</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/ChangeDetectionStrategy" rel="noopener">ChangeDetectionStrategy — Angular API reference (OnPush)</a></li>
+      <li>[Official] <a href="https://material.angular.dev/cdk/scrolling/overview" rel="noopener">Scrolling and virtual scroll viewport — Angular CDK</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MZ6s5EL7hKk" rel="noopener">Zoneless Angular applications — Deborah Kurata</a></li>
+    </ul>
+
+    <h3>Build phases: nine steps, each independently runnable and demoable</h3>
+    <p>The rule for every phase below: at the end of it you can start the app, show a person something working, and commit. No phase depends on a later phase to be demonstrable. If a phase is taking more than a few evenings, cut its scope rather than merging it into the next one.</p>
+    <ol>
+      <li><strong>Simulated tick generator behind an interface.</strong> Define <code>MarketDataFeed</code>; implement a seeded random-walk generator over a hardcoded symbol list, with a configurable ticks-per-second knob. <em>Demo:</em> a scheduled log line showing plausible prices moving. No web layer yet — and you now have a load generator for phase 8.</li>
+      <li><strong>REST endpoints for symbols and historical candles.</strong> PostgreSQL schema, Flyway or Liquibase migration, seed data, and the candle range/interval query with its composite index. <em>Demo:</em> curl or an HTTP client returning a day of one-minute candles for a symbol.</li>
+      <li><strong>SSE endpoint streaming ticks for a symbol set.</strong> An emitter registry, the snapshot-then-tick sequence, heartbeats, and completion callbacks that actually deregister. <em>Demo:</em> a browser tab on the raw endpoint, events scrolling past. This is the first genuinely new thing you have built.</li>
+      <li><strong>Angular watchlist consuming the stream.</strong> The stream service, <code>takeUntilDestroyed</code>, a signal-backed row list, add and remove against the watchlist API. <em>Demo:</em> prices ticking in a real table; navigate away and back and prove in the network tab that exactly one stream is open.</li>
+      <li><strong>The live chart with conflated updates.</strong> Load history over REST, then append from the stream — never refetch the series on a tick. Server-side conflation lands here: one flush interval, latest price per symbol. <em>Demo:</em> a candlestick chart whose last candle grows in place.</li>
+      <li><strong>Redis pub/sub backplane and a second instance.</strong> Move ingest out of the API path, publish per symbol, subscribe on every instance, add the latest-price cache and the movers ZSET. <em>Demo:</em> two instances behind a load balancer; both browsers see the same tick at the same time. This is the phase worth screen-recording for your portfolio.</li>
+      <li><strong>Alerts with threshold evaluation.</strong> Rule CRUD, evaluation on the conflated stream, cooldown so a price sitting on the threshold does not fire forty times, an append-only firing log, and a separate non-conflated alert stream. <em>Demo:</em> set a threshold just above the current price, watch it fire once.</li>
+      <li><strong>Reconnect, backpressure and the stale indicator.</strong> Backoff with jitter, resume behaviour on <code>Last-Event-ID</code>, adaptive throttling for slow clients, a "ticks conflated" and "open connections" metric, and the stale badge. <em>Demo:</em> kill the backend mid-session; the UI greys out, then recovers on its own. Then run the generator at ten thousand ticks a second and show the UI still smooth.</li>
+      <li><strong>One stretch goal, finished properly.</strong> Pick <em>one</em> — paper portfolio, multi-symbol comparison, email or push delivery, or session replay — and take it to the same standard as the MVP. One polished feature beats four half-built ones on a CV, every time.</li>
+    </ol>
+    <ul class="resources">
+      <li>[Reference] <a href="https://github.com/eugenp/tutorials" rel="noopener">eugenp/tutorials — GitHub (Baeldung's runnable modules for SSE, WebSocket, STOMP and Spring Data Redis)</a></li>
+      <li>[Reference] <a href="https://socket.io/docs/v4/redis-adapter/" rel="noopener">Redis adapter — Socket.IO documentation (the reference design for a pub/sub backplane, worth reading whatever your stack)</a></li>
+      <li>[Reference] <a href="https://github.com/socketio/socket.io" rel="noopener">socketio/socket.io — GitHub (adapter and multi-node source, if you want to read a mature implementation)</a></li>
+      <li>[Article] <a href="https://ably.com/blog/websockets-horizontal-vs-vertical-scaling" rel="noopener">Horizontal vs vertical scaling for realtime connections — Ably engineering</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" rel="noopener">Timeouts, retries and backoff with jitter — Amazon Builders' Library (phase 8's reconnect policy)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XgFzHXOk8IQ" rel="noopener">The complete guide to WebSockets — Hussein Nasser</a></li>
+    </ul>
+
+    <h3>Module map: which course modules this capstone exercises</h3>
+    <p>Every phase above cashes in modules you have already worked through. Revisit the linked page when a phase stalls — the answer is usually there rather than in a new search.</p>
+    <table>
+      <caption>Track modules put to work by this capstone</caption>
+      <thead>
+        <tr><th>Phase</th><th>Modules it exercises</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1-2 · Feed interface, REST, candles</td><td><a href="../spring-boot/04-web.html">Spring Boot: Web</a> · <a href="../spring-boot/05-data-access.html">Spring Boot: Data Access</a> · <a href="../databases/08-indexing.html">Databases: Indexing</a> · <a href="../system-design/09-api-design.html">System Design: API Design</a></td></tr>
+        <tr><td>3-4 · SSE endpoint and the Angular client</td><td><a href="../spring-boot/10-caching-messaging-scheduling.html">Spring Boot: Caching, Messaging, Scheduling</a> · <a href="../angular-advanced/03-rxjs-observables.html">Angular Advanced: RxJS Observables</a> · <a href="../angular-advanced/05-advanced-http.html">Angular Advanced: Advanced HTTP</a> · <a href="../angular-state/02-service-state.html">Angular State: Service State</a></td></tr>
+        <tr><td>5 · Chart with conflated updates</td><td><a href="../angular-advanced/09-performance.html">Angular Advanced: Performance</a> · <a href="../angular-state/07-signal-store.html">Angular State: SignalStore</a> · <a href="../angular-advanced/04-rxjs-subjects.html">Angular Advanced: RxJS Subjects</a></td></tr>
+        <tr><td>6 · Redis backplane and a second instance</td><td><a href="../databases/13-redis.html">Databases: Redis</a> · <a href="../system-design/04-caching.html">System Design: Caching</a> · <a href="../system-design/03-load-balancing.html">System Design: Load Balancing</a> · <a href="../system-design/02-scaling-basics.html">System Design: Scaling Basics</a></td></tr>
+        <tr><td>7 · Alerts and event delivery</td><td><a href="../messaging/01-messaging-fundamentals.html">Messaging: Fundamentals</a> · <a href="../messaging/10-event-driven-architecture.html">Messaging: Event-Driven Architecture</a> · <a href="../messaging/09-ordering-concurrency.html">Messaging: Ordering and Concurrency</a> · <a href="../system-design/10-async-architectures.html">System Design: Async Architectures</a></td></tr>
+        <tr><td>8 · Reconnect, backpressure, observability</td><td><a href="../observability/04-metrics.html">Observability: Metrics</a> · <a href="../observability/08-alerting-slo.html">Observability: Alerting and SLOs</a> · <a href="../spring-boot/06-actuator.html">Spring Boot: Actuator</a> · <a href="../angular-state/08-state-strategy.html">Angular State: State Strategy</a></td></tr>
+        <tr><td>9 · Stretch goal and hardening</td><td><a href="../messaging/08-dlq-retries.html">Messaging: DLQ and Retries</a> · <a href="../angular-advanced/14-pwa-workers.html">Angular Advanced: PWA and Workers</a> (web push) · <a href="../system-design/14-enterprise-design.html">System Design: Enterprise Design</a></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <nav class="pager" aria-label="Capstone navigation">
+    <a href="05-hr-management.html">← HR Management System</a>
+    <a href="index.html">All capstone briefs</a>
+    <a href="07-banking-application.html">Banking Application →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>An interviewer sees this project on your CV and will not ask you about CRUD. These are the questions that follow — the ones Indian product and service companies use to find out whether you designed the thing or followed a tutorial:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through what happens between a price changing and a user seeing it.</summary>
+      <div class="answer"><p>The feed adapter receives a tick and hands it to the processor, which updates the latest-price hash in Redis, updates the movers sorted set, and publishes to the symbol's Redis channel. Every API instance is subscribed; each one looks up which of its own open SSE connections care about that symbol, and writes a conflated batch on the next flush interval. The browser's EventSource fires a message event, the stream service parses it into a signal update, and the OnPush row and the chart's imperative update call redraw. Roughly five hops, and I can point at where each one is in the code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where did your market data come from?</summary>
+      <div class="answer"><p>A simulated feed — a seeded random walk per symbol with a drift term and volatility spikes — behind a MarketDataFeed interface, with a free-tier delayed API as a second implementation of that same interface. That is deliberate, not a shortcut: real-time exchange data is licensed and cannot be redistributed, free tiers are delayed and heavily rate-limited, and a simulator runs at any hour, at any rate I choose, and reproducibly. Because everything above the interface is provider-agnostic, swapping in a paid feed is one class.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why does the dashboard call a REST endpoint at all if it has a live stream?</summary>
+      <div class="answer"><p>Because a stream only tells you about changes from the moment you connect. A user opening the page at a quiet moment would stare at empty rows until something moved. So the page loads a snapshot over REST — served from the Redis latest-price cache — paints immediately, and the stream then applies deltas on top. The same snapshot-then-delta pattern also covers reconnection. Historical candles are REST for the same reason: they are a bounded query, not a subscription.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You chose SSE over WebSocket. Defend that.</summary>
+      <div class="answer"><p>The data flows one way. SSE is exactly that shape, and being plain HTTP it keeps everything I already have: bearer tokens and cookies, compression, HTTP/2 multiplexing, proxy traversal, the same logging and tracing, the same load balancer with no stickiness needed because any instance can serve a reconnect. EventSource also reconnects automatically and resumes from Last-Event-ID, which with WebSocket I would write myself. WebSocket buys bidirectionality and lower per-frame overhead, and I did not need bidirectionality — if I added order entry or a chat panel I would move to STOMP over WebSocket, and I structured the event model so that swap is a delivery-layer change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the downside of SSE that you had to work around?</summary>
+      <div class="answer"><p>Over HTTP/1.1 browsers limit concurrent connections per origin to about six, and every open stream consumes one — so a user with several tabs open starves their own page, and any other request queues behind the streams. The fix is HTTP/2 at the edge, where the streams multiplex over a single connection. Secondly, intermediaries buffer or reap idle responses, so I send heartbeats and set the header that disables proxy buffering. Thirdly, SSE is text-only, so a binary protocol would need encoding — irrelevant for small JSON ticks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How did you scale to more than one instance?</summary>
+      <div class="answer"><p>One instance holding all the connections works until you deploy a replica, and then a tick arriving on instance 1 cannot reach browsers attached to instance 2. I introduced a Redis pub/sub backplane: ingest publishes once per symbol channel, every instance subscribes, and each forwards to its own local emitter registry. The publisher stays ignorant of topology and fan-out cost stays proportional to connections per instance. Because SSE is stateless HTTP I needed no sticky sessions; had I used WebSocket I would have needed sticky routing or a shared STOMP broker relay, because subscription state lives with the socket.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Redis pub/sub is fire-and-forget. Is that not a problem?</summary>
+      <div class="answer"><p>For prices, no — a message lost while an instance restarts is immediately superseded by the next tick, and the client resynchronises from a snapshot on reconnect anyway. For anything event-shaped it would be a problem, so alerts do not go over pub/sub; they use Redis Streams with a consumer group, offsets and explicit acknowledgement, plus a firing log in PostgreSQL and de-duplication on the event id at the client. Choosing fire-and-forget for state and a durable log for events is the actual design decision, and I can state the rule that separates them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why a sorted set for top movers instead of a query?</summary>
+      <div class="answer"><p>Because the ranking changes on every tick and is read constantly. A SQL ORDER BY over a live price table would be a full scan on a table under continuous write. A Redis sorted set keyed on percentage change is updated in logarithmic time as ticks arrive, and the panel becomes two range queries — highest scores and lowest scores — in constant-ish time. It is the leaderboard pattern. The tradeoff is that it is derived state that has to be rebuilt after a Redis flush, which the ingest path does from the previous close within one interval.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How did you handle backpressure?</summary>
+      <div class="answer"><p>Server side, because once bytes are on the wire the cost is already paid. Three layers: conflation — a per-symbol latest-value slot flushed on a timer, so four hundred ticks in a second become one message; throttling — a per-connection flush interval that lengthens for a client that is falling behind rather than letting its write buffer grow; and batching — one frame carrying every changed symbol in the interval instead of one frame per symbol. I also instrumented it: counters for ticks received versus ticks sent, and per-connection queue depth. A client too far behind gets disconnected and resynchronises from a fresh snapshot, because serving it a growing backlog of stale prices is worse than a brief reconnect.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You conflate ticks. When would conflation be a bug?</summary>
+      <div class="answer"><p>Whenever the messages are events rather than state. A price is state — the newest value fully supersedes the previous one, so dropping intermediates loses nothing actionable. A trade, an order fill, an alert firing or a ledger entry is an event: each is independently meaningful and dropping one is data loss, and it also breaks any downstream that computes volume or sequence. So in my design the tick channel conflates and the alert and order channels never do; they get a durable path with at-least-once delivery and client-side de-duplication. Getting that split wrong is how a dashboard quietly loses a fill.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does the Angular client avoid change-detection thrash at a thousand ticks a second?</summary>
+      <div class="answer"><p>Three things, in order of impact. Ticks land in signals and every component is OnPush, so only components reading a changed signal re-render — a moving row no longer forces a chart re-check. The raw tick path runs inside runOutsideAngular (zoneless removes the question entirely), re-entering only to publish the conflated result; the chart's own canvas update never needs a change-detection cycle. And the symbol list uses the CDK virtual scroll viewport with a stable track on the symbol, so five hundred symbols render twenty rows and update rather than rebuild them. I verified each with a profile at a realistic tick rate rather than assuming.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A user's connection drops for thirty seconds. What does the UI show, and what happens on reconnect?</summary>
+      <div class="answer"><p>The client tracks the last-event timestamp; once it exceeds a couple of heartbeat intervals a stale signal flips, prices grey out and a reconnecting badge appears — a frozen price shown confidently is worse than an admitted outage. EventSource retries on its own using the interval I send in the retry field; for errors it does not handle I use exponential backoff with jitter so a restarting backend is not stampeded by every open tab at once. On reconnect the browser sends Last-Event-ID; the server replies with a fresh snapshot rather than replaying the intervening ticks, because for state the current value is strictly better than a backlog. Alerts are the exception and do replay from the durable log.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How many concurrent users could one instance hold, and how would you find out?</summary>
+      <div class="answer"><p>I would not quote a number without measuring, because it depends on payload size, flush interval and heap sizing. The method: a load generator opening N streams while the simulator runs at a fixed rate, then watch open connections, heap after GC, CPU, and the per-connection queue depth, and find the knee. The limits that bite first are file descriptors, then heap held by emitter and subscription objects, then the write path once flush work exceeds the interval. Rough expectation is tens of thousands of mostly-idle SSE connections per well-tuned JVM. I export open connections and conflation counters per instance, so the imbalance a rolling deploy creates is visible rather than inferred.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> If you had to add order placement tomorrow, what changes?</summary>
+      <div class="answer"><p>That is the requirement that finally justifies WebSocket, because the client now publishes on the same connection — I would add STOMP over WebSocket with Spring's messaging support, keep the price feed on SSE initially, and move it later only if measurement justified it. The bigger changes are not transport: orders are events, so they need a durable path with idempotency keys so a retried submit cannot double-fill, an acknowledgement the client can reconcile against, and strict no-conflation. Operationally I would need sticky routing or a STOMP broker relay for shared subscription state, and handshake-time authentication since browsers cannot set headers on the upgrade.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Real-World Projects checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>prj.stk.brief — Feature outline, real-time transport choice, Redis and streaming architecture</li>
+      <li>prj.stk.build — Suggested build phases, reference implementations, module map</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Real-World Projects track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
