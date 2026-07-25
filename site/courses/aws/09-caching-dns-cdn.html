@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AWS caching, DNS and CDN module: ElastiCache engine choice between Valkey, Redis OSS and Memcached, cluster modes and failover, cache-aside versus write-through, stampede and penetration, Route 53 records and routing policies, CloudFront cache behaviours, OAC and edge functions, and the pattern for serving an Angular app — with verified resources and interview questions.">
+  <title>Caching, DNS and CDN on AWS — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Caching, DNS and CDN</h1>
+  <p class="standfirst">Three services sit in front of everything you have built so far — a cache, a resolver and an edge network — and between them they decide how fast the application <em>feels</em>, long before any of your code runs.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Cloud AWS track → Caching, DNS and CDN</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every previous module added a tier that does work: EC2 runs code, RDS runs queries, ECS runs containers. This module adds three tiers that avoid work. ElastiCache keeps hot data in memory so the database never sees the read. Route 53 answers the name lookup and decides which endpoint a user is sent to at all. CloudFront answers the request from an edge location kilometres away instead of a Region oceans away.</p>
+    <p>The engineering here is mostly about correctness under pressure, not about clicking through consoles. Which engine, sharded or not, cache-aside or write-through, what TTL, what happens when a hot key expires and ten thousand requests miss at once, alias record or CNAME, what belongs in the cache key, and how a single-page application survives a browser refresh on a deep link. Those are the decisions, and they are also the interview questions.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>ElastiCache: choosing the engine — Valkey, Redis OSS or Memcached</h3>
+    <p>ElastiCache is a managed in-memory data store that you place beside your application, usually to absorb reads that would otherwise hit RDS. The first decision is the engine. <strong>Valkey</strong> is the Linux Foundation fork of Redis created after Redis changed its licence in 2024; it is wire-compatible, it is what AWS steers new clusters towards, and it is priced noticeably lower than the Redis OSS option — which is why most greenfield ElastiCache work in 2026 starts on Valkey. <strong>Redis OSS</strong> remains available and behaves identically for practical purposes. <strong>Memcached</strong> is the third, much older option.</p>
+    <p>The honest comparison matters more than the branding. Memcached is a pure key/value cache: strings only, multi-threaded so it scales up within a node, trivially simple, and it loses everything on restart. Valkey and Redis give you real data structures (lists, sets, sorted sets, hashes, streams), optional persistence, replication with failover, transactions, Lua scripting, pub/sub and geospatial queries — at the cost of a mostly single-threaded core per shard. If you need a leaderboard, a rate limiter, a session store that survives a node failure, or anything sorted, you need Valkey or Redis. If you genuinely only need a memoized blob and want to scale a single node across many cores, Memcached is still defensible.</p>
+    <pre class="code-block" data-label="Bash"><code># A cluster-mode-disabled Valkey group: one shard, one primary, two replicas
+aws elasticache create-replication-group \
+  --replication-group-id catalog-cache \
+  --replication-group-description "read cache in front of the catalog RDS" \
+  --engine valkey --engine-version 8.0 \
+  --cache-node-type cache.r7g.large \
+  --num-cache-clusters 3 \
+  --multi-az-enabled --automatic-failover-enabled \
+  --transit-encryption-enabled --at-rest-encryption-enabled</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html" rel="noopener">What is Amazon ElastiCache? — AWS ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SelectEngine.html" rel="noopener">Comparing Valkey, Memcached and Redis OSS self-designed caches — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://valkey.io/topics/introduction/" rel="noopener">Introduction to Valkey — valkey.io (the fork's own documentation)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/elasticache/redis-vs-memcached/" rel="noopener">Redis vs Memcached — AWS product comparison</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=h-lTTtf3A98" rel="noopener">AWS ElastiCache Tutorial: Redis &amp; Memcached Explained with Live Demo — Cloud Guru</a></li>
+    </ul>
+
+    <h3>Cluster topology: cluster mode, replicas, failover and Multi-AZ</h3>
+    <p>ElastiCache for Valkey/Redis has two topologies and interviewers love the distinction. <strong>Cluster mode disabled</strong> gives you one shard: a single primary that holds the entire keyspace, plus up to five read replicas. All writes go to the primary, so write throughput is capped by one node, and the whole dataset must fit in one node's memory. <strong>Cluster mode enabled</strong> shards the keyspace across up to 500 shards, each with its own primary and replicas; keys are mapped to one of 16384 hash slots and the client library routes each command to the owning shard. That scales writes and memory horizontally, but multi-key operations only work when the keys land in the same slot, which is what hash tags (<code>{user:42}:cart</code>) exist for.</p>
+    <p>Replicas serve two purposes: read scaling and availability. With <strong>automatic failover</strong> enabled and the replicas spread across Availability Zones (<strong>Multi-AZ</strong>), ElastiCache promotes a replica when the primary fails and repoints the primary endpoint at it — typically well under a minute, but not instant, and replication is asynchronous, so a failover can lose the last few writes. That is acceptable for a cache and unacceptable for a system of record, which is the mental line to hold: ElastiCache is not your database. Always connect through the primary/configuration endpoint rather than a node address, because node addresses change under you when a failover or a resharding operation runs.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Replication.Redis-RedisCluster.html" rel="noopener">Replication: cluster mode disabled vs cluster mode enabled — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/AutoFailover.html" rel="noopener">Minimizing downtime with automatic failover — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/best-practices-online-resharding.html" rel="noopener">Best practices for online resharding and shard rebalancing — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://valkey.io/topics/cluster-tutorial/" rel="noopener">Valkey cluster tutorial — valkey.io (hash slots, resharding, client redirection)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/migrating-to-amazon-elasticache-for-valkey-best-practices-and-a-customer-success-story/" rel="noopener">Migrating to Amazon ElastiCache for Valkey: best practices and a customer success story — AWS Database Blog</a></li>
+    </ul>
+
+    <h3>Caching patterns in application code: cache-aside, write-through, write-behind</h3>
+    <p><strong>Cache-aside</strong> (lazy loading) is the default and the one you should be able to write on a whiteboard. The application asks the cache; on a hit it returns; on a miss it queries the database, writes the result into the cache with a TTL, and returns. Its virtues are that only requested data is ever cached, and that a cache outage degrades to a slow application rather than a broken one. Its cost is the <em>cache-miss penalty</em>: the first request for any key pays cache lookup plus database query plus cache write, so a cold cache after a deployment or a node replacement hits the database with the full uncached load.</p>
+    <p><strong>Write-through</strong> inverts it: every write updates the database <em>and</em> the cache in the same operation, so the cache is never stale and reads never miss on data that has been written. The price is write latency on every write and a cache full of data nobody may ever read, which wastes memory — it is best paired with a TTL so unread entries expire. <strong>Write-behind</strong> (write-back) acknowledges the write to the cache immediately and flushes to the database asynchronously; it gives the fastest writes and the highest risk, because an unflushed node failure loses committed-looking data. In practice, most production systems run cache-aside for reads, add write-through or explicit invalidation on the few hot entities that must never look stale, and reserve write-behind for genuinely tolerant workloads like counters and analytics.</p>
+    <p>Every cached entry needs an expiry. A TTL is not a performance knob, it is the bound on how wrong the cache is allowed to be, and it is your last line of defence when an invalidation path is missed — which it eventually will be. Pick the TTL from the business tolerance for staleness (a product price: seconds; a country list: hours) and add jitter so a batch of keys written together does not expire together.</p>
+    <pre class="code-block" data-label="Java"><code>// Cache-aside: the pattern that shows up in every interview
+public Product find(String sku) {
+    String key = "product:v3:" + sku;              // version the key, not the cache
+    Product hit = cache.get(key, Product.class);
+    if (hit != null) return hit;                   // hit: RDS never sees this read
+
+    Product fresh = repository.findBySku(sku);     // miss: pay the penalty once
+    if (fresh != null) {
+        Duration ttl = Duration.ofMinutes(10)
+            .plusSeconds(ThreadLocalRandom.current().nextInt(120)); // jitter
+        cache.set(key, fresh, ttl);
+    }
+    return fresh;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html" rel="noopener">Caching strategies: lazy loading, write-through and adding a TTL — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/database-caching-strategies-using-redis/welcome.html" rel="noopener">Database Caching Strategies Using Redis — AWS whitepaper</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/caching/best-practices/" rel="noopener">Caching best practices — AWS caching overview</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/cache-write-policy" rel="noopener">Cache Write Policy: write-through, write-back and write-around — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RtOyBwBICRs" rel="noopener">System Design: Distributed Cache and Caching Strategies — Concept &amp;&amp; Coding (Shrayansh)</a></li>
+    </ul>
+
+    <h3>The three classic failure modes: stampede, penetration and stale data</h3>
+    <p><strong>Cache stampede</strong> (thundering herd) is what happens when one very hot key expires: every concurrent request misses simultaneously, and all of them run the same expensive query against the database at the same instant. A cache that was absorbing ten thousand reads per second suddenly forwards ten thousand identical queries. The standard mitigations are a per-key lock or single-flight so exactly one caller recomputes while the others wait or serve the stale value, probabilistic early expiration where a request near the TTL boundary refreshes proactively, and background refresh of known-hot keys before they expire. Jittered TTLs prevent the related version of this — many keys expiring in the same second.</p>
+    <p><strong>Cache penetration</strong> is the opposite: requests for keys that do not exist in the database at all. Because a miss caches nothing, every one of those requests reaches the database, and an attacker (or a broken client looping over sequential ids) can drive unlimited load straight through the cache. The fixes are to cache the negative result under a short TTL — an explicit "not found" marker rather than a null — and, at scale, a Bloom filter in front that answers "definitely absent" without a lookup. <strong>Stale data</strong> is the third: a write updates the database and something forgets to invalidate the cache, so readers see the old value until the TTL saves you. Decide deliberately per entity whether you invalidate on write, write through, or simply accept staleness for a bounded TTL — and never leave the answer implicit.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/builders-library/caching-challenges-and-strategies/" rel="noopener">Caching challenges and strategies — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://en.wikipedia.org/wiki/Cache_stampede" rel="noopener">Cache stampede: locking, external recomputation and probabilistic early expiration — Wikipedia</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-redis-cache" rel="noopener">Spring Boot Cache with Redis — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vpe4aDu5ixI" rel="noopener">Spring Data Redis as Cache: @Cacheable, @CacheEvict, @CachePut — Java Techie</a></li>
+    </ul>
+
+    <h3>Eviction, memory pressure and the session-store use case</h3>
+    <p>A cache is a fixed amount of memory, so sooner or later it fills. What happens then is set by the <code>maxmemory-policy</code> parameter in the cluster's parameter group. <code>allkeys-lru</code> evicts the least recently used key regardless of TTL and is the right default for a pure cache. <code>volatile-lru</code> only evicts keys that carry a TTL, which quietly turns into <code>noeviction</code> — writes start failing with an out-of-memory error — if you have stored keys without expiry. <code>allkeys-lfu</code> evicts by access frequency and is better when a small set of keys is genuinely hot. <code>noeviction</code> is correct only when you are using the store as a queue or a system of record and would rather fail a write than silently drop data.</p>
+    <p>Watch two CloudWatch metrics above all others: <code>Evictions</code> rising means the working set no longer fits and you should scale up the node or out the shards, and the cache hit rate (derived from <code>CacheHits</code> and <code>CacheMisses</code>) tells you whether the cache is earning its cost at all — a hit rate below roughly 80% usually means the TTL is too short or the key design is wrong. The other headline use case is the <strong>session store</strong>: moving HTTP session state out of the application instance into ElastiCache is what makes your instances genuinely stateless, so an Auto Scaling group can terminate any of them without logging users out and the load balancer no longer needs sticky sessions. Give sessions a TTL matching the inactivity timeout, encrypt in transit and at rest, and treat a session-store failover's few lost writes as a real (if small) user-visible event.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/ParameterGroups.html" rel="noopener">Configuring engine parameters with parameter groups — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/CacheMetrics.html" rel="noopener">Monitoring ElastiCache metrics with CloudWatch — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://redis.io/docs/latest/develop/reference/eviction/" rel="noopener">Key eviction: maxmemory policies, LRU and LFU — Redis documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/get-started-with-amazon-elasticache-for-valkey/" rel="noopener">Get started with Amazon ElastiCache for Valkey — AWS Database Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8A6s9d0jnWI" rel="noopener">Caching Strategies With Redis — Software With Shawn</a></li>
+    </ul>
+
+    <h3>Route 53: hosted zones, record types, and alias versus CNAME</h3>
+    <p>Route 53 is AWS's authoritative DNS. A <strong>hosted zone</strong> is a container of records for one domain: a <em>public</em> hosted zone answers the internet, a <em>private</em> hosted zone answers only inside associated VPCs, which is how you give internal services friendly names that never resolve publicly. Creating a public zone hands you four name servers; the domain only becomes live once the registrar's NS delegation points at exactly those four. Beyond the everyday A, AAAA, CNAME, MX and TXT records, Route 53 adds NS and SOA automatically and supports CAA for certificate authority pinning.</p>
+    <p>The distinction that gets asked constantly is <strong>alias versus CNAME</strong>. A CNAME maps one name to another name and, by DNS rules, cannot exist at the <em>zone apex</em> — you cannot put a CNAME on <code>example.com</code> itself, only on <code>www.example.com</code>, because the apex must also carry NS and SOA records and a CNAME may not coexist with other records. An alias record is a Route 53 extension: it looks like an A/AAAA record to resolvers but points at an AWS resource (CloudFront distribution, ALB, S3 website endpoint, API Gateway, another record in the same zone), Route 53 resolves it internally and returns the target's IP addresses. Alias records work at the apex, follow the target's IP changes automatically, and — the practical clincher — alias queries to AWS resources are not billed, whereas CNAME queries are. At the apex the answer is always alias; below the apex, alias is still usually better.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "Comment": "Apex alias to the CloudFront distribution — a CNAME is illegal here",
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "example.com.",
+      "Type": "A",
+      "AliasTarget": {
+        "HostedZoneId": "Z2FDTNDATAQYW2",
+        "DNSName": "d111111abcdef8.cloudfront.net.",
+        "EvaluateTargetHealth": false
+      }
+    }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html" rel="noopener">What is Amazon Route 53? — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/hosted-zones-working-with.html" rel="noopener">Working with public and private hosted zones — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/ResourceRecordTypes.html" rel="noopener">Supported DNS record types — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-choosing-alias-non-alias.html" rel="noopener">Choosing between alias and non-alias records — Route 53 Developer Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BtiS0QyiTK8" rel="noopener">AWS Route 53 Tutorial: What Is AWS Route 53? — Simplilearn</a></li>
+    </ul>
+
+    <h3>Routing policies and health checks: seven ways to answer one question</h3>
+    <p>A Route 53 record does not have to return a fixed answer. The routing policy decides which of several candidate answers a given resolver receives, and each one exists for a specific job. <strong>Simple</strong> returns one record, no logic — the default for a single endpoint. <strong>Weighted</strong> splits traffic by integer weights across records with the same name and type, which is how you run a canary (weight 95 to the current stack, 5 to the new one) or a blue/green cutover you can reverse in one API call; weight 0 takes a target out of rotation. <strong>Latency-based</strong> sends each resolver to the AWS Region with the lowest measured network latency for that resolver — note that this is latency, not geography, and the two often disagree. <strong>Failover</strong> pairs a primary with a secondary and switches when the primary's health check fails: the standard active/passive disaster-recovery pattern, often with the secondary pointing at a static maintenance page in S3.</p>
+    <p><strong>Geolocation</strong> routes by where the user appears to be, which is about compliance and content rather than speed — serve Indian users the rupee-priced site, keep EU users' traffic inside EU endpoints, and always configure a default record for locations you did not enumerate. <strong>Geoproximity</strong> routes by distance between the user and your resources, with a <em>bias</em> you can dial to expand or shrink a resource's catchment area — useful when you want to shift load away from a Region without moving it entirely. <strong>Multivalue answer</strong> returns up to eight healthy records at random, giving cheap client-side load spreading with health checking — a poor man's load balancer for cases where an ALB is overkill, not a replacement for one.</p>
+    <p>Nearly all of these depend on <strong>health checks</strong>. Route 53 checks an endpoint (HTTP/HTTPS/TCP, optionally string-matching the response body) from multiple global checkers, and a record whose health check is failing is excluded from the answer. Three types matter: checks that monitor an endpoint, <em>calculated</em> checks that combine several child checks with a threshold, and checks that monitor a CloudWatch alarm — the last lets DNS react to a metric such as an error rate rather than to reachability. Remember the TTL trap: DNS failover is only as fast as the TTL clients have cached, so records that participate in failover carry short TTLs (60 seconds or less), and some resolvers and JVMs will still cache longer than you asked.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html" rel="noopener">Choosing a routing policy — Route 53 Developer Guide (all seven policies compared)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy-weighted.html" rel="noopener">Weighted routing — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy-latency.html" rel="noopener">Latency-based routing — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover.html" rel="noopener">Configuring DNS failover — Route 53 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/health-checks-types.html" rel="noopener">The three health check types: endpoint, calculated and CloudWatch alarm — Route 53 Developer Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/networking-and-content-delivery/latency-based-routing-leveraging-amazon-cloudfront-for-a-multi-region-active-active-architecture/" rel="noopener">Latency-based routing with CloudFront for a multi-Region active-active architecture — AWS Networking &amp; Content Delivery Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9A7ufQfQS_s" rel="noopener">Amazon Route 53 Routing Policies Explained: Weighted and Geolocation — KnoDAX</a></li>
+    </ul>
+
+    <h3>CloudFront: edge locations, distributions, origins and cache behaviours</h3>
+    <p>CloudFront is a content delivery network with hundreds of edge locations worldwide, including several in India. A viewer's request lands at the nearest edge; if that edge holds a valid cached copy the response goes back immediately and <em>your origin never sees the request at all</em>. That is the point worth internalising — a CDN's value is not only proximity but the origin traffic it eliminates, which is what lets a single small origin serve global load. Misses travel over AWS's backbone (often via a regional edge cache) to the origin, which is still faster and more reliable than the public internet.</p>
+    <p>A <strong>distribution</strong> is the configuration unit. It has one or more <strong>origins</strong> (an S3 bucket, an ALB, an API Gateway, or any public HTTP server) optionally grouped into origin groups for origin failover, and it has <strong>cache behaviours</strong>. A cache behaviour binds a path pattern to a set of rules: which origin serves it, which HTTP methods are allowed, whether the viewer is forced to HTTPS, which cache policy and origin request policy apply, whether compression is on, and which edge functions run. Behaviours are evaluated in order and the first matching path pattern wins, with the default behaviour (<code>*</code>) last — so <code>/api/*</code> pointing at the ALB with caching disabled must be listed above the default that points at S3. Getting this ordering wrong is the most common CloudFront configuration bug.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html" rel="noopener">What is Amazon CloudFront? — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/HowCloudFrontWorks.html" rel="noopener">How CloudFront delivers content — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistS3AndCustomOrigins.html" rel="noopener">Using S3 and custom origins with a distribution — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesCacheBehavior.html" rel="noopener">Cache behaviour settings: path patterns, methods and policies — CloudFront Developer Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KIltfPRpTi4" rel="noopener">How to Set up an Amazon CloudFront Distribution for Your Amazon S3 Origin — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Cache keys, TTLs and invalidation — and why versioned filenames win</h3>
+    <p>The <strong>cache key</strong> is what CloudFront uses to decide whether two requests are "the same object". By default it is the distribution, the path and nothing else — query strings, headers and cookies are excluded. A cache policy lets you add specific query string parameters, headers or cookies to the key, and the rule is to add the minimum. Every value you include multiplies the number of distinct cached objects; forwarding all cookies to a static origin is the classic way to drive the hit rate to nearly zero, because each user's session cookie mints a private copy of every asset. If the origin needs a header or cookie for logging or logic but the response does not vary on it, put it in the <em>origin request policy</em> instead of the cache policy — forwarded to the origin, absent from the key.</p>
+    <p>How long an object stays cached is a negotiation between your <code>Cache-Control</code> response headers and the distribution's minimum, default and maximum TTLs. If the origin sends <code>Cache-Control: max-age</code>, CloudFront honours it clamped between the minimum and maximum; if the origin sends nothing, the default TTL applies. Note that the same header also controls the browser cache, which is a second cache you cannot flush — an important asymmetry. <strong>Invalidation</strong> removes objects from the edge caches by path, but it is slow (measured in minutes), the first thousand paths per month are free and the rest are billed, and it does nothing about copies already sitting in users' browsers. That is why the professional answer is <strong>versioned filenames</strong>: ship <code>main.7f3a2c9.js</code>, cache it immutably for a year, and change the filename when the content changes. The new HTML references the new name, so there is nothing to invalidate. Reserve invalidation for the small set of unversioned entry points and for emergencies.</p>
+    <pre class="code-block" data-label="HTTP"><code># Hashed build output: safe to cache forever, the name changes when the bytes do
+Cache-Control: public, max-age=31536000, immutable
+
+# The entry point: never cache, it is what points at the new hashed names
+Cache-Control: no-cache, no-store, must-revalidate
+
+# Emergency only — slow, partly billed, and useless against browser caches
+aws cloudfront create-invalidation --distribution-id E123ABC --paths "/index.html"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/controlling-the-cache-key.html" rel="noopener">Controlling the cache key with a cache policy — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/controlling-origin-requests.html" rel="noopener">Controlling origin requests: what to forward without adding it to the key — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Expiration.html" rel="noopener">Managing how long content stays in the cache (expiration) — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html" rel="noopener">Invalidating files — CloudFront Developer Guide</a></li>
+      <li>[Article] <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control" rel="noopener">Cache-Control — MDN HTTP headers reference</a></li>
+      <li>[Article] <a href="https://web.dev/articles/http-cache" rel="noopener">Prevent unnecessary network requests with the HTTP cache — web.dev</a></li>
+    </ul>
+
+    <h3>Locking the distribution down: OAC, ACM certificates, signed URLs and edge functions</h3>
+    <p>A private S3 origin is the modern default. <strong>Origin Access Control (OAC)</strong> lets the bucket stay entirely private — public access blocked, no website endpoint — while the bucket policy grants <code>s3:GetObject</code> to the CloudFront service principal, restricted by the distribution's ARN. CloudFront then signs its origin requests with SigV4, so the only route to the objects is through the distribution, where your WAF rules, geo-restrictions and logging apply. OAC replaced the older Origin Access Identity and additionally supports SSE-KMS encrypted objects and all AWS Regions; if a codebase still uses OAI, that is a migration, not a style preference.</p>
+    <p>For a <strong>custom domain</strong> you add the alternate domain name to the distribution and attach an ACM certificate — and here is the classic gotcha that has burned everyone once: <em>the certificate must be requested or imported in us-east-1 (N. Virginia)</em>, no matter where your origin or your users are, because CloudFront is a global service backed by that Region. A certificate in ap-south-1 simply will not appear in the picker. (An ALB, by contrast, needs its certificate in the ALB's own Region — so a stack with both often needs two certificates for the same domain.) For paid or private content, <strong>signed URLs</strong> grant time-limited access to a single object and <strong>signed cookies</strong> grant access to a set of objects matching a policy, which is the right tool for a video library or a members' area.</p>
+    <p>Finally, you can run code at the edge. <strong>CloudFront Functions</strong> are lightweight JavaScript running in a sub-millisecond, memory-only sandbox on viewer request and viewer response only — no network access, no file system — and they are the right choice for header manipulation, URL rewrites, redirects, simple token checks and normalising the cache key. <strong>Lambda@Edge</strong> runs full Node.js or Python functions at regional edge caches on all four trigger points including origin request and origin response, can call other AWS services and take up to thirty seconds; it costs more and adds latency, so reach for it only when you genuinely need a network call or a request body. Rule of thumb: if it can be a CloudFront Function, it should be.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html" rel="noopener">Restricting access to an S3 origin with Origin Access Control — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html" rel="noopener">Alternate domain names and HTTPS requirements (the us-east-1 certificate rule) — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PrivateContent.html" rel="noopener">Serving private content with signed URLs and signed cookies — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/edge-functions-choosing.html" rel="noopener">Choosing between CloudFront Functions and Lambda@Edge — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/acm/latest/userguide/acm-services.html" rel="noopener">Services integrated with AWS Certificate Manager — ACM User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/networking-and-content-delivery/amazon-cloudfront-introduces-origin-access-control-oac/" rel="noopener">Amazon CloudFront introduces Origin Access Control — AWS Networking &amp; Content Delivery Blog</a></li>
+    </ul>
+
+    <h3>The concrete pattern: serving the Angular app from S3 behind CloudFront</h3>
+    <p>Put it together for this course's own front end. Build the Angular app, which emits an <code>index.html</code> plus hashed bundles such as <code>main-A7B3C9D1.js</code> and <code>styles-4F2E8A.css</code>. Sync the output to a private S3 bucket. Create a distribution with that bucket as origin, secured by OAC, with the alternate domain name and an ACM certificate from us-east-1, and point an apex alias record in Route 53 at the distribution. Set two caching rules by path: hashed assets get <code>max-age=31536000, immutable</code>, and <code>index.html</code> gets <code>no-cache</code>. That combination means a deploy is instantly visible (the entry point is always revalidated) while ninety-nine percent of the bytes are served from a cold-immutable edge cache.</p>
+    <p>The remaining problem is client-side routing. Angular's router owns paths like <code>/courses/aws/09</code>, but no such object exists in the bucket, so a refresh or a shared deep link asks S3 for a key that is not there and gets a 403 (with OAC and a private bucket) or a 404. The <strong>SPA fallback</strong> fixes it: configure custom error responses that map 403 and 404 to <code>/index.html</code> with a response code of 200, so the browser receives the application shell and the router resolves the path client-side. Two refinements worth knowing: returning 200 for genuinely missing content hurts SEO and hides real errors, so many teams instead use a CloudFront Function on viewer request that rewrites only extension-less paths to <code>/index.html</code> and lets true 404s through; and if an <code>/api/*</code> behaviour points at an ALB on the same distribution, the API's own 404s must not be swallowed by the fallback — scope the custom error response carefully.</p>
+    <pre class="code-block" data-label="Bash"><code># Two sync passes: immutable hashed assets, then the never-cached entry point
+aws s3 sync dist/app/browser/ s3://my-site --exclude index.html \
+  --cache-control "public, max-age=31536000, immutable"
+aws s3 cp dist/app/browser/index.html s3://my-site/index.html \
+  --cache-control "no-cache"
+
+# SPA fallback: deep links must return the shell, not an error
+#   403 -> /index.html (200)   404 -> /index.html (200)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/GeneratingCustomErrorResponses.html" rel="noopener">Generating custom error responses (the SPA fallback mechanism) — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html" rel="noopener">Customizing at the edge with CloudFront Functions — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/deploy-a-react-based-single-page-application-to-amazon-s3-and-cloudfront.html" rel="noopener">Deploy a single-page application to Amazon S3 and CloudFront — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/networking-and-content-delivery/host-single-page-applications-spa-with-tiered-ttls-on-cloudfront-and-s3/" rel="noopener">Host single-page applications with tiered TTLs on CloudFront and S3 — AWS Networking &amp; Content Delivery Blog</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/performance-efficiency-pillar/welcome.html" rel="noopener">Performance Efficiency Pillar — AWS Well-Architected Framework</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-containers-serverless.html">← Containers and Serverless</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="10-cloud-monitoring.html">Monitoring and Cost in the Cloud →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Caching and CDN questions are near-universal in Indian product and service-company rounds — service companies test the AWS service surface (alias vs CNAME, routing policies, invalidation), product companies push on the patterns and their failure modes:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is ElastiCache, and why put it in front of RDS?</summary>
+      <div class="answer"><p>A managed in-memory data store (Valkey, Redis OSS or Memcached) that sits beside the application. Reads served from memory take microseconds instead of the milliseconds a database round trip costs, and every hit is a query RDS never runs — so it cuts latency and lets a smaller database instance carry far more traffic. It is a cache, not a system of record: it can lose data on failover and must always be rebuildable from the database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Redis/Valkey versus Memcached — how do you choose?</summary>
+      <div class="answer"><p>Memcached is a simple multi-threaded key/value cache: strings only, no persistence, no replication, everything lost on restart, but it scales across cores within a node. Valkey and Redis give data structures (lists, sets, sorted sets, hashes, streams), optional persistence, replication with automatic failover, transactions, Lua and pub/sub. Choose Memcached only for plain memoized blobs; choose Valkey (cheaper than Redis OSS on ElastiCache and the current AWS default direction) for anything else — leaderboards, sessions, rate limiters, queues.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is CloudFront and what does an edge cache hit actually save?</summary>
+      <div class="answer"><p>A global CDN with hundreds of edge locations. On a hit the edge returns the object directly, so the request never reaches the origin — saving the round trip to the Region, the origin's compute and bandwidth, and the origin's data transfer cost. On a miss the request still travels over the AWS backbone rather than the open internet, so it is usually faster than hitting the origin directly anyway.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain cache-aside (lazy loading) in five sentences.</summary>
+      <div class="answer"><p>The application asks the cache for a key. On a hit it returns the value. On a miss it queries the database, writes the result into the cache with a TTL, and returns it. Only requested data is ever cached, so memory is spent on what is actually used. If the cache goes down the application still works, just slower.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Cache-aside versus write-through — trade-offs, and which do you default to?</summary>
+      <div class="answer"><p>Cache-aside caches on read: minimal memory, resilient to cache failure, but every first read of a key pays the miss penalty and a cold cache after a deploy hits the database hard. Write-through caches on write: data is never stale and reads never miss on written data, but every write pays extra latency and the cache fills with entries nobody may read, wasting memory. Default to cache-aside, add write-through (or explicit invalidation) selectively for hot entities that must not look stale, and always attach a TTL either way.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a cache stampede, and how do you prevent it?</summary>
+      <div class="answer"><p>A very hot key expires and every concurrent request misses at once, so all of them run the same expensive query against the database simultaneously — the thundering herd that can take the database down. Mitigations: a per-key lock or single-flight so exactly one caller recomputes while the rest wait or serve the stale value; probabilistic early expiration where requests near the TTL boundary refresh proactively; scheduled background refresh of known-hot keys; and jittered TTLs so keys written together do not expire together.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't you use a CNAME at the zone apex, and what do you use instead?</summary>
+      <div class="answer"><p>DNS forbids a CNAME from coexisting with any other record at the same name, and the apex must carry NS and SOA records — so a CNAME on example.com is illegal. Route 53's alias record solves it: it behaves like an A/AAAA record to resolvers but points at an AWS resource (CloudFront, ALB, S3, API Gateway, or another record in the zone), Route 53 resolves it internally, it tracks the target's IP changes automatically, and alias queries to AWS resources are not billed while CNAME queries are.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the Route 53 routing policies and give one use case each.</summary>
+      <div class="answer"><p>Simple — one endpoint, no logic. Weighted — canary or blue/green traffic splits by integer weight. Latency-based — send each user to the lowest-latency Region. Failover — active/passive disaster recovery driven by a health check. Geolocation — compliance and localisation, route by where the user is. Geoproximity — route by distance with a tunable bias to shift load between Regions. Multivalue answer — return up to eight healthy records at random for cheap client-side spreading with health checks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Cluster mode disabled versus enabled in ElastiCache?</summary>
+      <div class="answer"><p>Disabled means one shard: a single primary holding the whole keyspace plus up to five read replicas — writes are capped by one node and the dataset must fit in one node's memory. Enabled shards the keyspace across many shards (up to 500), each with its own primary and replicas, mapping keys to 16384 hash slots so writes and memory scale horizontally. The catch with cluster mode enabled is that multi-key operations only work when keys hash to the same slot, which is why hash tags exist.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You must fix a bad asset already deployed to CloudFront. Invalidate or redeploy?</summary>
+      <div class="answer"><p>Invalidation works but is slow (minutes), only the first thousand paths a month are free, and it cannot touch copies already cached in users' browsers. The right answer is versioned filenames: hashed build assets cached immutably for a year, so a new build produces new names and there is nothing to invalidate, with index.html served no-cache so it always points at the new names. Keep invalidation for the few unversioned entry points and genuine emergencies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your CloudFront hit rate is 20%. Walk through the diagnosis.</summary>
+      <div class="answer"><p>Start at the cache key: a cache policy including all query strings, all headers or all cookies mints a separate object per user — a session cookie alone can make every asset unique. Move anything the origin needs but the response does not vary on into the origin request policy instead. Then check TTLs: an origin sending no Cache-Control with a low default TTL, or a minimum TTL of zero with no-cache from the origin, means constant revalidation. Then check for unversioned URLs with cache-busting query parameters, uncacheable methods or Set-Cookie on static responses (which suppresses caching), and behaviours whose path patterns route static assets to a caching-disabled behaviour.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is cache penetration and how is it different from a stampede?</summary>
+      <div class="answer"><p>Penetration is repeated requests for keys that do not exist in the database at all. A miss on a nonexistent key caches nothing, so every such request reaches the database — a client looping over sequential ids, or an attacker, drives unlimited load straight through the cache. Fix by caching the negative result under a short TTL as an explicit not-found marker (never a bare null), and at scale by putting a Bloom filter in front to answer "definitely absent" without a lookup. A stampede is the opposite situation: the key does exist and is hot, and the load spike comes from its expiry, not from its absence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A user refreshes on /orders/1234 in your Angular app on S3 + CloudFront and gets an error. Explain and fix.</summary>
+      <div class="answer"><p>That path is a client-side route; no such object exists in the bucket, so S3 returns 404 — or 403 when the bucket is private behind OAC, since a private bucket hides existence. The fix is the SPA fallback: custom error responses mapping 403 and 404 to /index.html with response code 200, so the browser gets the app shell and the Angular router resolves the path. Refinements: returning 200 for genuinely missing content hurts SEO and masks real errors, so a CloudFront Function on viewer request that rewrites only extension-less paths is cleaner, and any /api/* behaviour must be excluded so real API 404s are not swallowed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your ACM certificate exists in ap-south-1 but CloudFront won't offer it. Why?</summary>
+      <div class="answer"><p>CloudFront is a global service whose certificate store lives in us-east-1, so any certificate used for an alternate domain name on a distribution must be requested or imported in us-east-1 regardless of where the origin or the users are — a certificate in any other Region simply does not appear in the picker. An ALB, by contrast, needs its certificate in its own Region, so a stack with CloudFront in front of an ALB in Mumbai commonly needs two certificates for the same domain name. ACM public certificates are free, so issue both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> CloudFront Functions or Lambda@Edge — how do you choose?</summary>
+      <div class="answer"><p>CloudFront Functions run JavaScript in a sub-millisecond memory-only sandbox at the edge on viewer request and viewer response only, with no network or file system access — ideal for header manipulation, URL rewrites, redirects, cache-key normalisation and simple token checks, at roughly a sixth of the cost. Lambda@Edge runs full Node.js or Python at regional edge caches on all four triggers including origin request and origin response, can call other AWS services, access the request body and run for up to thirty seconds — but adds real latency and cost. Default to a CloudFront Function; escalate to Lambda@Edge only when you need a network call, a request body, or an origin-side trigger.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your ElastiCache maxmemory-policy is volatile-lru and writes start failing. What happened?</summary>
+      <div class="answer"><p>volatile-lru only evicts keys that carry a TTL. If part of the keyspace was written without an expiry — a session, a lock, a config blob — those keys are ineligible, so once memory fills and no evictable keys remain the engine behaves like noeviction and rejects writes with an out-of-memory error. For a pure cache use allkeys-lru (or allkeys-lfu when a small set of keys is genuinely hot), enforce a TTL on every write, and alert on the Evictions metric and the hit rate so you scale up or shard out before the wall is hit.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.cache.elasticache — ElastiCache (Valkey and Redis), cluster modes, caching patterns in front of RDS</li>
+      <li>aws.edge.cloudfront — Route 53 routing policies, CloudFront distributions and cache behaviours, serving the Angular app</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

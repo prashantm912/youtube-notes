@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AWS containers and serverless module: ECR registries and lifecycle policies, ECS clusters, task definitions, tasks and services, EC2 versus Fargate launch types, task role versus task execution role, EKS awareness, and the Lambda side — execution model, triggers, cold starts, Java on Lambda, API Gateway and the SQS/SNS/EventBridge decision — with verified resources and interview questions.">
+  <title>AWS Containers and Serverless — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Containers and Serverless</h1>
+  <p class="standfirst">You built a container image in the DevOps track and never said where it runs. This module answers that — ECS on Fargate for long-lived services, Lambda for event-shaped work — and gives you the vocabulary to defend the choice.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Cloud AWS → Containers and Serverless</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>By now you can build an image, push it somewhere, and put a load balancer in front of instances. What has been missing is the layer between the image and the load balancer: something that pulls the image, starts N copies of it, watches them, restarts the dead ones, registers the survivors with a target group, and replaces them all when you ship a new version. On AWS that layer is ECS — a cluster, a task definition, tasks, and a service — fed by images from ECR and optionally running on Fargate so you never touch a host.</p>
+    <p>The second half is the alternative shape. Not every workload is a long-running server. A thumbnail generated when a file lands in a bucket, a webhook processed once an hour, a queue drained in bursts — these are functions, not services, and Lambda charges you only while they run. That convenience buys a different set of problems: cold starts, concurrency limits, a hard runtime ceiling, and a JVM that was designed for the opposite trade. We cover both honestly, plus the API Gateway front door and the SQS, SNS and EventBridge trio that glue event-driven systems together.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Amazon ECR: the private registry your images live in</h3>
+    <p>Elastic Container Registry is a managed, private Docker registry inside your account. Each <em>repository</em> holds the tagged versions of one image — <code>orders-api</code>, <code>web</code>, <code>batch-worker</code> — and its address is the account-and-region hostname you push to, <code>&lt;account-id&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/orders-api</code>. Unlike Docker Hub there is no username and password to rotate: authentication is IAM. The docker CLI does not speak IAM, so <code>aws ecr get-login-password</code> mints a short-lived token that you pipe into <code>docker login</code>, which is why nearly every CI pipeline that deploys to AWS has that exact one-liner in it.</p>
+    <p>Two features earn their keep in production. <em>Image scanning</em> examines pushed images for known CVEs in OS packages and language dependencies — basic scanning on push, or enhanced scanning through Amazon Inspector that keeps re-evaluating images as new vulnerabilities are published, which matters because an image that was clean in March is not clean in July. <em>Lifecycle policies</em> expire images by rule (keep the last 20 tagged with <code>prod</code>, delete untagged images older than 14 days) so the registry does not silently accumulate gigabytes of dead builds you pay for forever. Set both on day one; retrofitting a lifecycle policy onto a registry with 4,000 images is an unpleasant afternoon.</p>
+    <pre class="code-block" data-label="Shell"><code># IAM is the credential; the token it returns is short-lived
+aws ecr get-login-password --region ap-south-1 \
+  | docker login --username AWS --password-stdin \
+      123456789012.dkr.ecr.ap-south-1.amazonaws.com
+
+docker build -t orders-api:1.4.0 .
+docker tag orders-api:1.4.0 123456789012.dkr.ecr.ap-south-1.amazonaws.com/orders-api:1.4.0
+docker push 123456789012.dkr.ecr.ap-south-1.amazonaws.com/orders-api:1.4.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html" rel="noopener">What is Amazon Elastic Container Registry? — Amazon ECR User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/registry_auth.html" rel="noopener">Private registry authentication — Amazon ECR User Guide (get-login-password and auth tokens)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/LifecyclePolicies.html" rel="noopener">Lifecycle policies — Amazon ECR User Guide (expiry rules and the dry-run evaluator)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning-enhanced.html" rel="noopener">Enhanced scanning with Amazon Inspector — Amazon ECR User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=W2hD-KliAjY" rel="noopener">Introduction to ECR (Mastering AWS ECS Fargate) — Aviz Academy | AWS with Avinash Reddy</a></li>
+    </ul>
+
+    <h3>ECS in the right order: cluster, task definition, task, service</h3>
+    <p>ECS has exactly four nouns and interviews go badly when candidates blur them. A <strong>cluster</strong> is a logical boundary — a namespace for capacity and for the things running in it. A <strong>task definition</strong> is an immutable, versioned blueprint in JSON: which image, how much CPU and memory, which ports to map, which environment variables and secrets to inject, and where the logs go. You never edit a task definition; you register a new <em>revision</em> (<code>orders-api:7</code> follows <code>orders-api:6</code>), which is exactly what makes rollback a matter of pointing back at the previous number. A <strong>task</strong> is one running instance of a revision — one or more containers scheduled together on the same host, sharing a network namespace. A <strong>service</strong> is the controller that keeps N tasks of a given revision alive, registers them with an ALB target group, and orchestrates the rolling replacement when you change the revision.</p>
+    <p>The mental shortcut that works: the task definition is the class, the task is the object, and the service is the supervisor that keeps a fixed number of objects alive. Note what belongs where — image tag and memory go in the definition; desired count, load balancer wiring and deployment behaviour go on the service; the cluster mostly just holds capacity. Two other things belong in the definition and are worth naming now: secrets pulled by ARN from AWS Secrets Manager or SSM Parameter Store (so passwords never appear in the JSON or in <code>docker inspect</code>), and a <code>logConfiguration</code> using the <code>awslogs</code> driver so every container's stdout lands in a CloudWatch log group automatically.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "family": "orders-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512", "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/ecsTaskExecutionRole",
+  "taskRoleArn":      "arn:aws:iam::123456789012:role/ordersApiTaskRole",
+  "containerDefinitions": [{
+    "name": "app",
+    "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/orders-api:1.4.0",
+    "portMappings": [{ "containerPort": 8080 }],
+    "environment": [{ "name": "SPRING_PROFILES_ACTIVE", "value": "prod" }],
+    "secrets": [{ "name": "DB_PASSWORD",
+                  "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:orders/db" }],
+    "logConfiguration": { "logDriver": "awslogs", "options": {
+        "awslogs-group": "/ecs/orders-api", "awslogs-region": "ap-south-1",
+        "awslogs-stream-prefix": "app" } }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html" rel="noopener">What is Amazon Elastic Container Service? — Amazon ECS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/clusters.html" rel="noopener">Amazon ECS clusters — ECS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html" rel="noopener">Amazon ECS task definitions — ECS Developer Guide (revisions, families, container definitions)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_services.html" rel="noopener">Amazon ECS services — ECS Developer Guide (desired count, scheduler, service types)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AYAh6YDXuho" rel="noopener">Containers on AWS Overview: ECS | EKS | Fargate | ECR — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Launch types: EC2 where you own the hosts, Fargate where you do not</h3>
+    <p>The same task definition can run two ways. With the <strong>EC2 launch type</strong> you register EC2 instances into the cluster; the ECS agent on each instance reports free CPU and memory, and the scheduler bin-packs tasks onto whatever fits. You own those instances entirely — AMI patching, right-sizing, cluster auto scaling, draining before termination, and the wasted headroom between what you provisioned and what your tasks actually requested. With <strong>Fargate</strong> you declare CPU and memory per task and AWS provisions a right-sized, isolated microVM for it. There is no instance to log into, no AMI to patch, no capacity to plan.</p>
+    <p>The honest trade is that Fargate costs more per unit of compute — you are paying for the operational work you are no longer doing — and it removes some knobs (no daemon containers on the host, no GPU on classic Fargate, no SSH; you use ECS Exec instead). For most teams that is an easy trade, because the alternative is a permanent, low-grade infrastructure job that nobody is measured on. Where the arithmetic flips: very large, steady, high-utilisation fleets that can amortise Savings Plans across instances, or workloads with special hardware needs. <strong>Fargate Spot</strong> claws back much of the price difference for interruption-tolerant work (batch jobs, queue consumers) at up to roughly 70% off on-demand, with a two-minute termination warning; the common production pattern is a capacity provider strategy mixing a guaranteed base of on-demand tasks with a Spot majority above it.</p>
+    <table>
+      <thead>
+        <tr><th>Dimension</th><th>EC2 launch type</th><th>Fargate</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Who patches the host OS</td><td>You (AMI refresh, instance replacement)</td><td>AWS — there is no host you can see</td></tr>
+        <tr><td>Capacity planning</td><td>You size and scale the instance fleet</td><td>Per-task CPU and memory; no fleet to plan</td></tr>
+        <tr><td>Billing unit</td><td>The instance, whether tasks fill it or not</td><td>vCPU-seconds and GB-seconds the task actually requested</td></tr>
+        <tr><td>Cost per unit of compute</td><td>Lower list price; Savings Plans and Spot apply</td><td>Higher list price; Fargate Spot and Compute Savings Plans apply</td></tr>
+        <tr><td>Utilisation risk</td><td>Idle headroom on partly-filled instances is paid for</td><td>Little waste, but no bin-packing gains either</td></tr>
+        <tr><td>Host access and daemons</td><td>SSH, host agents, daemon-scheduled tasks all possible</td><td>No host access; sidecars only, ECS Exec for a shell</td></tr>
+        <tr><td>Best fit</td><td>Large steady fleets, special hardware, host-level agents</td><td>Most services, spiky traffic, small platform teams</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html" rel="noopener">Amazon ECS on AWS Fargate — ECS Developer Guide (what Fargate manages, and its limits)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-capacity-providers.html" rel="noopener">Fargate capacity providers — ECS Developer Guide (base and weight strategy, Fargate Spot)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html" rel="noopener">Task definition parameters for Fargate — ECS Developer Guide (the valid CPU and memory pairs)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/fargate/pricing/" rel="noopener">AWS Fargate pricing — AWS (per-vCPU and per-GB rates, Spot and Savings Plan discounts)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hWCXrBWn_vE" rel="noopener">AWS ECS Fargate vs EC2 Launch Types Explained — DheerajTechInsight</a></li>
+    </ul>
+
+    <h3>Task role versus task execution role — the classic confusion</h3>
+    <p>Every ECS task can carry two IAM roles and candidates mix them up constantly, so learn the split by <em>who uses it</em>. The <strong>task execution role</strong> belongs to the ECS agent and the Fargate infrastructure, not to you: it is assumed <em>before</em> your container starts, so the platform can pull the image from ECR, fetch the secret values named in the task definition from Secrets Manager or SSM, and create the CloudWatch log stream it will write your stdout into. AWS ships a managed policy for exactly this (<code>AmazonECSTaskExecutionRolePolicy</code>), and if it is missing or wrong your task never reaches RUNNING — you get a <code>CannotPullContainerError</code> or a secret-resolution failure, with no application logs at all because the log stream was never created.</p>
+    <p>The <strong>task role</strong> is what your application code assumes at runtime. When your Java process calls <code>S3Client.putObject</code> or publishes to an SQS queue, the AWS SDK picks up temporary credentials from the container credentials endpoint, and those credentials come from the task role. This is the AWS-native replacement for baking access keys into environment variables, and it is where least privilege actually lives: scope the task role to the specific bucket prefixes, queues and tables that this one service touches. A useful diagnostic rule for interviews and for incidents alike — <em>failures before startup are execution-role failures; <code>AccessDenied</code> from an SDK call inside your code is a task-role failure.</em></p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html" rel="noopener">Amazon ECS task IAM role — ECS Developer Guide (credentials your application code uses)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html" rel="noopener">Amazon ECS task execution IAM role — ECS Developer Guide (what the agent needs, and why)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data.html" rel="noopener">Passing sensitive data to a container — ECS Developer Guide (Secrets Manager and SSM by ARN)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_awslogs.html" rel="noopener">Send Amazon ECS logs to CloudWatch — ECS Developer Guide (the awslogs driver)</a></li>
+    </ul>
+
+    <h3>Deploying this course's stack: service, target group and rolling replacement</h3>
+    <p>Put the pieces together for the Spring Boot API from earlier modules. Push the image to ECR. Register a task definition asking for 512 CPU units and 1 GB, with <code>awsvpc</code> networking so the task gets its own elastic network interface and its own security group inside your private subnets. Create a service with a desired count of 2, attached to the ALB target group from the load balancing module, with the container port and a health check path (<code>/actuator/health</code>) the ALB will poll. The service registers each task's IP with the target group as it passes health checks, and deregisters it — after the deregistration delay — when it goes away.</p>
+    <p>Deployment is where the design pays off. The default rolling update is governed by two percentages on the service: <code>minimumHealthyPercent</code> (how far below desired count you will dip) and <code>maximumPercent</code> (how far above you will temporarily go). With 100 and 200 you get a true zero-downtime rollout — new tasks start and pass health checks before old ones drain. Enable the <em>deployment circuit breaker</em> so a revision whose tasks keep failing health checks is detected and rolled back automatically instead of flapping until someone notices; without it, a bad image can cycle for a long time consuming capacity. Rollback itself is trivial precisely because task definitions are immutable: point the service at the previous revision number and let the same rolling machinery run in reverse.</p>
+    <pre class="code-block" data-label="Shell"><code># 1. register the new revision (returns orders-api:7)
+aws ecs register-task-definition --cli-input-json file://taskdef.json
+
+# 2. point the service at it — ECS does the rolling replacement
+aws ecs update-service --cluster prod --service orders-api \
+  --task-definition orders-api:7 --force-new-deployment
+
+# 3. rollback is the same command with the previous revision number
+aws ecs update-service --cluster prod --service orders-api \
+  --task-definition orders-api:6</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/getting-started-fargate.html" rel="noopener">Create an ECS Linux task for Fargate — ECS Developer Guide (the end-to-end walkthrough)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-load-balancing.html" rel="noopener">Use load balancing to distribute traffic — ECS Developer Guide (target groups and ECS services)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-type-ecs.html" rel="noopener">Rolling update deployments — ECS Developer Guide (minimum healthy and maximum percent)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html" rel="noopener">Deployment circuit breaker — ECS Developer Guide (automatic failure detection and rollback)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Owz1eh-OfUw" rel="noopener">AWS ECS, ECR &amp; Fargate Tutorial: Deploy &amp; Run Docker Containers on AWS — EmbarkX (Faisal Memon)</a></li>
+    </ul>
+
+    <h3>EKS at awareness level: managed Kubernetes and what it costs you</h3>
+    <p>Elastic Kubernetes Service runs a genuine, conformant Kubernetes control plane for you — the API server and etcd, replicated across availability zones, patched and upgraded by AWS on a published version cadence. Your workloads run on data-plane compute you choose: self-managed EC2 nodes, EKS managed node groups, or Fargate profiles. Everything your team already knows about Kubernetes applies unchanged, which is exactly the point: Deployments, Services, Ingress, HPA, Helm charts, operators, and a very large ecosystem of third-party tooling that has no ECS equivalent.</p>
+    <p>Choose EKS when at least one of three things is true: your team already knows Kubernetes and would have to relearn ECS for no gain; you need something from the Kubernetes ecosystem specifically (Istio, Argo CD, KEDA, a vendor operator); or portability across clouds and on-premises is a real business requirement rather than a slide. Choose ECS otherwise. The cost of EKS is not mainly the hourly control-plane charge — it is the standing complexity: cluster and add-on upgrades on Kubernetes' fast release cadence, IRSA or Pod Identity to map service accounts to IAM, CNI and IP-address planning inside your VPC, and enough Kubernetes expertise on call to debug it at 3 a.m. ECS trades that ecosystem away for an AWS-shaped service with far fewer moving parts. For most Java teams shipping a handful of services, ECS on Fargate is the right default and EKS is the deliberate upgrade.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/eks/latest/userguide/what-is-eks.html" rel="noopener">What is Amazon EKS? — Amazon EKS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/eks/latest/userguide/clusters.html" rel="noopener">EKS cluster lifecycle and configuration — Amazon EKS User Guide (versions and upgrades)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/containers/amazon-ecs-vs-amazon-eks-making-sense-of-aws-container-services/" rel="noopener">Amazon ECS vs Amazon EKS: making sense of AWS container services — AWS Containers Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o73kDW0xqlg" rel="noopener">ECS and EKS: What Works Best for Your Project? — KodeKloud</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hK8wf18SasY" rel="noopener">Kubernetes and EKS for Beginners – Crash Course — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Lambda's execution model: handler, event, context, concurrency, price</h3>
+    <p>A Lambda function is a handler method that AWS calls with two arguments: the <em>event</em> (the JSON payload describing what happened — an HTTP request, an S3 object creation, a batch of SQS messages) and the <em>context</em> (request id, remaining execution time, log group, memory limit). Around your handler is an <em>execution environment</em>: a microVM that Lambda creates, initialises once, then reuses for subsequent invocations while traffic continues. Code outside the handler runs once per environment, not once per request, which is why database clients and SDK clients belong in a static field or constructor and never inside the handler body.</p>
+    <p>Scaling is the part people get wrong. One execution environment serves exactly one request at a time — there is no thread pool absorbing concurrent requests inside a function. Ten simultaneous requests means ten environments; concurrency, not CPU, is the unit of scale, and it is capped per account and per region (with reserved concurrency to guarantee a share for a critical function, and to protect downstream databases from a function that would otherwise scale to thousands of connections). Pricing follows from the same model: you pay per request plus GB-seconds of duration, and memory is the only performance dial — CPU is allocated proportionally to memory, so a function given more memory often finishes faster <em>and</em> costs less. There is also a hard 15-minute execution ceiling; work that can exceed it is a container job, not a function.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html" rel="noopener">Lambda execution environment lifecycle — AWS Lambda Developer Guide (Init, Invoke, Shutdown)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/lambda-concurrency.html" rel="noopener">Understanding Lambda function scaling — AWS Lambda Developer Guide (concurrency and burst limits)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/understanding-aws-lambda-scaling-and-throughput/" rel="noopener">Understanding AWS Lambda scaling and throughput — AWS Compute Blog</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/lambda/pricing/" rel="noopener">AWS Lambda pricing — AWS (requests, GB-seconds, and the free tier)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0_jfH6qijVY" rel="noopener">A closer look at AWS Lambda (SVS404-R), re:Invent 2022 — AWS Events</a></li>
+    </ul>
+
+    <h3>Triggers: what actually invokes a function</h3>
+    <p>Lambda is worth learning mainly for what can call it. Three invocation styles cover everything: <em>synchronous</em> (API Gateway, an Application Load Balancer, a direct SDK <code>Invoke</code> — the caller waits and gets your return value), <em>asynchronous</em> (S3 events, SNS, EventBridge — the event is queued by Lambda, retried twice on failure, and finally routed to a dead-letter queue or on-failure destination), and <em>event source mapping</em> (SQS, Kinesis, DynamoDB Streams, Amazon MSK — a Lambda-managed poller reads batches from the source and calls you with them).</p>
+    <p>The distinction is not academic, because error handling differs completely across the three. A synchronous failure is the caller's problem and is returned to them; an asynchronous failure is retried by Lambda on its own schedule and can be silently lost if you have not configured a destination; an event source mapping failure means the batch is not deleted from the queue and will be redelivered until it succeeds, ages out, or hits the queue's redrive policy — which is how a single poison message can stall a partition or spin a queue forever. The practical checklist for any SQS-triggered function: set a dead-letter queue with a sensible <code>maxReceiveCount</code>, set the visibility timeout to at least six times the function timeout, and consider partial batch responses so one bad message does not fail nineteen good ones.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/lambda-invocation.html" rel="noopener">Lambda function invocation methods — AWS Lambda Developer Guide (sync, async, event source mappings)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/lambda-services.html" rel="noopener">Invoking Lambda with events from other AWS services — AWS Lambda Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html" rel="noopener">Using Lambda with Amazon SQS — AWS Lambda Developer Guide (batching, visibility timeout, partial failures)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/with-s3.html" rel="noopener">Process S3 event notifications with Lambda — AWS Lambda Developer Guide</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/serverless-applications-lens/welcome.html" rel="noopener">Serverless Applications Lens — AWS Well-Architected Framework</a></li>
+    </ul>
+
+    <h3>Cold starts, explained honestly</h3>
+    <p>A cold start is not mysterious. When no warm execution environment is free, Lambda has to create one: provision a microVM, download and unpack your deployment package, start the runtime, and run your initialisation code before the handler sees the request. That is the <em>Init</em> phase, and its duration is what the caller experiences as extra latency on that one request. Every later request routed to the same environment skips all of it. So cold starts are a tail-latency problem, not an average-latency problem — they matter enormously for a user-facing API at low traffic, and barely at all for a queue consumer processing a million messages.</p>
+    <p>What makes them worse, in rough order of impact: a heavy runtime (a JVM has to load and verify classes and warm up before it is fast), a large deployment package with hundreds of dependencies to download and unpack, and expensive initialisation such as building a Spring context or opening database connections. VPC attachment used to add several seconds while an elastic network interface was created per environment; AWS re-architected this in 2019 to shared, pre-created ENIs, so a VPC-attached function today pays only a small one-off cost — an important correction, because plenty of blog posts and interviewers still repeat the old number. Mitigations, cheapest first: shrink the package and defer optional work; move initialisation outside the handler so it is amortised; use <em>provisioned concurrency</em> to keep a set number of environments initialised and warm (you pay for them, but the Init cost disappears from the request path); and for the JVM specifically, SnapStart or a natively compiled binary.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html" rel="noopener">Configuring provisioned concurrency — AWS Lambda Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html" rel="noopener">Improving startup performance with Lambda SnapStart — AWS Lambda Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html" rel="noopener">Giving Lambda functions access to VPC resources — AWS Lambda Developer Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/understanding-and-remediating-cold-starts-an-aws-lambda-perspective/" rel="noopener">Understanding and remediating cold starts: an AWS Lambda perspective — AWS Compute Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lce7O0Gd5z4" rel="noopener">When To Use AWS Lambda SnapStart? — Rahul Nath</a></li>
+    </ul>
+
+    <h3>Java on Lambda: the JVM's bargain, and when the shape is wrong</h3>
+    <p>The JVM is optimised for a bargain Lambda does not obviously offer: pay a slow, allocation-heavy start-up, then get world-class throughput from JIT-compiled code over hours of uptime. A function invoked a few times a minute never reaches the second half of that bargain. That is the whole tension, and the ecosystem's answer is <strong>SnapStart</strong>: Lambda runs your Init phase once when you publish a version, takes an encrypted snapshot of the initialised memory and disk, caches it, and restores from that snapshot on invocation instead of starting the JVM from scratch — commonly an order-of-magnitude improvement for Java. It is not free of sharp edges: state captured in the snapshot is shared by every restored environment, so anything unique-per-instance (random seeds, cached credentials, open connections, generated identifiers) must be re-established in a runtime hook. GraalVM native images take the other route — ahead-of-time compilation to a native binary with near-instant start and low memory, at the cost of a slower, more fragile build and no dynamic reflection unless you configure it, which is why Quarkus and Micronaut exist.</p>
+    <p>Say the honest thing in interviews: a full Spring Boot application behind a Lambda proxy is usually the wrong shape. You are paying context-refresh cost on every cold start for a framework designed to be started once and left running, you inherit a request-response model with a 15-minute ceiling, and you get container-like billing with function-like constraints. Spring Cloud Function or a plain <code>RequestHandler</code> class fits far better if Lambda is genuinely right for the workload — and if the service is a long-lived HTTP API with steady traffic, ECS on Fargate is the better home. Lambda earns its place on event-shaped, bursty, or intermittent work: S3 triggers, scheduled jobs, queue consumers, webhook receivers, glue between AWS services.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/lambda-java.html" rel="noopener">Building Lambda functions with Java — AWS Lambda Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/lambda/latest/dg/java-handler.html" rel="noopener">Define a Lambda function handler in Java — AWS Lambda Developer Guide (RequestHandler, event types)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/reducing-java-cold-starts-on-aws-lambda-functions-with-snapstart/" rel="noopener">Reducing Java cold starts on AWS Lambda functions with SnapStart — AWS Compute Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/java-aws-serverless/" rel="noopener">Practical Performance Tuning for Serverless Java on AWS — InfoQ (SnapStart priming vs GraalVM AOT)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IIKe2dx9Ag0" rel="noopener">AWS Lambda SnapStart: dramatically reduce cold starts for your Java functions — Spring I/O</a></li>
+    </ul>
+
+    <h3>API Gateway: the HTTP front door for functions</h3>
+    <p>Lambda has no URL of its own worth exposing, so API Gateway supplies the front door: routing, TLS, authentication, throttling, request validation and observability, translating an HTTP request into the event JSON your handler receives. The first decision is which flavour. <strong>REST APIs</strong> are the older, feature-rich product — request and response mapping templates, API keys and usage plans, WAF integration, per-method caching, private endpoints. <strong>HTTP APIs</strong> are the newer, deliberately leaner product: fewer features, lower latency, and roughly 70% cheaper per million requests. The default advice is to start with an HTTP API and move to REST only when you need a feature it lacks; on a high-traffic endpoint that price gap is real money.</p>
+    <p>Three more things to be able to discuss. <em>Authorizers</em> keep authentication out of your function: a JWT authorizer validates a Cognito or OIDC token at the gateway, and a Lambda authorizer runs your own function to return an IAM policy document, with a configurable cache so you are not re-authorising every request. <em>Throttling</em> is enforced at several levels — an account-wide steady rate and burst, per-stage and per-route limits, and per-client quotas through usage plans and API keys — and it is your first line of defence for a downstream that cannot absorb a traffic spike. <em>Stages</em> are named deployments (<code>dev</code>, <code>prod</code>) and <em>stage variables</em> are the key-value pairs attached to them, most often used to point the same API definition at a different Lambda alias or backend URL per stage rather than maintaining parallel API definitions.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/welcome.html" rel="noopener">What is Amazon API Gateway? — API Gateway Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html" rel="noopener">Choose between REST APIs and HTTP APIs — API Gateway Developer Guide (the feature-by-feature table)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html" rel="noopener">Use API Gateway Lambda authorizers — API Gateway Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html" rel="noopener">Throttle requests to your REST APIs — API Gateway Developer Guide (account, stage and usage-plan limits)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e3YnsfkaEEU" rel="noopener">AWS API Gateway Tutorial for Beginners: HTTP vs REST vs WebSocket APIs — AWS Made Easy</a></li>
+    </ul>
+
+    <h3>SQS and SNS: queues and fan-out</h3>
+    <p><strong>SQS</strong> is a durable, pull-based queue between a producer and one consumer group. A message sits in the queue until a consumer receives it, becomes invisible for the visibility timeout while that consumer works, and is deleted only on explicit acknowledgement — so a crashed consumer means redelivery, not loss. That property is the reason queues exist: they absorb bursts the consumer cannot handle at line rate, and they decouple availability, letting the producer keep accepting work while the consumer is down. Standard queues give near-unlimited throughput with at-least-once delivery and best-effort ordering (design your consumers to be idempotent); FIFO queues give strict ordering and exactly-once processing within a message group, at much lower throughput. Always attach a dead-letter queue — without one, a message that always fails is redelivered forever.</p>
+    <p><strong>SNS</strong> is push-based publish-subscribe. A publisher sends to a topic and every subscriber gets its own copy: Lambda functions, SQS queues, HTTPS endpoints, email, SMS. There is no retention for consumers that were not subscribed at publish time — this is fan-out, not a log. The single most common production pattern in AWS is the two combined: publish once to an SNS topic, subscribe several SQS queues to it, and let each downstream service consume its own queue at its own pace with its own retries and dead-letter queue. That gives you fan-out from SNS <em>and</em> buffering and replay-on-failure from SQS, which neither service provides alone.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/welcome.html" rel="noopener">What is Amazon Simple Queue Service? — Amazon SQS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html" rel="noopener">Using dead-letter queues in Amazon SQS — SQS Developer Guide (redrive policy and maxReceiveCount)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/sns/latest/dg/welcome.html" rel="noopener">What is Amazon SNS? — Amazon SNS Developer Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/aws-sns-vs-sqs" rel="noopener">Amazon SNS vs. Amazon SQS — Baeldung (fan-out pattern, with Java examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=q3zo3YREfJI" rel="noopener">Spring Cloud AWS: Amazon Simple Queue Service with Spring Boot — Java Techie</a></li>
+    </ul>
+
+    <h3>EventBridge, and a decision rule for all three</h3>
+    <p><strong>EventBridge</strong> is an event bus with content-based routing. Producers put structured JSON events on a bus; <em>rules</em> match them with <em>event patterns</em> — filters on any field, not just a topic name — and forward matches to targets (Lambda, SQS, Step Functions, another account's bus, dozens of SaaS and AWS destinations). AWS services publish their own events to your default bus for free, so "run this function whenever an EC2 instance changes state" or "when a CodePipeline stage fails" needs no polling. The schema registry can discover the shape of events flowing through a bus and generate typed bindings, including Java classes, which turns loosely-typed JSON into something your IDE can help with. The trade against SNS is throughput and latency: EventBridge does more work per event and is priced per event published, so it is not the right tool for millions of high-rate messages.</p>
+    <p>The decision rule, compactly. <em>One producer, one logical consumer, work that must not be lost and can be processed later</em> → SQS. <em>One event, several consumers that each need a copy, and you want high throughput and low cost</em> → SNS, ideally with an SQS queue per consumer for buffering. <em>Many event types, consumers that should subscribe to a filtered subset without the producer knowing they exist, or events coming from AWS services and third-party SaaS</em> → EventBridge. And when ordering, replay from an arbitrary offset, and multiple independent readers of the same stream are all required, the answer is none of the three — that is Kinesis or Kafka, which is the follow-up question a good interviewer asks next.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html" rel="noopener">What is Amazon EventBridge? — Amazon EventBridge User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rules.html" rel="noopener">Rules in Amazon EventBridge — EventBridge User Guide (patterns, targets, scheduled rules)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-schema-registry.html" rel="noopener">Schema registries in Amazon EventBridge — EventBridge User Guide (discovery and code bindings)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/choosing-between-messaging-services-for-serverless-applications/" rel="noopener">Choosing between messaging services for serverless applications — AWS Compute Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RoKAEzdcr7k" rel="noopener">AWS SQS vs SNS vs EventBridge — When to Use What? — Be A Better Dev</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-load-balancing-scaling.html">← Load Balancing and Auto Scaling</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="09-caching-dns-cdn.html">Caching, DNS and CDN →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Containers and serverless dominate the AWS round in Indian product and service-company interviews — service companies probe ECS deployment mechanics and IAM roles, product companies push on cold starts, concurrency and the messaging decision:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain cluster, task definition, task and service in ECS.</summary>
+      <div class="answer"><p>A cluster is a logical grouping of capacity and the workloads on it. A task definition is an immutable, versioned JSON blueprint — image, CPU and memory, port mappings, environment and secrets, log configuration. A task is one running instance of a task definition revision. A service keeps a desired number of tasks running, registers them with a load balancer target group, and manages rolling deployments. The definition is the class, the task is the object, the service is the supervisor.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is ECR and how do you authenticate to it?</summary>
+      <div class="answer"><p>A private, managed container registry per AWS account and region. There are no static registry credentials — authentication is IAM. You run <code>aws ecr get-login-password</code> to obtain a short-lived token and pipe it into <code>docker login</code> against your account's registry hostname. In CI you grant that permission to the pipeline's role rather than storing any password.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Lambda cold start?</summary>
+      <div class="answer"><p>The extra latency on a request that has no warm execution environment available. Lambda must create a microVM, download and unpack the deployment package, start the runtime and run your initialisation code before the handler executes. Subsequent requests reusing that environment skip all of it, so it is a tail-latency problem — critical for a low-traffic user-facing API, mostly irrelevant for a queue consumer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When would you choose Lambda over a container on ECS?</summary>
+      <div class="answer"><p>When the work is event-shaped, bursty or intermittent and finishes well inside 15 minutes — S3 triggers, scheduled jobs, webhook receivers, queue consumers, glue between AWS services. Choose ECS for long-lived HTTP services with steady traffic, anything needing more than the Lambda limits (duration, package size, in-process concurrency), or anything where a warm JVM's throughput matters. Steady high traffic also usually costs less on Fargate than per-invocation Lambda billing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Task role vs task execution role — what is the difference?</summary>
+      <div class="answer"><p>The execution role is used by the ECS agent and Fargate infrastructure <em>before</em> your container starts: pulling the image from ECR, resolving secrets from Secrets Manager or SSM, creating the CloudWatch log stream. The task role is assumed by your application code at runtime — the AWS SDK picks up its temporary credentials to call S3, SQS, DynamoDB and so on. Diagnostic rule: a failure before the task reaches RUNNING (CannotPullContainerError, secret resolution failure, no logs at all) is the execution role; an AccessDenied from an SDK call inside your code is the task role.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> EC2 launch type vs Fargate — how do you decide?</summary>
+      <div class="answer"><p>With EC2 you register and own the instances: you patch AMIs, plan capacity, scale the fleet and pay for idle headroom, but you get cheaper compute, bin-packing, host access, daemon containers and special hardware. Fargate provisions a right-sized microVM per task — no hosts, no patching, no capacity planning — at a higher price per unit of compute. Default to Fargate unless you have a large steady high-utilisation fleet that can amortise the operational cost, or a hard requirement for host-level access or hardware. Fargate Spot recovers much of the price gap for interruption-tolerant work.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a zero-downtime ECS rolling deployment actually work?</summary>
+      <div class="answer"><p>You register a new task definition revision and update the service to it. ECS starts new tasks bounded by maximumPercent (say 200% of desired count) while never dropping below minimumHealthyPercent (100%); each new task must pass the ALB target group health check before old tasks are drained and deregistered, respecting the deregistration delay so in-flight requests finish. Enable the deployment circuit breaker so a revision whose tasks keep failing health checks is rolled back automatically. Rollback is just pointing the service at the previous revision number, which is safe because definitions are immutable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Lambda scale, and what is reserved concurrency for?</summary>
+      <div class="answer"><p>One execution environment handles exactly one request at a time, so concurrency is the scaling unit — 500 simultaneous requests means up to 500 environments, subject to the account and region concurrency limit and a burst rate. Reserved concurrency does two jobs at once: it guarantees that a critical function can always reach that many concurrent executions, and it caps that function so it cannot starve others or overwhelm a downstream — capping connections into an RDS database is the classic use.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> REST API vs HTTP API in API Gateway?</summary>
+      <div class="answer"><p>REST APIs are the older, feature-rich option: mapping templates, API keys and usage plans, per-method caching, WAF, private endpoints, request validation. HTTP APIs are leaner and faster, support JWT authorizers natively, and cost roughly 70% less per million requests. Start with HTTP APIs and move to REST only for a feature you actually need — on a high-traffic endpoint the price difference is significant.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> SQS vs SNS vs EventBridge — give me a rule.</summary>
+      <div class="answer"><p>SQS for durable point-to-point work that must not be lost and can be processed later, with buffering and retries. SNS for pushing one event to many subscribers cheaply and at high throughput. EventBridge when routing should be content-based — rules matching on any field, so consumers subscribe to a filtered subset without the producer knowing they exist — and for events emitted by AWS services or SaaS partners. The standard production pattern is SNS fanning out into one SQS queue per consumer, combining fan-out with buffering. If you need ordering, replay from an offset and multiple independent readers, none of the three fits — that is Kinesis or Kafka.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> ECS or EKS? Justify the choice for a team of eight Java engineers.</summary>
+      <div class="answer"><p>ECS, unless one of three conditions holds: the team already has real Kubernetes expertise, you specifically need something from the Kubernetes ecosystem (Istio, Argo CD, KEDA, a vendor operator), or cross-cloud portability is a genuine business requirement. EKS gives you a managed, conformant control plane and the whole ecosystem, but you own cluster and add-on upgrades on Kubernetes' release cadence, IRSA or Pod Identity, CNI and IP planning, and the on-call expertise to debug it. With eight engineers shipping a handful of services, that operational surface buys nothing ECS on Fargate does not already give you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A Java Lambda has an unacceptable p99. Walk me through your fixes in order.</summary>
+      <div class="answer"><p>Measure first — split Init duration from Invoke duration in CloudWatch to confirm cold starts are actually the cause. Then, cheapest first: shrink the deployment package and prune dependencies; move client construction and other one-off work outside the handler so it is amortised across invocations; raise memory, since CPU scales with it and a faster function is often a cheaper one. Then SnapStart for Java, which snapshots the initialised environment at publish time and restores it instead of starting the JVM — being careful to re-establish per-instance state in a runtime hook. Provisioned concurrency if a hard latency floor is required and you accept paying for warm environments. GraalVM native images (Quarkus, Micronaut) as the structural fix. And question the shape: if it is a steady-traffic HTTP API, Fargate may simply be the right answer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is running a full Spring Boot app in Lambda a good idea?</summary>
+      <div class="answer"><p>Usually not. You pay Spring context-refresh cost on every cold start for a framework designed to start once and run for months, you inherit a 15-minute ceiling and per-invocation billing, and you get none of the throughput benefit of a warm JIT-compiled JVM. If Lambda is genuinely right for the workload, use Spring Cloud Function or a plain RequestHandler and keep the dependency graph small; SnapStart makes the Spring Boot case viable rather than good. If it is a long-lived HTTP API, ECS on Fargate is the correct home for it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Does putting a Lambda in a VPC still add seconds to cold starts?</summary>
+      <div class="answer"><p>No — and knowing why is a good signal. Originally Lambda created an elastic network interface per execution environment, which added several seconds. AWS re-architected this in 2019 to shared, pre-created network interfaces per function-and-subnet-and-security-group combination, so a VPC-attached function now pays only a small one-off setup cost. Plenty of older blog posts still quote the old figure. The real VPC considerations today are IP-address capacity in your subnets and the fact that a VPC-attached function needs a NAT gateway or VPC endpoints to reach AWS service APIs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An SQS-triggered Lambda is stuck reprocessing the same messages. Diagnose it.</summary>
+      <div class="answer"><p>Almost always one of three causes. The visibility timeout is shorter than the function's execution time, so the message reappears while the function is still working and is processed repeatedly — set it to at least six times the function timeout. Or a poison message keeps throwing, and with no dead-letter queue and redrive policy it is redelivered until it ages out — attach a DLQ with a sensible maxReceiveCount. Or the whole batch is being failed because of one bad record; enable partial batch responses so only the failed message identifiers are returned and the successful ones are deleted. Also check the function's IAM permission to call DeleteMessage, and remember that SQS is at-least-once by design, so consumers must be idempotent regardless.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Fargate task will not start and there are no application logs. How do you debug it?</summary>
+      <div class="answer"><p>No logs at all means the container never ran, so the fault is in the platform's phase, not yours. Read the stopped-task reason in the ECS console or <code>describe-tasks</code>. CannotPullContainerError points at the execution role's ECR permissions, a wrong image tag or digest, or a task in a private subnet with no NAT gateway and no ECR and S3 VPC endpoints. A secret-resolution failure points at the execution role's Secrets Manager or SSM permissions, or a KMS key it cannot decrypt with. ResourceInitializationError often means the awslogs log group does not exist and the role cannot create it. If the container does start but the service keeps replacing tasks, the fault has moved to health checks — a wrong path or port, or a grace period shorter than the JVM's startup time.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.ecs.deploy — ECR registries, scanning and lifecycle policies; ECS clusters, task definitions, tasks and services; EC2 vs Fargate launch types and Fargate Spot; task role vs task execution role; deploying the stack with a rolling update; EKS awareness</li>
+      <li>aws.lambda.event — Lambda execution model, concurrency and pricing; triggers and invocation styles; cold starts and their mitigations; Java on Lambda and SnapStart; API Gateway REST vs HTTP APIs, authorizers, throttling and stage variables; SQS, SNS and EventBridge with a decision rule</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

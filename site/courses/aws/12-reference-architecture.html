@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Well-Architected reference deployment module: the six AWS Well-Architected pillars read as design pressure, the Well-Architected Tool and lenses, and the full end-to-end stack — Route 53, CloudFront and S3, ALB with ACM, ECS Fargate, RDS Multi-AZ, ElastiCache, Secrets Manager and SSM — with a request walkthrough, a production-readiness checklist, an honest cost sketch, verified resources and interview questions.">
+  <title>Well-Architected Reference Deployment — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Well-Architected Reference Deployment</h1>
+  <p class="standfirst">Eleven modules taught you the services one at a time. This one assembles them into a single deployment you could defend in a design review — and is honest about what that deployment costs.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS</a> → Well-Architected Reference Deployment</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Knowing what an ALB does is not architecture. Architecture is the set of decisions you make when the ALB, the ECS service, the database, the cache and the CDN all have to work together under a budget, a latency target and an on-call rota. This closing module is the synthesis chapter: first the AWS Well-Architected Framework — not as a list of six nice words but as six kinds of pressure that each change a concrete choice in your design — and then one complete reference deployment walked end to end.</p>
+    <p>Nothing here re-teaches a service. VPC subnets, IAM roles, RDS failover, ECS task definitions, CloudFront behaviours and Terraform state all have their own modules earlier in the track, and this page points back at them rather than repeating them. What is new here is the <em>assembly</em>: which service sits in which subnet, how a browser click travels through every hop, what separates a demo from something you would put a customer on, and roughly what the monthly bill looks like when you do.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Six pillars, six questions: the framework as design pressure</h3>
+    <p>The AWS Well-Architected Framework organises cloud design guidance under six pillars: operational excellence, security, reliability, performance efficiency, cost optimization and sustainability. Read as a checklist it is inert — everyone agrees systems should be secure and reliable. Read properly, each pillar is a <em>question you are obliged to answer</em>, and the answer changes something concrete in the diagram. Operational excellence asks "how will we know this is broken, and how do we change it safely?" — which is why the reference stack ships structured logs to CloudWatch, tags every resource by owner and environment, and is defined entirely in code so a change is a reviewable diff rather than a console click somebody half-remembers.</p>
+    <p>Security asks "who can reach this, with what credential, and what happens when that credential leaks?" — which is why the database sits in isolated subnets whose security group accepts traffic only from the application security group, why the ECS task role is scoped to the two secrets it actually reads rather than <code>secretsmanager:*</code>, and why the certificate lives in ACM instead of a file baked into an image. Each pillar has its own AWS whitepaper; the framework document itself is the index, and the pillar papers are where the specific best practices and their rationale live.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/architecture/well-architected/" rel="noopener">AWS Well-Architected — framework home, pillars, tool and lenses</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html" rel="noopener">AWS Well-Architected Framework — the framework whitepaper (AWS Documentation)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/the-pillars-of-the-framework.html" rel="noopener">The pillars of the framework — AWS Well-Architected Framework</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/welcome.html" rel="noopener">Operational Excellence Pillar — AWS whitepaper</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html" rel="noopener">Security Pillar — AWS whitepaper</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3_ECfhMuuVU" rel="noopener">AWS Well-Architected Framework Six Pillars Explained — Tech Arkit</a></li>
+    </ul>
+
+    <h3>Reliability, performance, cost and sustainability: what each one changes here</h3>
+    <p>Reliability asks "what happens when this availability zone fails?" That single question is what forces the subnet layout: three tiers of subnets duplicated across at least two AZs, an ALB with a node in each public subnet, a Fargate service whose tasks are spread across AZs, and RDS in Multi-AZ so a zone outage is a failover rather than an outage. It also forces you to test the restore, not just take the backup — an untested backup is a hope, not a recovery plan. Performance efficiency asks "is this the right service and the right shape for the load?" and pushes the static Angular bundle off the application entirely onto S3 behind CloudFront, and pushes hot reads off PostgreSQL into ElastiCache, so the expensive tier only handles what genuinely needs it.</p>
+    <p>Cost optimization asks "what am I paying for while nothing is happening?" — a question that changes the NAT layout (two NAT gateways is the reliable answer, one is the cheap answer, VPC endpoints for S3 and DynamoDB avoid the charge entirely for that traffic), the instance and task sizes, and whether non-production runs the same topology as production or a deliberately smaller one. Sustainability asks "how much hardware am I keeping warm?" and tends to point the same way as cost: right-size, use managed and serverless compute that scales to the load, choose efficient instance families such as Graviton, and delete what nobody reads instead of storing it forever.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html" rel="noopener">Reliability Pillar — AWS whitepaper</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/performance-efficiency-pillar/welcome.html" rel="noopener">Performance Efficiency Pillar — AWS whitepaper</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/cost-optimization-pillar/welcome.html" rel="noopener">Cost Optimization Pillar — AWS whitepaper</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/sustainability-pillar/sustainability-pillar.html" rel="noopener">Sustainability Pillar — AWS whitepaper</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o4NYjMPZPZE" rel="noopener">Six Pillars of AWS Well Architected Framework Explained — Tech With Yeshwanth</a></li>
+    </ul>
+
+    <h3>The pillars conflict — and that is the point</h3>
+    <p>The framework is often presented as if all six pillars pull in the same direction. They do not. A second NAT gateway buys you zone-independent egress and costs another fixed monthly fee for capacity you hope never to use. Multi-AZ RDS roughly doubles the database bill in exchange for automatic failover. A read replica improves performance and adds replication lag your code must tolerate. Encrypting everything and rotating credentials aggressively is more secure and more operationally fragile. Well-Architected is not a promise that you can max out all six — it is a discipline for making the tradeoff <em>consciously</em>, writing down which pillar you sacrificed and why, so that the next person does not mistake a deliberate decision for an oversight.</p>
+    <p>Two tools support that. The AWS Well-Architected Tool walks a workload through the framework's questions, records your answers, and produces an improvement plan with the high-risk items called out — it is genuinely useful as a structured review agenda even if you never look at the report again. Lenses extend the questions to a domain: serverless, SaaS, data analytics, machine learning, financial services and more, each adding pillar-specific best practices that the generic framework leaves out. Well-Architected Labs turns the guidance into hands-on exercises, which is the fastest way to make the pillars concrete rather than abstract.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/framework/general-design-principles.html" rel="noopener">General design principles — AWS Well-Architected Framework</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/userguide/intro.html" rel="noopener">What is AWS Well-Architected Tool? — AWS WA Tool User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/wellarchitected/latest/userguide/lenses.html" rel="noopener">Lenses — AWS Well-Architected Tool User Guide</a></li>
+      <li>[Article] <a href="https://www.wellarchitectedlabs.com/" rel="noopener">AWS Well-Architected Labs — hands-on labs per pillar</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/architecture/lets-architect-designing-well-architected-systems/" rel="noopener">Let's Architect! Designing Well-Architected systems — AWS Architecture Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5DePAUEg3yg" rel="noopener">AWS re:Invent 2025 — From ideas to impact: Architecting with cloud best practices (ARC204) — AWS Events</a></li>
+    </ul>
+
+    <h3>The reference deployment, service by service</h3>
+    <p>Here is the whole stack in one paragraph, so you can hold it in your head. <strong>Route 53</strong> hosts the zone and answers for <code>app.example.com</code> and <code>api.example.com</code>. The Angular build is uploaded to a private <strong>S3</strong> bucket and served by a <strong>CloudFront</strong> distribution using Origin Access Control, so the bucket itself is never public. The Spring Boot API sits behind an internet-facing <strong>Application Load Balancer</strong> in the public subnets, terminating TLS with an <strong>ACM</strong> certificate. The API itself runs as an <strong>ECS Fargate</strong> service in the private subnets, registered as targets in the ALB's target group. <strong>RDS PostgreSQL, Multi-AZ</strong>, lives in isolated subnets with no route to the internet and a security group that accepts port 5432 only from the application's security group. <strong>ElastiCache</strong> sits alongside it for sessions and hot reads. Secrets come from <strong>Secrets Manager</strong>, non-secret configuration from <strong>SSM Parameter Store</strong>, both injected into the task definition rather than baked into the image. Logs, metrics and traces go to <strong>CloudWatch</strong> and the AWS Distro for OpenTelemetry. All of it is defined in <strong>Terraform</strong> or CloudFormation.</p>
+    <p>The shape is deliberately boring, and that is a compliment. It is the same three-tier topology the AWS Architecture Center has published for years, modernised by replacing the EC2 auto scaling group with Fargate tasks and the web tier with a CDN in front of object storage. Everything in it is a managed service with a documented failure mode, which means your on-call runbook is short. Notice what is <em>not</em> here: no Kubernetes control plane to operate, no self-managed database, no bastion host (use SSM Session Manager), no service mesh. Each of those is a real answer to a real problem, and none of them is a problem you have on day one.</p>
+    <pre class="code-block" data-label="Topology"><code>Route 53
+ ├─ app.example.com  → CloudFront → S3 (private, OAC)         # Angular build
+ └─ api.example.com  → ALB (public subnets, ACM cert, WAF)
+                          │  HTTP to target group
+                          ▼
+                       ECS Fargate service (private subnets, 2 AZs)
+                          │                  │
+                          │ 5432             │ 6379
+                          ▼                  ▼
+                   RDS PostgreSQL      ElastiCache
+                   (isolated, Multi-AZ)  (isolated)
+
+ egress: NAT gateway per AZ  |  S3 + ECR + Secrets Manager via VPC endpoints
+ identity: task role (app permissions) + execution role (pull image, read secrets)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/architecture/" rel="noopener">AWS Architecture Center — reference architectures and best-practice guidance</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/architecture/reference-architecture-diagrams/" rel="noopener">AWS Reference Architecture Diagrams — downloadable vetted designs</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/web-application-hosting-best-practices/welcome.html" rel="noopener">Web Application Hosting in the AWS Cloud — AWS whitepaper</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html" rel="noopener">Amazon ECS on AWS Fargate — Amazon ECS Developer Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=esISkPlnxL0" rel="noopener">AWS ECS Full Tutorial: EC2, Fargate, load balancers and Docker deployment — KodeKloud</a></li>
+    </ul>
+
+    <h3>One request, end to end</h3>
+    <p>Trace a single browser click and the design stops being a diagram. The user types <code>app.example.com</code>; Route 53 returns the CloudFront distribution's alias record; CloudFront serves <code>index.html</code> and the hashed JS and CSS bundles from its edge cache, fetching them from the S3 origin over an OAC-signed request the first time. The Angular app boots and calls <code>api.example.com/orders</code>. Route 53 resolves that to the ALB; the ALB terminates TLS using the ACM certificate, matches the listener rule, and forwards the request over HTTP inside the VPC to a healthy target in the target group — one of the Fargate tasks, chosen round-robin across availability zones.</p>
+    <p>Inside the task, the Spring Boot process already holds its database password: the ECS agent read it from Secrets Manager at task start using the execution role and injected it as an environment variable, and the feature flags came from Parameter Store the same way. The handler checks ElastiCache first; on a miss it opens a pooled connection to the RDS writer endpoint over port 5432, which the database's security group permits only because the source is the application security group. The response goes back through the ALB to the browser. Along the way the container's stdout went to a CloudWatch Logs group, the ADOT sidecar exported a trace span, and the ALB emitted request-count and target-response-time metrics that a CloudWatch alarm is watching. Every hop in that path is a control you configured deliberately in an earlier module.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html" rel="noopener">What is an Application Load Balancer? — Elastic Load Balancing User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html" rel="noopener">Restrict access to an Amazon S3 origin with Origin Access Control — CloudFront Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html" rel="noopener">What is Amazon ElastiCache? — ElastiCache User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html" rel="noopener">Multi-AZ deployments for high availability — Amazon RDS User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yeyr6OBMfcE" rel="noopener">AWS Three-Tier Architecture Deployment Step-by-Step: VPC, Subnets, ALB, Auto Scaling, RDS — Tech with Ajit</a></li>
+    </ul>
+
+    <h3>Secrets, configuration and certificates</h3>
+    <p>The rule that keeps this stack out of trouble is that the container image contains code and nothing else. Anything that differs between environments — database host, feature flags, log levels — goes in SSM Parameter Store; anything that would be a breach if leaked — database password, third-party API keys, JWT signing material — goes in Secrets Manager. Both are referenced from the ECS task definition by ARN. ECS resolves them at task start using the <em>execution</em> role and injects them as environment variables, so the values never appear in the image, in your Terraform state, in a <code>.env</code> file, or in the console page anyone can screenshot. Rotating a secret becomes a Secrets Manager operation plus a service redeploy rather than a rebuild.</p>
+    <p>Two distinctions worth having ready for an interview. First, Parameter Store versus Secrets Manager: Parameter Store's standard tier is free and does encrypted <code>SecureString</code> values, but Secrets Manager adds managed rotation, cross-region replication and resource policies, and charges per secret per month — so use Parameter Store for configuration and Secrets Manager for credentials that must rotate. Second, the ECS <em>execution</em> role is what the ECS agent uses to pull the image and fetch those secrets; the <em>task</em> role is what your application code uses to call AWS APIs at runtime. Conflating them is the single most common ECS permissions mistake. The public certificate for both hostnames is issued free by ACM with DNS validation through the Route 53 zone, and renews itself as long as the validation record stays in place.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "family": "orders-api",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/orders-exec",
+  "taskRoleArn":      "arn:aws:iam::123456789012:role/orders-task",
+  "containerDefinitions": [{
+    "name": "api",
+    "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/orders:sha-9f2c1ab",
+    "environment": [{ "name": "SPRING_PROFILES_ACTIVE", "value": "prod" }],
+    "secrets": [
+      { "name": "SPRING_DATASOURCE_PASSWORD",
+        "valueFrom": "arn:aws:secretsmanager:ap-south-1:123456789012:secret:prod/orders/db-AbCdEf" },
+      { "name": "FEATURE_FLAGS",
+        "valueFrom": "arn:aws:ssm:ap-south-1:123456789012:parameter/prod/orders/flags" }
+    ]
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data.html" rel="noopener">Pass sensitive data to an Amazon ECS container — Amazon ECS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html" rel="noopener">What is AWS Secrets Manager? — AWS Secrets Manager User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html" rel="noopener">AWS Systems Manager Parameter Store — AWS Systems Manager User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html" rel="noopener">What is AWS Certificate Manager? — ACM User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lh5f69t7L9A" rel="noopener">Building a Three-Tier Architecture with EC2, RDS, ALB, ACM and Route 53 — Aviz Academy</a></li>
+    </ul>
+
+    <h3>From demo to production: availability, scaling and safe deployments</h3>
+    <p>The gap between a working demo and a production system is mostly made of unglamorous settings. Multi-AZ everywhere is the first: subnets, ALB nodes, Fargate tasks and the RDS standby all span at least two availability zones, and a service running a single task is not highly available no matter how many AZs its subnets cover. Second, scaling: an ECS service target-tracking policy on average CPU or on ALB requests-per-target lets the service grow with load, with a minimum count that survives losing one AZ. Third, health checks: the ALB target group should probe a real readiness endpoint that checks the database connection, not a static route that returns HTTP 200 while the app is broken — otherwise the load balancer cheerfully sends traffic to a dead task.</p>
+    <p>Fourth, and the setting most often left at its default: deregistration delay. When ECS replaces a task, the ALB stops sending it new requests but keeps the in-flight ones alive for the deregistration delay window — the default of five minutes is far too long for a fast-deploying API and makes every rollout feel like a stall, while setting it to zero cuts off requests mid-flight. Tune it to a little more than your slowest expected request, and make sure the container's stop timeout is longer than that so the orchestrator does not kill the process while the ALB is still draining it. Finally, enable the ECS deployment circuit breaker so a bad image rolls itself back instead of cycling failing tasks until someone notices.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-auto-scaling.html" rel="noopener">Automatically scale your Amazon ECS service — Amazon ECS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html" rel="noopener">Target group attributes, including deregistration delay — Elastic Load Balancing</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html" rel="noopener">Amazon ECS deployment circuit breaker — automatic rollback on failed deployments</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Alarms.html" rel="noopener">Using Amazon CloudWatch alarms — CloudWatch User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/architecture/understand-resiliency-patterns-and-trade-offs-to-architect-efficiently-in-the-cloud/" rel="noopener">Understand resiliency patterns and trade-offs to architect efficiently in the cloud — AWS Architecture Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6rsJlfpwnP4" rel="noopener">Deploy a Production-Grade 3-Tier Architecture on AWS: CloudFront, ALB, ASG, EC2, RDS, CloudWatch — Learn It Right Way</a></li>
+    </ul>
+
+    <h3>Least privilege, WAF, backups you have actually restored, and a pipeline</h3>
+    <p>The security half of production-readiness starts with the task role. Write it as an explicit allow-list of the API calls the application genuinely makes, on the specific resource ARNs it touches — this bucket prefix, these two secrets, this queue — not a managed policy ending in <code>FullAccess</code>. That is the difference between a leaked container being an incident and being a catastrophe. In front of the ALB (or on the CloudFront distribution, if you want the filtering to happen at the edge), attach an AWS WAF web ACL with at least the AWS managed common rule set and a rate-based rule, so a scripted flood is absorbed before it reaches your tasks. Keep the database out of public subnets entirely and reach it for admin work through SSM Session Manager rather than a bastion host with an open SSH port.</p>
+    <p>On backups, the number that matters is not the retention window but the last date somebody performed a restore. RDS automated backups with point-in-time recovery are on by default in production for a reason, but a backup you have never restored is an untested assumption — schedule a restore into a scratch instance, time it, and write the measured recovery time down next to the recovery objective you promised the business. Finally, the deployment pipeline: build the image, tag it with the commit SHA (never <code>latest</code>), push to ECR, run a Terraform plan that a human approves, then update the ECS service and let the circuit breaker guard the rollout. Every production change should be a merged pull request, which is exactly what operational excellence was asking for at the top of this page.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html" rel="noopener">Amazon ECS task IAM role — task role vs execution role, Amazon ECS Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/waf/latest/developerguide/waf-chapter.html" rel="noopener">AWS WAF — web ACLs, managed rule groups and rate-based rules</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html" rel="noopener">Working with backups and point-in-time recovery — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/codepipeline/latest/userguide/welcome.html" rel="noopener">What is AWS CodePipeline? — AWS CodePipeline User Guide</a></li>
+      <li>[Official] <a href="https://aws-otel.github.io/docs/introduction" rel="noopener">AWS Distro for OpenTelemetry — introduction and collector setup</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=40X6abe5wv0" rel="noopener">Complete AWS CI/CD: Deploy Spring Boot to ECS using CodeBuild and CodePipeline — Java Techie</a></li>
+    </ul>
+
+    <h3>What it costs, the cheaper variants, and what to build on Monday</h3>
+    <p>An honest sketch, at list price in a region like Mumbai, for a low-traffic production workload: the ALB runs roughly twenty dollars a month before capacity units; two Fargate tasks at one vCPU and two gigabytes each, running continuously, land around seventy; a Multi-AZ <code>db.t4g.medium</code> PostgreSQL with a hundred gigabytes of storage is comfortably over a hundred; a small two-node ElastiCache cluster adds forty or fifty; two NAT gateways cost about thirty-five each in fixed hourly charges <em>before</em> the per-gigabyte processing fee; CloudFront, S3, Route 53, Secrets Manager, WAF and CloudWatch together add perhaps thirty to fifty. Call it four to five hundred dollars a month, and notice how much of it is fixed cost you pay while the system is idle at three in the morning. Cross-AZ data transfer and NAT processing are the two line items that most often surprise people, because neither appears in the architecture diagram.</p>
+    <p>The cheaper variants for a small team, roughly in order of savings per unit of regret: run one NAT gateway instead of two, and add S3, ECR and Secrets Manager VPC endpoints so most egress never touches it; run RDS single-AZ in non-production and turn Multi-AZ on only for the production database; drop ElastiCache until a query profile proves you need it; put non-critical Fargate tasks on Fargate Spot; buy a Compute Savings Plan once your baseline is genuinely steady; and size down aggressively, because a <code>t4g.small</code> database that you can resize in a maintenance window is a better starting point than a guess two sizes too big. What you should <em>not</em> economise on is Multi-AZ for production data, backups, or least-privilege roles — those are the ones whose absence you discover at the worst possible moment.</p>
+    <p>So: what would you actually build on Monday? A VPC with public, private and isolated subnets across two AZs, one ALB with an ACM certificate, one Fargate service with two tasks, one Multi-AZ RDS instance, the Angular build on S3 behind CloudFront with OAC, secrets in Secrets Manager from the very first deploy, all of it in Terraform from the first commit, and an AWS Budgets alarm configured <em>before</em> anything else. Skip the cache, the WAF, the multi-region story and the service mesh until a measurement — not a blog post, and not an interview panel — tells you that you need them. That is the whole track in one paragraph: use the managed service, put it in two zones, define it in code, watch what it costs, and add complexity only when the numbers demand it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/fargate/pricing/" rel="noopener">AWS Fargate pricing — per-vCPU and per-GB rates, Spot and Savings Plans</a></li>
+      <li>[Official] <a href="https://calculator.aws/" rel="noopener">AWS Pricing Calculator — model this stack before you build it</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/vpc/latest/privatelink/privatelink-access-aws-services.html" rel="noopener">Access AWS services through AWS PrivateLink — VPC endpoints instead of NAT egress</a></li>
+      <li>[Article] <a href="https://www.lastweekinaws.com/blog/the-aws-managed-nat-gateway-is-unpleasant-and-not-recommended/" rel="noopener">The AWS Managed NAT Gateway is Unpleasant and Not Recommended — Last Week in AWS</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/architecture/achieving-frugal-architecture-using-the-aws-well-architected-framework-guidance/" rel="noopener">Achieving Frugal Architecture using AWS Well-Architected Framework guidance — AWS Architecture Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tQewsywPztY" rel="noopener">AWS re:Invent 2024 — What's new with AWS cost optimization (COP204) — AWS Events</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-infrastructure-as-code.html">← Infrastructure as Code</a>
+    <a href="index.html">All Cloud AWS modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>This is the module that maps directly onto the architecture round. "Design a highly available web application on AWS" is asked in almost every Indian product-company system design interview and in most senior service-company panels; the follow-ups below are where candidates either show they have run this stack or reveal they have only read about it:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the six pillars of the AWS Well-Architected Framework.</summary>
+      <div class="answer"><p>Operational excellence, security, reliability, performance efficiency, cost optimization and sustainability. Sustainability was added in 2021 and is the one candidates most often forget. Say them in order and then immediately give an example of a decision one of them changed in a system you built — reciting the list alone is a weak answer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Design a highly available web application on AWS. Walk me through it.</summary>
+      <div class="answer"><p>Route 53 for DNS; CloudFront in front of a private S3 bucket (Origin Access Control) for the static frontend; an internet-facing ALB in public subnets across two AZs terminating TLS with an ACM certificate; the API on ECS Fargate in private subnets across the same two AZs behind that ALB; RDS Multi-AZ PostgreSQL in isolated subnets reachable only from the application security group; ElastiCache for sessions and hot reads; secrets in Secrets Manager and config in Parameter Store injected into the task definition; CloudWatch and ADOT for logs, metrics and traces; everything in Terraform. Then state your availability assumption explicitly: this survives the loss of one availability zone, not the loss of a region.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why put the Angular build on S3 and CloudFront instead of serving it from the application?</summary>
+      <div class="answer"><p>Static assets do not need compute. S3 plus CloudFront serves them from edge locations close to the user, cheaper and faster than an origin server, and it takes that traffic off the tier you are paying to keep warm — which is the performance efficiency pillar's exact argument. Use Origin Access Control so the bucket stays private and only CloudFront can read it, and hash your bundle filenames so you can cache them for a long time while <code>index.html</code> stays short-lived.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which subnets do the ALB, the ECS tasks and the database go in, and why?</summary>
+      <div class="answer"><p>ALB in public subnets, because it needs an internet gateway route to receive traffic from users. ECS tasks in private subnets, with outbound access via NAT or VPC endpoints but no inbound route from the internet — the ALB reaches them through security group rules inside the VPC. Database in isolated subnets with no internet route at all, and a security group that references the application's security group rather than a CIDR block, so the rule follows the tasks wherever they get scheduled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Secrets Manager or SSM Parameter Store — how do you decide?</summary>
+      <div class="answer"><p>Parameter Store's standard tier is free and supports encrypted SecureString values, which makes it right for configuration: hostnames, feature flags, log levels, non-sensitive tunables. Secrets Manager charges per secret per month but adds managed automatic rotation, cross-region replication and resource-based policies, which makes it right for credentials — database passwords, third-party API keys, signing material. Both are referenced by ARN from the ECS task definition, so the value never lands in the image or in source control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the difference between the ECS task role and the task execution role.</summary>
+      <div class="answer"><p>The execution role belongs to the ECS agent: it pulls the image from ECR, writes to the CloudWatch log group, and resolves the Secrets Manager and Parameter Store ARNs listed in the task definition. The task role belongs to your application code: it is the identity behind the SDK calls the container makes at runtime, such as reading an S3 bucket or publishing to SQS. Merging the two, or attaching a broad managed policy to either, is the most common ECS security mistake.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Two NAT gateways or one? Argue both sides.</summary>
+      <div class="answer"><p>One NAT gateway is cheaper by roughly its full fixed hourly charge per month, but it lives in a single AZ: if that zone fails, private subnets in the surviving zone lose outbound internet even though your tasks there are healthy. One per AZ removes that dependency and is what the reliability pillar asks for. The consciously-made tradeoff is the point — and both sides improve if you add S3, ECR, Secrets Manager and CloudWatch VPC endpoints, because that traffic then bypasses NAT entirely and cuts the per-gigabyte processing fee as well.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is deregistration delay, and what breaks at the default value?</summary>
+      <div class="answer"><p>It is how long the ALB keeps draining in-flight requests to a target after it starts deregistering it. The default is five minutes, so every ECS deployment appears to hang while old tasks sit in draining — painful for a service that deploys several times a day. Set it a little above your slowest expected request instead, and make the container stop timeout longer than the delay so the task is not killed while the ALB is still draining it. Setting it to zero is the opposite error: it severs in-flight requests and shows up as intermittent client errors during every deploy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your ALB health check returns HTTP 200 but users get errors. What went wrong?</summary>
+      <div class="answer"><p>The health check is probing a static endpoint that proves only that the web server is listening — not that the application can reach its database, cache or downstream dependency. The load balancer therefore keeps a broken task in service. Point the target group at a real readiness endpoint that verifies critical dependencies, keep it cheap enough to run every few seconds, and separate liveness from readiness so a transient dependency failure sheds traffic instead of triggering an endless restart loop.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Where does this architecture cost money while nothing is happening, and how would you cut it?</summary>
+      <div class="answer"><p>The fixed costs dominate: the ALB's hourly charge, continuously-running Fargate tasks, the Multi-AZ RDS instance and its doubled storage, ElastiCache nodes, and one NAT gateway per AZ — all billed whether or not a request arrives. On top of that, cross-AZ data transfer and NAT data processing are charged per gigabyte and appear on no diagram. Cuts in order of savings per unit of regret: VPC endpoints plus a single NAT for non-production, single-AZ RDS outside production, drop the cache until profiling justifies it, Fargate Spot for non-critical tasks, a Compute Savings Plan once the baseline is steady, and honest right-sizing. Do not economise on production Multi-AZ, backups or least-privilege roles.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> The pillars conflict. Give a concrete example and say how you would resolve it.</summary>
+      <div class="answer"><p>Reliability wants a NAT gateway per AZ, a Multi-AZ database and generous minimum task counts; cost optimization wants one of each. Performance wants a read replica; that adds replication lag the application must tolerate, and adds a failure mode. Security wants aggressive credential rotation; operations has to keep that rotation from causing outages. The resolution is not to maximise every pillar but to write the decision down — which pillar you traded, what business requirement justified it, and what signal would make you revisit it. The Well-Architected Tool exists to force exactly that conversation and record the high-risk items.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you make this architecture survive the loss of an entire region?</summary>
+      <div class="answer"><p>Be explicit that the reference design does not, and that region failure is a materially harder and more expensive problem than zone failure. The options, in ascending cost: backup and restore into a second region (hours of recovery time, cheapest); pilot light — infrastructure defined in code in a second region with the database replicating via an RDS cross-region read replica or Aurora Global Database, compute scaled to zero; warm standby — a small live copy that scales up on failover; and active-active behind Route 53 latency or failover routing, which forces you to confront cross-region write conflicts and data residency. Choose from a stated recovery time and recovery point objective, and note that most products genuinely need only the first or second.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your database is CPU-bound at peak. Walk through the options in order.</summary>
+      <div class="answer"><p>Measure first with Performance Insights and find the top queries — the answer is very often a missing index or an N+1 from the ORM, and no amount of instance size fixes that. Then, in ascending cost and complexity: fix the queries and connection pooling; add ElastiCache for hot reads so repeat traffic never touches PostgreSQL; move read-only endpoints to a read replica and make the code tolerate replication lag; scale the instance up, or move to Aurora for its faster storage layer; and only then consider partitioning or sharding. Naming caching and read replicas before instance resizing is what separates a considered answer from a reflex.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What would you check first in a Well-Architected review of a stack you have just inherited?</summary>
+      <div class="answer"><p>Four things, in this order. Is there a tested restore — not just a backup? Is production defined in code, or has it drifted from whatever template created it? What can the compute reach that it should not: broad IAM policies, security groups open to the world, a database in a public subnet? And what does it cost, broken down by tag, with a budget alarm attached? Those four answers tell you more about the real risk than a full pass through every question in the framework, and each maps to a pillar you can then dig into with the Well-Architected Tool.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.wa.pillars</li>
+      <li>aws.wa.stack</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="AWS monitoring and cost module: CloudWatch metrics, namespaces and dimensions, the CloudWatch agent for memory and disk, custom metrics and EMF, log groups, retention, metric and subscription filters, Logs Insights, alarms and composite alarms, ADOT tracing, Application Signals and SLOs, plus Cost Explorer, Budgets, cost allocation tags and the line items that surprise teams.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monitoring and Cost in the Cloud — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Monitoring and Cost in the Cloud</h1>
+  <p class="standfirst">Two questions every on-call engineer eventually has to answer about a live AWS account: what is it doing right now, and why does it cost that much. Both are answered with services you already have switched on.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS</a> → Monitoring and Cost in the Cloud</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The moment you launch anything on AWS, CloudWatch starts collecting metrics about it — free, with nothing installed. That default telemetry is genuinely useful and also genuinely incomplete, and knowing exactly where the line falls (which metrics exist, at what interval, and which ones require an agent you have to install yourself) is the difference between an account you can operate and one you merely hope is fine. This module walks that line: metrics, logs, alarms and dashboards, then tracing with the AWS Distro for OpenTelemetry, then the cost side, which is an engineering responsibility rather than a finance one.</p>
+    <p>Scope note: this is the <em>AWS-native</em> view of observability. This course carries a full Observability track elsewhere — Micrometer, Prometheus, Grafana, an OpenTelemetry deep dive, SLIs and error budgets, structured logging strategy — and everything vendor-neutral belongs there. Here we stay on the AWS side: which managed service does what, what it charges for, and what a Spring Boot service running on ECS or EC2 needs to do to show up in it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>CloudWatch metrics: namespaces, dimensions and the monitoring interval</h3>
+    <p>A CloudWatch metric is a time-ordered series of data points identified by three things: a <em>namespace</em> (a container such as <code>AWS/EC2</code>, <code>AWS/ApplicationELB</code> or your own <code>MyCompany/Orders</code>), a metric name, and a set of <em>dimensions</em> — name/value pairs such as <code>InstanceId=i-0abc</code> or <code>LoadBalancer=app/prod/xyz</code>. Dimensions are part of the metric's identity, not filters applied afterwards: <code>CPUUtilization</code> with <code>InstanceId</code> and <code>CPUUtilization</code> with <code>AutoScalingGroupName</code> are two different metrics that are billed and queried separately. That single fact explains most confusion about why a graph does not show what someone expected.</p>
+    <p>The second thing to internalise is the interval. Most AWS services publish at <em>basic monitoring</em> resolution — one data point every five minutes, at no charge. Detailed monitoring drops that to one minute and costs money per metric; high-resolution custom metrics can go to one second. Five-minute granularity is fine for a capacity trend and useless for an incident, because an outage that lasts four minutes may never produce a single anomalous data point. Decide the interval per workload, not per account, and remember that alarm evaluation periods can never be finer than the underlying metric.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_concepts.html" rel="noopener">Metrics concepts — Amazon CloudWatch User Guide (namespaces, dimensions, resolution, retention)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/working_with_metrics.html" rel="noopener">Metrics in Amazon CloudWatch — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch-metrics-basic-detailed.html" rel="noopener">Basic monitoring and detailed monitoring in CloudWatch — AWS documentation</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/cloudwatch/pricing/" rel="noopener">Amazon CloudWatch pricing — AWS (what each metric, alarm, dashboard and log GB actually costs)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Yxl7e88cTAQ" rel="noopener">Basics of Amazon CloudWatch and CloudWatch Metrics — Tiny Technical Tutorials</a></li>
+    </ul>
+
+    <h3>Statistics and percentiles — and the metrics EC2 does not send you</h3>
+    <p>CloudWatch never stores raw observations for you to aggregate later; it stores a statistic set per period, and you choose how to read it. <code>Average</code> is the default and the most misleading: an average latency of 180 milliseconds tells you nothing about the one request in a hundred that took eight seconds. Prefer <code>p90</code>, <code>p99</code> and <code>Maximum</code> for latency, <code>Sum</code> for counts such as errors or requests, and <code>SampleCount</code> when you need to know whether the average is based on three data points or three million. Percentile statistics need enough samples to be meaningful, which is another reason detailed monitoring matters on latency-sensitive services.</p>
+    <p>Now the gotcha that catches almost everybody: <strong>an EC2 instance does not report memory usage or disk usage to CloudWatch by default.</strong> The hypervisor can see CPU, network and EBS I/O from outside the guest, so those are free. Memory utilisation and filesystem free space live inside the operating system, so nothing outside can observe them — you must install the <em>CloudWatch agent</em> on the instance, give its role the <code>CloudWatchAgentServerPolicy</code> permissions, and configure which counters to publish. Those become custom metrics, so they are billed, and teams routinely discover this at the worst possible moment: during an incident, looking for a memory graph that was never being collected.</p>
+    <pre class="code-block" data-label="JSON"><code>// /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json (excerpt)
+{
+  "metrics": {
+    "namespace": "MyCompany/EC2",
+    "append_dimensions": { "InstanceId": "${aws:InstanceId}" },
+    "metrics_collected": {
+      "mem":  { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 },
+      "disk": { "measurement": ["used_percent"], "resources": ["/"] }
+    }
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Statistics-definitions.html" rel="noopener">CloudWatch statistics definitions — AWS documentation (Average, Sum, percentiles, trimmed means)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/viewing_metrics_with_cloudwatch.html" rel="noopener">CloudWatch metrics that are available for your instances — Amazon EC2 User Guide (the default list, and what is missing)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Install-CloudWatch-Agent.html" rel="noopener">Collect metrics, logs and traces using the CloudWatch agent — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/metrics-collected-by-CloudWatch-agent.html" rel="noopener">Metrics collected by the CloudWatch agent — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=q8ND5kP7QGk" rel="noopener">How do I send memory and disk metrics from my EC2 instances to CloudWatch? — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Custom metrics and the embedded metric format</h3>
+    <p>Business-level numbers — orders placed, payments declined, queue depth in your own domain terms — are not something AWS can infer, so you publish them. The direct route is the <code>PutMetricData</code> API, but calling it once per event is both slow (a synchronous HTTPS call on your request path) and expensive (custom metrics are priced per metric per month, and every distinct dimension combination is a separate metric). Batch aggressively, keep cardinality low, and never put a user id, request id or full URL in a dimension unless you enjoy surprising bills.</p>
+    <p>The better pattern on Lambda, ECS and anything already shipping logs is the <em>embedded metric format</em> (EMF): you write a specially structured JSON log line containing both your metric values and arbitrary context, CloudWatch Logs ingests it as an ordinary log event, and CloudWatch extracts the metrics from it asynchronously. You get metrics without a blocking API call, the high-cardinality context stays queryable in Logs Insights rather than exploding your metric count, and the log line and the metric are guaranteed to agree because they are the same record.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "_aws": {
+    "Timestamp": 1774000000000,
+    "CloudWatchMetrics": [{
+      "Namespace": "MyCompany/Orders",
+      "Dimensions": [["Service","Region"]],
+      "Metrics": [{ "Name": "OrderValue", "Unit": "None" }]
+    }]
+  },
+  "Service": "order-api", "Region": "ap-south-1",
+  "OrderValue": 2499,
+  "orderId": "ORD-91823", "customerTier": "gold"
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/publishingMetrics.html" rel="noopener">Publish custom metrics (PutMetricData and EMF) — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format.html" rel="noopener">Embedding metrics within logs — Amazon CloudWatch User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/mt/lowering-costs-and-focusing-on-our-customers-with-amazon-cloudwatch-embedded-custom-metrics/" rel="noopener">Lowering costs with Amazon CloudWatch embedded custom metrics — AWS Cloud Operations Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kksPEerXIGs" rel="noopener">Setting Up CloudWatch Agent on EC2: From Basic to Advanced Metrics — Rahul Nath</a></li>
+    </ul>
+
+    <h3>CloudWatch Logs: log groups, streams, the unified agent and retention</h3>
+    <p>The hierarchy is two levels. A <em>log group</em> is the unit of configuration and usually maps to one application or resource (<code>/aws/lambda/checkout</code>, <code>/ecs/order-api</code>); retention, encryption, subscription filters, metric filters and access policy are all set on the group. A <em>log stream</em> inside it is the sequence of events from one source — one container, one instance, one Lambda execution environment. Getting logs there is either automatic (Lambda, and ECS via the <code>awslogs</code> log driver) or a matter of installing the same unified CloudWatch agent used for metrics and pointing it at your log files.</p>
+    <p>Then set retention, because this is where AWS quietly bills you forever. <strong>A newly created log group's retention is "Never expire" by default.</strong> Storage is charged per GB per month indefinitely, ingestion is charged per GB on the way in, and a chatty debug logger in a busy service produces an astonishing amount of both. Choose a deliberate retention per group (two weeks for application debug, a year or more for audit trails), export what you truly need to keep to S3 or the Infrequent Access log class, and turn the volume down at the source rather than paying to store noise nobody will ever read.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html" rel="noopener">What is Amazon CloudWatch Logs? — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html" rel="noopener">Working with log groups and log streams — AWS documentation (including retention settings)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_billing.html" rel="noopener">Analyzing, optimizing and reducing CloudWatch costs — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dQPXBohP0hw" rel="noopener">AWS CloudWatch Tutorial for Beginners: Metrics, Alarms, Dashboards and Logs Explained — DheerajTechInsight</a></li>
+    </ul>
+
+    <h3>Turning logs into signal: metric filters and subscription filters</h3>
+    <p>A <em>metric filter</em> watches a log group for a pattern and increments a CloudWatch metric whenever it matches. This is how a log line becomes something you can alarm on: count occurrences of <code>ERROR</code>, of a specific exception class, of failed logins, of an <code>OutOfMemoryError</code>, and you now have a numeric series that alarms and dashboards understand. Filters apply only to events ingested <em>after</em> the filter is created — they are not retroactive — and the filter pattern syntax has separate forms for plain text and for JSON-structured events, which is one more argument for logging JSON.</p>
+    <p>A <em>subscription filter</em> is the streaming exit door: matching events are delivered in near real time to Kinesis Data Streams, Firehose, Lambda or OpenSearch. That is the standard route out of CloudWatch Logs to somewhere else — a central security account, a data lake in S3, or a third-party platform such as Datadog, Splunk or Elastic — and it is the answer to the common interview question "how would you centralise logs from fifty AWS accounts?" Metric filter for alarming, subscription filter for forwarding.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/MonitoringPolicyExamples.html" rel="noopener">Creating metric filters — Amazon CloudWatch Logs documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html" rel="noopener">Filter pattern syntax for metric and subscription filters — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/SubscriptionFilters.html" rel="noopener">Log group-level subscription filters — AWS documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/mt/analyze-logs-usage-with-amazon-cloudwatch-enhanced-automatic-dashboard/" rel="noopener">Analyze logs usage with the CloudWatch enhanced automatic dashboard — AWS Cloud Operations Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=s5SQQ9eLBXA" rel="noopener">AWS CloudWatch Log Insights: fetch specific logs from a log group — DevOps With Namdev</a></li>
+    </ul>
+
+    <h3>Logs Insights: actually finding things</h3>
+    <p>Scrolling a log stream in the console stops working at about the tenth screenful. CloudWatch Logs Insights is the query engine over the same data: a small piped language (<code>fields</code>, <code>filter</code>, <code>parse</code>, <code>stats</code>, <code>sort</code>, <code>limit</code>) that runs across one or many log groups over a chosen time range, with automatically discovered fields for JSON events and <code>parse</code> for unstructured lines. It is the tool you reach for during an incident and the tool that makes JSON logging pay for itself, because <code>filter level = "ERROR" and service = "checkout"</code> only works if those are real fields.</p>
+    <p>Two operational notes. Queries are billed per GB of log data scanned, so always narrow the time range and the log groups first — an unbounded query over a month of production logs is a real invoice line, not a rounding error. And save the queries your team runs repeatedly (top error signatures, slowest endpoints, one customer's full request trail) so the next person on call does not have to reinvent them at three in the morning.</p>
+    <pre class="code-block" data-label="Logs Insights"><code>fields @timestamp, @message, level, service, latencyMs
+| filter level = "ERROR" and service = "order-api"
+| parse @message /orderId=(?&lt;orderId&gt;[A-Z0-9-]+)/
+| stats count() as errors, avg(latencyMs) as avgLatency by bin(5m), orderId
+| sort errors desc
+| limit 20</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html" rel="noopener">Analyzing log data with CloudWatch Logs Insights — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html" rel="noopener">CloudWatch Logs Insights query syntax — AWS documentation (every command and function)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/mt/advanced-analytics-using-amazon-cloudwatch-logs-insights/" rel="noopener">Advanced analytics using Amazon CloudWatch Logs Insights — AWS Cloud Operations Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mAdBKHDTAiI" rel="noopener">AWS CloudWatch Logs Insights: search, filter, parse and sort operations — CloudAvail Technology Consulting</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HE7pNygqxKY" rel="noopener">CloudWatch Logs Insights Tutorial: Query and Analyze AWS Logs — CodeLucky</a></li>
+    </ul>
+
+    <h3>Alarms: thresholds, evaluation, missing data and noise control</h3>
+    <p>An alarm watches one metric (or one metric-math expression) against a threshold and holds one of three states: <code>OK</code>, <code>ALARM</code>, and <code>INSUFFICIENT_DATA</code> — the third meaning the metric has not reported enough points to judge. Two settings decide how twitchy it is: the <em>evaluation periods</em> (how many periods to look back over) and <em>datapoints to alarm</em> (how many of those must breach). "3 out of 5 periods" is the classic M-of-N configuration that ignores a single spike but catches a sustained problem, and it is a far better answer in an interview than raising the threshold until the pager stops.</p>
+    <p>Missing data is its own decision, and the default <code>missing</code> treatment means gaps neither cause nor clear an alarm. Choose <code>notBreaching</code> for a metric that is legitimately absent when idle (a queue with no messages), and <code>breaching</code> when absence itself is the emergency (a heartbeat that stopped because the process died). For noise, <em>composite alarms</em> combine child alarms with AND/OR/NOT so that one root cause pages once instead of forty times; <em>anomaly detection</em> builds a model of a metric's normal band and alarms on deviation from it, which is what you want for a strongly seasonal metric where no fixed threshold is right at both 3am and 3pm. Alarm actions publish to SNS (email, chat, PagerDuty, Lambda), trigger Auto Scaling policies, or stop and recover EC2 instances.</p>
+    <pre class="code-block" data-label="Terraform"><code>resource "aws_cloudwatch_metric_alarm" "api_5xx" {
+  alarm_name          = "order-api-5xx-sustained"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  dimensions          = { LoadBalancer = aws_lb.app.arn_suffix }
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 5     # look back over five periods
+  datapoints_to_alarm = 3     # alarm only if three of them breach
+  threshold           = 10
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.oncall.arn]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Alarms.html" rel="noopener">Using Amazon CloudWatch alarms — AWS documentation (states, evaluation, missing-data treatment)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ConsoleAlarms.html" rel="noopener">Create a CloudWatch alarm based on a static threshold — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Create_Composite_Alarm.html" rel="noopener">Create a composite alarm — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Anomaly_Detection.html" rel="noopener">Using CloudWatch anomaly detection — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8-KNqr60AyU" rel="noopener">AWS CloudWatch: Metrics, Alarms, Pricing, Events, Detailed Monitoring — knowledgeindia LearnCloud</a></li>
+    </ul>
+
+    <h3>Dashboards and widgets</h3>
+    <p>A dashboard is a saved arrangement of widgets — line and stacked-area graphs, single-value numbers, gauges, alarm-status panels, log tables driven by a Logs Insights query, and free text for runbook links. Dashboards are global rather than regional, can pull metrics from several regions and (with the right roles) several accounts, and are defined by a JSON document, which means you should create them in CloudFormation or Terraform alongside the infrastructure they watch rather than clicking them together and losing them.</p>
+    <p>Keep them purposeful. One service dashboard that answers "is this healthy?" in ten seconds — request rate, error rate, latency percentiles, saturation, and the alarms that matter — beats a wall of forty graphs nobody reads. The first three of those are the classic RED metrics, and putting them in the same order on every service's dashboard makes an unfamiliar service legible to whoever is on call. Note that the first few dashboards are free and additional ones are billed per dashboard per month.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Dashboards.html" rel="noopener">Using Amazon CloudWatch dashboards — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/create_dashboard.html" rel="noopener">Creating a customized CloudWatch dashboard — AWS documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/mt/visualizing-amazon-cloudwatch-costs-part-1/" rel="noopener">Visualizing Amazon CloudWatch costs, part 1 — AWS Cloud Operations Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pGq2COgmoHk" rel="noopener">Amazon CloudWatch Tutorial: Metrics, Alarms, Events, Detailed Monitoring — S3CloudHub</a></li>
+    </ul>
+
+    <h3>Tracing on AWS: teach ADOT, not the X-Ray SDK</h3>
+    <p>Be explicit about this, because a lot of older material is misleading: <strong>the AWS X-Ray SDKs and the X-Ray daemon are on an end-of-support timeline, and OpenTelemetry is the instrumentation standard AWS itself now points you at.</strong> AWS has published a maintenance-mode and end-of-support schedule for the X-Ray SDKs and daemon plus explicit migration guides. X-Ray is not going away — it remains the backend and the console — but the code in your service should emit OpenTelemetry, not X-Ray-specific calls.</p>
+    <p>The vehicle is the <em>AWS Distro for OpenTelemetry</em> (ADOT): AWS's supported, security-patched build of the upstream OpenTelemetry components, with AWS-specific bits (X-Ray trace-id propagation, resource detectors for EC2/ECS/EKS/Lambda, an X-Ray exporter and a CloudWatch EMF exporter) already included. The payoff is vendor neutrality: the same instrumentation in your Java code can export to X-Ray today and to Grafana Tempo, Jaeger, Datadog or Honeycomb tomorrow by changing collector configuration rather than application code. That is why the OpenTelemetry deep dive lives in its own track — here the point is simply which distribution AWS supports and why it is the default choice.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws-otel.github.io/docs/introduction" rel="noopener">Introduction — AWS Distro for OpenTelemetry documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-daemon-timeline.html" rel="noopener">X-Ray SDK and daemon support timeline — AWS X-Ray Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-migration.html" rel="noopener">Migrating from X-Ray instrumentation to OpenTelemetry instrumentation — AWS X-Ray Developer Guide</a></li>
+      <li>[Article] <a href="https://opentelemetry.io/docs/what-is-opentelemetry/" rel="noopener">What is OpenTelemetry? — opentelemetry.io (the vendor-neutral standard, in its own words)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WZKvXaoo7QU" rel="noopener">AWS Supports You: Getting Started with OpenTelemetry and ADOT — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Instrumenting a Java service: the ADOT agent, the collector, and exporters</h3>
+    <p>For a Spring Boot service the fastest honest answer is zero-code instrumentation: download the ADOT Java auto-instrumentation agent JAR, attach it with <code>-javaagent</code>, and it will byte-code-instrument the frameworks it recognises — Spring MVC and WebFlux, servlet containers, JDBC, the AWS SDK, Apache HttpClient, Kafka clients — producing spans for inbound requests and outbound calls with no source changes. Add manual spans later, only where a business operation needs its own boundary; auto-instrumentation gets you most of a trace on day one.</p>
+    <p>The agent does not talk to X-Ray directly. It exports OTLP to a <em>collector</em> — the ADOT Collector, run as a sidecar container in your ECS task, a DaemonSet on EKS, or a service on EC2 — and the collector does the batching, sampling, resource enrichment and fan-out to backends. That indirection is the whole architectural point: your application knows only OTLP, and the choice of destination (the X-Ray exporter, the CloudWatch EMF exporter, or an OTLP endpoint at a third party) is collector configuration. Give the task or instance role permission for <code>xray:PutTraceSegments</code> and <code>xray:PutTelemetryRecords</code>, and remember that sampling is a cost control as well as a performance one — full-fidelity tracing of every request in a high-traffic service is rarely worth what it charges.</p>
+    <pre class="code-block" data-label="Shell"><code># Zero-code instrumentation of a Spring Boot service with the ADOT Java agent
+java -javaagent:/opt/aws-opentelemetry-agent.jar \
+     -Dotel.service.name=order-api \
+     -Dotel.exporter.otlp.endpoint=http://localhost:4317 \
+     -Dotel.propagators=tracecontext,baggage,xray \
+     -Dotel.traces.sampler=parentbased_traceidratio \
+     -Dotel.traces.sampler.arg=0.1 \
+     -jar order-api.jar</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws-otel.github.io/docs/getting-started/java-sdk/auto-instr" rel="noopener">Auto-instrumentation for traces and metrics with the Java agent — AWS Distro for OpenTelemetry</a></li>
+      <li>[Official] <a href="https://aws-otel.github.io/docs/getting-started/collector" rel="noopener">Getting started with the ADOT Collector — AWS Distro for OpenTelemetry</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/xray/latest/devguide/xray-migration-opentelemetry.html" rel="noopener">Migrating to OpenTelemetry Java — AWS X-Ray Developer Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-opentelemetry-collector" rel="noopener">Working with the OpenTelemetry Collector — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=S4GfA2R0N_A" rel="noopener">Seamless observability with AWS Distro for OpenTelemetry (COM307) — AWS Events, re:Invent</a></li>
+    </ul>
+
+    <h3>Application Signals, SLOs, and the X-Ray service map</h3>
+    <p>CloudWatch <em>Application Signals</em> is the layer above raw traces: once a service is instrumented with OpenTelemetry it automatically derives the application-level golden signals — request volume, availability (error rate), latency percentiles, and fault versus error breakdown — per service and per operation, with no dashboards to build. It also discovers dependencies, so you see which downstream service or database is dragging an endpoint down without correlating anything by hand.</p>
+    <p>On top of that it lets you declare <em>service level objectives</em> against those signals: "99.5% of <code>POST /orders</code> requests succeed in under 400 milliseconds over a rolling 28 days", with the remaining error budget tracked and burn visible. That is the AWS-native way to state a reliability target; the general theory of SLIs, SLOs and error budgets is covered properly in the Observability track. The X-Ray <em>trace map</em> (formerly the service map) remains the visualisation for an individual request path — nodes for each service, edges annotated with latency and error rate, and a click through to the actual traces behind any node, which is how you answer "where did those eight seconds go?" in one screen.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Application-Monitoring-Sections.html" rel="noopener">Application Signals — Amazon CloudWatch User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Application-Signals-Enable.html" rel="noopener">Enable Application Signals in your account — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-ServiceLevelObjectives.html" rel="noopener">Service level objectives (SLOs) — Amazon CloudWatch User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/xray/latest/devguide/xray-console-servicemap.html" rel="noopener">Using the X-Ray trace map — AWS X-Ray Developer Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=OOScvywKj9s" rel="noopener">How to do distributed tracing in AWS? X-Ray and CloudWatch ServiceLens — FooBar Serverless</a></li>
+    </ul>
+
+    <h3>Cost as an engineering responsibility: Cost Explorer, Budgets and Anomaly Detection</h3>
+    <p>Cost is a non-functional requirement like latency, and the tools live in the same console you already use. <em>Cost Explorer</em> is the analysis surface: daily or monthly spend broken down by service, account, region, usage type, instance type or tag, with filters and up to twelve months of history plus a forecast. It is where you answer "what changed?" after a bill jumps, and the single most useful first move is grouping by usage type rather than by service — "EC2" tells you nothing, <code>NatGateway-Bytes</code> or <code>DataTransfer-Regional-Bytes</code> tells you everything.</p>
+    <p><em>AWS Budgets</em> is the guardrail: define a monthly cost or usage budget, per account or per tag or per service, and get alerted at thresholds of both actual and <em>forecast</em> spend — forecast alerts are the ones that reach you while there is still time to act. <em>Cost Anomaly Detection</em> is the machine-learning complement that needs no threshold at all; it learns each service's normal spend pattern and raises an alert when something deviates, which is how you catch a runaway Lambda loop or a forgotten load test on day two instead of at the end of the month. Every team account should have at least one budget and anomaly monitor from the day it is opened.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/cost-management/latest/userguide/ce-what-is.html" rel="noopener">Analyzing your costs and usage with AWS Cost Explorer — AWS Cost Management documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html" rel="noopener">Managing your costs with AWS Budgets — AWS Cost Management documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cost-management/latest/userguide/manage-ad.html" rel="noopener">Detecting unusual spend with AWS Cost Anomaly Detection — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=oE8TNKGmc40" rel="noopener">AWS Cost Optimisation Series: Cost Explorer — Amazon Web Services</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5vYEVQzoMeM" rel="noopener">AWS Cost Optimisation Series: AWS Budgets — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Cost allocation tags, the CUR, and the line items that surprise teams</h3>
+    <p>An untagged account cannot answer "which team spent this", and no tool can rescue it after the fact. <em>Cost allocation tags</em> are ordinary resource tags that you explicitly activate in the billing console, after which they become grouping dimensions in Cost Explorer and columns in the billing data. Agree a small mandatory set early — owner, environment, application, cost-centre — enforce them with tag policies or a Service Control Policy and with your Terraform or CloudFormation defaults, and accept that activation is not retroactive: costs incurred before a tag existed stay unattributed forever. Below that sits the <em>Cost and Usage Report</em>, the most granular billing data AWS produces (hourly, per resource, per line item), delivered to S3 for querying in Athena or QuickSight when Cost Explorer's granularity runs out.</p>
+    <p>Finally, the line items that repeatedly ambush teams, because none of them are the compute you were thinking about. <strong>NAT gateway data processing</strong> is charged per GB on top of the hourly rate, so private-subnet traffic to S3 or ECR through a NAT gateway can cost more than the instances — VPC endpoints exist precisely to bypass this. <strong>Cross-AZ traffic</strong> is charged in both directions, so a chatty service talking to a database in another availability zone pays per gigabyte for the privilege. <strong>CloudWatch Logs ingestion and never-expiring retention</strong> is the observability bill nobody budgeted for. And idle resources bill happily forever: load balancers with no targets, unattached EBS volumes, unassociated Elastic IPs, old snapshots and stopped instances still holding storage. Sweeping those four categories is the highest-return afternoon of work available in most AWS accounts.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/cost-alloc-tags.html" rel="noopener">Organizing and tracking costs using AWS cost allocation tags — AWS Billing documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cur/latest/userguide/what-is-cur.html" rel="noopener">What are AWS Cost and Usage Reports? — AWS Data Exports documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html" rel="noopener">NAT gateways — Amazon VPC User Guide (hourly charge plus per-GB data processing)</a></li>
+      <li>[Article] <a href="https://www.lastweekinaws.com/blog/aws-cross-az-data-transfer-costs-more-than-aws-says/" rel="noopener">AWS Cross-AZ Data Transfer Costs More Than AWS Says — Last Week in AWS</a></li>
+      <li>[Article] <a href="https://www.lastweekinaws.com/blog/the-aws-managed-nat-gateway-is-unpleasant-and-not-recommended/" rel="noopener">The AWS Managed NAT Gateway is Unpleasant and Not Recommended — Last Week in AWS</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-caching-dns-cdn.html">← Caching, DNS and CDN</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="11-infrastructure-as-code.html">Infrastructure as Code →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Monitoring and cost questions are a staple of Indian product and service-company rounds — service companies probe operational awareness and billing discipline, product companies push on tracing and alarm design:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is CloudWatch, and what does it collect without any setup?</summary>
+      <div class="answer"><p>The AWS-native monitoring and observability service. With nothing installed it collects metrics that AWS can see from outside your resources — EC2 CPU, network and EBS I/O; ALB request counts, target response time and HTTP status codes; RDS connections and read/write latency; Lambda invocations, errors, duration and throttles — plus logs from services that ship them automatically, such as Lambda and ECS with the awslogs driver.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is memory utilisation not available for an EC2 instance by default?</summary>
+      <div class="answer"><p>Because CloudWatch collects EC2 metrics from the hypervisor, outside the guest operating system. CPU, network and disk I/O are visible from there; memory usage and filesystem free space are internal OS state that nothing outside can observe. You install the CloudWatch agent inside the instance, grant its role CloudWatchAgentServerPolicy, and configure which counters to publish — they arrive as custom metrics, which are billed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain namespace and dimension with an example.</summary>
+      <div class="answer"><p>A namespace is a container for metrics — <code>AWS/EC2</code>, <code>AWS/Lambda</code>, or your own <code>MyCompany/Orders</code>. Dimensions are name/value pairs that identify a specific series inside it, such as <code>InstanceId=i-0abc</code> or <code>FunctionName=checkout</code>. Dimensions are part of the metric's identity, so the same metric name with different dimension sets is different metrics, priced and queried separately.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three states of a CloudWatch alarm?</summary>
+      <div class="answer"><p>OK (the metric is within the threshold), ALARM (it has breached according to the evaluation configuration), and INSUFFICIENT_DATA (there is not enough data to decide — the metric has not reported, or the alarm is newly created). Actions can be attached to transitions into any of the three, and treating INSUFFICIENT_DATA as harmless is a common mistake when the metric's absence is itself the outage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the default retention on a new CloudWatch log group, and why does it matter?</summary>
+      <div class="answer"><p>Never expire. Logs are billed for ingestion per GB and then for storage per GB every month, forever, so a debug-heavy service quietly accumulates a permanent bill. Set an explicit retention on every log group (weeks for application debug, longer only for audit), export anything you must keep to S3 or the Infrequent Access log class, and reduce log volume at the source.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Standard versus detailed monitoring — what changes, and when do you pay for detailed?</summary>
+      <div class="answer"><p>Basic monitoring publishes one data point every five minutes and is free; detailed monitoring publishes every minute and is charged per metric. Five-minute granularity cannot see a four-minute outage and delays every alarm by up to five minutes, so enable detailed monitoring on user-facing and autoscaled workloads where reaction time matters, and leave batch or dev workloads on basic. Alarm periods can never be finer than the metric's resolution.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A metric filter and a subscription filter both watch a log group. What is the difference?</summary>
+      <div class="answer"><p>A metric filter turns matching log events into a CloudWatch metric you can alarm and graph on — counting ERROR lines or a specific exception. A subscription filter streams matching events in near real time to Kinesis Data Streams, Firehose, Lambda or OpenSearch, which is the standard route for centralising logs across accounts or forwarding to a third-party platform. Metric filter for alarming; subscription filter for forwarding. Neither is retroactive.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why prefer p99 over Average for latency alarms?</summary>
+      <div class="answer"><p>Average hides the tail. A 180-millisecond mean is compatible with one request in a hundred taking eight seconds, and that one percent is a real set of users, often the ones with the most data. Percentiles measure the experience at the bad end, which is what an SLO is written against. Use Sum for counts, Maximum or high percentiles for latency, and check SampleCount so you know the statistic is based on enough observations to mean anything.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your alarm pages on every brief spike. How do you fix it without weakening the alert?</summary>
+      <div class="answer"><p>Tune evaluation rather than the threshold: set evaluation periods to five and datapoints-to-alarm to three so a sustained problem fires but a single blip does not. Choose the right missing-data treatment. Alarm on a rate or percentage instead of a raw count so it scales with traffic. Use a composite alarm so one root cause produces one page instead of forty child alarms, and use anomaly detection for metrics with a strong daily or weekly shape where no fixed number is correct at all hours.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the embedded metric format and why would you use it over PutMetricData?</summary>
+      <div class="answer"><p>EMF is a JSON log line carrying both metric values and arbitrary context; CloudWatch Logs ingests it and extracts the metrics asynchronously. You avoid a synchronous PutMetricData call on the request path, you keep high-cardinality fields (order id, customer tier) queryable in Logs Insights instead of exploding your custom-metric count, and the log record and the metric can never disagree because they are the same record. It is the default pattern on Lambda and containers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you find, in production, the ten slowest requests to one endpoint in the last hour?</summary>
+      <div class="answer"><p>CloudWatch Logs Insights over that service's log group: filter on the endpoint, sort by the latency field descending, limit ten — assuming structured JSON logs so latency is a real field, otherwise parse it out of the message first. Narrow the time range before running it, because queries are billed by data scanned. Then pivot to the X-Ray trace map or Application Signals to see which downstream call consumed the time.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Would you instrument a new Java service with the X-Ray SDK or with ADOT? Justify it.</summary>
+      <div class="answer"><p>ADOT. AWS has published a maintenance-mode and end-of-support timeline for the X-Ray SDKs and daemon and provides migration guides to OpenTelemetry, so new X-Ray SDK code is legacy on arrival. ADOT is AWS's supported build of upstream OpenTelemetry with X-Ray propagation, AWS resource detectors and exporters included; the Java auto-instrumentation agent needs no source changes, and because the app speaks only OTLP the backend choice (X-Ray, Tempo, Datadog, Honeycomb) becomes collector configuration rather than a rewrite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does the ADOT Collector do that the agent in the application cannot?</summary>
+      <div class="answer"><p>It decouples producing telemetry from shipping it. The collector batches and compresses, applies tail or probabilistic sampling centrally, enriches spans with resource attributes the app does not know, redacts sensitive fields, and fans out to several backends at once — all without redeploying the service. It also absorbs backend outages and back-pressure at the edge of your cluster instead of inside your request path. Run it as an ECS sidecar, an EKS DaemonSet or an EC2 service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is CloudWatch Application Signals, and how does it relate to X-Ray?</summary>
+      <div class="answer"><p>Application Signals sits on OpenTelemetry instrumentation and automatically derives application-level golden signals per service and per operation — request volume, availability, latency percentiles, fault versus error — plus discovered dependencies, and lets you declare SLOs against them with error-budget tracking. X-Ray holds the individual traces and renders the trace map. Application Signals answers "is this service meeting its objective?"; X-Ray answers "where did this one request spend its time?"</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Finance asks which team caused a 40% bill increase. The account has no tags. What can you actually do?</summary>
+      <div class="answer"><p>For the past, very little by team — cost allocation tags are not retroactive, so spend incurred before activation stays unattributed. You can still isolate the cause structurally: Cost Explorer grouped by usage type and by linked account, and the Cost and Usage Report in Athena for hourly per-resource detail, which usually identifies the resource even when it cannot identify the owner. Then fix it forward: agree a mandatory tag set, activate those tags in billing, enforce them through Terraform defaults and tag policies or an SCP, and add per-account budgets and anomaly monitors so the next jump is caught in days.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Name the AWS charges that most often surprise teams, and how you would reduce each.</summary>
+      <div class="answer"><p>NAT gateway data processing — route S3, ECR, DynamoDB and SSM traffic through VPC endpoints instead. Cross-AZ data transfer, charged in both directions — keep chatty services and their databases zone-aligned where the availability design allows. CloudWatch Logs ingestion plus never-expiring retention — set retention, cut log volume, use the Infrequent Access class. And idle resources: load balancers with no healthy targets, unattached EBS volumes, unassociated Elastic IPs, ancient snapshots. Cost Anomaly Detection catches the first spike; VPC endpoints and a retention policy prevent the recurring bleed.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.cw.observe — CloudWatch metrics (namespaces, dimensions, basic vs detailed monitoring, statistics and percentiles, the CloudWatch agent for memory and disk, custom metrics and EMF), logs (log groups and streams, retention, metric and subscription filters), alarms (thresholds, evaluation periods, missing data, composite alarms, anomaly detection, SNS and Auto Scaling actions), dashboards and Logs Insights</li>
+      <li>aws.cw.trace — tracing with OpenTelemetry and ADOT (Java auto-instrumentation agent, collector, X-Ray and third-party exporters, the X-Ray SDK end-of-support timeline), CloudWatch Application Signals and SLOs, the X-Ray trace map, and cost monitoring with Cost Explorer, AWS Budgets, Cost Anomaly Detection, cost allocation tags, the Cost and Usage Report and the commonly missed line items</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

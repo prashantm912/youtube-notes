@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Amazon RDS module: supported engines and instance classes, Multi-AZ versus read replicas, Multi-AZ DB clusters, failover behaviour, automated backups and point-in-time recovery, parameter groups, Performance Insights, Aurora, and connecting Spring Boot securely with Secrets Manager and IAM database authentication.">
+  <title>RDS and Managed Databases — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: RDS and Managed Databases</h1>
+  <p class="standfirst">RDS trades some control for not being the person who gets paged about a failed replica at 3am. This module is about what you give up, what you get back, and the handful of distinctions — Multi-AZ versus read replicas above all — that every AWS interview reaches for.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS</a> → RDS and Managed Databases</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Amazon RDS is a relational database you do not install. AWS provisions the host, patches the engine, takes the backups, watches the disk and — if you asked for it — fails the instance over to a second Availability Zone without waking anybody. What it does not do is design your schema, write your queries or decide which columns need an index. Knowing exactly where that line sits is the difference between a team that uses RDS well and a team that is surprised by it.</p>
+    <p>We cover the engine choices and instance classes, then the availability model in detail: Multi-AZ for surviving an AZ failure, read replicas for scaling reads, Multi-AZ DB clusters as the newer hybrid, and what a failover actually looks like from inside a running Spring Boot application. The second half is the operational surface — backups, point-in-time recovery, snapshots, parameter groups, Performance Insights — plus Aurora, and how to connect an application to the database without a password sitting in a properties file.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>What RDS runs for you: engines and the managed/unmanaged line</h3>
+    <p>RDS offers six engine families: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, and Amazon Aurora (MySQL- and PostgreSQL-compatible) which is a different architecture wearing a familiar wire protocol. For a new JVM application in India the practical choice is almost always PostgreSQL or MySQL — no licence cost, the widest driver and tooling support, and the version cadence you already know. Oracle and SQL Server exist on RDS mainly so that existing licensed estates can lift and shift; they bring licence models and per-engine feature gaps you should read before committing.</p>
+    <p>The managed line is worth memorising because interviewers probe it. AWS owns the physical host, the hypervisor, the operating system, engine installation and patching, the storage substrate and its durability, the backup machinery, and — with Multi-AZ — the failover. You own everything above the connection string: schema design, indexes, query plans, connection-pool sizing, data retention, who has which grant, and whether the instance sits in a subnet the internet can reach. RDS also removes some knobs you may have used on-premises: no SSH into the host, no superuser role, no arbitrary extensions, and engine parameters can only be changed through parameter groups rather than by editing a config file.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html" rel="noopener">What is Amazon Relational Database Service? — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/compliance/shared-responsibility-model/" rel="noopener">Shared Responsibility Model — AWS (where the managed/customer line is drawn)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_BestPractices.html" rel="noopener">Best practices for Amazon RDS — Amazon RDS User Guide</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/welcome.html" rel="noopener">Reliability Pillar — AWS Well-Architected Framework</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=TKqulFnJGyY" rel="noopener">AWS RDS Tutorial — AWS RDS Full Course, Zero to Hero Series — Cloud Guru</a></li>
+    </ul>
+
+    <h3>Instance classes, storage types and right-sizing</h3>
+    <p>A DB instance is sized by <em>instance class</em> and <em>storage</em>, and they are billed and scaled separately. Classes fall into families: <code>db.t</code> (burstable, CPU-credit based — fine for development, dangerous for steady production load because credits run out), <code>db.m</code> (general purpose, the sane default), <code>db.r</code> and <code>db.x</code> (memory-optimised, which is what a database usually actually wants because a bigger buffer pool means fewer disk reads). Graviton-based classes with an <code>g</code> in the name generally give better price-performance on the open-source engines and are worth checking first.</p>
+    <p>Storage is a separate decision. General Purpose SSD (gp3) decouples IOPS and throughput from volume size, which is the modern default; the older gp2 tied IOPS to size and produced the classic "we over-provisioned 1 TB to get IOPS" bill. Provisioned IOPS (io1/io2) is for latency-sensitive OLTP that genuinely needs a guaranteed floor. Two operational facts that show up in incidents: storage autoscaling can grow a volume but never shrink it, and scaling storage or changing the instance class is an online-ish operation that still causes a brief interruption unless you are on Multi-AZ, where AWS modifies the standby first and then fails over.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.html" rel="noopener">DB instance classes — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html" rel="noopener">Amazon RDS DB instance storage — gp2, gp3, io1/io2 and storage autoscaling</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/rds/instance-types/" rel="noopener">Amazon RDS Instance Types — AWS product documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/scaling-your-amazon-rds-instance-vertically-and-horizontally/" rel="noopener">Scaling your Amazon RDS instance vertically and horizontally — AWS Database Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rM_c7K0-tC0" rel="noopener">AWS RDS Masterclass — Full Course and Demo — Tech With Yeshwanth</a></li>
+    </ul>
+
+    <h3>Multi-AZ versus read replicas: the distinction you will be asked about</h3>
+    <p>These are the two features candidates most often conflate, and they solve different problems. <strong>Multi-AZ is an availability feature.</strong> AWS maintains a synchronous standby copy of your instance in a second Availability Zone. You cannot connect to it, you cannot read from it, and it does no work at all in normal operation — it exists so that when the primary or its AZ dies, AWS can promote it automatically. Because replication is synchronous, no committed transaction is lost, and the price of that is a small write-latency tax on every commit.</p>
+    <p><strong>Read replicas are a scaling feature.</strong> They use the engine's own asynchronous replication, they are fully readable, you can have several of them, they can live in another Region, and each one has its own endpoint you point read traffic at. Because replication is asynchronous they lag — usually milliseconds, occasionally seconds or worse under write bursts or long-running replica queries — so a read replica can serve stale data, and a read-your-own-write immediately after a commit may not see it. Promoting a read replica to a standalone primary is a <em>manual</em> action, it breaks replication permanently, and it does not give you automatic failover.</p>
+    <p>They are not alternatives; production systems usually run both. Multi-AZ handles the AZ going away, read replicas handle the reporting query that would otherwise crush the primary. A read replica can itself be Multi-AZ, and in a disaster-recovery design a cross-Region read replica is your standby Region — with the honest caveat that promoting it is manual and any unreplicated writes are gone.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html" rel="noopener">Configuring and managing a Multi-AZ deployment — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZSingleStandby.html" rel="noopener">Multi-AZ DB instance deployments — Amazon RDS User Guide (the synchronous standby)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html" rel="noopener">Working with DB instance read replicas — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.XRgn.html" rel="noopener">Creating a read replica in a different AWS Region — Amazon RDS User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fW_prKJR79Y" rel="noopener">Multi-AZ vs Read Replicas — Amazon RDS Tutorial for Beginners — BeSA Cloud Academy</a></li>
+    </ul>
+
+    <h3>Multi-AZ DB clusters: three instances, two of them readable</h3>
+    <p>The newer Multi-AZ DB cluster deployment closes the obvious gap in the classic design — a standby doing nothing. A cluster is one writer and two reader instances spread across three Availability Zones, with semi-synchronous replication: a commit is acknowledged once at least one reader has confirmed the write, so you keep the durability guarantee without waiting for both. The readers accept read traffic through a dedicated reader endpoint, so the standby capacity you were already paying for now serves queries.</p>
+    <p>The payoff usually quoted is failover time: typically under 35 seconds for a Multi-AZ DB cluster versus one to two minutes for a Multi-AZ DB instance, plus lower write latency than a fully synchronous two-node setup. The constraints are real too — it is available for RDS for MySQL and RDS for PostgreSQL on specific versions and instance classes only, it costs more than a two-instance Multi-AZ deployment, and the readers are still replicas, so they lag. Interviewers like this topic because it forces you to say out loud that "Multi-AZ" now names two different things.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/multi-az-db-clusters-concepts.html" rel="noopener">Multi-AZ DB cluster deployments — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/multi-az-db-clusters-concepts-failover.html" rel="noopener">Failing over a Multi-AZ DB cluster — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_MultiAZDBCluster_ReadRepl.html" rel="noopener">Working with Multi-AZ DB cluster read replicas — Amazon RDS User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/choose-the-right-amazon-rds-deployment-option-single-az-instance-multi-az-instance-or-multi-az-database-cluster/" rel="noopener">Choose the right Amazon RDS deployment option — AWS Database Blog</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/amazon-rds-multi-az-with-two-readable-standbys-under-the-hood/" rel="noopener">Amazon RDS Multi-AZ with two readable standbys: under the hood — AWS Database Blog</a></li>
+    </ul>
+
+    <h3>Failover, concretely: what your application actually sees</h3>
+    <p>An RDS failover is a DNS operation. Your instance endpoint is a hostname; when AWS promotes the standby it repoints that hostname's CNAME at the standby's address. Nothing about your connection string changes — which is precisely why you must never resolve the endpoint once and cache the IP, and why JVM applications should keep the DNS TTL short rather than relying on the JVM's default caching behaviour. A long-lived cached address after a failover produces the worst symptom in this whole module: connections that succeed against a host that is no longer the primary, or hang until the socket timeout.</p>
+    <p>What the application sees is an abrupt reset. Every open connection in the pool is dead; in-flight transactions are rolled back; requests fail for the duration of the switch, typically one to two minutes for a Multi-AZ DB instance and often under a minute for a cluster. RDS does not retry for you. So the design work is on your side: the pool must detect and discard broken connections (HikariCP does this with a validation query and <code>max-lifetime</code> below any network idle timeout), the application must retry idempotent reads, and non-idempotent writes must be idempotent by design before you retry them at all. Failover is also worth rehearsing — the console and CLI let you force one on demand, and a team that has never tested it has an untested assumption, not a high-availability design.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  datasource:
+    url: jdbc:postgresql://orders.abc123.ap-south-1.rds.amazonaws.com:5432/orders
+    hikari:
+      maximum-pool-size: 20
+      max-lifetime: 900000          # ms; retire connections before any idle timeout
+      keepalive-time: 300000        # ms; probe idle connections so dead ones are found early
+      validation-timeout: 3000      # ms
+      connection-timeout: 5000      # ms; fail fast during a failover, don't pile up threads</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html" rel="noopener">Failing over a Multi-AZ DB instance — Amazon RDS User Guide (the DNS CNAME swap)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Endpoint.html" rel="noopener">Connecting to a DB instance: endpoints and ports — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.Promote.html" rel="noopener">Promoting a read replica to a standalone DB instance — Amazon RDS User Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-hikari" rel="noopener">Configuring a Hikari Connection Pool with Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://github.com/brettwooldridge/HikariCP" rel="noopener">HikariCP — project README (maxLifetime, keepaliveTime and why pool validation matters)</a></li>
+    </ul>
+
+    <h3>Automated backups, point-in-time recovery and manual snapshots</h3>
+    <p>Automated backups are on by default and are two things at once: a daily storage-level snapshot taken inside a backup window you choose, plus continuous archiving of the transaction logs to S3. Together they give <em>point-in-time recovery</em> — you can restore to any second within the retention period, which is one to thirty-five days (setting retention to zero disables backups entirely, which is a legitimate choice only for a throwaway instance). Backups are taken from the standby in a Multi-AZ deployment, so there is no I/O pause on the primary; on a Single-AZ instance the snapshot can cause a brief I/O suspension, which is why the backup window should sit in your quiet hours.</p>
+    <p>Manual snapshots are the other half. They are taken on demand, they live until <em>you</em> delete them, they can be copied to another Region or shared with another account, and — unlike automated backups — they are not deleted when the DB instance is deleted, provided you asked for a final snapshot. The gotcha that catches people in interviews and in production: <strong>a restore never restores in place.</strong> Both point-in-time recovery and snapshot restore create a brand-new DB instance with a new endpoint, on default parameter and security groups unless you specify otherwise. The recovery runbook therefore always includes "restore, verify, then repoint the application (or rename the instances)", and the time that whole sequence takes is your real RTO — not the marketing number.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html" rel="noopener">Working with backups — Amazon RDS User Guide (backup window and retention period)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html" rel="noopener">Restoring a DB instance to a specified time — Amazon RDS User Guide (point-in-time recovery)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateSnapshot.html" rel="noopener">Creating a DB snapshot — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_RestoreFromSnapshot.html" rel="noopener">Restoring from a DB snapshot — Amazon RDS User Guide (it creates a new instance)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vJQ5Q3LOQOw" rel="noopener">How do I restore data from an Amazon RDS database snapshot? — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Parameter groups, option groups, and which changes need a reboot</h3>
+    <p>You cannot edit <code>postgresql.conf</code> or <code>my.cnf</code> on an RDS host — there is no host to log in to. Engine settings live in a <em>DB parameter group</em>, a named collection of parameters attached to the instance. The default group AWS provides is read-only, so the first thing any real project does is create a custom parameter group, attach it, and change settings there. Many defaults are formulas expressed in terms of instance memory (<code>{DBInstanceClassMemory/32768}</code> and friends), which is how a setting like <code>shared_buffers</code> follows you correctly when you resize the instance — overriding those with a fixed number is a common self-inflicted wound.</p>
+    <p>Parameters are one of two types, and this distinction is a standard interview question. <em>Dynamic</em> parameters apply as soon as you save them. <em>Static</em> parameters — the ones the engine reads only at process start, such as <code>shared_buffers</code> or <code>max_connections</code> on some engines — need an explicit reboot of the instance before they take effect, and the console will show the group as <code>pending-reboot</code> until you do. Option groups are the separate mechanism for engine <em>features</em> rather than settings: Oracle and SQL Server extras, MySQL audit plugins, and so on. Both changes should be sequenced with the weekly maintenance window, which is also when AWS applies minor version patches you have not applied yourself.</p>
+    <pre class="code-block" data-label="Shell"><code># create a custom group, change a dynamic parameter, then a static one
+aws rds create-db-parameter-group --db-parameter-group-name orders-pg16 \
+    --db-parameter-group-family postgres16 --description "orders service"
+
+aws rds modify-db-parameter-group --db-parameter-group-name orders-pg16 \
+    --parameters "ParameterName=log_min_duration_statement,ParameterValue=500,ApplyMethod=immediate" \
+                 "ParameterName=shared_preload_libraries,ParameterValue=pg_stat_statements,ApplyMethod=pending-reboot"
+
+aws rds reboot-db-instance --db-instance-identifier orders   # required for pending-reboot params</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithParamGroups.html" rel="noopener">Working with parameter groups — Amazon RDS User Guide (static vs dynamic, apply methods)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithOptionGroups.html" rel="noopener">Working with option groups — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_UpgradeDBInstance.Maintenance.html" rel="noopener">Maintaining a DB instance — Amazon RDS User Guide (maintenance window and pending changes)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/amazon-aurora-postgresql-parameters-part-1-memory-and-query-plan-management/" rel="noopener">Aurora PostgreSQL parameters, part 1: memory and query plan management — AWS Database Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7xPBpKPXGbU" rel="noopener">Amazon RDS Parameter Groups — production use case and DB performance — egain</a></li>
+    </ul>
+
+    <h3>Monitoring: CloudWatch, Enhanced Monitoring and Performance Insights</h3>
+    <p>There are three layers and interviewers like you to separate them. Plain <strong>CloudWatch metrics</strong> come from the hypervisor at one-minute granularity and cost nothing extra: CPU, <code>FreeableMemory</code>, <code>FreeStorageSpace</code>, <code>DatabaseConnections</code>, <code>ReadIOPS</code>/<code>WriteIOPS</code>, <code>ReplicaLag</code> and burst-balance metrics. <strong>Enhanced Monitoring</strong> installs an agent on the host and streams true operating-system metrics — per-process CPU and memory, load average, per-device I/O — to CloudWatch Logs at up to one-second granularity. The difference matters: hypervisor CPU and in-guest CPU disagree, and only Enhanced Monitoring shows you which process is eating the box.</p>
+    <p><strong>Performance Insights</strong> is the one that answers the question you actually have during an incident: <em>what is the database busy doing?</em> It samples the engine's active sessions and plots database load in units of average active sessions against your vCPU count, sliced by wait event, SQL statement, host and user. A load line above the vCPU line means sessions are queueing; the wait-event breakdown then tells you whether they are waiting on CPU, on locks, on I/O or on the log. Seven days of history is free on supported engines; longer retention is paid. Turn all three on before you need them — enabling Performance Insights during an outage gives you no history to compare against.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Monitoring.html" rel="noopener">Monitoring metrics in an Amazon RDS instance — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html" rel="noopener">Monitoring DB load with Performance Insights — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Monitoring.OS.html" rel="noopener">Monitoring OS metrics with Enhanced Monitoring — Amazon RDS User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YLIzUrXRzd0" rel="noopener">Integrated RDS Performance Monitoring in CloudWatch — Amazon Web Services</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DZdfCE6Yr1w" rel="noopener">RDS Monitoring: Performance Insights vs Enhanced Monitoring vs CloudWatch — CloudFolks HUB</a></li>
+    </ul>
+
+    <h3>Aurora: compute and storage pulled apart</h3>
+    <p>Aurora looks like MySQL or PostgreSQL to your driver and is nothing like them underneath. A conventional database instance owns its disk; an Aurora instance owns no disk at all. Instead the cluster writes to a shared, distributed storage service that spans three Availability Zones and keeps six copies of every data block, two per AZ, with quorum writes and reads. The engine ships redo log records rather than full data pages, which is why Aurora's write amplification is so much lower than a MySQL primary streaming a binlog to replicas. Storage grows automatically in increments up to 128 TiB, and repairs and rebalancing happen underneath without you noticing.</p>
+    <p>Because storage is shared, replicas are cheap and fast. Every reader in a cluster reads the same storage volume as the writer, so replica lag is measured in milliseconds rather than seconds, and adding a reader does not copy any data. A cluster gives you two endpoints that matter: the <em>cluster (writer) endpoint</em>, which always points at the current writer and follows a failover automatically, and the <em>reader endpoint</em>, which load-balances connections across the readers. Failover is fast — typically well under a minute — because a reader can take over the same storage rather than replaying a log. In Spring Boot the practical pattern is two datasources, writes to the cluster endpoint and read-only transactions to the reader endpoint.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html" rel="noopener">What is Amazon Aurora? — Amazon Aurora User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html" rel="noopener">Amazon Aurora storage and reliability — Aurora User Guide (six copies, three AZs)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.Endpoints.html" rel="noopener">Amazon Aurora connection management: cluster, reader and custom endpoints</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/database/amazon-aurora-under-the-hood-quorum-and-correlated-failure/" rel="noopener">Amazon Aurora under the hood: quorum and correlated failure — AWS Database Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sfZUQ6sFpxE" rel="noopener">Deep dive into Amazon Aurora and its innovations (DAT441) — AWS Events</a></li>
+    </ul>
+
+    <h3>Aurora Serverless v2, Global Database, and when plain RDS is the better buy</h3>
+    <p><strong>Serverless v2</strong> replaces fixed instance sizes with Aurora Capacity Units that scale up and down in fine increments, in place, in seconds, without dropping connections — which makes it genuinely useful for spiky or unpredictable workloads, dev and test fleets, and multi-tenant estates where most tenants are idle. <strong>Aurora Global Database</strong> replicates a cluster to secondary Regions using the storage layer rather than the engine, giving typical cross-Region lag around a second, low-latency local reads in each Region, and managed promotion of a secondary for disaster recovery with a much shorter RTO than promoting a cross-Region read replica by hand.</p>
+    <p>The honest counterweight: Aurora is not free and it is not always right. You pay a premium per instance-hour, you pay per million storage I/O requests on the standard configuration (a chatty, badly indexed workload can make that bill startling — Aurora I/O-Optimized exists precisely for that case), and you inherit a proprietary storage engine you cannot run locally or move off easily. For a steady, moderate workload that fits comfortably on one <code>db.r</code> instance with a Multi-AZ standby, plain RDS for PostgreSQL is usually cheaper, simpler, fully portable, and entirely sufficient. Choose Aurora when you actually need its read scaling, its failover speed, its storage elasticity or its global footprint — not because it is the newer logo on the console.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html" rel="noopener">Using Aurora Serverless v2 — Amazon Aurora User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html" rel="noopener">Amazon Aurora Global Database — Aurora User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Concepts.AuroraHighAvailability.html" rel="noopener">High availability for Amazon Aurora — Aurora User Guide (failover and replica tiers)</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/rds/aurora/" rel="noopener">Amazon Aurora — AWS product page (editions, I/O-Optimized, pricing model)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/aws-aurora-rds-java" rel="noopener">Guide to AWS Aurora RDS with Java — Baeldung</a></li>
+    </ul>
+
+    <h3>Wiring Spring Boot to RDS: datasource, pool and read routing</h3>
+    <p>From Spring's point of view RDS is just a JDBC URL, and that is the point — no AWS-specific driver is required for PostgreSQL or MySQL. The work is in the pool and the topology. Size the pool from the database's <code>max_connections</code> backwards, not from optimism: every pod multiplies its pool size, and a fleet of forty pods with a pool of fifty will exhaust a <code>db.m6g.large</code> long before it exhausts your patience. Where connection counts genuinely are the constraint — Lambda, or a large autoscaled fleet — <strong>RDS Proxy</strong> sits between the application and the database, multiplexes connections, and additionally shortens failover impact because it holds the client connections open while the backend moves.</p>
+    <p>To use read replicas you must route deliberately; nothing routes for you. The standard Spring pattern is a routing datasource that picks a read-only connection when the current transaction is marked <code>@Transactional(readOnly = true)</code> and the writer otherwise, usually wrapped in <code>LazyConnectionDataSourceProxy</code> so the choice happens after the transaction's read-only flag is known. Two rules go with it: never send a write down the replica datasource, and accept that a read-only transaction may see slightly stale data — anything that must read its own write immediately has to stay on the writer.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+DataSource routingDataSource(@Qualifier("writer") DataSource writer,
+                             @Qualifier("reader") DataSource reader) {
+    var routing = new AbstractRoutingDataSource() {
+        @Override protected Object determineCurrentLookupKey() {
+            return TransactionSynchronizationManager.isCurrentTransactionReadOnly()
+                    ? "reader" : "writer";     // reader endpoint vs cluster endpoint
+        }
+    };
+    routing.setTargetDataSources(Map.of("writer", writer, "reader", reader));
+    routing.setDefaultTargetDataSource(writer);
+    // lazy proxy: acquire the connection only after readOnly is known
+    return new LazyConnectionDataSourceProxy(routing);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/data/sql.html" rel="noopener">SQL databases — Spring Boot reference documentation (datasource and pool configuration)</a></li>
+      <li>[Official] <a href="https://docs.awspring.io/spring-cloud-aws/docs/3.4.0/reference/html/index.html" rel="noopener">Spring Cloud AWS — reference documentation (AWS integrations for Spring Boot 3)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html" rel="noopener">Using Amazon RDS Proxy — Amazon RDS User Guide (connection pooling and faster failover)</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/read-write-read-only-transaction-routing-spring/" rel="noopener">Read-write and read-only transaction routing with Spring — Vlad Mihalcea</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-aws-rds" rel="noopener">Spring Cloud AWS — RDS — Baeldung</a></li>
+    </ul>
+
+    <h3>Credentials without hardcoding: Secrets Manager, rotation and IAM database authentication</h3>
+    <p>A database password in <code>application.properties</code>, in a Docker image, or in a Git history is the single most common finding in an AWS security review. The default answer is <strong>AWS Secrets Manager</strong>: store the credential as a JSON secret, grant the application's IAM role permission to read exactly that secret ARN, and let the application fetch it at startup. Secrets Manager's value over a plain config store is <em>rotation</em> — it can run a Lambda on a schedule that changes the password in RDS and in the secret together, using the two-user or single-user strategy, so the credential your application holds is never more than a few days old. Spring Cloud AWS can load a secret directly into the environment, or the AWS <code>aws-secretsmanager-jdbc</code> driver wrapper can fetch and refresh it around the JDBC connection.</p>
+    <p><strong>SSM Parameter Store</strong> is the cheaper sibling: SecureString parameters are KMS-encrypted and fine for configuration and for secrets you rotate by hand, but it has no built-in rotation machinery. The strongest option is <strong>IAM database authentication</strong>, where there is no password at all: the application calls the RDS API for a short-lived authentication token (valid 15 minutes) signed with its IAM role and uses that as the JDBC password. Nothing durable to leak, access revoked by editing an IAM policy, and every connection attributable to a role — the trade-offs are a per-second connection-rate limit that makes it unsuitable for very chatty short-lived connections, and mandatory TLS. Whichever you choose, the rule is the same: the credential is issued to a role at runtime, never baked into an artefact.</p>
+    <pre class="code-block" data-label="Java"><code>// IAM database authentication: the "password" is a signed, short-lived token
+RdsUtilities utilities = RdsClient.create().utilities();
+String authToken = utilities.generateAuthenticationToken(b -&gt; b
+        .hostname("orders.abc123.ap-south-1.rds.amazonaws.com")
+        .port(5432)
+        .username("app_user")          // a DB user GRANTed rds_iam
+        .region(Region.AP_SOUTH_1));
+
+Properties props = new Properties();
+props.setProperty("user", "app_user");
+props.setProperty("password", authToken);   // regenerate per connection; expires quickly
+props.setProperty("sslmode", "verify-full"); // TLS is mandatory for IAM auth</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html" rel="noopener">What is AWS Secrets Manager? — AWS Secrets Manager User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotating-secrets.html" rel="noopener">Rotate secrets — AWS Secrets Manager User Guide (single-user and alternating-user strategies)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html" rel="noopener">IAM database authentication for MySQL and PostgreSQL — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html" rel="noopener">AWS Systems Manager Parameter Store — AWS Systems Manager User Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-integrate-aws-secrets-manager" rel="noopener">Integrate AWS Secrets Manager in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ePTNs3pqVvg" rel="noopener">Spring Boot: manage your credentials using AWS Secrets Manager and RDS — Java Techie</a></li>
+    </ul>
+
+    <h3>Network isolation and encryption in transit</h3>
+    <p>The other half of connecting securely is making the database unreachable by anyone who does not need it. Put the DB instance in a private DB subnet group spanning at least two Availability Zones, leave <code>PubliclyAccessible</code> off, and give it a security group whose only inbound rule is the database port <em>sourced from the application's security group</em> — not from a CIDR block, and certainly not from anywhere. Security-group-to-security-group references keep working as instances come and go, which CIDR rules do not. Administrative access then goes through a bastion or, better, Session Manager port forwarding, so no human path from the internet exists at all.</p>
+    <p>Encryption is two separate settings. At rest, KMS encryption must be chosen when the instance is created — you cannot turn it on later in place; the workaround is snapshot, copy the snapshot with encryption enabled, restore. In transit, RDS presents a certificate from an AWS regional CA, and it is your job to actually verify it: bundle the AWS root certificate in the application's truststore and set the driver to a verifying mode (<code>sslmode=verify-full</code> on PostgreSQL, <code>sslMode=VERIFY_IDENTITY</code> on MySQL). Anything weaker accepts an unverified peer, which defeats the point. You can also force it server-side with a parameter such as <code>rds.force_ssl</code>, and remember these CA certificates expire on a published schedule — rotating them is a planned maintenance task, not a surprise.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html" rel="noopener">Working with a DB instance in a VPC — Amazon RDS User Guide (subnet groups, public accessibility)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html" rel="noopener">Using SSL/TLS to encrypt a connection to a DB instance — Amazon RDS User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-secrets-manager.html" rel="noopener">Managing the master user password with AWS Secrets Manager — Amazon RDS User Guide</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html" rel="noopener">Security Pillar — AWS Well-Architected Framework</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zHXWH2ImwKM" rel="noopener">How do I use IAM authentication to connect to RDS for PostgreSQL or Aurora PostgreSQL? — Amazon Web Services</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-vpc.html">← VPC Networking</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="07-load-balancing-scaling.html">Load Balancing and Auto Scaling →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>RDS is the highest-yield AWS service in Indian product and service-company rounds — the Multi-AZ versus read replica question is close to guaranteed, and the follow-ups sort candidates who have operated a database from candidates who have only created one:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Amazon RDS, and what does AWS manage that you would otherwise do yourself?</summary>
+      <div class="answer"><p>A managed relational database service. AWS provisions and patches the host and engine, manages storage and its durability, takes automated backups, and performs failover in a Multi-AZ deployment. You keep schema design, indexing, query tuning, connection-pool sizing, user grants, retention policy and network placement. You lose host-level access — no SSH, no superuser, no editing config files; engine settings change only through parameter groups.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which database engines does RDS support?</summary>
+      <div class="answer"><p>PostgreSQL, MySQL, MariaDB, Oracle and SQL Server, plus Amazon Aurora in MySQL- and PostgreSQL-compatible editions. Aurora is compatible at the wire and SQL level but is a different storage architecture underneath, which is why it is usually discussed separately.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between Multi-AZ and a read replica?</summary>
+      <div class="answer"><p>Multi-AZ is for availability: a synchronous standby in a second AZ that you cannot read from, with automatic failover managed by AWS. Read replicas are for scaling reads: asynchronous, readable, multiple, optionally cross-Region, with visible lag, and promotion is a manual operation with no automatic failover. Different problems — most production systems run both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How long does an RDS Multi-AZ failover take, and does the connection string change?</summary>
+      <div class="answer"><p>Typically one to two minutes for a Multi-AZ DB instance, often under half a minute for a Multi-AZ DB cluster. The connection string does not change: the endpoint is a DNS name whose CNAME is repointed at the promoted standby. That is why you connect by hostname and never cache the resolved IP address.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Automated backups versus manual snapshots — what is the difference?</summary>
+      <div class="answer"><p>Automated backups run daily in a chosen window plus continuous transaction-log archiving, enabling point-in-time recovery within a retention period of one to thirty-five days; they are deleted with the instance. Manual snapshots are taken on demand, kept until you delete them, and can be copied cross-Region or shared with another account. Both are used together: snapshots for milestones and retention beyond the window, automated backups for "restore to the minute before the bad deploy".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Can you read from a Multi-AZ standby to offload reporting queries?</summary>
+      <div class="answer"><p>No — a classic trap. The Multi-AZ DB instance standby accepts no connections; it exists only to be promoted. If you want readable standbys you either add read replicas or move to a Multi-AZ DB cluster, which has one writer and two readers exposed through a reader endpoint.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your application restores a snapshot to recover from a bad migration. What actually happens?</summary>
+      <div class="answer"><p>A brand-new DB instance is created from the snapshot with a new endpoint — the restore is never in place. It comes up with default parameter and security groups unless you specify them, so you must reattach the custom parameter group, the right security group and the correct subnet group, verify the data, then repoint the application or rename the instances. Budget that whole sequence as your real RTO.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You changed a parameter in a parameter group and nothing happened. Why?</summary>
+      <div class="answer"><p>Almost certainly a static parameter, which the engine reads only at start-up — the group shows <code>pending-reboot</code> until you reboot the instance. Dynamic parameters apply immediately. The other common cause is editing the default parameter group, which is read-only: you must create a custom group, attach it to the instance (itself a change requiring care), and edit that.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you connect a Spring Boot application to RDS without a password in the config?</summary>
+      <div class="answer"><p>Give the compute an IAM role and fetch the credential at runtime: AWS Secrets Manager with automatic rotation (loaded via Spring Cloud AWS or the <code>aws-secretsmanager-jdbc</code> wrapper), or SSM Parameter Store SecureString for simpler cases. Stronger still is IAM database authentication, where the JDBC password is a short-lived signed token and no durable secret exists at all. In every case the credential is issued to a role at runtime and never baked into the image, the repository or the properties file.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which CloudWatch metrics would you alarm on for an RDS instance?</summary>
+      <div class="answer"><p><code>FreeStorageSpace</code> (the outage nobody sees coming), <code>CPUUtilization</code>, <code>FreeableMemory</code>, <code>DatabaseConnections</code> against <code>max_connections</code>, <code>ReadIOPS</code>/<code>WriteIOPS</code> and queue depth against the provisioned ceiling, <code>ReplicaLag</code> on every replica, and burst-balance metrics if you are on a burstable class or gp2. Add Performance Insights for DB load in average active sessions versus vCPU, and Enhanced Monitoring when you need true in-guest, per-process numbers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Aurora's storage layer differ from ordinary RDS storage?</summary>
+      <div class="answer"><p>Aurora separates compute from a shared distributed storage service: six copies of every block across three Availability Zones, quorum reads and writes, and the engine ships redo log records instead of full pages. Storage grows automatically and is shared by every instance in the cluster, so readers do not each hold a copy, replica lag drops to milliseconds, and failover is fast because a reader attaches to the same volume rather than replaying a log.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through exactly what a Spring Boot service experiences during a Multi-AZ failover, and what you must configure.</summary>
+      <div class="answer"><p>The endpoint's DNS CNAME is repointed; every pooled connection is severed and in-flight transactions roll back; requests fail for roughly a minute or two. Configure: short DNS caching in the JVM so the new address is picked up (never cache the IP), HikariCP <code>max-lifetime</code> and <code>keepalive-time</code> below any network idle timeout so dead connections are evicted rather than handed out, a short <code>connection-timeout</code> so threads fail fast instead of piling up, application-level retry for idempotent reads, and idempotency keys before retrying any write. Then actually rehearse it with a forced failover — an untested failover plan is an assumption.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design HA and DR for an order service: RPO near zero in-Region, RTO of an hour cross-Region. What do you pick?</summary>
+      <div class="answer"><p>In-Region: Multi-AZ (or a Multi-AZ DB cluster if the engine and version support it) gives synchronous replication, so RPO is effectively zero and failover is automatic within minutes. Cross-Region: either a cross-Region read replica promoted manually — asynchronous, so RPO is the replication lag and RTO includes promotion plus repointing — or, on Aurora, a Global Database with managed secondary promotion for a much tighter RTO. Layer automated backups with point-in-time recovery for logical corruption (a bad migration is not solved by replication, which faithfully replicates the mistake), and copy snapshots to the DR Region so the restore path exists there too.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A read replica's lag climbs to several minutes under load. Causes and fixes?</summary>
+      <div class="answer"><p>Replication is single-threaded apply on some engines, so a write-heavy primary can outrun it; long-running or conflicting queries on the replica block apply; the replica is a smaller instance class or has less IOPS than the primary; large DDL or bulk loads serialise on the replica. Fixes: size the replica at least as large as the primary, move long analytical queries to a dedicated replica, batch and throttle bulk writes, tune the engine's parallel-apply settings, and alarm on <code>ReplicaLag</code>. Architecturally, if lag is business-critical, either route only lag-tolerant reads to replicas or move to Aurora, whose shared storage keeps lag in the millisecond range.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When is plain RDS a better choice than Aurora?</summary>
+      <div class="answer"><p>When the workload is steady and fits comfortably on one instance with a standby: Aurora costs more per instance-hour and, on the standard configuration, bills per million storage I/O requests, which punishes chatty or poorly indexed workloads. Plain RDS also keeps you on a stock engine you can run locally, dump and move to another provider, and its feature set is closer to what your team already operates. Choose Aurora deliberately for read scaling, sub-minute failover, automatic storage growth, Serverless v2 elasticity or a global footprint — not by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you make an unencrypted production RDS instance encrypted at rest, and why is it awkward?</summary>
+      <div class="answer"><p>You cannot enable KMS encryption on an existing instance in place. The path is: take a snapshot, copy the snapshot with encryption enabled and a chosen KMS key, restore the encrypted copy as a new instance, then cut over — which means a maintenance window and an endpoint change (or a rename). Read replicas of an encrypted instance are encrypted, and cross-Region copies need a key in the destination Region. The lesson interviewers want is that encryption at rest is a create-time decision, so enable it on day one.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.rds.engines — Engines, instance classes, Multi-AZ vs read replicas, failover behaviour</li>
+      <li>aws.rds.connect — Backups and snapshots, parameter groups, Aurora overview, connecting Spring Boot securely with Secrets Manager</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AWS Load Balancing and Auto Scaling module: ALB vs NLB vs Gateway Load Balancer, listeners and rules, target groups and target types, health checks, cross-zone balancing, deregistration delay, sticky sessions, TLS with ACM and SNI, Auto Scaling groups, launch templates, target tracking and predictive scaling, warm-up, cooldown, warm pools, lifecycle hooks and termination policies — with verified resources and interview questions.">
+  <title>Load Balancing and Auto Scaling — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Load Balancing and Auto Scaling</h1>
+  <p class="standfirst">One server is a demo. Two services turn it into a system that survives both a dead instance at 3am and a traffic spike on Monday morning — a load balancer that stops sending traffic to what is broken, and an Auto Scaling group that grows and shrinks the fleet behind it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS track</a> → Load Balancing and Auto Scaling</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Elastic Load Balancing and EC2 Auto Scaling are the two halves of the same answer to "what happens when things go wrong or get busy?" The load balancer gives you one stable endpoint in front of many interchangeable servers, watches their health, and quietly stops routing to the ones that fail. Auto Scaling changes how many of those servers exist, on a schedule, on a metric, or on a forecast.</p>
+    <p>The first half of the module covers the ELB family — Application, Network and Gateway Load Balancers — and their mechanics: listeners and rules, target groups and target types, health checks, cross-zone behaviour, deregistration delay, sticky sessions and TLS termination with ACM. The second half covers Auto Scaling groups: launch templates, capacity bounds, health check types, the five kinds of scaling policy, and the timing settings (warm-up, cooldown, warm pools) that decide whether scaling actually arrives before your users do.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The Elastic Load Balancing family: ALB, NLB, Gateway — and the legacy Classic</h3>
+    <p>Elastic Load Balancing is a managed, regional service: you get a DNS name, AWS runs redundant load balancer nodes in each Availability Zone you enable, and those nodes scale themselves with traffic. It is not a box you size. Four types exist and the choice between the first two is the single most-asked question in this whole module: the <strong>Application Load Balancer</strong> works at layer 7 and understands HTTP, while the <strong>Network Load Balancer</strong> works at layer 4 and understands TCP, UDP and TLS flows. The <strong>Gateway Load Balancer</strong> is a different animal — it fronts a fleet of third-party virtual appliances (firewalls, IDS/IPS, deep packet inspection) and tunnels traffic to them over GENEVE, so it belongs in your vocabulary rather than your first architecture. The <strong>Classic Load Balancer</strong> is the 2009 original: still supported, no longer the answer, and AWS publishes a migration guide away from it.</p>
+    <p>Pick ALB when you are serving HTTP or HTTPS and want to route on the content of the request, terminate TLS, attach a WAF, or authenticate users. Pick NLB when you need raw throughput and the lowest possible latency, a static IP per Availability Zone, non-HTTP protocols, PrivateLink exposure, or the client's real source IP without relying on an <code>X-Forwarded-For</code> header. When someone insists on "both", note that an ALB can be registered as the target of an NLB — that is a supported pattern, not a hack.</p>
+    <table>
+      <caption>Choosing between the load balancer types</caption>
+      <thead>
+        <tr><th>Dimension</th><th>Application Load Balancer</th><th>Network Load Balancer</th><th>Gateway Load Balancer</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>OSI layer</td><td>7 — HTTP, HTTPS, gRPC, WebSocket</td><td>4 — TCP, UDP, TLS</td><td>3 gateway plus layer 4 tunnel</td></tr>
+        <tr><td>Routing decision</td><td>Path, host, HTTP header, query string, method, source IP</td><td>Flow hash over the connection tuple</td><td>Distributes flows across appliance targets</td></tr>
+        <tr><td>Latency</td><td>Milliseconds; parses every request</td><td>Ultra-low; designed for millions of requests per second</td><td>Adds a GENEVE encapsulation hop</td></tr>
+        <tr><td>Addressing</td><td>DNS name only; node IPs change</td><td>Static IP per Availability Zone, Elastic IP supported</td><td>Reached through a Gateway Load Balancer endpoint</td></tr>
+        <tr><td>Client source IP</td><td>Replaced; original arrives in <code>X-Forwarded-For</code></td><td>Preserved for instance and IP targets</td><td>Preserved inside the tunnel</td></tr>
+        <tr><td>TLS</td><td>Terminate with ACM, SNI, mutual TLS, redirect rules</td><td>TLS listener terminates; TCP passes through untouched</td><td>Not applicable</td></tr>
+        <tr><td>Signature extras</td><td>AWS WAF, Cognito and OIDC authentication, Lambda targets, weighted target groups</td><td>AWS PrivateLink, UDP, very long-lived connections</td><td>Third-party firewall and inspection fleets, GENEVE on port 6081</td></tr>
+        <tr><td>Cross-zone load balancing</td><td>On by default (can be disabled per target group)</td><td>Off by default</td><td>Off by default</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/what-is-load-balancing.html" rel="noopener">What is Elastic Load Balancing? — AWS Elastic Load Balancing User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html" rel="noopener">What is an Application Load Balancer? — AWS ALB User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html" rel="noopener">What is a Network Load Balancer? — AWS NLB User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/gateway/introduction.html" rel="noopener">What is a Gateway Load Balancer? — AWS GWLB User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/compare/the-difference-between-the-difference-between-application-network-and-gateway-load-balancing/" rel="noopener">Application, Network and Gateway load balancing compared — AWS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=qpHLRc4Qt1E" rel="noopener">AWS Elastic Load Balancing Introduction — Stephane Maarek</a></li>
+    </ul>
+
+    <h3>Listeners and rules: how an ALB decides where a request goes</h3>
+    <p>A <em>listener</em> is a protocol and port the load balancer accepts connections on — HTTP on 80, HTTPS on 443. Each listener owns an ordered list of <em>rules</em>, and each rule is a set of conditions plus an action. The rules are evaluated in priority order and the first match wins; the listener also has a default rule with no conditions, which is what catches everything that matched nothing else. This is the entire routing engine, and it is worth being able to draw it on a whiteboard.</p>
+    <p>Conditions are where layer 7 earns its keep: <code>path-pattern</code> sends <code>/api/*</code> to one target group and everything else to the static site, <code>host-header</code> puts several domains behind one load balancer, and there are conditions for HTTP headers, query strings, the request method and the source IP CIDR. Actions are richer than "forward": <code>redirect</code> (the standard HTTP-to-HTTPS move), <code>fixed-response</code> (a maintenance page with no backend at all), <code>authenticate-oidc</code> and <code>authenticate-cognito</code> (login enforced at the edge before your app sees the request), and <code>forward</code> to one or more target groups with weights — which is how you run a blue/green or canary release without touching DNS.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-listeners.html" rel="noopener">Listeners and rules for your Application Load Balancer — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-rules.html" rel="noopener">Listener rules — AWS ALB User Guide (priority and evaluation order)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/rule-condition-types.html" rel="noopener">Rule condition types — path, host, header, query, method, source IP</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/rule-action-types.html" rel="noopener">Rule action types — forward, redirect, fixed-response, authenticate</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0XMsnAgHXoo" rel="noopener">Route traffic to multiple target groups using listener rules — Tiny Technical Tutorials</a></li>
+    </ul>
+
+    <h3>Target groups: instance, IP and Lambda targets</h3>
+    <p>A target group is the routing destination: a named set of targets plus the health check configuration and the protocol and port used to reach them. It exists independently of any load balancer, which has two consequences people miss. First, the <em>same</em> target group can be referenced by rules on several listeners and even by more than one load balancer — you do not duplicate a fleet to serve it from two places. Second, a target group with no load balancer attached is perfectly legal and simply routes nothing, which is why "the load balancer returns 503" so often means "the target group is empty".</p>
+    <p>Three target types matter. <code>instance</code> registers EC2 instance IDs and is what an Auto Scaling group uses; the load balancer reaches them by primary private IP. <code>ip</code> registers addresses directly — the type you need for containers with awsvpc networking, for peered VPCs, and for on-premises servers reachable over Direct Connect or VPN. <code>lambda</code> lets an ALB invoke a function as the backend, which turns the load balancer into a cheap HTTP front door for serverless code without API Gateway. Weighted forwarding across two target groups is the mechanism behind ALB-driven canary deployments, and an NLB can even take an ALB as its target when you need a static IP in front of layer 7 routing.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html" rel="noopener">Target groups for your Application Load Balancer — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-target-group.html" rel="noopener">Create a target group — AWS ALB User Guide (target types explained)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/lambda-functions.html" rel="noopener">Use Lambda functions as targets of an Application Load Balancer — AWS</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/network/application-load-balancer-target.html" rel="noopener">Use an Application Load Balancer as a target of a Network Load Balancer — AWS</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/aws/new-application-load-balancer-simplifies-deployment-with-weighted-target-groups/" rel="noopener">Weighted target groups for blue/green and canary releases — AWS News Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=cuJTmBvFCS0" rel="noopener">AWS Application Load Balancer step-by-step tutorial — Rahul Wagh</a></li>
+    </ul>
+
+    <h3>Health checks: the setting that quietly decides your availability</h3>
+    <p>The load balancer probes every registered target on a path and port you choose and keeps a per-target verdict. A target that fails <code>UnhealthyThresholdCount</code> consecutive probes is marked unhealthy and <strong>removed from rotation</strong> — it keeps existing, it keeps costing money, it simply receives no new requests until it passes <code>HealthyThresholdCount</code> probes again. ALB defaults are a probe every 30 seconds with a 5-second timeout, two failures to eject and five successes to return, with a success matcher of HTTP 200. Those numbers, not your code, decide how long a broken instance keeps serving errors.</p>
+    <p>This is a two-sided failure and both sides are outages. A check that is <em>too lax</em> — a path that returns 200 from the web server without touching the application, or a threshold so high that ejection takes minutes — sends real customer traffic to a process that cannot serve it. A check that is <em>too strict</em> is worse and far less obvious: if the health endpoint calls the database, then a slow database fails every instance at once, the load balancer ejects the entire fleet, and a degraded system becomes a total outage. That is why AWS distinguishes shallow from deep health checks, and why ELB has a fail-open behaviour where a load balancer with no healthy targets in a zone routes to all of them rather than to none. Configure target group health thresholds (minimum healthy count or percentage) deliberately rather than accepting the default.</p>
+    <pre class="code-block" data-label="Bash"><code>aws elbv2 modify-target-group \
+  --target-group-arn "$TG_ARN" \
+  --health-check-path /healthz \
+  --health-check-interval-seconds 15 \
+  --health-check-timeout-seconds 5 \
+  --healthy-threshold-count 2 \
+  --unhealthy-threshold-count 3 \
+  --matcher HttpCode=200
+
+# Why is nothing being served? Ask the target group, not the app.
+aws elbv2 describe-target-health --target-group-arn "$TG_ARN" \
+  --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason]'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html" rel="noopener">Health checks for Application Load Balancer target groups — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/network/target-group-health-checks.html" rel="noopener">Health checks for Network Load Balancer target groups — AWS documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/implementing-health-checks/" rel="noopener">Implementing health checks — Amazon Builders' Library (shallow vs deep, fail-open)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/networking-and-content-delivery/using-load-balancer-target-group-health-thresholds-to-improve-availability/" rel="noopener">Using target group health thresholds to improve availability — AWS Networking Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wjc_ka1W54g" rel="noopener">AWS Elastic Load Balancing — how it works — Digital Cloud Training</a></li>
+    </ul>
+
+    <h3>Cross-zone balancing, deregistration delay and sticky sessions</h3>
+    <p>ELB runs nodes in every Availability Zone you enable, and DNS hands clients an address for one of them. <em>Cross-zone load balancing</em> decides what that node does next: with it on, each node spreads requests across healthy targets in <em>all</em> zones; with it off, a node only talks to targets in its own zone. The default differs by type — on for ALB, off for NLB — and that difference is a real interview question with a real production consequence. Uneven target counts per zone plus cross-zone off equals uneven load; cross-zone on evens the load but adds a small inter-AZ hop and, historically, inter-AZ data transfer cost. Turning it off is also what makes an Availability Zone genuinely isolated, which is the prerequisite for zonal shift to evacuate a bad zone.</p>
+    <p><em>Deregistration delay</em>, also called connection draining, is the grace period ELB gives in-flight requests when a target is removed — default 300 seconds. During draining the target receives no new requests but existing ones are allowed to finish, so a deploy or a scale-in does not truncate someone's upload. Set it to roughly your longest legitimate request rather than leaving five minutes on an endpoint that answers in 200 milliseconds, because every scale-in and every deployment waits for it. <em>Sticky sessions</em> pin a client to one target using a load balancer-generated cookie (<code>AWSALB</code>) or your own application cookie. They work, and you should still treat needing them as a design smell: sticky sessions defeat even load distribution, create hot targets, and turn every instance replacement into lost user state. The better answer is stateless instances with session state in ElastiCache or a database — then scale-in, deploys and instance failure all stop being user-visible events.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/how-elastic-load-balancing-works.html" rel="noopener">How Elastic Load Balancing works — AWS (nodes, zones and cross-zone behaviour)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html" rel="noopener">Target group attributes — deregistration delay, stickiness, slow start — AWS</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/networking-and-content-delivery/using-cross-zone-load-balancing-with-zonal-shift/" rel="noopener">Using cross-zone load balancing with zonal shift — AWS Networking Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes-cluster-sticky-session" rel="noopener">Sticky sessions and their trade-offs — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=d8v-TiL_e1U" rel="noopener">Sticky sessions on an Application Load Balancer — Gokce DB</a></li>
+    </ul>
+
+    <h3>TLS termination: ACM certificates, SNI, security policies and the redirect rule</h3>
+    <p>Terminating TLS at the load balancer is the normal pattern on AWS, and AWS Certificate Manager is what makes it painless: a public certificate issued by ACM is free, validated by DNS, and <strong>renewed automatically</strong> as long as the validation record stays in Route 53. That last property is the entire argument — the classic "certificate expired over the weekend" incident stops existing. ACM certificates cannot be exported for public use; they attach to integrated services such as ELB and CloudFront, so if you need the private key on an instance you are buying a certificate elsewhere.</p>
+    <p>An HTTPS listener carries a default certificate plus an optional list of additional ones, and the load balancer uses <em>Server Name Indication</em> to pick the right certificate per connection from the hostname the client sent — that is how one ALB serves dozens of domains on port 443. The listener also carries a <em>security policy</em>, which is the negotiated set of TLS protocol versions and ciphers; choosing one that still allows TLS 1.0 is a common audit finding, so pick a current policy deliberately. Finally, do not solve HTTP-to-HTTPS in your application. Give the port 80 listener a single default rule with a <code>redirect</code> action to <code>HTTPS:443</code> returning 301 — no backend is involved, so the redirect survives even when every target is unhealthy.</p>
+    <pre class="code-block" data-label="Bash"><code># Port 80 listener whose only job is to send everyone to TLS
+aws elbv2 create-listener --load-balancer-arn "$LB_ARN" \
+  --protocol HTTP --port 80 \
+  --default-actions 'Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}'
+
+# Extra SNI certificates on the HTTPS listener
+aws elbv2 add-listener-certificates --listener-arn "$HTTPS_LISTENER_ARN" \
+  --certificates CertificateArn="$ACM_ARN_SECOND_DOMAIN"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-https-listener.html" rel="noopener">Create an HTTPS listener for your Application Load Balancer — AWS</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/https-listener-certificates.html" rel="noopener">SSL certificates and SNI for an HTTPS listener — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/elasticloadbalancing/latest/application/describe-ssl-policies.html" rel="noopener">Security policies for HTTPS listeners — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/acm/latest/userguide/acm-overview.html" rel="noopener">What is AWS Certificate Manager? — ACM User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=E5TkqBIB4fY" rel="noopener">How can I redirect HTTP requests to HTTPS using an Application Load Balancer? — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Auto Scaling groups and launch templates</h3>
+    <p>An Auto Scaling group is a declaration of intent: "keep this many instances of this shape running across these subnets." It owns three numbers — <code>MinSize</code>, <code>MaxSize</code> and <code>DesiredCapacity</code> — and it does whatever is needed to hold desired capacity between the bounds. Minimum is your floor during a quiet night and also your protection against an over-eager scale-in policy; maximum is your blast-radius and bill cap, and it is the number that silently caps you during a genuine traffic event, so set it from a capacity plan rather than from a default. Even with no scaling policies at all, an ASG is worth having for one instance: when that instance fails its health check the group terminates it and launches a replacement, which is self-healing you did not have to write.</p>
+    <p>The shape of the instances comes from a <strong>launch template</strong>: AMI, instance type, key pair, security groups, IAM instance profile, block device mappings, user data, tags. Launch templates are <em>versioned</em> — you create a new version and point the group at it, which gives you a clean rollback and a natural fit with instance refresh — and they support features launch configurations never will, including mixed instance types, Spot and On-Demand blends, and attribute-based instance selection. <strong>Launch configurations are legacy</strong>: immutable, unversioned, unable to express modern options, and AWS's own guidance is to migrate off them. If an interviewer asks about launch configurations, saying "they are the deprecated predecessor and here is why templates replaced them" is the answer they want.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html" rel="noopener">What is Amazon EC2 Auto Scaling? — AWS Auto Scaling User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-groups.html" rel="noopener">Auto Scaling groups — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/launch-templates.html" rel="noopener">Launch templates for Auto Scaling groups — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/launch-configurations.html" rel="noopener">Launch configurations — AWS documentation (the legacy option and migration advice)</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_adapt_to_changes_autoscale_adapt.html" rel="noopener">REL07-BP01 Use automation when obtaining or scaling resources — Well-Architected Reliability Pillar</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=km1EgYWKNf4" rel="noopener">EC2 Auto Scaling, launch configurations and templates — Digital Cloud Training</a></li>
+    </ul>
+
+    <h3>Across Availability Zones, health check types, and registering into the target group</h3>
+    <p>Give the group subnets in at least two — preferably three — Availability Zones and it will spread instances evenly across them, launching in the zone with the fewest instances and rebalancing when a zone becomes unbalanced (after a zone outage recovers, or after you add a subnet). Rebalancing launches the replacement <em>before</em> terminating the surplus instance, so capacity never dips below desired during the shuffle. This is where an ASG earns its reliability reputation: multi-AZ spread plus automatic replacement is <em>static stability</em> in practice — the system keeps serving through a zone failure using capacity that already exists, without needing a control-plane call to succeed at the worst possible moment.</p>
+    <p>The group's <strong>health check type</strong> is the setting people forget and then debug for a day. The default, <code>EC2</code>, only watches EC2 status checks — the hypervisor and the network reachability. An instance whose JVM has crashed passes EC2 status checks forever. Enable the <code>ELB</code> health check as well and the group inherits the target group's verdict, so an instance the load balancer has ejected also gets terminated and replaced. Pair that with a <em>health check grace period</em> (default 300 seconds) long enough for your app to boot, or the group will kill each new instance just before it becomes ready and loop forever. Attaching the target group to the ASG is what wires the two services together: the group registers every instance it launches and deregisters every instance it terminates, so you never touch the target group by hand.</p>
+    <pre class="code-block" data-label="Bash"><code>aws autoscaling create-auto-scaling-group \
+  --auto-scaling-group-name web-asg \
+  --launch-template LaunchTemplateName=web-lt,Version='$Latest' \
+  --min-size 2 --max-size 10 --desired-capacity 2 \
+  --vpc-zone-identifier "subnet-aaa,subnet-bbb,subnet-ccc" \
+  --target-group-arns "$TG_ARN" \
+  --health-check-type ELB \
+  --health-check-grace-period 180 \
+  --default-instance-warmup 180</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-availability-zone-balanced.html" rel="noopener">Availability Zone distribution and rebalancing — AWS Auto Scaling documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-health-checks.html" rel="noopener">Health checks for instances in an Auto Scaling group — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-check-grace-period.html" rel="noopener">Set the health check grace period — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/attach-load-balancer-asg.html" rel="noopener">Attach an Elastic Load Balancing target group to your Auto Scaling group — AWS</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/static-stability-using-availability-zones/" rel="noopener">Static stability using Availability Zones — Amazon Builders' Library</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AmQeeB4ygZc" rel="noopener">AWS Auto Scaling groups and load balancers — Sam Meech-Ward</a></li>
+    </ul>
+
+    <h3>Scaling policies: target tracking, step, simple, scheduled and predictive</h3>
+    <p><strong>Target tracking</strong> is the one you should reach for by default. You name a metric and a target value — "keep average CPU utilisation at 50 percent" or, far better for a web tier, "keep <code>ALBRequestCountPerTarget</code> at 1000" — and Auto Scaling creates and manages the CloudWatch alarms itself, adding and removing instances to hold the number. It deliberately scales out aggressively and scales in gently, which is the correct asymmetry: being briefly over-provisioned costs money, being under-provisioned costs customers. The metric must scale proportionally with capacity, which is why a request-count or per-target latency metric usually beats CPU, and why tracking something like total queue depth without dividing by instance count produces a group that oscillates.</p>
+    <p><strong>Step scaling</strong> gives you explicit control: CloudWatch alarm breaches by this much, add that many instances; breaches further, add more. Use it when the response needs to be non-linear or when you want a different reaction to "slightly busy" versus "on fire". <strong>Simple scaling</strong> is the original mechanism — one adjustment, then a mandatory cooldown before anything else can happen — and AWS now recommends step or target tracking instead. <strong>Scheduled scaling</strong> handles the patterns you already know: the batch window at midnight, the 9am login surge, the Diwali or end-of-quarter sale. It costs nothing to combine with dynamic scaling and it is the most under-used policy in practice. <strong>Predictive scaling</strong> is the machine-learning one: it analyses at least 24 hours of history (14 days for a good model), forecasts the next 48 hours, and provisions capacity <em>ahead</em> of the curve. Run it in forecast-only mode first, then pair it with target tracking — predictive handles the daily shape, dynamic handles the surprises. When several policies are active, each computes a desired capacity independently and the largest wins, so they cannot fight each other downwards.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/scaling-overview.html" rel="noopener">Choose your scaling method — AWS Auto Scaling documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-target-tracking.html" rel="noopener">Target tracking scaling policies — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-simple-step.html" rel="noopener">Step and simple scaling policies — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-scheduled-scaling.html" rel="noopener">Scheduled scaling — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-predictive-scaling.html" rel="noopener">Predictive scaling for Amazon EC2 Auto Scaling — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yqYxgH259w8" rel="noopener">Auto scale EC2 instances with a target tracking policy — Gokce DB</a></li>
+    </ul>
+
+    <h3>Warm-up, cooldown, and the honest limits of reactive scaling</h3>
+    <p>Two timers stop a scaling policy from thrashing. <strong>Instance warm-up</strong> tells Auto Scaling how long a newly launched instance takes to start contributing, and until that time passes the instance is excluded from the group's aggregated metrics. Without it, a new instance reports near-zero CPU while it is still booting, drags the average down, and the policy either scales in immediately or launches more instances because the ones it just launched have not helped yet. Set <code>DefaultInstanceWarmup</code> to your real time-to-ready. <strong>Cooldown</strong> (default 300 seconds) is the older, blunter instrument: a pause after a simple scaling activity before another can start. Target tracking and step scaling use warm-up rather than cooldown, which is one reason to prefer them.</p>
+    <p>Now the honest part, and the answer that makes a senior candidate stand out: <em>reactive scaling is always late.</em> The chain is metric collection, alarm evaluation, policy decision, instance launch, boot, application start, health check pass, target registration. If your AMI takes five minutes to become useful, you are five-plus minutes behind the traffic that triggered the scale-out — and a spike sharper than that is served by whatever capacity you already had. There are only four real answers, and they are all about shrinking or removing that lag: bake a golden AMI so boot is seconds not minutes; keep a <strong>warm pool</strong> of pre-initialised stopped or hibernated instances that the group can resume almost instantly; move to containers or Lambda where a new unit starts in seconds; or stop being reactive and use scheduled and predictive scaling to be early on purpose. Over-provisioning as a deliberate headroom policy is a legitimate fifth answer, and cheaper than an outage.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-default-instance-warmup.html" rel="noopener">Set the default instance warmup — AWS Auto Scaling documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-scaling-cooldowns.html" rel="noopener">Scaling cooldowns for Amazon EC2 Auto Scaling — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-warm-pools.html" rel="noopener">Warm pools for Amazon EC2 Auto Scaling — AWS documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/faster-scaling-with-amazon-ec2-auto-scaling-target-tracking/" rel="noopener">Faster scaling with EC2 Auto Scaling target tracking — AWS Compute Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2021/05/aws-warm-pools/" rel="noopener">AWS launches EC2 Auto Scaling warm pools — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xQeGrgQJJDc" rel="noopener">AWS Auto Scaling deep dive — Digital Cloud Training</a></li>
+    </ul>
+
+    <h3>Lifecycle hooks and termination policies</h3>
+    <p>By default an instance goes from launched straight to InService, and from a scale-in decision straight to gone. <strong>Lifecycle hooks</strong> insert a pause at either end — <code>Pending:Wait</code> before an instance joins, <code>Terminating:Wait</code> before it disappears — and hold it there until you call <code>complete-lifecycle-action</code> or the heartbeat timeout expires (default one hour, up to 48 hours). The launch hook is for bootstrapping that must finish before traffic arrives: pull configuration, warm a cache, register with a discovery service. The termination hook is the one that saves you from data loss: drain the queue consumer cleanly, flush logs off the instance, deregister from anything the ASG does not know about. Hooks are usually wired to EventBridge and a Lambda function rather than polled.</p>
+    <p><strong>Termination policies</strong> decide which instance dies when the group scales in. The default policy is a sequence, and being able to recite the shape of it is a good interview answer: first pick the Availability Zone with the most instances so the spread stays even, then apply the allocation strategy for mixed-instance groups, then prefer instances using the oldest launch template or configuration, then the one closest to the next billing hour, and finally choose at random. You can override with <code>OldestInstance</code>, <code>NewestInstance</code> and friends, or supply a Lambda function for a fully custom rule — "never terminate an instance still processing a job". For anything short-lived, instance <em>scale-in protection</em> is the simpler tool. Whichever you use, remember the interaction with the load balancer: on scale-in the ASG deregisters the instance first, the target group's deregistration delay lets in-flight requests finish, and only then does the instance terminate — so graceful shutdown is a property of both settings agreeing with each other.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-lifecycle.html" rel="noopener">Amazon EC2 Auto Scaling instance lifecycle — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/lifecycle-hooks.html" rel="noopener">Lifecycle hooks for Auto Scaling groups — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-termination-policies.html" rel="noopener">Configure termination policies for Amazon EC2 Auto Scaling — AWS</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/autoscaling/ec2/userguide/gracefully-handle-instance-termination.html" rel="noopener">Design for graceful instance termination — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RKQ64BuZB9E" rel="noopener">Getting the most out of AWS Auto Scaling — AWS Events</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-rds.html">← RDS and Managed Databases</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="08-containers-serverless.html">Containers and Serverless →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Load balancing and auto scaling are the backbone of the "design a highly available web application on AWS" round that both Indian service companies and product companies open with — ALB versus NLB is close to guaranteed, and the follow-ups separate people who have run this in production from people who have watched a video about it:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> ALB vs NLB — what is the difference and when do you choose each?</summary>
+      <div class="answer"><p>ALB is layer 7: it parses HTTP, so it can route on path, host, header, query string, method or source IP, terminate TLS with ACM, support WebSocket and gRPC, invoke Lambda targets, authenticate with Cognito or OIDC, and sit behind AWS WAF. NLB is layer 4: it forwards TCP, UDP and TLS flows with ultra-low latency at very high throughput, gives you a static IP per Availability Zone (Elastic IP if you want), preserves the client source IP, and supports PrivateLink. Choose ALB for HTTP/HTTPS applications that need content-based routing — which is most web workloads. Choose NLB for non-HTTP protocols, extreme performance, static IP requirements, or PrivateLink exposure. Gateway Load Balancer is the third type and is for third-party inspection appliances; Classic Load Balancer is legacy.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a target group and how does it relate to a listener?</summary>
+      <div class="answer"><p>A target group is a named set of targets plus the health check settings and the protocol/port used to reach them. A listener is a protocol and port the load balancer accepts connections on, with an ordered list of rules; each rule's forward action points at one or more target groups. Target groups exist independently of load balancers, so the same target group can be referenced by multiple listeners and even by more than one load balancer.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are the target types, and which one do you use for containers?</summary>
+      <div class="answer"><p>Three: <code>instance</code> (EC2 instance IDs — what an Auto Scaling group registers), <code>ip</code> (raw IP addresses, needed for ECS tasks with awsvpc networking, peered VPCs, and on-premises servers over Direct Connect or VPN), and <code>lambda</code> (an ALB invoking a function directly). Containers with their own ENI use the <code>ip</code> target type.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How does an Auto Scaling group know how many instances to run?</summary>
+      <div class="answer"><p>Through minimum, maximum and desired capacity. The group works to hold desired capacity, never going below minimum or above maximum. Scaling policies change desired capacity; the group launches or terminates instances to match. Even with no policies, the group replaces instances that fail their health checks, so the count stays at desired.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Launch template vs launch configuration?</summary>
+      <div class="answer"><p>Launch configurations are the legacy, immutable, unversioned option that AWS no longer adds features to and recommends migrating away from. Launch templates are versioned (so you can roll forward and back cleanly, and pair them with instance refresh) and support modern capabilities launch configurations cannot express — mixed instance types, blended Spot and On-Demand purchasing, attribute-based instance type selection, and newer instance settings. Always use launch templates for new work.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What exactly happens when a target fails its health check?</summary>
+      <div class="answer"><p>After <code>UnhealthyThresholdCount</code> consecutive failed probes the load balancer marks the target unhealthy and stops sending it new requests — it is removed from rotation but not stopped or terminated by ELB. If the Auto Scaling group's health check type is set to ELB, the group inherits that verdict, terminates the instance and launches a replacement. If the health check type is left at the default EC2, the group only watches EC2 status checks and will happily keep a crashed application running forever.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Your health check hits an endpoint that queries the database. Critique that.</summary>
+      <div class="answer"><p>It couples every instance's health to a shared dependency, so one slow database fails all targets simultaneously, the load balancer ejects the whole fleet, and a degraded system becomes a complete outage — plus the Auto Scaling group may start replacing perfectly good instances. Use a shallow liveness check on the load balancer path (process up, can serve a response) and keep deep dependency checks in a separate diagnostic endpoint used by monitoring and alerting rather than by routing decisions. The mirror-image mistake — a check so shallow or so lax that a broken app still passes — is equally real, which is why threshold and interval tuning is a deliberate exercise, not a default.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is cross-zone load balancing, and how does the default differ between ALB and NLB?</summary>
+      <div class="answer"><p>With cross-zone on, each load balancer node distributes requests to healthy targets in every enabled Availability Zone; with it off, a node only routes to targets in its own zone. It is on by default for ALB (and can be disabled per target group) and off by default for NLB. The consequence: with an NLB and uneven target counts per zone, load is uneven, because DNS spreads clients roughly evenly across zones regardless of how many targets each zone holds. Turning cross-zone off is also what makes zones genuinely independent, which is what zonal shift relies on to evacuate a bad zone.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is deregistration delay and what breaks if you get it wrong?</summary>
+      <div class="answer"><p>Also called connection draining: the period (default 300 seconds) during which a deregistering target receives no new requests but is allowed to finish in-flight ones. Too short and you truncate long uploads or slow reports during deploys and scale-in. Too long and every scale-in and every deployment stalls for the full window even though requests finish in milliseconds. Set it to a little more than your longest legitimate request.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Sticky sessions — how do they work on an ALB, and should you use them?</summary>
+      <div class="answer"><p>Stickiness is enabled on the target group and pins a client to one target using either a load balancer-generated cookie (<code>AWSALB</code>) or a cookie your application names. They work, but treat needing them as a design smell: they defeat even distribution, create hot targets, and make every instance replacement lose user state — which is exactly what auto scaling does routinely. The better answer is stateless instances with session state in ElastiCache, DynamoDB or a signed token, after which scale-in, deploys and failures stop being user-visible.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you serve several domains on one HTTPS listener?</summary>
+      <div class="answer"><p>Attach a default certificate plus additional certificates to the listener; the load balancer uses Server Name Indication to select the right one per connection from the hostname the client sends. Then use host-header listener rules to route each domain to its own target group. Issue the certificates in ACM with DNS validation so they renew automatically, and add a port 80 listener whose default action is a 301 redirect to HTTPS.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Which scaling policy would you reach for first, and why not CPU?</summary>
+      <div class="answer"><p>Target tracking, because it manages its own CloudWatch alarms, scales out aggressively and in gently, and needs only one number from you. CPU is a poor default metric for a web tier because it often does not move proportionally with load — an I/O-bound service can be saturated at 30 percent CPU. <code>ALBRequestCountPerTarget</code> or a per-target latency metric tracks actual demand per instance and is usually the better choice. The metric must be proportional to capacity: tracking a total (like whole-queue depth) rather than a per-instance value makes the group oscillate.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Compare target tracking, step, simple, scheduled and predictive scaling.</summary>
+      <div class="answer"><p>Target tracking: name a metric and a target value, AWS manages the alarms — the sensible default. Step scaling: explicit step adjustments per alarm-breach magnitude, for non-linear responses. Simple scaling: one adjustment then a mandatory cooldown; the original mechanism, now superseded. Scheduled scaling: capacity changes at known times — batch windows, business-hours ramps, sale events. Predictive scaling: machine learning over at least 24 hours of history (14 days for a good model) forecasting the next 48 hours and provisioning ahead of demand; run it forecast-only first, then pair with target tracking. When multiple policies are active each computes a desired capacity and the maximum wins.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your traffic spikes in 90 seconds but instances take five minutes to boot. What do you do?</summary>
+      <div class="answer"><p>Accept first that reactive scaling cannot win that race — metric collection, alarm evaluation, launch, boot, health check and registration all cost time, so you are structurally late. The fixes are all about removing or hiding that lag: bake a golden AMI so startup is seconds rather than minutes; keep a warm pool of pre-initialised stopped or hibernated instances the group resumes almost instantly; move the workload to containers on ECS/Fargate or to Lambda where a unit starts in seconds; use scheduled and predictive scaling to be early on purpose; and carry deliberate headroom via a higher minimum capacity. Also make sure a burst does not become an outage — a queue in front, or load shedding, buys time while capacity arrives.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Instance warm-up vs cooldown — what does each actually prevent?</summary>
+      <div class="answer"><p>Warm-up excludes a newly launched instance from the group's aggregated metrics until it is genuinely contributing, which stops a booting instance's near-zero utilisation from dragging the average down and provoking either an immediate scale-in or another unnecessary scale-out. Cooldown is a blunt pause after a simple scaling activity before another can begin. Target tracking and step scaling use warm-up, not cooldown; simple scaling uses cooldown. Set <code>DefaultInstanceWarmup</code> to your real time-to-ready and prefer step or target tracking.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Walk through what happens end to end when an ASG scales in one instance behind an ALB.</summary>
+      <div class="answer"><p>The policy lowers desired capacity. The termination policy picks a victim — by default balancing across Availability Zones first, then allocation strategy, then oldest launch template or configuration, then closest to the next billing hour, then random. If a <code>Terminating:Wait</code> lifecycle hook exists the instance pauses there until you call <code>complete-lifecycle-action</code> or the heartbeat expires, which is where you drain queue consumers and flush logs. The ASG deregisters the instance from the target group; the load balancer stops sending new requests and honours the deregistration delay so in-flight requests complete. Then the instance terminates. Graceful shutdown depends on the hook timeout, the deregistration delay and your app's own shutdown handling all agreeing.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> An ALB returns 503 with no healthy targets, but the instances are running fine. Where do you look?</summary>
+      <div class="answer"><p>503 from an ALB means it had nowhere to forward. Check <code>describe-target-health</code> for the reason code. The usual causes: the target group is empty because the ASG was never attached; the security group on the instances does not allow the health check port from the load balancer's security group; the health check path or success matcher is wrong (an app that returns 302 to a login page against a matcher of 200); the app listens on a different port than the target group's; the health check grace period is shorter than boot time so instances are killed before they pass; or the subnets have no route back. Also confirm the listener rule actually forwards to the target group you are inspecting.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How would you do a canary or blue/green release using only ELB and Auto Scaling?</summary>
+      <div class="answer"><p>Create a second target group and a second Auto Scaling group running the new launch template version, then use a weighted forward action on the listener rule to send a small percentage — five, then twenty-five, then a hundred — to the new target group while watching per-target-group CloudWatch metrics and error rates. Rollback is a weight change, which takes effect immediately and needs no DNS propagation. The alternative within one group is an instance refresh with a minimum healthy percentage and checkpoints, which replaces instances in controlled batches with automatic rollback; use weighted target groups when you want independent fleets and instant reversal, instance refresh when you simply want the fleet moved to a new AMI safely.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.elb.alb — ALB vs NLB, target groups, health checks, path and host routing, listeners and TLS</li>
+      <li>aws.asg.scale — Auto Scaling groups, launch templates, scaling policies, warm-up and cooldown</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

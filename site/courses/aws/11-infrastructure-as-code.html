@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="AWS Infrastructure as Code module: CloudFormation template anatomy, intrinsic functions, stacks, change sets, drift and StackSets, AWS CDK constructs, and Terraform in depth — state, remote backends and locking, providers, modules and workspaces — plus an honest CloudFormation vs Terraform comparison, verified resources and interview questions.">
+  <title>Infrastructure as Code on AWS — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: Infrastructure as Code</h1>
+  <p class="standfirst">Clicking through the console produces infrastructure nobody can review, nobody can roll back, and nobody can recreate in another account. Writing it down as code fixes all three — this module covers the two tools that do it on AWS.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS track</a> → Infrastructure as Code</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything in the previous ten modules — the VPC, the security groups, the load balancer, the RDS instance, the ECS service — was created by clicking. That works exactly once. It cannot be code-reviewed, it leaves no history of who changed what and why, it cannot be reproduced in a staging account without a human repeating the clicks from memory, and when a change breaks production there is nothing to revert to. Infrastructure as code turns the whole estate into text files that live in Git alongside the application.</p>
+    <p>Two tools dominate on AWS. <strong>CloudFormation</strong> is the AWS-native service: you hand it a template, it works out the dependency graph, creates the resources, and remembers the result as a <em>stack</em>. <strong>Terraform</strong> is HashiCorp's multi-cloud tool and is what most teams actually run in production, largely because of its <code>plan</code> step. This module covers both properly, plus the AWS CDK as the "write it in a real programming language" option, and finishes with an honest comparison and the licence split that produced OpenTofu.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The principles: declarative desired state, review, repeatability and drift</h3>
+    <p>Infrastructure as code rests on four ideas. First, <em>declarative desired state</em>: you describe what the environment should look like, not the sequence of API calls to get there, and the tool computes the difference between the description and reality. That is why the same file can create an environment and later update it. Second, <em>version control</em>: infrastructure changes arrive as pull requests, get reviewed by a second pair of eyes, carry a commit message explaining why, and can be reverted with the same mechanics as application code. Third, <em>repeatability</em>: the same definition, parameterised, produces dev, staging and production, so "it works in staging" starts to mean something.</p>
+    <p>Fourth, and the one that determines whether the whole discipline holds, is <em>drift</em>. Drift is any difference between what the code says and what actually exists in the account, and it is almost always created by a human fixing something urgently in the console at two in the morning. Once drift exists, the code is a lie: the next deployment either silently reverts the emergency fix or fails in a confusing way. The cure is cultural before it is technical — nobody changes production by hand, breakglass access is audited, and detected drift is either reverted or promoted into the code within the day.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://aws.amazon.com/what-is/iac/" rel="noopener">What is Infrastructure as Code? — AWS</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/whitepapers/latest/introduction-devops-aws/infrastructure-as-code.html" rel="noopener">Infrastructure as code — Introduction to DevOps on AWS whitepaper</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/intro" rel="noopener">What is Terraform? — HashiCorp developer docs (the case for declarative infrastructure)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/InfrastructureAsCode.html" rel="noopener">InfrastructureAsCode — Martin Fowler bliki</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7xngnjfIlK4" rel="noopener">Complete Terraform Course — From Beginner to Pro (Learn Infrastructure as Code) — DevOps Directive</a></li>
+    </ul>
+
+    <h3>CloudFormation templates: anatomy and intrinsic functions</h3>
+    <p>A CloudFormation template is a YAML or JSON document with a fixed set of top-level sections. <code>AWSTemplateFormatVersion</code> is a legacy version stamp (there has only ever been one value). <code>Parameters</code> are the inputs a caller supplies at deploy time, with types, defaults, allowed values and constraints that AWS validates before anything is created. <code>Mappings</code> are static lookup tables — the classic use is region-to-AMI. <code>Conditions</code> are named boolean expressions you attach to resources or properties so one template can serve dev and prod. <code>Resources</code> is the only mandatory section and holds the actual infrastructure. <code>Outputs</code> publishes values — an endpoint, a bucket name, a security group id — for humans and, when exported, for other stacks.</p>
+    <p>Templates are data, not code, so anything dynamic goes through <em>intrinsic functions</em>. <code>Ref</code> returns a resource's default identifier or a parameter's value. <code>Fn::GetAtt</code> reaches into a resource for a specific attribute such as a load balancer's DNS name. <code>Fn::Sub</code> interpolates variables into a string and is the readable replacement for nested <code>Fn::Join</code> calls. <code>Fn::ImportValue</code> pulls in a value another stack exported. There are also <code>Fn::If</code>, <code>Fn::FindInMap</code>, <code>Fn::Select</code> and <code>Fn::Cidr</code>. Crucially, references also build the dependency graph: because the security group is referenced by the instance, CloudFormation knows to create it first, and you rarely need <code>DependsOn</code> explicitly.</p>
+    <pre class="code-block" data-label="YAML"><code>AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [dev, prod]
+Conditions:
+  IsProd: !Equals [!Ref EnvName, prod]
+Resources:
+  AppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'app-assets-${EnvName}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: !If [IsProd, Enabled, Suspended]
+Outputs:
+  BucketArn:
+    Value: !GetAtt AppBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketArn'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html" rel="noopener">What is AWS CloudFormation? — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/template-anatomy.html" rel="noopener">Template anatomy: every top-level section explained — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/intrinsic-function-reference.html" rel="noopener">Intrinsic function reference (Ref, GetAtt, Sub, ImportValue, If) — CloudFormation Template Reference</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/best-practices.html" rel="noopener">CloudFormation best practices — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Omppm_YUG2g" rel="noopener">Introduction to AWS CloudFormation — Amazon Web Services (official channel)</a></li>
+    </ul>
+
+    <h3>Stacks, change sets and what happens when a deployment fails</h3>
+    <p>A <em>stack</em> is the unit of deployment: one template plus its parameters, managed as a single object. Everything in a stack is created, updated and deleted together, and deleting the stack deletes the resources — which is exactly what you want for an ephemeral test environment and exactly what terrifies people about production. The stack also carries the event log, which is the first place to look when something goes wrong; the failure that actually matters is usually the <em>first</em> failure event, not the cascade of cancellations after it.</p>
+    <p><em>Change sets</em> are the safety feature. Instead of applying a template edit directly, you create a change set and CloudFormation tells you which resources it will add, modify or delete, and — critically — whether a modification requires <code>Replacement</code>. Replacement means the resource is destroyed and recreated: a new RDS instance, a new database endpoint, an outage. Reading that column before executing is the difference between a routine deploy and an incident. Change sets can now also be drift-aware, giving a three-way comparison between the new template, the last deployed template and the resources as they actually are.</p>
+    <p>On failure, CloudFormation rolls back by default, and the resulting states are worth memorising because people get stuck in them. A failed <em>create</em> leaves <code>ROLLBACK_COMPLETE</code>, a state from which you cannot update — you can only delete the stack and start again. A failed <em>update</em> rolls back to the previous template; if the rollback itself fails you land in <code>UPDATE_ROLLBACK_FAILED</code>, and the only exits are <code>ContinueUpdateRollback</code> (optionally skipping the resources that will not settle) or manual repair. Disabling rollback on a create is the standard trick for debugging, because it leaves the half-built resources in place for inspection.</p>
+    <pre class="code-block" data-label="Shell"><code>aws cloudformation create-change-set \
+  --stack-name app-prod --change-set-name bump-instance-size \
+  --template-body file://app.yaml --capabilities CAPABILITY_NAMED_IAM
+
+# read Action / ResourceType / Replacement before you execute anything
+aws cloudformation describe-change-set \
+  --stack-name app-prod --change-set-name bump-instance-size
+
+aws cloudformation execute-change-set \
+  --stack-name app-prod --change-set-name bump-instance-size</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacks.html" rel="noopener">Working with stacks — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html" rel="noopener">Update stacks using change sets — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stack-failure-options.html" rel="noopener">Stack failure options: rollback behaviour on create and update — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/troubleshooting.html" rel="noopener">Troubleshooting CloudFormation (including UPDATE_ROLLBACK_FAILED) — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2gT1dvbppg8" rel="noopener">AWS CloudFormation for Beginners — Digital Cloud Training</a></li>
+    </ul>
+
+    <h3>Composing stacks: nested stacks, cross-stack references and StackSets</h3>
+    <p>One template describing an entire platform becomes unmaintainable, and CloudFormation caps template size anyway. Two composition mechanisms exist and they are not interchangeable. <em>Nested stacks</em> use the <code>AWS::CloudFormation::Stack</code> resource to embed a child template inside a parent, with parameters passed down and outputs read back through <code>Fn::GetAtt</code>. The parent owns the children: they deploy, update and delete as one operation. This is how you build a reusable VPC or bastion module and stamp it out repeatedly.</p>
+    <p><em>Cross-stack references</em> are for independently deployed stacks with different lifecycles — a long-lived networking stack and a fast-moving application stack. The producer declares <code>Export</code> on an output; the consumer reads it with <code>Fn::ImportValue</code>. The tradeoff is rigidity: an exported value cannot be changed or deleted while any stack imports it, which is precisely the protection you want and precisely the thing that will block a networking refactor at the worst moment. Export names are also account-and-region unique, so name them after the stack.</p>
+    <p>At awareness level, <em>StackSets</em> extend a single template across many accounts and regions from one administrator account, with service-managed permissions driving deployment into AWS Organizations organisational units. This is the mechanism behind "every account in the org gets the same guardrails, log destinations and IAM roles", and it is what a platform team runs rather than an application team.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-nested-stacks.html" rel="noopener">Nested stacks — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/walkthrough-crossstackref.html" rel="noopener">Walkthrough: refer to resource outputs in another stack (Export and ImportValue) — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/what-is-cfnstacksets.html" rel="noopener">What is CloudFormation StackSets? — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacksets-concepts.html" rel="noopener">StackSets concepts: administrator and target accounts, stack instances, operations — AWS documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/devops/aws-cloudformation-2025-year-in-review/" rel="noopener">AWS CloudFormation year in review — AWS DevOps &amp; Developer Productivity Blog</a></li>
+    </ul>
+
+    <h3>Protecting a stack: drift detection, stack policies and deletion policies</h3>
+    <p>Drift detection asks CloudFormation to compare each managed resource against the template and report anything that has been changed outside the stack. It returns per-resource status — <code>MODIFIED</code>, <code>DELETED</code>, <code>IN_SYNC</code> — with the exact property differences, and it works on StackSets as well. Run it on a schedule rather than after an incident: a Lambda triggered by EventBridge that detects drift daily and alerts is a standard piece of platform plumbing, and drift-aware change sets let you fold the discovered reality into the next deployment deliberately instead of being surprised by it.</p>
+    <p>Two more protections belong on any production stack. A <em>stack policy</em> is a JSON document attached to the stack that denies update actions on named resources — the classic use is <code>Deny</code> on <code>Update:Replace</code> for the database so an innocuous-looking template edit cannot recreate it. It only guards updates, not deletion. For deletion you need <code>DeletionPolicy: Retain</code> or <code>Snapshot</code> on stateful resources, plus stack-level termination protection so <code>delete-stack</code> is refused outright. <code>UpdateReplacePolicy</code> covers the third case, where an update replaces a resource and the old one would otherwise be destroyed.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-stack-drift.html" rel="noopener">Detect unmanaged configuration changes with drift detection — CloudFormation User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html" rel="noopener">Using drift-aware change sets — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-protect-stacks.html" rel="noopener">Prevent updates to stack resources with a stack policy — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html" rel="noopener">DeletionPolicy attribute (Retain, Snapshot, Delete) — CloudFormation Template Reference</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/devops/safely-handle-configuration-drift-with-cloudformation-drift-aware-change-sets/" rel="noopener">Safely handle configuration drift with drift-aware change sets — AWS DevOps Blog</a></li>
+    </ul>
+
+    <h3>AWS CDK: write it in TypeScript or Java, synthesize CloudFormation</h3>
+    <p>YAML has no loops, no types and no functions, so a template that must create twenty near-identical resources becomes copy-paste. The AWS Cloud Development Kit lets you define infrastructure in TypeScript, Python, Java, C# or Go and <em>synthesizes</em> a CloudFormation template from it. You get real language features — <code>for</code> loops, classes, unit tests, IDE completion, refactoring — and the deployment is still CloudFormation, so stacks, change sets, drift detection and rollback all still apply. <code>cdk synth</code> prints the generated template and <code>cdk diff</code> compares it against what is deployed.</p>
+    <p>Constructs come in three levels. <strong>L1</strong> constructs (prefixed <code>Cfn</code>) map one-to-one onto CloudFormation resources and expose every property with no defaults. <strong>L2</strong> constructs are the curated AWS-authored ones — sensible defaults, encryption on by default, and helper methods such as <code>bucket.grantRead(lambdaFn)</code> which quietly writes the correct IAM policy for you. <strong>L3</strong> constructs, or patterns, assemble a whole architecture in one object, such as <code>ApplicationLoadBalancedFargateService</code>. The honest tradeoff: the abstraction leaks. A one-line L3 construct can generate hundreds of CloudFormation resources, debugging means reading synthesized YAML anyway, and you have added Node.js, a package manager and a dependency tree to a deployment pipeline that previously needed only a file. Teams that love CDK are usually application teams already fluent in the language; teams that regret it are usually operations teams who inherited someone else's TypeScript.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const bucket = new s3.Bucket(this, 'Assets', {
+  encryption: s3.BucketEncryption.S3_MANAGED,
+  removalPolicy: RemovalPolicy.RETAIN,
+});
+
+const fn = new lambda.Function(this, 'Resizer', {
+  runtime: lambda.Runtime.NODEJS_20_X,
+  handler: 'index.handler',
+  code: lambda.Code.fromAsset('lambda'),
+});
+
+bucket.grantRead(fn);   // L2 helper: writes the IAM policy for you</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/cdk/v2/guide/home.html" rel="noopener">What is the AWS CDK? — AWS CDK v2 Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cdk/v2/guide/constructs.html" rel="noopener">Constructs: L1, L2 and L3 explained — AWS CDK Developer Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html" rel="noopener">Getting started with the AWS CDK (bootstrap, synth, deploy) — AWS documentation</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/cdk/v2/guide/languages.html" rel="noopener">Supported programming languages for the AWS CDK — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=flNiRj7Rf9k" rel="noopener">Building blocks of the AWS CDK — constructs explained — Train To Code</a></li>
+    </ul>
+
+    <h3>Terraform: the init, plan, apply, destroy loop</h3>
+    <p>Terraform is the tool most teams actually use, and its workflow is four commands. <code>terraform init</code> reads the configuration, downloads the required provider plugins into <code>.terraform/</code> and configures the backend where state will live; you run it on a fresh checkout and after changing provider or module requirements. <code>terraform plan</code> refreshes the current state, compares it with the configuration, and prints exactly what it intends to do — <code>+</code> create, <code>~</code> update in place, <code>-/+</code> destroy and recreate, <code>-</code> destroy — without touching anything. <code>terraform apply</code> executes that plan. <code>terraform destroy</code> tears the whole thing down, which is what makes throwaway environments cheap.</p>
+    <p><code>plan</code> is the reason Terraform is pleasant to live with. It is a genuine dry run you can read, argue about in a pull request, and save to a file with <code>-out</code> so that <code>apply</code> executes exactly the reviewed plan and nothing else — the standard CI pipeline runs <code>plan</code> on the pull request, posts the output as a comment, and runs <code>apply</code> on the saved plan file after approval. Learn to read the <code>-/+ destroy and then create replacement</code> marker the way you read a change set's <code>Replacement: True</code>: it is the line that ends careers. Also learn that a plan showing changes when you changed nothing means drift, and a plan that never converges usually means a provider bug or a resource whose API returns something different from what you set.</p>
+    <pre class="code-block" data-label="Shell"><code>terraform init                       # providers + backend
+terraform fmt -recursive             # canonical formatting
+terraform validate                   # syntax and type checks, no API calls
+terraform plan -out=tfplan           # dry run, saved for review
+terraform apply tfplan               # execute exactly what was reviewed
+terraform destroy                    # tear the environment down</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/commands/init" rel="noopener">terraform init — Terraform CLI documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/commands/plan" rel="noopener">terraform plan: planning modes, refresh and saved plan files — Terraform CLI documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/commands/apply" rel="noopener">terraform apply — Terraform CLI documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/tutorials/aws-get-started" rel="noopener">Get started with Terraform on AWS — HashiCorp official tutorial track</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SLB_c_ayRMo" rel="noopener">Terraform Course — automate your AWS cloud infrastructure — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>State: the file that makes Terraform work, and the file that will hurt you</h3>
+    <p>Terraform state is a JSON document mapping every resource in your configuration to the real object in the provider — the instance id, the ARN, every attribute as last observed. It exists because a name like <code>aws_instance.web</code> means nothing to AWS; something has to remember that it corresponds to <code>i-0abc123</code>. State is also how Terraform knows a resource it manages has been deleted from the configuration and must therefore be destroyed, and it caches attribute values so a plan does not have to re-read the entire estate. Without state there is no diff, and without a diff there is no plan.</p>
+    <p>Local state on a laptop is a team-scale disaster. It lives in one person's working directory, so a second engineer's Terraform believes nothing exists and tries to create everything again; it is lost with the laptop; it is not backed up; and two people applying at once corrupt it. The fix is a <em>remote backend</em> — for AWS, an S3 bucket with versioning enabled and server-side encryption on. Modern Terraform supports native S3 state locking via a lock file (<code>use_lockfile = true</code>); historically this required a DynamoDB table with a <code>LockID</code> partition key, which is still what most existing codebases and most interview questions describe. Either way the lock means the second concurrent <code>apply</code> waits instead of racing.</p>
+    <p>The security point everyone forgets: <strong>state contains secrets in plaintext</strong>. An RDS <code>password</code>, a generated access key, the contents of a secret data source — all of it is written into the state file as readable JSON, whether or not the value is marked <code>sensitive</code> in output. Marking something sensitive only redacts it from CLI output. So the state bucket needs encryption, a restrictive bucket policy, versioning for recovery, and an access list as short as the one on your production database.</p>
+    <pre class="code-block" data-label="HCL"><code>terraform {
+  required_version = "~> 1.9"
+  backend "s3" {
+    bucket       = "acme-tfstate-prod"
+    key          = "platform/network/terraform.tfstate"
+    region       = "ap-south-1"
+    encrypt      = true
+    use_lockfile = true          # native S3 locking (was a DynamoDB table)
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state" rel="noopener">State: purpose, mapping to the real world, and metadata — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state/remote" rel="noopener">Remote state — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/backend/s3" rel="noopener">S3 backend: bucket, key, encryption and lockfile locking — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/manage-sensitive-data" rel="noopener">Managing sensitive data in state — Terraform documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o04xfWEouKM" rel="noopener">Terraform remote state backend using S3 and DynamoDB — Cloud Champ</a></li>
+    </ul>
+
+    <h3>Locking, and the dangerous commands: import, state mv, taint and replace</h3>
+    <p>State locking prevents two engineers (or an engineer and a CI job) from writing state at the same time. Terraform takes the lock before any operation that writes state and releases it after; if a process is killed mid-apply the lock can be left behind and you unblock it with <code>terraform force-unlock</code> and the lock id — a command to use only after confirming no apply is genuinely still running, because forcing a lock during a live apply is how state gets corrupted.</p>
+    <p>Three commands manipulate state directly, and they are dangerous exactly because they change Terraform's model of the world without changing the world. <code>terraform import</code> (or, better, the declarative <code>import</code> block introduced in Terraform 1.5, which shows up in the plan and can be reviewed) adopts an existing resource that was created by hand or by another tool: you write the configuration first, then import so state points at the real object. <code>terraform state mv</code> renames a resource's address in state — the command you need after refactoring code into a module, because otherwise Terraform sees the old address disappear and plans a destroy plus create. The declarative <code>moved</code> block does the same thing reviewably. <code>terraform taint</code> is deprecated in favour of <code>terraform apply -replace=ADDRESS</code>, which marks a healthy-looking but actually broken resource for destroy-and-recreate on the next apply.</p>
+    <p>The rule for all of them: back up state first (S3 versioning gives you this free), run a plan immediately afterwards, and never hand-edit the state JSON. An unexpected destroy in the plan after a state operation means stop and restore, not "it is probably fine".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state/locking" rel="noopener">State locking and force-unlock — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/import" rel="noopener">Importing existing infrastructure — Terraform CLI documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/import" rel="noopener">The import block: declarative, reviewable imports — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/commands/state/mv" rel="noopener">terraform state mv — Terraform CLI documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/cli/commands/taint" rel="noopener">terraform taint (deprecated in favour of apply -replace) — Terraform CLI documentation</a></li>
+      <li>[Article] <a href="https://spacelift.io/blog/terraform-state" rel="noopener">Terraform state explained: files, backends and common operations — Spacelift blog</a></li>
+    </ul>
+
+    <h3>Providers, version pinning, resources and data sources</h3>
+    <p>A <em>provider</em> is the plugin that translates Terraform resources into a vendor's API — <code>hashicorp/aws</code> for AWS, but also Kubernetes, GitHub, Datadog and hundreds more, which is why one tool can wire an EKS cluster to a GitHub repository to a Datadog monitor in a single apply. Declare providers in the <code>required_providers</code> block with a source address and a version constraint. Pinning matters: the AWS provider ships breaking changes at major versions, so <code>~&gt; 5.0</code> (allow 5.x, refuse 6.0) is the normal posture. <code>terraform init</code> then writes <code>.terraform.lock.hcl</code>, recording the exact versions and checksums selected — commit that file, exactly as you commit a package lock file, so CI and every colleague resolve identically. <code>terraform init -upgrade</code> is the deliberate act of moving it.</p>
+    <p>The other distinction to be crisp about: a <code>resource</code> block is something Terraform creates, owns and will destroy; a <code>data</code> block only <em>reads</em> something that already exists. Data sources are how you reference infrastructure owned by another team or another tool — look up the current AMI, the default VPC, an existing hosted zone, the account id via <code>aws_caller_identity</code> — without taking responsibility for its lifecycle. Reaching for a resource block where a data source was needed is how teams accidentally destroy things they did not create.</p>
+    <pre class="code-block" data-label="HCL"><code>terraform {
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~&gt; 5.0" }
+  }
+}
+
+data "aws_vpc" "main" {          # read-only: someone else owns this
+  tags = { Name = "platform-prod" }
+}
+
+resource "aws_security_group" "web" {   # Terraform owns this
+  name   = "web-sg"
+  vpc_id = data.aws_vpc.main.id
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/providers/requirements" rel="noopener">Provider requirements and version constraints — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/files/dependency-lock" rel="noopener">The dependency lock file (.terraform.lock.hcl) — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/resources" rel="noopener">Resources — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/data-sources" rel="noopener">Data sources — Terraform language docs</a></li>
+      <li>[Official] <a href="https://registry.terraform.io/providers/hashicorp/aws/latest/docs" rel="noopener">AWS provider documentation — Terraform Registry</a></li>
+    </ul>
+
+    <h3>Variables, outputs, locals and workspaces</h3>
+    <p><code>variable</code> blocks are the inputs: give each a type, a description and, where it helps, a <code>validation</code> rule and a <code>default</code>. Values arrive from a <code>.tfvars</code> file, <code>-var</code> flags, or <code>TF_VAR_</code> environment variables, which is how CI injects per-environment values without editing code. Mark secrets <code>sensitive = true</code> so they are redacted from output — remembering, from the state topic, that this does not encrypt them in state. <code>output</code> blocks publish values from a configuration, both for humans and for other configurations reading them through the <code>terraform_remote_state</code> data source. <code>locals</code> are named intermediate expressions inside one configuration — computed naming conventions, merged tag maps — and exist purely to stop you repeating an expression six times.</p>
+    <p><em>Workspaces</em> give one configuration multiple independent state files, selected with <code>terraform workspace select</code> and readable in code as <code>terraform.workspace</code>. They are genuinely useful for short-lived parallel copies: a per-feature-branch environment, a load test. They are a poor fit for dev-versus-production isolation, and saying so is a good interview answer: workspaces share one backend, one set of credentials and one configuration, so a mistyped workspace name applies your dev change to production. The industry norm is separate directories or repositories per environment, separate state keys, and ideally separate AWS accounts.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/values/variables" rel="noopener">Input variables: types, validation and precedence — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/values/outputs" rel="noopener">Output values — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/values/locals" rel="noopener">Local values — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/state/workspaces" rel="noopener">Managing workspaces (and when not to use them) — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/tutorials/configuration-language/sensitive-variables" rel="noopener">Protect sensitive input variables — HashiCorp tutorial</a></li>
+    </ul>
+
+    <h3>Modules: writing one, using the registry, and versioning</h3>
+    <p>A Terraform module is just a directory containing <code>.tf</code> files — every configuration is already the "root module". Calling one is a <code>module</code> block with a <code>source</code> and whatever input variables it declares; the module's outputs become <code>module.NAME.OUTPUT</code>. This is how you stop copying the same twelve-resource VPC into every project: write it once, expose CIDR and environment name as variables, and consume it everywhere. Good module design mirrors good API design — narrow inputs, meaningful outputs, no hidden assumptions about the caller's account, and no provider blocks inside the module (the caller configures providers, the module inherits them).</p>
+    <p><code>source</code> accepts a local path, a Git URL, an S3 or GCS object, or a Terraform Registry address. For anything remote, <strong>pin the version</strong>: <code>version = "5.1.2"</code> on a registry module, or a tag ref such as <code>?ref=v1.4.0</code> on a Git source. An unpinned module means <code>terraform init -upgrade</code> can silently change your infrastructure definition, and registry modules genuinely do ship breaking changes. The public registry has excellent, heavily used AWS modules (<code>terraform-aws-modules/vpc/aws</code> is the canonical example) — but read them before adopting, because a popular module that creates forty resources you do not understand is technical debt with good reviews.</p>
+    <pre class="code-block" data-label="HCL"><code>module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.13.0"            # pin: never track latest
+
+  name            = "platform-${var.env}"
+  cidr            = "10.20.0.0/16"
+  azs             = ["ap-south-1a", "ap-south-1b"]
+  private_subnets = ["10.20.1.0/24", "10.20.2.0/24"]
+  enable_nat_gateway = true
+}
+
+resource "aws_db_subnet_group" "db" {
+  subnet_ids = module.vpc.private_subnets     # module output
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/modules" rel="noopener">Modules overview — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/modules/develop" rel="noopener">Developing modules: structure, inputs, outputs and publishing — Terraform documentation</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/language/modules/configuration" rel="noopener">Module blocks: sources, versions and meta-arguments — Terraform language docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/terraform/tutorials/modules/module-create" rel="noopener">Build and use a local module — HashiCorp tutorial</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=R6Lte_C8upo" rel="noopener">Learn how to use modules on the Terraform Registry — Bryan Krausen</a></li>
+    </ul>
+
+    <h3>CloudFormation versus Terraform — and the OpenTofu licence split</h3>
+    <p>There is no universal winner, and an interviewer asking this wants to hear tradeoffs rather than a preference. CloudFormation is AWS-native: no state file to host or protect, no extra binary in the pipeline, IAM-integrated, same-day support for new AWS features, and StackSets for organisation-wide rollout. Terraform wins on the developer experience — a genuinely readable plan, HCL that is pleasanter than YAML, one tool and one workflow across AWS, Kubernetes, GitHub, Cloudflare and everything else, a huge module registry, and a much larger pool of engineers who already know it. The costs are symmetrical: Terraform makes you own and secure a state file, and lags AWS launches by days or weeks; CloudFormation gives you change sets that are less informative than a plan, error messages that are frequently opaque, and lock-in to one cloud.</p>
+    <table>
+      <caption>Choosing between the two on an AWS-only estate</caption>
+      <thead>
+        <tr><th scope="col">Dimension</th><th scope="col">CloudFormation</th><th scope="col">Terraform</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Scope</th><td>AWS only</td><td>Multi-cloud and multi-service via providers</td></tr>
+        <tr><th scope="row">State</th><td>Managed by AWS; nothing to host</td><td>You own it: S3 bucket, encryption, locking, secrets in plaintext</td></tr>
+        <tr><th scope="row">Preview</th><td>Change sets, including drift-aware</td><td><code>plan</code>, more detailed and easier to review in a pull request</td></tr>
+        <tr><th scope="row">Language</th><td>YAML or JSON; CDK adds real languages</td><td>HCL, with loops, expressions and functions built in</td></tr>
+        <tr><th scope="row">New AWS features</th><td>Usually available at or near launch</td><td>Waits for a provider release</td></tr>
+        <tr><th scope="row">Reuse</th><td>Nested stacks, StackSets</td><td>Modules and a large public registry</td></tr>
+        <tr><th scope="row">Failure handling</th><td>Automatic rollback; some stuck states</td><td>Stops and leaves partial state; you re-plan and continue</td></tr>
+        <tr><th scope="row">Adopting existing resources</th><td>Resource import, more limited</td><td><code>import</code> block and CLI import, widely used</td></tr>
+      </tbody>
+    </table>
+    <p>One piece of context that catches people out: in August 2023 HashiCorp relicensed Terraform from the Mozilla Public License to the Business Source License, a source-available licence that restricts building a competing offering. The response was <strong>OpenTofu</strong>, a fork of the last MPL-licensed Terraform, now a Linux Foundation project. OpenTofu is a drop-in replacement for the versions it forked from — same HCL, same providers, same state format, the binary is <code>tofu</code> — and has since added its own features such as state encryption. Practically: most Indian enterprises still run Terraform, the two have begun to diverge, and knowing that the split exists and why is a credible thing to say in an interview when someone asks what you think of Terraform's licensing.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentofu.org/" rel="noopener">OpenTofu — the Linux Foundation fork of Terraform</a></li>
+      <li>[Official] <a href="https://opentofu.org/faq/" rel="noopener">OpenTofu FAQ: what changed, compatibility and migration</a></li>
+      <li>[Article] <a href="https://www.hashicorp.com/en/blog/hashicorp-adopts-business-source-license" rel="noopener">HashiCorp adopts Business Source License — HashiCorp blog (the announcement that caused the fork)</a></li>
+      <li>[Article] <a href="https://spacelift.io/blog/terraform-vs-cloudformation" rel="noopener">Terraform vs CloudFormation: a detailed comparison — Spacelift blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Y6C_ih_UAhI" rel="noopener">Terraform vs CloudFormation — an in-depth comparison — env0</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-cloud-monitoring.html">← Monitoring and Cost in the Cloud</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="12-reference-architecture.html">Well-Architected Reference Deployment →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Infrastructure as code is asked in almost every AWS and DevOps round in India, from service companies staffing cloud migrations to product companies hiring platform engineers. Terraform state and the CloudFormation-versus-Terraform comparison are the two questions you should expect every single time:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is infrastructure as code and why not just use the console?</summary>
+      <div class="answer"><p>Defining infrastructure in version-controlled text files that a tool applies to the cloud. The console cannot be reviewed, leaves no history of who changed what and why, cannot be reproduced reliably in another account or region, and gives you nothing to revert to when a change breaks production. Code gives you pull requests, audit trail, repeatable environments and rollback.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the sections of a CloudFormation template. Which is mandatory?</summary>
+      <div class="answer"><p>AWSTemplateFormatVersion, Description, Metadata, Parameters, Mappings, Conditions, Transform, Resources and Outputs. Only Resources is mandatory. Parameters are deploy-time inputs, Mappings are static lookup tables (region to AMI), Conditions are named booleans that let one template serve several environments, and Outputs publish values that can also be exported for other stacks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a CloudFormation stack?</summary>
+      <div class="answer"><p>The unit of deployment: one template plus its parameter values, managed as a single object. Every resource in it is created, updated and deleted together, it carries an event log for troubleshooting, and deleting the stack deletes its resources unless a DeletionPolicy or termination protection says otherwise.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between Ref and Fn::GetAtt?</summary>
+      <div class="answer"><p>Ref returns the default identifier — a parameter's value, or a resource's primary id such as a bucket name or instance id. Fn::GetAtt returns a specific named attribute of a resource, such as a bucket's Arn or a load balancer's DNSName. Both also create an implicit dependency, so CloudFormation orders creation correctly without DependsOn.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do terraform init, plan and apply each do?</summary>
+      <div class="answer"><p>init downloads the required provider plugins and configures the backend where state is stored. plan refreshes state, diffs it against the configuration and prints the intended creates, updates, replacements and destroys without changing anything. apply executes those actions — ideally against a plan file saved with <code>-out</code>, so what runs is exactly what was reviewed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is Terraform state, why does it exist, and where should it live?</summary>
+      <div class="answer"><p>A JSON mapping from configuration addresses like aws_instance.web to real objects like i-0abc123, plus the last-known attribute values. It exists because the provider has no idea what your resource names mean; it is also how Terraform knows a resource removed from the code must be destroyed. It should live in a remote backend — for AWS an S3 bucket with versioning and encryption enabled and locking turned on — never on a laptop, because local state is unshareable, unbacked-up, and corrupted by concurrent applies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Terraform prevent two engineers applying at the same time?</summary>
+      <div class="answer"><p>State locking. The backend takes a lock before any state-writing operation and releases it after, so a second apply waits rather than racing. With the S3 backend this is now native lockfile-based locking (use_lockfile); historically it required a DynamoDB table with a LockID partition key, which is what most existing codebases still use. A crashed process can leave a stale lock, cleared with terraform force-unlock — only after confirming no apply is actually still running.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> CloudFormation change sets versus terraform plan — what do you get from each?</summary>
+      <div class="answer"><p>Both preview a change before it happens. A change set lists resources to add, modify or remove and flags whether a modification requires Replacement — the column that tells you a database is about to be recreated. terraform plan is generally more informative: it shows attribute-level diffs, marks replacements with -/+, and can be saved to a file so the apply executes exactly the reviewed plan. Change sets can now also be drift-aware, comparing new template, deployed template and actual resource state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Resource versus data source in Terraform?</summary>
+      <div class="answer"><p>A resource block is infrastructure Terraform creates, owns and will destroy if you remove it from the code. A data block only reads something that already exists and takes no ownership — an existing VPC, the latest AMI, a hosted zone another team manages, the current account id. Using a resource where a data source was needed is a common way to accidentally destroy infrastructure you did not create.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the three CDK construct levels, and when would you not use CDK?</summary>
+      <div class="answer"><p>L1 constructs (Cfn prefix) map one-to-one onto CloudFormation resources with no defaults. L2 constructs are AWS-curated with sensible defaults and helpers such as grantRead that generate IAM policies. L3 constructs are whole patterns, like a load-balanced Fargate service. Avoid CDK when the team is not fluent in the language, when you want the deployed artifact to be readable by anyone (a one-line L3 can synthesize hundreds of resources), or when you do not want a Node.js toolchain and dependency tree in the deployment pipeline.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Someone changed a security group in the console. What happens on your next deployment, and how do you handle it?</summary>
+      <div class="answer"><p>That is drift. Terraform's next plan refreshes state, sees the real world differs from the configuration, and proposes to revert the manual change — silently undoing an emergency fix if nobody reads the plan. CloudFormation will not notice until you run drift detection, and the next update may fail or overwrite. Handling it: run drift detection on a schedule and alert, decide deliberately whether to revert or promote the change into code, use drift-aware change sets to fold reality into the next deployment, and remove console write access so it stops recurring.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You refactored resources into a module and the plan now shows destroy-and-recreate for everything. Why, and what do you do?</summary>
+      <div class="answer"><p>Terraform tracks resources by address. Moving aws_instance.web into a module changes its address to module.app.aws_instance.web, so Terraform sees the old address gone (destroy) and a new one appear (create), even though the underlying resource is untouched. Fix it by rewriting the address rather than the infrastructure: a moved block in the configuration, which is reviewable and shows up in the plan, or terraform state mv for each address. Back up state first, then confirm the plan shows no changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> There are existing resources created by hand. How do you bring them under Terraform without downtime?</summary>
+      <div class="answer"><p>Write the configuration to match the existing resource as closely as you can, then adopt it — the declarative import block (Terraform 1.5 and later) is preferable to terraform import because it appears in the plan and can be reviewed. Then run a plan: an empty diff means the configuration matches reality; any proposed change means your code is wrong and applying it would modify live infrastructure. Iterate until the plan is clean. Do it a few resources at a time, and keep state versioned so you can restore.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is the Terraform state file a security concern, and what do you do about it?</summary>
+      <div class="answer"><p>State stores every attribute Terraform has observed, including secrets in plaintext — RDS master passwords, generated access keys, values read from a secret data source. Marking a variable or output sensitive only redacts CLI output; it does not encrypt state. Mitigations: server-side encryption on the state bucket with a customer-managed key, a restrictive bucket policy limiting access to the CI role and a small group of humans, versioning for recovery, no state in Git, and where possible avoiding provider-generated secrets by referencing Secrets Manager instead of materialising values into state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you choose CloudFormation over Terraform, and what is OpenTofu?</summary>
+      <div class="answer"><p>Choose CloudFormation on an AWS-only estate where you do not want to own and protect a state file, need day-one support for new AWS services, want native IAM and StackSets for organisation-wide rollout, or are already invested in CDK. Choose Terraform for multi-cloud or multi-provider estates, a better plan and review workflow, module reuse, and a larger hiring pool. OpenTofu is the Linux Foundation fork created after HashiCorp relicensed Terraform under the Business Source License in 2023 — a drop-in replacement for the versions it forked from, still MPL-licensed, and now diverging with its own features such as state encryption.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A CloudFormation stack is stuck in UPDATE_ROLLBACK_FAILED. What now?</summary>
+      <div class="answer"><p>The update failed and the automatic rollback also failed, usually because a resource cannot be returned to its previous configuration — something was changed or deleted outside the stack, or a dependency no longer exists. You cannot update the stack from this state. Fix the underlying resource manually so rollback can succeed, then call ContinueUpdateRollback; if a specific resource will never settle, continue the rollback with that logical id in the skip list and reconcile it afterwards. Related trap: a stack that fails on its very first create ends in ROLLBACK_COMPLETE, which cannot be updated at all — delete it and create again.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.iac.cfn — CloudFormation templates, stacks and change sets, CDK awareness</li>
+      <li>aws.iac.terraform — Terraform: state, plan and apply, providers, modules, remote state and locking</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
