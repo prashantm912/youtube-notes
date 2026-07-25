@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Centralized Configuration module: the twelve-factor config rule, Spring Cloud Config Server and client, profiles and resolution order, encryption and dynamic refresh, Kubernetes ConfigMaps and Secrets, external secret managers and rotation — with verified official and community resources plus interview questions.">
+  <title>Centralized Configuration — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Centralized Configuration</h1>
+  <p class="standfirst">Config baked into a build means rebuilding an image to change a timeout. Config copy-pasted into twenty services means twenty places to edit and one of them will be wrong. This module is about the third option: config that lives outside the artifact and reaches the app at runtime.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices → Centralized Configuration</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two paths solve the same problem and you will meet both. The <strong>Spring Cloud Config Server</strong> path keeps a Git-backed store of <code>{application}-{profile}</code> property files that services fetch at startup and can re-read on demand via <code>@RefreshScope</code>. The <strong>Kubernetes-native</strong> path mounts ConfigMaps and Secrets into pods as files or environment variables, with real secret management delegated to Vault, a cloud secrets manager, or Sealed Secrets.</p>
+    <p>Both paths inherit the same underlying discipline — the twelve-factor rule that config belongs in the environment, never in the artifact — and both raise the same hard question at the end: what happens when a value changes while the service is running?</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Config in the environment: the twelve-factor rule</h3>
+    <p>The twelve-factor definition of config is deliberately narrow: config is <em>everything that varies between deploys</em> — database URLs, credentials, per-environment hostnames, feature toggles — and nothing else. Internal wiring that is identical in dev, staging and production is code, not config. The litmus test the twelve-factor authors propose is blunt: could you open-source the repository right now without leaking a credential? If not, config and code are tangled.</p>
+    <p>Why it matters in a microservices context: the same build artifact must be promotable through every environment untouched. Once a jar or container image contains an environment-specific value, you have a per-environment artifact, and "it worked in staging" stops meaning anything. Spring Boot already gives you the machinery — a layered <code>Environment</code> with a defined precedence order in which command-line arguments and environment variables override packaged property files — so externalizing config is mostly about knowing that order rather than inventing a mechanism.</p>
+    <pre class="code-block" data-label="Shell"><code># same image, three environments — nothing rebuilt
+docker run -e SPRING_PROFILES_ACTIVE=prod \
+           -e SPRING_DATASOURCE_URL=jdbc:postgresql://db-prod/orders \
+           orders-service:1.4.2</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/config" rel="noopener">III. Config — The Twelve-Factor App (the source of the "store config in the environment" rule)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/external-config.html" rel="noopener">Externalized Configuration — Spring Boot reference (the full property precedence order)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/overview/" rel="noopener">Configuration Best Practices — Kubernetes docs</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/externalized-configuration.html" rel="noopener">Pattern: Externalized configuration — microservices.io (Chris Richardson)</a></li>
+    </ul>
+
+    <h3>Spring Cloud Config Server: a Git-backed config store</h3>
+    <p>Config Server is a small Spring Boot application whose entire job is to serve properties over HTTP. Its backing store — the <em>environment repository</em> — is usually a Git repo, which buys you the four things a config store needs almost for free: history, diffs, pull-request review, and rollback by <code>git revert</code>. Filesystem, JDBC, Vault, AWS Secrets Manager and Redis backends exist too, and can be composited so one server serves several kinds of source.</p>
+    <p>The naming convention is the whole API. Files are named <code>{application}-{profile}.yml</code> (or <code>.properties</code>), and a client asking for application <code>orders</code> with profile <code>prod</code> receives a merged result assembled from most-general to most-specific: <code>application.yml</code> (shared defaults for every service), then <code>application-prod.yml</code>, then <code>orders.yml</code>, then <code>orders-prod.yml</code> — with later, more specific sources winning. A <code>{label}</code> (Git branch or tag, default <code>main</code>) adds a third axis, which is how teams pin a release to a config snapshot. You can curl any of it directly, which makes debugging pleasantly boring.</p>
+    <pre class="code-block" data-label="Text"><code>config-repo/
+  application.yml          # every service, every profile
+  application-prod.yml     # every service, prod only
+  orders.yml               # orders service, all profiles
+  orders-prod.yml          # orders service, prod  (highest precedence)
+
+GET http://config:8888/orders/prod          -&gt; merged JSON
+GET http://config:8888/orders-prod.yml      -&gt; merged YAML</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-config/reference/server.html" rel="noopener">Spring Cloud Config Server — reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-config/reference/server/environment-repository.html" rel="noopener">Environment Repository — Spring Cloud Config (naming, labels, search paths, composite backends)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/centralized-configuration" rel="noopener">Centralized Configuration — official Spring getting-started guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-configuration" rel="noopener">Quick Intro to Spring Cloud Configuration — Baeldung (server, client and encryption end to end)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=x1BR0D-buQg" rel="noopener">Spring cloud config server using GitHub repository — Java Techie</a></li>
+    </ul>
+
+    <h3>The client side: import, encryption and dynamic refresh</h3>
+    <p>Modern Spring Boot clients no longer need a <code>bootstrap.yml</code>. A single <code>spring.config.import=configserver:http://config:8888</code> in <code>application.yml</code> pulls remote properties in as an ordinary config-data import, in a documented position in the precedence chain; add <code>optional:</code> in front of it if you want local development to survive without a running config server. Sensitive values do not have to sit in Git as plaintext: the server can decrypt properties written as <code>{cipher}...</code> using a symmetric key or a keystore, so the repository holds ciphertext and the client receives plaintext over TLS.</p>
+    <p>Refresh is the part interviewers push on. Fetching config once at startup means a changed value needs a restart — acceptable for a datasource URL, painful for a feature flag or a rate limit. Annotating a bean <code>@RefreshScope</code> makes it a lazy proxy that is thrown away and rebuilt on the next access after someone POSTs to the Actuator <code>refresh</code> endpoint; <code>@ConfigurationProperties</code> beans rebind on refresh without the annotation. Calling that endpoint on every instance by hand does not scale, so Spring Cloud Bus links the instances over RabbitMQ or Kafka and turns one call to <code>busrefresh</code> into a broadcast. Note the honest limits: a refreshed value only reaches code that re-reads it, and things fixed at construction time — connection pool sizes, listener container concurrency — often need a restart regardless.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  application.name: orders
+  config.import: "optional:configserver:http://config:8888"
+management.endpoints.web.exposure.include: refresh,busrefresh,health</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-config/reference/client.html" rel="noopener">Spring Cloud Config Client — reference (config import, fail-fast, retry)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-config/reference/server/encryption-and-decryption.html" rel="noopener">Encryption and Decryption — Spring Cloud Config (the cipher prefix, keys and keystores)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/application-context-services.html" rel="noopener">Refresh Scope and the refresh endpoint — Spring Cloud Commons reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-bus/reference/" rel="noopener">Spring Cloud Bus — reference documentation (broadcast refresh over a broker)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-bus" rel="noopener">Spring Cloud Bus — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gb1i4WyWNK4" rel="noopener">Set up spring cloud config server from scratch — Java Brains (Microservice configuration with Spring Boot)</a></li>
+    </ul>
+
+    <h3>Kubernetes ConfigMaps: config as files and environment variables</h3>
+    <p>If the platform is Kubernetes, a lot of Config Server's job is already done for you. A ConfigMap is a namespaced API object holding non-confidential key/value pairs, consumed by a pod in one of three ways: injected as individual environment variables, injected wholesale with <code>envFrom</code>, or mounted as a volume so each key becomes a file in a directory. Spring Boot reads a mounted directory natively through <code>spring.config.import=configtree:/etc/config/</code>, and Spring Cloud Kubernetes goes further by reading ConfigMaps and Secrets straight from the API server as a Spring <code>PropertySource</code>, matched by application name and profile — the same mental model as Config Server, without running a config server.</p>
+    <p>The consumption style is a real decision, not a preference. Environment variables are captured once when the container process starts, so an updated ConfigMap never reaches a running pod; you must roll the deployment. Mounted volumes are different: the kubelet refreshes projected files periodically, so the file content does change under a running process — which only helps if the application actually re-reads the file. Also worth knowing: ConfigMaps are size-limited (roughly 1 MiB) and are not a place for large blobs, and a ConfigMap referenced but absent will keep your pod from starting.</p>
+    <pre class="code-block" data-label="YAML"><code>envFrom:
+  - configMapRef: { name: orders-config }   # every key as an env var
+volumeMounts:
+  - name: cfg
+    mountPath: /etc/config                  # every key as a file
+    readOnly: true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/configmap/" rel="noopener">ConfigMaps — Kubernetes concepts</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/" rel="noopener">Configure a Pod to Use a ConfigMap — Kubernetes task guide (all consumption styles)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-kubernetes/reference/property-source-config.html" rel="noopener">ConfigMap and Secret PropertySources — Spring Cloud Kubernetes reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-kubernetes" rel="noopener">Guide to Spring Cloud Kubernetes — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EWQIoGIp4y0" rel="noopener">Kubernetes: ConfigMaps and Secrets — SivaLabs (Spring Boot + Kubernetes series, part 21)</a></li>
+    </ul>
+
+    <h3>Secrets, external secret managers and rotation</h3>
+    <p>A Kubernetes Secret is a ConfigMap with a different name and slightly better manners: it is stored separately from pod specs, can be mounted into a tmpfs rather than written to disk, and is typed. What it is <em>not</em>, by default, is encrypted. Secret values are base64-encoded, and base64 is an encoding, not encryption — anyone who can run <code>kubectl get secret -o yaml</code> or read etcd can decode them in one command. Making Secrets meaningfully secret requires two deliberate steps the docs are explicit about: enable <a href="https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/" rel="noopener">encryption at rest</a> for the <code>secrets</code> resource, and lock down RBAC so only the service accounts that need a Secret can read it. Committing a Secret manifest to Git is the same mistake as committing a password, which is exactly the gap Sealed Secrets fills by encrypting the manifest so only the in-cluster controller can decrypt it.</p>
+    <p>Beyond the cluster, dedicated secret managers — HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager — add what Kubernetes does not have: audit trails, fine-grained policy, short-lived dynamic credentials, and rotation. Rotation is where a design either holds or quietly fails. Rotating a database password is worthless if every service read that password once at startup and cached it in a connection pool for the next thirty days; the rotation "succeeds", nothing errors, and the credential is stale until the next deploy. A rotation-aware design decides in advance how the new value arrives — a projected volume the app re-reads, a Vault Agent or Secrets Store CSI driver refreshing the mount, a <code>busrefresh</code> broadcast, an External Secrets Operator sync that triggers a rolling restart — and pairs it with overlapping validity windows so old and new credentials both work during the changeover. Ask "who re-reads this, and when?" while designing, not during the incident.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/secret/" rel="noopener">Secrets — Kubernetes concepts (types, mounting, the base64 caveat)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/security/secrets-good-practices/" rel="noopener">Good practices for Kubernetes Secrets — Kubernetes docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/vault/docs/what-is-vault" rel="noopener">What is Vault? — HashiCorp developer docs (dynamic secrets, leases, rotation)</a></li>
+      <li>[Official] <a href="https://external-secrets.io/latest/" rel="noopener">External Secrets Operator — documentation (sync from Vault, AWS, Azure, GCP into Secrets)</a></li>
+      <li>[Official] <a href="https://github.com/bitnami-labs/sealed-secrets" rel="noopener">Sealed Secrets — Bitnami Labs (encrypted secret manifests safe to commit)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html" rel="noopener">What is AWS Secrets Manager? — AWS documentation (managed rotation schedules)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-vault-kubernetes-secrets" rel="noopener">Secure Kubernetes Secrets with Vault — Baeldung (sidecar, CSI provider and Spring Cloud Vault compared)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=I1OcFX6_09c" rel="noopener">ConfigMap &amp; Secrets Implementation in a Spring Boot CRUD Example — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-service-discovery.html">← Service Discovery</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="08-resilience.html">Resilience with Resilience4j →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Configuration questions asked constantly in Indian product and service-company rounds — service companies push Spring Cloud Config hard, product companies push Kubernetes Secrets and rotation:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why not just keep configuration inside the application jar?</summary>
+      <div class="answer"><p>Because it makes the artifact environment-specific. Changing a timeout or a database URL then means a rebuild and a redeploy, the same build cannot be promoted from staging to production unchanged, and secrets end up in version control. Twelve-factor separates config from code so one artifact runs everywhere and only the environment differs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Spring Cloud Config Server and what backs it?</summary>
+      <div class="answer"><p>A standalone Spring Boot service that serves properties to other services over HTTP. The default backend is a Git repository, which gives versioning, diffs, review and rollback for free. Filesystem, JDBC, Redis, Vault and AWS Secrets Manager backends are also supported, and several can be composited into one server.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does a client tell the config server which properties it wants?</summary>
+      <div class="answer"><p>Through three coordinates: application name (<code>spring.application.name</code>), active profile (<code>spring.profiles.active</code>), and label (the Git branch or tag, default <code>main</code>). They map onto the <code>{application}-{profile}.yml</code> file naming in the repository.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a ConfigMap and a Secret in Kubernetes?</summary>
+      <div class="answer"><p>Both hold key/value data consumed as environment variables or mounted files. ConfigMaps are for non-confidential data and stored as plain text. Secrets are intended for sensitive data: values are base64-encoded, they are stored apart from pod specs, they can be mounted into memory-backed tmpfs, and they can be encrypted at rest and restricted by RBAC. The API shape is nearly identical, the handling is not.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Given <code>application.yml</code>, <code>application-prod.yml</code>, <code>orders.yml</code> and <code>orders-prod.yml</code>, which value wins?</summary>
+      <div class="answer"><p><code>orders-prod.yml</code>. The server merges from most general to most specific — shared defaults, then profile-wide, then service-specific, then service-plus-profile — with the most specific source overriding. Put cross-cutting defaults in <code>application.yml</code> and only the genuine differences in the specific files.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you change a property without restarting the service?</summary>
+      <div class="answer"><p>Annotate the bean holding the value with <code>@RefreshScope</code> (or use a <code>@ConfigurationProperties</code> bean, which rebinds automatically), expose the Actuator <code>refresh</code> endpoint, and POST to it after the config changes. The scoped bean is discarded and rebuilt with new values on next access. For many instances, use Spring Cloud Bus over RabbitMQ or Kafka and call <code>busrefresh</code> once to broadcast.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is <code>bootstrap.yml</code> still required for a config client?</summary>
+      <div class="answer"><p>No. The legacy bootstrap context is deprecated; current Spring Boot uses <code>spring.config.import=configserver:http://host:port</code> in ordinary <code>application.yml</code>, which slots remote config into the documented config-data precedence order. Prefix with <code>optional:</code> so the app still starts when the server is unreachable. Expect a follow-up on how you keep local development working.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is base64 in a Kubernetes Secret a form of encryption?</summary>
+      <div class="answer"><p>No — it is an encoding, reversible by anyone with the data and one command. Without extra work, Secret values sit in etcd as plain text. To make them meaningfully secret you must enable encryption at rest for the secrets resource (ideally with an external KMS provider) and restrict read access through RBAC and per-workload service accounts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What happens to a running pod when you update a ConfigMap it uses?</summary>
+      <div class="answer"><p>It depends on consumption style. Values injected as environment variables are fixed at process start and never change — the deployment must be rolled. Values mounted as a volume are refreshed by the kubelet after a short propagation delay, so the file content changes; whether the app notices depends on whether it re-reads the file. Immutable ConfigMaps and subPath mounts never update at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you keep passwords out of the config Git repository?</summary>
+      <div class="answer"><p>Config Server can decrypt values stored as <code>{cipher}...</code>, so the repo holds ciphertext and clients receive plaintext over TLS — with the key held by the server, not committed. Stronger options move secrets out of Git entirely: a Vault or AWS Secrets Manager backend, Sealed Secrets for manifests, or the External Secrets Operator syncing from a manager into Kubernetes Secrets.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> The config server is down when fifty pods restart. What happens, and how do you design around it?</summary>
+      <div class="answer"><p>With <code>fail-fast</code> enabled the pods refuse to start; without it they start on possibly-wrong defaults, which is often worse. Mitigations: run the config server as a replicated, health-checked deployment; enable client retry with backoff so transient outages are absorbed; keep sane local fallbacks for non-critical values; and on Kubernetes prefer ConfigMaps and Secrets, which the platform delivers with no extra runtime dependency. This is the standard "you added a new single point of failure" follow-up.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You rotated a database password in the secret manager and nothing broke — then everything broke a week later. Explain.</summary>
+      <div class="answer"><p>The services read the credential once at startup and cached it in their connection pools, so rotation changed the stored value without changing what the apps were using. The failure surfaced only when a pod restarted or a pool reconnected with the stale credential. A rotation-aware design defines the delivery path (re-read a projected volume, Vault Agent or the Secrets Store CSI driver refreshing the mount, a broadcast refresh, or an operator-triggered rolling restart) and keeps both old and new credentials valid during an overlap window.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Spring Cloud Config Server or Kubernetes ConfigMaps — how do you choose?</summary>
+      <div class="answer"><p>If the platform is already Kubernetes, ConfigMaps and Secrets are the default: no extra service to run, native RBAC and audit, and Spring Cloud Kubernetes or a <code>configtree</code> import reads them with no custom code. Config Server earns its place with a heterogeneous estate (virtual machines, several platforms, or non-Kubernetes runtimes), a genuine need for Git-native review and history over config, or environment-and-label resolution richer than Kubernetes provides. Some teams run both: Config Server for application properties, Secrets for credentials.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Which properties can a refresh event genuinely change, and which cannot?</summary>
+      <div class="answer"><p>Anything re-read on each use changes cleanly: feature flags, thresholds, URLs read per call, and <code>@ConfigurationProperties</code> beans. Anything captured at construction or startup does not: connection pool sizing, server port, thread pool and listener concurrency, and values injected once with <code>@Value</code> into a singleton outside refresh scope. Say this explicitly in an interview — claiming refresh changes everything is the trap the question is set for.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you audit and control who can change production configuration?</summary>
+      <div class="answer"><p>Treat config as reviewed code: a protected branch in the config repository with required pull-request approval, signed commits, and CI validation of the resulting merged config. On the runtime side, restrict who can read or edit Secrets via namespaced RBAC and per-workload service accounts, enable API audit logging, and use a secret manager with its own audit trail and least-privilege policies for anything credential-shaped. The Git history and the audit log together answer "who changed the timeout at the time the incident started".</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.cfg.server — Spring Cloud Config server and client, profiles, refresh scope</li>
+      <li>ms.cfg.secrets — Kubernetes ConfigMaps and Secrets, externalized config, secret rotation awareness</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

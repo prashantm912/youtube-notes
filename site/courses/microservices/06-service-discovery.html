@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Microservices Service Discovery module: the service registry, self-registration vs third-party registration, heartbeats and leases, client-side vs server-side discovery, the CAP tradeoff behind Eureka and Consul, and Kubernetes-native Service DNS — with verified resources and interview questions.">
+  <title>Service Discovery — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Service Discovery</h1>
+  <p class="standfirst">Autoscaling and rolling deploys mean the instance you called a minute ago may no longer exist. This module covers the machinery that answers "where is order-service right now?" — and when your platform already answers it for you.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → Service Discovery</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>In a monolith, calling another module is a method call. In a distributed system it is a network call to an address that changes — containers get scheduled onto new nodes, autoscalers add and remove replicas, and blue-green deploys swap whole fleets. Hardcoded hostnames and hand-maintained config files stop working roughly the day you scale past one instance per service.</p>
+    <p>Service discovery is the answer: a registry that holds the current network locations of healthy instances, a way for instances to get into it, a way for them to fall out of it when they die, and a lookup path for callers. You will meet the two lookup patterns (client-side and server-side), the two registration patterns (self and third-party), the consistency tradeoff every registry makes, and three concrete implementations — Netflix Eureka, HashiCorp Consul, and Kubernetes Services.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Instances come and go: the service registry</h3>
+    <p>A service registry is a database of service instances: for each logical service name (<code>order-service</code>) it holds a list of live instances with host, port, and metadata such as zone, version, or secure/insecure scheme. It is the single source of truth for "where is this service" and it must be highly available, because every request path depends on it. Registries typically run as a small cluster of their own and replicate between members.</p>
+    <p>Instances get into the registry one of two ways. With <strong>self-registration</strong> the instance itself calls the registry on startup, renews its entry, and de-registers on shutdown — simple, no extra moving parts, but it couples application code to the registry (this is what a Spring Boot app with the Eureka client does). With <strong>third-party registration</strong> a separate registrar watches the deployment platform and writes entries on the instance's behalf; the service stays ignorant of discovery entirely. Kubernetes is the mainstream third-party registrar: the control plane registers Pod IPs into Endpoints/EndpointSlices as readiness changes, and no application code is involved.</p>
+    <ul class="resources">
+      <li>[Pattern] <a href="https://microservices.io/patterns/service-registry.html" rel="noopener">Service Registry pattern — microservices.io (Chris Richardson)</a></li>
+      <li>[Pattern] <a href="https://microservices.io/patterns/self-registration.html" rel="noopener">Self Registration pattern — microservices.io</a></li>
+      <li>[Pattern] <a href="https://microservices.io/patterns/3rd-party-registration.html" rel="noopener">3rd Party Registration pattern — microservices.io</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/common-abstractions.html" rel="noopener">DiscoveryClient and ServiceRegistry abstractions — Spring Cloud Commons reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/service-discovery-microservices" rel="noopener">Service Discovery in Microservices — Baeldung on Computer Science</a></li>
+    </ul>
+
+    <h3>Client-side vs server-side discovery</h3>
+    <p>With <strong>client-side discovery</strong> the caller queries the registry, receives the full list of healthy instances, caches it locally, and picks one itself — so the load-balancing decision lives inside your application. Spring Cloud LoadBalancer is the standard implementation on the JVM: you inject a <code>@LoadBalanced RestClient</code>/<code>WebClient</code> or use OpenFeign, write the logical service name in the URL, and the client resolves and balances. No extra network hop, full control over the algorithm (round-robin, zone-preference, weighted), but every language you deploy needs its own discovery-aware client library.</p>
+    <p>With <strong>server-side discovery</strong> the caller just requests one stable address, and a router — a load balancer, gateway, or the platform's own proxy — does the registry lookup and forwards the request. Callers stay dumb and polyglot-friendly, and the routing tier becomes the place to add TLS termination, retries or rate limiting; the cost is an extra hop and a component you must keep highly available. AWS ELB/ALB, an NGINX tier, Kubernetes Services, and service-mesh sidecars are all server-side discovery.</p>
+    <pre class="code-block" data-label="Java"><code>// Client-side discovery: the host is a SERVICE NAME, not a machine
+@Bean @LoadBalanced
+RestClient.Builder loadBalanced() { return RestClient.builder(); }
+
+String body = restClient.get()
+    .uri("http://order-service/api/orders/{id}", id)   // resolved via the registry
+    .retrieve().body(String.class);</code></pre>
+    <ul class="resources">
+      <li>[Pattern] <a href="https://microservices.io/patterns/client-side-discovery.html" rel="noopener">Client-side Discovery pattern — microservices.io</a></li>
+      <li>[Pattern] <a href="https://microservices.io/patterns/server-side-discovery.html" rel="noopener">Server-side Discovery pattern — microservices.io</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html" rel="noopener">Spring Cloud LoadBalancer — Spring Cloud Commons reference</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/service-registration-and-discovery" rel="noopener">Service Registration and Discovery — official Spring getting-started guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=h1mrflwF6Lc" rel="noopener">Service Discovery in Microservices — Eureka and its Spring Boot implementation — Concept &amp;&amp; Coding by Shrayansh</a></li>
+    </ul>
+
+    <h3>Heartbeats, leases and the CAP tradeoff every registry makes</h3>
+    <p>A registry entry is a <em>lease</em>, not a permanent record. The instance renews it on a heartbeat (Eureka's default is a renewal every 30 seconds with a 90-second expiry); miss enough renewals and the entry is evicted. This is how the registry notices a crashed process — but it is also why discovery data is always slightly stale: between the moment an instance dies and the moment its lease expires, callers will still be handed a dead address. That is why discovery must be paired with the resilience patterns in the next modules — timeouts, retries against a different instance, and circuit breakers. Consul takes a different route: it runs explicit health checks (HTTP, TCP, script, TTL) and pulls failing instances out of the healthy set rather than waiting for a lease to expire.</p>
+    <p>Under a network partition a registry must choose. <strong>Eureka favours availability</strong>: peers replicate best-effort, any node answers reads from its own cache, and self-preservation mode deliberately <em>stops</em> evicting instances when renewals drop sharply — on the theory that a network glitch is more likely than every instance dying at once. You get answers during a partition, possibly stale ones. <strong>Consul favours consistency</strong>: servers elect a leader via Raft and commit registrations through the log, so a minority partition cannot accept writes at all. For a service registry, "available but occasionally wrong" is usually the better trade — a stale address plus a retry beats no address at all — which is exactly the argument to make when an interviewer asks why Eureka chose AP.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/Netflix/eureka/wiki/Eureka-at-a-glance" rel="noopener">Eureka at a glance — Netflix Eureka wiki (leases, renewals, self-preservation)</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/architecture/consensus" rel="noopener">Consensus protocol (Raft) — HashiCorp Consul docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/register/health-check/vm" rel="noopener">Define health checks — HashiCorp Consul docs</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/consistent-core.html" rel="noopener">Consistent Core — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ZcM3e_zp6Tk" rel="noopener">How Eureka works internally — Selenium Express</a></li>
+    </ul>
+
+    <h3>Netflix Eureka with Spring Cloud</h3>
+    <p>Eureka is the registry most Indian enterprise teams meet first, because Spring Cloud Netflix made it two annotations away. A standalone server is a Spring Boot app with <code>@EnableEurekaServer</code> and <code>spring-cloud-starter-netflix-eureka-server</code>; for production you run two or more peers that replicate to each other. Every other service adds <code>spring-cloud-starter-netflix-eureka-client</code>, sets <code>spring.application.name</code> (that name becomes the registry key) and points <code>eureka.client.service-url.defaultZone</code> at the server. Registration, renewal and de-registration then happen automatically, and Spring Cloud LoadBalancer consumes the resulting instance list.</p>
+    <p>Two things to say out loud in an interview. First, Eureka's client-side cache means a newly started instance can take a couple of refresh cycles to become visible to callers — the "why is it so slow to register" section of the reference docs exists for a reason, and shortening the intervals in a demo is a known trick. Second, Spring Cloud Netflix is in maintenance mode: Ribbon, Hystrix, Zuul and Archaius were removed years ago, and Eureka is the only component still carried forward. It is fine on existing systems and still worth learning, but nobody should start a greenfield Kubernetes project with it.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  application:
+    name: order-service      # the id other services will look up
+eureka:
+  client:
+    service-url:
+      defaultZone: http://eureka-1/eureka/,http://eureka-2/eureka/
+  instance:
+    prefer-ip-address: true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html#spring-cloud-eureka-server" rel="noopener">Running a Eureka server (standalone, peer awareness, security) — Spring Cloud Netflix reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html#_service_discovery_eureka_clients" rel="noopener">Service discovery: Eureka clients (registration, health checks, metadata, zones) — Spring Cloud Netflix reference</a></li>
+      <li>[Official] <a href="https://spring.io/projects/spring-cloud-netflix" rel="noopener">Spring Cloud Netflix project page — supported versions and maintenance-mode status</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-netflix-eureka" rel="noopener">Introduction to Spring Cloud Netflix — Eureka — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=irBEdp7XlSQ" rel="noopener">Spring Cloud Eureka — Java Techie</a></li>
+    </ul>
+
+    <h3>HashiCorp Consul: health checks, KV and a DNS interface</h3>
+    <p>Consul is the polyglot answer. An agent runs on every node; services register with the local agent (via config file, HTTP API, or the Spring Cloud Consul starter) and declare health checks that the agent executes locally, reporting status up to the servers. Consul does three jobs at once: service discovery, distributed health checking, and a hierarchical key/value store that doubles as a configuration backend — which is why the next module on centralized configuration can reuse the same cluster.</p>
+    <p>Its most useful property for mixed estates is that discovery is exposed over plain <strong>DNS</strong> as well as HTTP: a lookup of <code>order-service.service.consul</code> returns the addresses of only the passing instances, so a legacy Python job, an NGINX config, or a shell script can discover services with no library at all. On the Spring side, <code>spring-cloud-starter-consul-discovery</code> implements the same <code>DiscoveryClient</code> interface as Eureka, so switching registries is a dependency and a properties change rather than a code change — a good example of why coding against Spring Cloud's abstraction pays off.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/services/discovery/dns-overview" rel="noopener">DNS interface for service discovery — HashiCorp Consul docs</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/tutorials/get-started-vms/virtual-machine-gs-service-discovery" rel="noopener">Get started: register a service and discover it — HashiCorp Consul tutorial</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-consul/reference/discovery.html" rel="noopener">Service discovery with Consul — Spring Cloud Consul reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-consul" rel="noopener">A Quick Guide to Spring Cloud Consul — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Dd9-UxrNiD0" rel="noopener">Spring Cloud Consul — service discovery — Java Techie</a></li>
+    </ul>
+
+    <h3>Kubernetes-native discovery: Services, kube-proxy and cluster DNS</h3>
+    <p>On Kubernetes the platform is the registry, and it is a third-party registrar you get for free. A <code>Service</code> is a stable name and virtual IP in front of a set of Pods selected by labels; the control plane keeps the backing EndpointSlices in sync as Pods pass and fail their readiness probes. CoreDNS publishes an A record for every Service at <code>&lt;service&gt;.&lt;namespace&gt;.svc.cluster.local</code> (and short forms resolve inside the same namespace), so calling another service is literally <code>http://order-service:8080/api/orders</code> — an ordinary HTTP client with no discovery library. kube-proxy programs iptables or IPVS rules on each node so traffic to the ClusterIP is spread across the ready Pods. That is textbook server-side discovery, implemented by the platform.</p>
+    <p>Consequences worth knowing: because the ClusterIP is virtual, load balancing happens per connection, which is why long-lived HTTP/2 and gRPC connections pin to one Pod unless you use a headless Service (<code>clusterIP: None</code>, DNS returns every Pod IP) or a mesh. Readiness probes, not heartbeats, are the liveness signal here — a Pod that fails readiness is removed from the endpoints without dying. And if you do want the Spring programming model, <code>spring-cloud-kubernetes</code> implements <code>DiscoveryClient</code> on top of the Kubernetes API so <code>@LoadBalanced</code> clients and Spring Cloud Gateway routes keep working unchanged.</p>
+    <pre class="code-block" data-label="Bash"><code># inside any Pod in the cluster
+curl http://order-service.orders.svc.cluster.local/api/orders/42
+kubectl get endpointslices -l kubernetes.io/service-name=order-service</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/service/" rel="noopener">Service — Kubernetes concepts documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/" rel="noopener">DNS for Services and Pods — Kubernetes documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/reference/networking/virtual-ips/" rel="noopener">Virtual IPs and Service proxies (kube-proxy, iptables and IPVS modes) — Kubernetes reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-kubernetes/reference/discovery-client.html" rel="noopener">Kubernetes DiscoveryClient — Spring Cloud Kubernetes reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=T4Z7visMM4E" rel="noopener">Kubernetes Services explained: ClusterIP vs NodePort vs LoadBalancer vs headless — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>The honest verdict: do you still need a registry?</h3>
+    <p>If everything you run lives in one Kubernetes cluster, running Eureka on top of it is duplicated machinery: you would have two sources of truth, two failure modes, and application code doing work the platform already does. Use Services and cluster DNS, and spend the saved effort on readiness probes and resilience. The reasonable exception is an existing Spring Cloud estate mid-migration, where keeping Eureka lets you move services into the cluster one at a time without rewriting clients.</p>
+    <p>A dedicated registry still earns its place when discovery has to span boundaries the platform does not cover: virtual machines and bare metal alongside containers, multiple clusters or multiple clouds, or non-Kubernetes schedulers — that is Consul's core use case, and its DNS interface is what makes a mixed estate workable. Beyond that, a service mesh subsumes discovery entirely into the data plane, which is the direction most large deployments end up taking. The answer interviewers reward is not "always Eureka" or "always Kubernetes" but the ability to name the deployment topology first and then pick.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/articles/microservices.html" rel="noopener">Microservices: a definition of this new architectural term — Martin Fowler and James Lewis</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/seven-uservices-antipatterns/" rel="noopener">Seven Microservices Anti-patterns — InfoQ</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tutorials/services/connect-applications-service/" rel="noopener">Connecting applications with Services — Kubernetes tutorial</a></li>
+      <li>[Official] <a href="https://developer.hashicorp.com/consul/docs/architecture" rel="noopener">Consul architecture: agents, servers, gossip and datacenters — HashiCorp docs</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-api-gateway.html">← API Gateway and BFF</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="07-centralized-config.html">Centralized Configuration →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Service discovery is a standard microservices round in Indian product and service companies — screening questions on Eureka setup, senior rounds on staleness, CAP and whether you need a registry at all:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why do microservices need service discovery at all?</summary>
+      <div class="answer"><p>Instance addresses are dynamic: containers are rescheduled onto new nodes, autoscalers add and remove replicas, and deploys replace whole fleets. Hardcoded hostnames or hand-edited property files go stale immediately. A registry keeps the current list of healthy instances per logical service name so callers ask "who is order-service" instead of "what is 10.0.4.17".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a service registry and what does it store?</summary>
+      <div class="answer"><p>A highly available database of service instances. Per logical service name it holds each instance's host, port, scheme, status, and metadata such as zone or version. Callers or routers query it; instances (or a registrar) keep it current. Because every request depends on it, it is normally run as a replicated cluster.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain client-side and server-side discovery in one line each.</summary>
+      <div class="answer"><p>Client-side: the caller queries the registry, gets the instance list, and load-balances itself (Spring Cloud LoadBalancer, Eureka client). Server-side: the caller hits one stable address and a router or proxy does the lookup and forwards (Kubernetes Service, ALB, gateway). Client-side saves a hop; server-side keeps clients dumb and polyglot.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set up a Eureka server and register a client in Spring Boot?</summary>
+      <div class="answer"><p>Server: a Spring Boot app with <code>spring-cloud-starter-netflix-eureka-server</code> and <code>@EnableEurekaServer</code>; in production run two or more peers pointing at each other. Client: add <code>spring-cloud-starter-netflix-eureka-client</code>, set <code>spring.application.name</code> (the registry key) and <code>eureka.client.service-url.defaultZone</code>. Registration and renewal are automatic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Self-registration vs third-party registration?</summary>
+      <div class="answer"><p>Self-registration: the instance registers, heartbeats and de-registers itself — simple, but application code is coupled to the registry (the Eureka client model). Third-party registration: a separate registrar or the platform watches deployments and writes entries on the instance's behalf — the service stays discovery-agnostic. Kubernetes registering Pod IPs into EndpointSlices is the mainstream example.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a registry decide an instance is dead?</summary>
+      <div class="answer"><p>Two mechanisms. Lease plus heartbeat: the instance renews periodically (Eureka defaults to renewal every 30 seconds, expiry after 90) and the entry is evicted when renewals stop. Or active health checking: Consul agents run HTTP/TCP/script/TTL checks and drop failing instances from the healthy set. Kubernetes uses readiness probes — a failing Pod is removed from endpoints without being killed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A service was killed one second ago but callers still get its address. Why, and what do you do about it?</summary>
+      <div class="answer"><p>Discovery data is eventually consistent: the lease has not expired yet, and clients cache the instance list on top of that. You cannot eliminate the window, only shrink it (shorter leases and refresh intervals, graceful shutdown that de-registers first, and readiness gates during deploys) and survive it — connect and read timeouts, retry the request against a different instance, and a circuit breaker so a bad instance is not hammered.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Eureka vs Consul — how do you choose?</summary>
+      <div class="answer"><p>Eureka is JVM-centric, AP by design, dead simple to run for a Spring Cloud estate, and in maintenance mode. Consul is polyglot, CP via Raft, does active health checking, ships a KV store for configuration, and exposes discovery over DNS so non-JVM workloads and VMs participate. Rule of thumb: existing Spring-only system on VMs, Eureka is fine; mixed languages, VMs plus containers, or multi-datacenter, choose Consul.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Kubernetes do service discovery without any registry code in the application?</summary>
+      <div class="answer"><p>A Service gives a stable name and ClusterIP over label-selected Pods; the control plane keeps EndpointSlices in sync with readiness. CoreDNS publishes <code>&lt;service&gt;.&lt;namespace&gt;.svc.cluster.local</code>, and kube-proxy programs iptables or IPVS rules so ClusterIP traffic is distributed across ready Pods. The app just makes an ordinary HTTP call to the service name — server-side discovery provided by the platform.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Registries are distributed systems too — where does Eureka sit on CAP, and why?</summary>
+      <div class="answer"><p>Eureka chooses AP. Peers replicate best-effort, any node serves reads from its own cache, and self-preservation stops evicting instances when the renewal rate drops sharply, assuming a network problem rather than mass death. So during a partition you get answers, possibly stale ones. Consul chooses CP: Raft requires a quorum, so a minority partition refuses writes. For discovery, AP is usually right — a stale address plus a retry beats no address — but stale entries must be assumed, not wished away.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your gRPC calls all land on one Pod despite the Service having ten replicas. Explain.</summary>
+      <div class="answer"><p>A ClusterIP balances per connection, not per request. gRPC and HTTP/2 multiplex many requests over one long-lived connection, so after the initial pick every request goes to the same Pod. Fixes: a headless Service (<code>clusterIP: None</code>) so DNS returns all Pod IPs and a client-side balancer distributes, a proxy that speaks HTTP/2 request-level balancing, or a service mesh sidecar. Same reasoning applies to any pooled long-lived connection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You are migrating a Spring Cloud system onto Kubernetes. Do you keep Eureka?</summary>
+      <div class="answer"><p>Not as the destination. Inside one cluster, Services plus cluster DNS already give registration, health-based membership and load balancing, so Eureka would be a second source of truth and a second failure mode. Keep it only during migration so services outside the cluster stay reachable, or swap to <code>spring-cloud-kubernetes</code> so the same <code>DiscoveryClient</code> and <code>@LoadBalanced</code> code runs against the Kubernetes API. A dedicated registry stays justified when discovery must span VMs, multiple clusters, or clouds — that is Consul's territory.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.disc.patterns — Client-side vs server-side discovery, service registry, self-registration</li>
+      <li>ms.disc.impl — Eureka and Consul, Kubernetes-native Service DNS discovery</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

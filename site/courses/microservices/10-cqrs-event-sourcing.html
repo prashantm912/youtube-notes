@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CQRS and Event Sourcing module: why the two patterns are independent, separate write and read models, projections and consistency lag, event stores, replay and snapshots, the real costs, and a verdict on when each is worth it — with verified resources and interview questions.">
+  <title>CQRS and Event Sourcing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: CQRS and Event Sourcing</h1>
+  <p class="standfirst">Two patterns that get named in the same breath and are not the same thing. You can do CQRS without event sourcing — and most of the time you should.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → CQRS and Event Sourcing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>CQRS splits the model you write through from the model you read through. Event sourcing changes what you store: the sequence of things that happened, rather than the current state. They compose well, which is why they are constantly conflated — but each has its own cost curve and its own reasons to say no.</p>
+    <p>This module orients you on both, in that order, and finishes with an honest verdict: which bounded contexts earn these patterns, which do not, and what the tooling landscape actually offers.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>CQRS: separating the command model from the query model</h3>
+    <p>Command Query Responsibility Segregation takes the single model that normally serves an application — one set of entities used for both writing and reading — and splits it in two. The <em>write model</em> accepts commands, enforces invariants, and is usually normalized and small, because its job is deciding whether a change is legal. The <em>read model</em> answers queries, is denormalized, and is shaped for the screen that consumes it: an order-summary view with customer name, line-item count and status already flattened, no joins at request time.</p>
+    <p>Why bother? Because reads and writes genuinely have different requirements once a system has scale. Reads outnumber writes by orders of magnitude in most business systems, they tolerate slightly stale data, and they want wide, join-free, cacheable shapes. Writes are rare, must be correct, and want a tight consistency boundary. Forcing both through one ORM-mapped entity graph means every query pays for the write model's normalization and every write pays for the read model's indexes. Splitting lets you scale, index and even store each side independently — the read side can be Elasticsearch or a materialized Postgres view while the write side stays a small transactional table.</p>
+    <p>The read side is kept current by <em>projections</em>: handlers that consume domain events emitted by the write side and update materialized views. That is where the famous consistency lag comes from — the write commits, the event is published, the projection catches up milliseconds (or seconds) later, and a user who writes then immediately reads may not see their own change. That is a product decision to design around, not a bug to fix: show optimistic UI, read your own writes from the write side, or accept the lag where it does not matter.</p>
+    <p>Fowler's caution is the part candidates skip. CQRS adds significant complexity: two models, a synchronization mechanism, duplicated data, and a whole class of new failure modes. It belongs to a <em>bounded context</em> with a specific pressure — a heavily-read reporting surface, a domain with genuinely complex invariants — not to a whole system by default. Applying it everywhere is how teams end up maintaining twice the code for a CRUD screen.</p>
+    <pre class="code-block" data-label="Java"><code>// write side: enforce the invariant, emit what happened
+public void handle(PlaceOrder cmd) {
+    Order order = Order.place(cmd);        // invariants live here
+    repository.save(order);
+    events.publish(new OrderPlaced(order.id(), order.total()));
+}
+
+// read side: a projection keeps a flat view current
+@EventHandler
+public void on(OrderPlaced e) {
+    summaryView.upsert(e.orderId(), e.total(), "PLACED");
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/CQRS.html" rel="noopener">CQRS — Martin Fowler bliki (the definitive short definition, including the "significant complexity" warning)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/cqrs.html" rel="noopener">Pattern: Command Query Responsibility Segregation (CQRS) — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs" rel="noopener">CQRS pattern — Microsoft Azure Architecture Center (context, issues, when to use and when not to)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view" rel="noopener">Materialized View pattern — Microsoft Azure Architecture Center (the mechanism behind read models)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cqrs-for-a-spring-rest-api" rel="noopener">Apply CQRS to a Spring REST API — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fzGZPf0FMao" rel="noopener">CQRS Design Pattern with Spring Boot &amp; Apache Kafka — Java Techie</a></li>
+    </ul>
+
+    <h3>Event sourcing: the event log as the source of truth</h3>
+    <p>Event sourcing answers a different question: what do you persist? Instead of storing current state and overwriting it on every change, you append an immutable, ordered sequence of state-changing events — <code>AccountOpened</code>, <code>MoneyDeposited</code>, <code>MoneyWithdrawn</code> — to an <em>event store</em>. Current state is not stored at all; it is <em>derived</em> by replaying the events for an aggregate from the beginning and folding them into an in-memory object. The log is the truth; everything else is a cache of it.</p>
+    <p>Replay from the beginning gets expensive once an aggregate has thousands of events, so event-sourced systems take <em>snapshots</em>: a periodic serialized state at sequence number N, so loading means "read snapshot at N, then replay only events after N". Snapshots are strictly an optimization — you can always delete them and rebuild from the log, which is exactly the property that makes the pattern valuable.</p>
+    <p>The benefits are real and hard to get any other way. You have a complete audit log for free, because the log <em>is</em> the data — invaluable in regulated domains where "who changed this and when" is a legal question, not a debugging one. You get time travel: replay to any point to reconstruct the state the system was in when a decision was made. You can build a brand-new read model months later by replaying history through a new projection — retroactive analytics on data you never thought to record, because you recorded the events, not just their aggregate effect. And bugs in a projection are fixable by deleting the view and rebuilding it.</p>
+    <p>The costs are equally real and get underestimated. Event schemas are forever: an event written in 2021 must still be deserializable in 2031, so you need upcasting/versioning discipline from day one. Ad-hoc queries are painful — you cannot write "all customers in Pune with balance over X" against a log, which is precisely why event sourcing pushes you toward CQRS for the read side. Deletion is genuinely hard: GDPR's right to erasure collides head-on with an immutable append-only store, and the workarounds (crypto-shredding, keeping personal data outside the log) must be designed in, not bolted on. And every developer joining the team has to learn a new mental model before they can be productive — the ramp-up cost is a permanent tax on hiring.</p>
+    <pre class="code-block" data-label="Java"><code>// state is a fold over the event log, not a row
+Account account = new Account();
+for (Event e : eventStore.readStream(accountId, fromSequence)) {
+    account.apply(e);   // AccountOpened, MoneyDeposited, MoneyWithdrawn ...
+}
+// snapshot bounds the replay cost
+if (account.version() % 100 == 0) snapshotStore.save(account);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/EventSourcing.html" rel="noopener">Event Sourcing — Martin Fowler (the original write-up: replay, snapshots, external systems)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/event-sourcing.html" rel="noopener">Pattern: Event sourcing — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" rel="noopener">Event Sourcing pattern — Microsoft Azure Architecture Center (benefits, issues and considerations)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cqrs-event-sourcing-java" rel="noopener">CQRS and Event Sourcing in Java — Baeldung (builds both from scratch, separately then together)</a></li>
+      <li>[Article] <a href="https://event-driven.io/en/event_streaming_is_not_event_sourcing/" rel="noopener">Event streaming is not event sourcing — Oskar Dudycz (why a stream is not a store)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8JKjvY4etTY" rel="noopener">Event Sourcing — Greg Young, GOTO 2014 (from the person who named the pattern) — GOTO Conferences</a></li>
+    </ul>
+
+    <h3>Is it worth it? The verdict and the tooling</h3>
+    <p>Separate the two decisions. CQRS on its own is cheap enough to be worth reaching for whenever a bounded context has a read surface that fights its write surface — a dashboard, a search page, a reporting API. You keep a normal database, keep a normal transaction, and add a projection. That is the common, sane, usually-right call, and it is what most teams mean when they say "we did CQRS".</p>
+    <p>Event sourcing is a much bigger commitment and needs a stronger reason. It earns its cost in two situations. First, regulated or audit-heavy domains — banking, payments, insurance, trading, healthcare — where a tamper-evident history of every change is a requirement you would otherwise have to build anyway. Second, genuinely event-shaped domains, where the business already thinks in terms of things that happened: shipment tracking, order lifecycles, ledgers, workflow engines. If your domain is "user edits their profile", event sourcing is dressing up a CRUD app in a costume. InfoQ's write-ups of production experience are blunt about this: a whole system built on event sourcing is an anti-pattern, and the worst day-two problems come from teams adopting it before they understood the domain.</p>
+    <p>On tooling: <strong>Axon Framework</strong> is the mature JVM option — command bus, aggregates, event store, snapshots and projection support in one opinionated package, with Axon Server as the backing store. <strong>EventStoreDB</strong> (now shipped as Kurrent) is a purpose-built event store with streams, subscriptions and built-in projections. And <strong>Kafka</strong> is a durable log that people constantly reach for here — with an important caveat: Kafka alone is not an event store. It has no per-aggregate optimistic concurrency check, retention and compaction can drop history, and reading a single aggregate's stream is awkward. Kafka is excellent for propagating events between services; use a real event store for the write-side source of truth.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.axoniq.io/axon-framework-reference/latest/" rel="noopener">Axon Framework Reference Guide — AxonIQ documentation</a></li>
+      <li>[Official] <a href="https://docs.axoniq.io/axon-framework-reference/latest/tuning/event-snapshots/" rel="noopener">Event Snapshots — Axon Framework Reference (how snapshotting is configured in practice)</a></li>
+      <li>[Official] <a href="https://developers.eventstore.com/" rel="noopener">EventStoreDB documentation — developers.eventstore.com</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2016/04/event-sourcing-anti-pattern/" rel="noopener">A Whole System Based on Event Sourcing is an Anti-Pattern — InfoQ</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2019/09/cqrs-event-sourcing-production/" rel="noopener">Day Two Problems When Using CQRS and Event Sourcing — InfoQ</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/microservices-aggregates-events-cqrs-part-2-richardson/" rel="noopener">Developing Transactional Microservices Using Aggregates, Event Sourcing and CQRS, Part 2 — Chris Richardson on InfoQ</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/event-sourcing/event-sourcing-vs-event-streaming/" rel="noopener">Event Sourcing vs Event Streaming — Confluent Developer (the Kafka caveat, from Confluent itself)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dwFNWiRHQXE" rel="noopener">CQRS Design Pattern in Microservices — Interview Questions and Answers — Code Decode</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-distributed-data.html">← Distributed Data Patterns</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="11-tracing-debugging.html">Tracing and Debugging Across Services →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>What actually gets asked in Indian product and service company rounds — architect screens, system design rounds, and the "you wrote CQRS on your resume" follow-ups:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does CQRS stand for and what does it actually separate?</summary>
+      <div class="answer"><p>Command Query Responsibility Segregation. It separates the model that handles commands (state changes, invariants, normalized) from the model that handles queries (reads, denormalized, shaped for the consumer). Two models, often two stores, instead of one shared entity graph.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is CQRS the same as event sourcing?</summary>
+      <div class="answer"><p>No — and this is the classic trap question. They are independent patterns. CQRS is about splitting read and write <em>models</em>; event sourcing is about what you <em>store</em> (a log of events instead of current state). You can do CQRS with a plain relational database and no events in sight, and that is usually the right call. Event sourcing tends to pull CQRS along with it, because you cannot query a log efficiently — which is why people see them together and assume they are one thing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a projection or read model?</summary>
+      <div class="answer"><p>A denormalized view built and kept current by consuming events from the write side, shaped for a specific query or screen so reads need no joins. It is a derived artifact — you can delete it and rebuild it by replaying the events.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an event store and how is it different from a normal table?</summary>
+      <div class="answer"><p>An append-only, immutable, ordered log of state-changing events, usually grouped into per-aggregate streams. A normal table stores current state and overwrites it; an event store never overwrites — current state is derived by replaying the stream.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do reads and writes deserve different models at all?</summary>
+      <div class="answer"><p>Different requirements. Reads are far more frequent, tolerate staleness, and want wide, join-free, cacheable shapes with heavy indexing. Writes are rarer, must be correct, and want a small normalized model with a tight consistency boundary. One shared model makes each side pay the other's cost, and neither can be scaled or indexed independently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your user updates a record and immediately does not see the change. What happened and how do you handle it?</summary>
+      <div class="answer"><p>Projection lag — the write committed, the event has not been consumed into the read model yet. Options: optimistic UI that renders the expected result; read-your-own-writes by serving that one request from the write model; return the new version and have the client poll or wait for it; or accept the lag where the domain does not care. It is a product decision, not a defect to eliminate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are snapshots and why are they needed?</summary>
+      <div class="answer"><p>Replaying an aggregate from event one gets slow once the stream is long. A snapshot is the serialized aggregate state at sequence number N, so loading becomes "read snapshot, replay only events after N". Purely an optimization — snapshots are disposable and can always be regenerated from the log.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name three genuine downsides of event sourcing.</summary>
+      <div class="answer"><p>Event schema versioning forever (a 2021 event must deserialize in 2031, so you need upcasters from day one); no easy ad-hoc queries against a log, which forces you into CQRS for reads; and a steep learning curve — every new joiner must absorb a different mental model before being productive. Add operational cost: replay time, snapshot management, and eventual consistency everywhere.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Can you use Kafka as your event store?</summary>
+      <div class="answer"><p>Not as the write-side source of truth, on its own. Kafka has no per-aggregate optimistic concurrency check, retention and compaction can discard history you needed, and reading one aggregate's stream is awkward when a topic holds many. Kafka is excellent as the transport that propagates events to consumers and projections; pair it with a real event store (EventStoreDB/Kurrent, Axon Server, or an outbox-backed relational store) for the log of record.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you satisfy GDPR's right to erasure in an event-sourced system?</summary>
+      <div class="answer"><p>You cannot simply delete from an append-only log without breaking replay. The practical approaches: crypto-shredding — encrypt each subject's personal data with a per-subject key and destroy the key, leaving the events structurally intact but unreadable; or keep personal data out of the log entirely, storing only a reference to a mutable, deletable side store. Both must be designed in before go-live; retrofitting them is a rewrite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you evolve event schemas over years without breaking replay?</summary>
+      <div class="answer"><p>Treat events as a permanent published contract. Only add optional fields; never rename or repurpose an existing one. Version the event type explicitly and use upcasters that transform old versions into the current shape on read. For a genuinely breaking change, introduce a new event type and keep handling the old one. Some teams do a one-off migration by replaying the entire log through a transformer into a new store, but that is a heavy, carefully-rehearsed operation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Fowler warns CQRS adds significant complexity. Where do you apply it, and where would you refuse?</summary>
+      <div class="answer"><p>Apply it inside a single bounded context that has a real read/write tension — a reporting or search surface fighting a transactional model, or a domain with complex invariants. Refuse it as a system-wide default: for straightforward CRUD it doubles the code, duplicates the data, and introduces eventual consistency for no return. "We use CQRS in the order context" is a good answer; "our architecture is CQRS" is a warning sign.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Give a concrete verdict: which domains justify event sourcing and which do not?</summary>
+      <div class="answer"><p>Justified: regulated and audit-heavy domains — banking, payments, insurance, trading, healthcare — where a tamper-evident change history is a compliance requirement you would build anyway; and genuinely event-shaped domains where the business already thinks in events (ledgers, shipment tracking, order lifecycles, workflow engines). Not justified: profile management, catalogue admin, settings screens, most internal tooling — anything whose natural description is "the user edits a record". If you cannot name a stakeholder who asks "what was the state on 3 March and who changed it", you are paying for time travel nobody wants.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does an event-sourced write side avoid the dual-write problem when publishing to other services?</summary>
+      <div class="answer"><p>It largely dissolves it: appending the event <em>is</em> the state change, so there is no separate "save row then publish message" pair to keep atomic. Downstream propagation becomes a subscription that reads the store's own log and forwards events, tracking its position so it can resume. With a non-event-sourced store you achieve the same guarantee with the transactional outbox pattern — write state and outbox row in one transaction, relay them afterwards.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.cqrs.split — CQRS: separating command and query models, read models and projections</li>
+      <li>ms.cqrs.eventsourcing — Event sourcing: event store, replay, snapshots, when it is worth the cost</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

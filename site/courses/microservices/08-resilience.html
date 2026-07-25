@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Microservices resilience module: circuit breaker states and sliding-window configuration, fallback design, retry with backoff and jitter, time limiter, bulkhead and rate limiter in Resilience4j, the order decorators compose in, and Micrometer metrics — with verified resources and interview questions.">
+  <title>Resilience with Resilience4j — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Resilience with Resilience4j</h1>
+  <p class="standfirst">In a distributed system nothing is either up or down — some fraction of calls is always failing. Resilience is the engineering that keeps one sick dependency from taking your service, and its callers, down with it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → Resilience with Resilience4j</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Partial failure is the normal operating condition of a microservice estate: one downstream is slow, one node is garbage-collecting, one network path is flapping. The danger is not the failure itself but the <em>cascade</em> — callers block on a sick service, exhaust their own threads and connection pools, and stop serving requests they could have served.</p>
+    <p>This module covers the toolkit that contains that blast radius: the circuit breaker and its state machine, retries with exponential backoff and jitter, time limits, bulkheads and rate limiters — and, critically, the order these decorators must compose in. Resilience4j is the reference implementation on Spring Boot 3.x/4.x, usually behind the Spring Cloud Circuit Breaker abstraction.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Partial failure, cascading failure, and why Hystrix gave way to Resilience4j</h3>
+    <p>A synchronous call to a healthy-but-slow service is worse than a call to a dead one: a dead service fails in milliseconds, a slow one holds your thread for the full socket timeout. Multiply that by request volume and the caller's thread pool fills with threads parked on one dependency; requests to unrelated endpoints queue behind them and the caller looks "down" even though only one of its ten dependencies is unhealthy. That is cascading failure, and it propagates upward one hop at a time until the edge.</p>
+    <p>Netflix Hystrix popularised the countermeasures, but it went into maintenance mode in 2018 and is no longer actively developed — Netflix moved to adaptive concurrency limits, and the JVM ecosystem moved to Resilience4j, a lightweight, functional-style library with no external dependencies beyond Vavr's successor internals. Spring's own <code>spring-cloud-circuitbreaker</code> project provides a vendor-neutral API with Resilience4j as the default implementation, so you can write against <code>CircuitBreakerFactory</code> or straight against Resilience4j annotations.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/getting-started" rel="noopener">Introduction — Resilience4j official documentation (design goals, modules, Hystrix comparison)</a></li>
+      <li>[Official] <a href="https://github.com/Netflix/Hystrix" rel="noopener">Netflix/Hystrix — GitHub (the maintenance-mode notice and its migration advice)</a></li>
+      <li>[Official] <a href="https://spring.io/blog/2019/04/16/introducing-spring-cloud-circuit-breaker" rel="noopener">Introducing Spring Cloud Circuit Breaker — Spring Blog</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/reliability/circuit-breaker.html" rel="noopener">Pattern: Circuit Breaker — microservices.io (Chris Richardson)</a></li>
+    </ul>
+
+    <h3>The circuit breaker state machine: CLOSED, OPEN, HALF_OPEN</h3>
+    <p>A circuit breaker is a proxy around a remote call that keeps a rolling record of outcomes. In <code>CLOSED</code> it lets everything through and counts results. When the recorded failure rate crosses the threshold it flips to <code>OPEN</code>, where every call is rejected immediately with <code>CallNotPermittedException</code> — no thread parked, no socket opened, failure in microseconds instead of seconds. That fast rejection is the whole point: it gives the downstream room to recover and it gives the caller its threads back.</p>
+    <p>After <code>waitDurationInOpenState</code> the breaker moves to <code>HALF_OPEN</code> and admits a small, fixed number of probe calls (<code>permittedNumberOfCallsInHalfOpenState</code>). If those probes meet the threshold it returns to <code>CLOSED</code>; if not it goes back to <code>OPEN</code> and waits again. Resilience4j adds three non-counting states you should be able to name in an interview: <code>DISABLED</code> (always allow), <code>FORCED_OPEN</code> (always reject) and <code>METRICS_ONLY</code> (record but never trip) — the last is how you safely observe a breaker in production before letting it act.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/circuitbreaker" rel="noopener">CircuitBreaker — Resilience4j official documentation (states, sliding windows, every property)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/CircuitBreaker.html" rel="noopener">CircuitBreaker — Martin Fowler bliki (the canonical write-up of the pattern)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker" rel="noopener">Circuit Breaker pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://reflectoring.io/circuitbreaker-with-resilience4j/" rel="noopener">Implementing a Circuit Breaker with Resilience4j — Reflectoring</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=b6R4dElDtRc" rel="noopener">Resilience4J Circuit Breaker Implementation on Spring Boot — Java Techie</a></li>
+    </ul>
+
+    <h3>Tuning the breaker: sliding window, thresholds and slow calls</h3>
+    <p>The breaker decides on evidence held in a sliding window, and choosing the window type is the first real design decision. <code>COUNT_BASED</code> keeps the last N calls — predictable for steady traffic, but on a low-traffic endpoint it can hold hours-old outcomes. <code>TIME_BASED</code> keeps the calls of the last N seconds — self-expiring, better for bursty or low-volume endpoints. Either way <code>minimumNumberOfCalls</code> gates the maths: below it the breaker never trips, which stops two failures out of two from opening a circuit on a cold start.</p>
+    <p>Two rates can trip it. <code>failureRateThreshold</code> (percent) counts exceptions in <code>recordExceptions</code>; <code>slowCallRateThreshold</code> counts calls slower than <code>slowCallDurationThreshold</code>, which is what actually saves you from the healthy-but-degraded dependency that never throws. Also configure <code>ignoreExceptions</code>: a downstream returning HTTP 404 or a validation error is your caller's bug, not a downstream outage, and counting it as a failure opens circuits for no reason.</p>
+    <pre class="code-block" data-label="YAML"><code>resilience4j.circuitbreaker:
+  instances:
+    inventory:
+      slidingWindowType: TIME_BASED
+      slidingWindowSize: 60          # seconds of history
+      minimumNumberOfCalls: 20       # no verdict below this
+      failureRateThreshold: 50       # percent
+      slowCallDurationThreshold: 2s
+      slowCallRateThreshold: 60      # percent
+      waitDurationInOpenState: 30s
+      permittedNumberOfCallsInHalfOpenState: 5
+      automaticTransitionFromOpenToHalfOpenEnabled: true
+      ignoreExceptions:
+        - com.acme.order.NotFoundException</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-circuitbreaker/reference/spring-cloud-circuitbreaker-resilience4j.html" rel="noopener">Spring Cloud Circuit Breaker with Resilience4j — Spring reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-resilience4j" rel="noopener">Guide to Resilience4j With Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/microservices-circuit-breaker-pattern" rel="noopener">Circuit Breaker Pattern in Microservices — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9AXAUlp3DBw" rel="noopener">Resilience4j Tutorial with Spring Boot: Circuit Breaker, Retry, Rate Limiter — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Fallbacks: designing the answer you give when the circuit is open</h3>
+    <p>Annotate the protected method with <code>@CircuitBreaker(name = "...", fallbackMethod = "...")</code>. The fallback must live in the same class, return the same type, and repeat the original parameters with one extra trailing <code>Throwable</code> (or a narrower exception type — you can declare several overloads and Resilience4j dispatches on the thrown type, which is how you distinguish <code>CallNotPermittedException</code> from a genuine downstream error).</p>
+    <p>The design rule that separates seniors from juniors: a fallback that calls another remote service is not a fallback, it is a second chance to fail. Good fallbacks are local and near-instant — a cached value, a sensible default, a degraded-but-honest response ("stock level unavailable"), or a queued write acknowledged as pending. Also decide deliberately when <em>not</em> to fall back: silently returning an empty list where the caller expects real data turns an outage into silent data corruption, and for a payment call the right fallback is a clean error the user can act on.</p>
+    <pre class="code-block" data-label="Java"><code>@CircuitBreaker(name = "inventory", fallbackMethod = "stockFallback")
+public Stock stockFor(String sku) {
+    return inventoryClient.get(sku);            // the remote call
+}
+
+// same signature + trailing Throwable; local and cheap, never another remote call
+private Stock stockFor(String sku, CallNotPermittedException open) {
+    return Stock.unknown(sku);                  // breaker is open: degrade honestly
+}
+private Stock stockFor(String sku, Throwable other) {
+    return cache.lastKnown(sku).orElseGet(() -&gt; Stock.unknown(sku));
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-circuitbreaker/reference/" rel="noopener">Spring Cloud Circuit Breaker — reference documentation (vendor-neutral API and fallbacks)</a></li>
+      <li>[Official] <a href="https://github.com/resilience4j/resilience4j" rel="noopener">resilience4j/resilience4j — GitHub (modules, Spring Boot 3 starter, release notes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-circuit-breaker" rel="noopener">Quick Guide to Spring Cloud Circuit Breaker — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Hw2KC7ecY_A" rel="noopener">Spring Boot Microservices: Circuit Breaker with Resilience4J — Programming Techie</a></li>
+    </ul>
+
+    <h3>Retry with exponential backoff and jitter</h3>
+    <p>Retry answers a different question from the circuit breaker: the breaker asks "is this dependency broken?", retry asks "was this one call unlucky?" Retries only help for transient faults — a dropped connection, a brief leader election, an HTTP 503 with a hint to come back. A fixed-interval retry storm is itself an outage amplifier: if a dependency wobbles, every caller retries at the same instant, and the retry traffic keeps it down. Exponential backoff spreads the attempts out in time; <em>jitter</em> — a random factor applied to each wait — spreads them out across callers, which is the actual fix for the thundering herd. Backoff without jitter still synchronises every client onto the same retry beat.</p>
+    <p>The second rule: never retry a non-idempotent write. A timeout does not tell you whether the request was lost on the way out or the response was lost on the way back — the payment may well have succeeded. Retrying it charges the customer twice. Make the operation idempotent first (an idempotency key, a client-generated request id, a conditional update), then retry. Budget the total too: three attempts at 2 seconds each inside a caller with a 3-second SLA is a guaranteed timeout, so the retry budget must fit inside the enclosing time limit.</p>
+    <pre class="code-block" data-label="YAML"><code>resilience4j.retry:
+  instances:
+    inventory:
+      maxAttempts: 3                    # 1 original + 2 retries
+      waitDuration: 200ms
+      enableExponentialBackoff: true
+      exponentialBackoffMultiplier: 2   # 200ms, 400ms, 800ms ...
+      enableRandomizedWait: true
+      randomizedWaitFactor: 0.5         # the jitter: +/- 50% per wait
+      retryExceptions:
+        - java.io.IOException
+        - java.util.concurrent.TimeoutException
+      ignoreExceptions:
+        - com.acme.order.BadRequestException</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/retry" rel="noopener">Retry — Resilience4j official documentation (interval functions, backoff, randomized wait)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" rel="noopener">Timeouts, retries and backoff with jitter — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/" rel="noopener">Exponential Backoff And Jitter — AWS Architecture Blog (the simulation that made the case)</a></li>
+      <li>[Article] <a href="https://reflectoring.io/retry-with-resilience4j/" rel="noopener">Implementing Retry with Resilience4j — Reflectoring</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Z4CSGsOLb1c" rel="noopener">Resilience4J Retry Module Implementation With Spring Boot — Java Techie</a></li>
+    </ul>
+
+    <h3>TimeLimiter and Bulkhead: capping time and concurrency</h3>
+    <p><code>TimeLimiter</code> puts a hard ceiling on how long a call may take, independent of whatever the HTTP client's socket timeouts happen to be. It works on a <code>CompletableFuture</code> or reactive type and cancels the running future when the budget expires. Without it the breaker's slow-call detection is your only defence against a dependency that answers in ninety seconds, and slow calls are the failure mode that most often takes a service down.</p>
+    <p><code>Bulkhead</code> caps how many calls to one dependency may be in flight at once, so a single slow dependency can never consume the whole thread pool — the ship's-compartment metaphor. Resilience4j ships two: <code>SemaphoreBulkhead</code> (a permit counter, cheap, the call runs on the caller's own thread, good for blocking MVC code) and <code>ThreadPoolBulkhead</code> (a bounded pool plus queue, true isolation, only usable with async/<code>CompletableFuture</code> returns). Size <code>maxConcurrentCalls</code> from Little's law rather than a round number: concurrency roughly equals target throughput multiplied by expected latency.</p>
+    <pre class="code-block" data-label="YAML"><code>resilience4j.bulkhead:                 # semaphore: caller's thread, blocking code
+  instances:
+    inventory:
+      maxConcurrentCalls: 20
+      maxWaitDuration: 0               # fail fast rather than queue
+
+resilience4j.thread-pool-bulkhead:     # real isolation, async returns only
+  instances:
+    reporting:
+      coreThreadPoolSize: 4
+      maxThreadPoolSize: 8
+      queueCapacity: 50
+
+resilience4j.timelimiter:
+  instances:
+    inventory:
+      timeoutDuration: 2s
+      cancelRunningFuture: true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/timeout" rel="noopener">TimeLimiter — Resilience4j official documentation</a></li>
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/bulkhead" rel="noopener">Bulkhead — Resilience4j official documentation (semaphore and thread-pool variants)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/bulkhead" rel="noopener">Bulkhead pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://reflectoring.io/time-limiting-with-resilience4j/" rel="noopener">Implementing Time Limiting with Resilience4j — Reflectoring</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ib_cL26zOB8" rel="noopener">What is Resilience4j Bulkhead — Spring Boot example — Codefarm</a></li>
+    </ul>
+
+    <h3>RateLimiter: protecting the callee, and staying inside your quota</h3>
+    <p><code>RateLimiter</code> caps calls per refresh period — <code>limitForPeriod</code> permits every <code>limitRefreshPeriod</code>, with <code>timeoutDuration</code> deciding whether a caller that finds no permit waits briefly or fails immediately with <code>RequestNotPermitted</code>. Two distinct uses: throttling inbound traffic so one tenant cannot starve the others, and throttling your own outbound calls to stay inside a third party's contracted quota (a payment gateway, an SMS provider, a KYC API) so you are never the client that gets banned.</p>
+    <p>Be clear about scope in interviews: a Resilience4j rate limiter is per JVM instance. Ten pods each permitting 100 requests per second is 1000 requests per second at the provider, not 100. Genuinely global limiting needs a shared counter — Redis-backed limiting at the API gateway, or a service mesh policy — and that is a different tool from the in-process limiter discussed here.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/ratelimiter" rel="noopener">RateLimiter — Resilience4j official documentation</a></li>
+      <li>[Article] <a href="https://reflectoring.io/rate-limiting-with-resilience4j/" rel="noopener">Implementing Rate Limiting with Resilience4j — Reflectoring</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/resilience4j" rel="noopener">Guide to Resilience4j — Baeldung (every module in one walkthrough)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=E7eN4iGmazQ" rel="noopener">Spring Boot Resilience4J RateLimiter pattern — Techno Town Techie</a></li>
+    </ul>
+
+    <h3>Combining patterns: the decorator order that decides whether any of it works</h3>
+    <p>Stacking annotations is easy; stacking them in the wrong order quietly ruins the breaker. Resilience4j's documented default aspect order, outermost first, is <code>Retry ( CircuitBreaker ( RateLimiter ( TimeLimiter ( Bulkhead ( call ) ) ) ) )</code>. Read it outside-in: the bulkhead admits the call, the time limiter bounds it, the rate limiter meters it, the circuit breaker records the outcome, and only then does retry decide whether to go round again. Higher aspect-order values run further out; the order you write the annotations in your source has no effect at all.</p>
+    <p>Get it backwards — retry <em>inside</em> the breaker — and every individual attempt is recorded as a separate sample, so one bad request logs three failures, the window fills with duplicated evidence and the breaker trips on inflated numbers. Worse, retries keep hammering a downstream the breaker has already judged dead, because the breaker never sees the traffic. The correct arrangement also has a pleasant property: once the breaker is <code>OPEN</code>, retry's attempts are rejected instantly by <code>CallNotPermittedException</code>, so add it to retry's ignore list rather than burning attempts on a circuit already judged open.</p>
+    <pre class="code-block" data-label="YAML"><code># Default order, outermost first:
+#   Retry ( CircuitBreaker ( RateLimiter ( TimeLimiter ( Bulkhead ( call ) ) ) ) )
+# Higher value = further out. Override only if you know why.
+resilience4j.retry.retryAspectOrder: 2
+resilience4j.circuitbreaker.circuitBreakerAspectOrder: 1
+
+# Don't spend retry attempts on an already-open circuit:
+resilience4j.retry.instances.inventory.ignoreExceptions:
+  - io.github.resilience4j.circuitbreaker.CallNotPermittedException</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/getting-started-3" rel="noopener">Getting Started with Spring Boot 2 and 3 — Resilience4j documentation (the aspect-order section)</a></li>
+      <li>[Official] <a href="https://github.com/resilience4j/resilience4j/issues/2383" rel="noopener">Default aspect order places Retry outside CircuitBreaker — resilience4j issue 2383 (the tradeoff argued in public)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-circuit-breaker-vs-retry" rel="noopener">Difference Between Circuit Breaker and Retry in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3-ChrD3Zosg" rel="noopener">Spring Boot 3: Circuit Breakers using Resilience4J — Tech Primers</a></li>
+    </ul>
+
+    <h3>Seeing it in production: Micrometer metrics, events and health</h3>
+    <p>An unobserved breaker is a liability — you find out it has been open for two days when a customer tells you. Resilience4j publishes Micrometer meters out of the box: <code>resilience4j_circuitbreaker_state</code> (a gauge tagged by state, so <code>state="open"</code> going to 1 is your alert), <code>resilience4j_circuitbreaker_calls</code> tagged <code>kind=successful|failed|not_permitted</code>, plus buffered-call and slow-call counts, and equivalents for retry, bulkhead and rate limiter. Alert on state transitions and on the not-permitted rate, and graph the failure rate next to the threshold you configured.</p>
+    <p>Alongside metrics, the Spring Boot starter exposes actuator endpoints — <code>/actuator/circuitbreakers</code> for current state and <code>/actuator/circuitbreakerevents</code> for the recent transition log, which is the fastest way to answer "when exactly did this open, and on what?" during an incident. Register an <code>EventPublisher</code> listener to log transitions at WARN so they land in your normal log pipeline, and remember that a breaker in the open state should usually make the dependent part of your health endpoint degraded rather than down, so Kubernetes does not restart a pod that is behaving correctly.</p>
+    <pre class="code-block" data-label="YAML"><code>management.endpoints.web.exposure.include: health,metrics,prometheus,circuitbreakers,circuitbreakerevents
+management.health.circuitbreakers.enabled: true
+resilience4j.circuitbreaker.instances.inventory.registerHealthIndicator: true
+
+# Prometheus series worth alerting on:
+#   resilience4j_circuitbreaker_state{name="inventory",state="open"} == 1
+#   rate(resilience4j_circuitbreaker_calls_seconds_count{kind="not_permitted"}[5m])</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://resilience4j.readme.io/docs/micrometer" rel="noopener">Micrometer metrics — Resilience4j official documentation (every published meter and tag)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html" rel="noopener">Metrics — Spring Boot Actuator reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/resilience4j-events-endpoints" rel="noopener">Resilience4j Events Endpoints — Baeldung</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/observability/health-check-api.html" rel="noopener">Pattern: Health Check API — microservices.io</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-centralized-config.html">← Centralized Configuration</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="09-distributed-data.html">Distributed Data Patterns →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Resilience is the highest-yield microservices topic in Indian product and service-company rounds — the state machine gets asked almost every time, and the follow-ups separate candidates who have configured it from candidates who have read about it:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a circuit breaker and what problem does it solve?</summary>
+      <div class="answer"><p>A proxy around a remote call that tracks recent outcomes and, once failures cross a threshold, stops calling the dependency and fails immediately instead. It prevents cascading failure: without it, callers park threads on a sick downstream until their own pools are exhausted and they go down too. It also gives the downstream breathing room to recover.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the circuit breaker states and the transitions between them.</summary>
+      <div class="answer"><p>CLOSED (calls flow, outcomes recorded) → OPEN when the failure rate crosses the threshold with at least minimumNumberOfCalls samples → after waitDurationInOpenState → HALF_OPEN, which admits permittedNumberOfCallsInHalfOpenState probe calls → back to CLOSED if they pass, back to OPEN if they don't. Resilience4j adds three special states: DISABLED, FORCED_OPEN and METRICS_ONLY.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is Resilience4j used instead of Netflix Hystrix?</summary>
+      <div class="answer"><p>Hystrix went into maintenance mode in 2018 and is no longer actively developed. Resilience4j is the successor on the JVM: lightweight, no heavy dependency tree, functional decorator API, modular (you take only the modules you need), works with plain functions as well as Spring annotations, and integrates with Micrometer. Spring Cloud Circuit Breaker wraps it behind a vendor-neutral API.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a fallback, and how do you declare one?</summary>
+      <div class="answer"><p>The alternative result returned when the protected call fails or is rejected. In Spring you write <code>@CircuitBreaker(name = "x", fallbackMethod = "y")</code>; the fallback lives in the same class, returns the same type, and takes the original parameters plus a trailing Throwable. You can declare several overloads with narrower exception types and Resilience4j picks the closest match.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Count-based vs time-based sliding window — which would you choose?</summary>
+      <div class="answer"><p>Count-based keeps the last N call results; time-based keeps results from the last N seconds. On a low-traffic endpoint a count-based window can be judging on stale evidence collected hours ago, so time-based is safer there. On steady high-volume traffic count-based is cheaper and more predictable. Either way set minimumNumberOfCalls so the breaker never rules on a handful of samples.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does slowCallRateThreshold do, and why isn't failure rate enough?</summary>
+      <div class="answer"><p>It trips the breaker on calls slower than slowCallDurationThreshold, even when they eventually succeed. A degraded dependency that answers in eight seconds throws no exception, so a failure-rate-only breaker stays closed while your threads pile up behind it. Slow calls, not exceptions, are the usual cause of cascading failure, so this setting is the one that matters most in production.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why add jitter to exponential backoff — isn't backoff enough?</summary>
+      <div class="answer"><p>No. Backoff alone spreads attempts over time but keeps every client synchronised: if a thousand callers fail at the same moment, they all wait 200ms, then all 400ms, so the retry traffic arrives in synchronised spikes that keep the recovering service down. That is the thundering herd. Jitter randomises each wait so attempts are smeared across the interval and the load arrives as a flat trickle instead of a wave.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Semaphore bulkhead vs thread-pool bulkhead?</summary>
+      <div class="answer"><p>Semaphore is a permit counter — the call runs on the caller's own thread, near-zero overhead, works with ordinary blocking code, but it does not isolate the caller's thread from a slow downstream. Thread-pool bulkhead runs the call on a separate bounded pool with a queue, giving true isolation and enabling real timeouts, at the cost of context switching and requiring async (CompletableFuture) return types. Default to semaphore; use thread-pool where isolation genuinely matters.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Circuit breaker vs retry — when do you use each, and can you use both?</summary>
+      <div class="answer"><p>Retry handles a transient, one-off fault; the circuit breaker handles a dependency that is persistently unhealthy. Retry says "try again", the breaker says "stop trying". Use both — the breaker prevents retry from becoming a denial-of-service attack on a dying service — but only in the correct nesting, with the breaker recording the outcome of the whole retried operation.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> In what order do Resilience4j decorators compose, and what breaks if you invert Retry and CircuitBreaker?</summary>
+      <div class="answer"><p>Outermost to innermost: Retry, CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead, then the call. Higher aspect-order values sit further out; annotation order in the source is irrelevant. Put retry inside the breaker and each attempt is recorded separately, so a single failing request contributes three failure samples — the window fills with duplicated evidence and the breaker trips on inflated numbers while retries keep hammering a downstream the breaker cannot see. Override with retryAspectOrder and circuitBreakerAspectOrder only with a deliberate reason.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your fallback calls a secondary service. Critique that design.</summary>
+      <div class="answer"><p>It is not a fallback. The fallback path runs precisely when the system is unhealthy, so it must be local, fast and dependency-free: a cache, a default, a degraded response, or a queued write. A remote fallback needs its own breaker, its own timeout and its own failure mode, and it usually fails for the same underlying reason (shared network, shared database, shared region). It also converts a fast failure into a slow one, which is what the breaker existed to prevent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is retrying a non-idempotent write dangerous, and how do you make it safe?</summary>
+      <div class="answer"><p>A timeout is ambiguous: you cannot tell whether the request never arrived or the response was lost after the write committed. Retrying may therefore duplicate a payment or an order. Make the operation idempotent first — a client-generated idempotency key the server deduplicates on, a conditional update guarded by a version, or an upsert on a natural key — and only then enable retry. Also cap the total retry budget so it fits inside the caller's own time limit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you detect in production that a breaker has opened, and what do you alert on?</summary>
+      <div class="answer"><p>Micrometer meters: the resilience4j_circuitbreaker_state gauge tagged by state (alert when state="open" reaches 1), and resilience4j_circuitbreaker_calls tagged kind=successful|failed|not_permitted — a rising not_permitted rate means traffic is being shed. Back that with the actuator circuitbreakers and circuitbreakerevents endpoints for the transition log during an incident, and an event-publisher listener logging transitions at WARN. Open breakers should usually mark a health check degraded, not down, so the orchestrator does not restart a healthy pod.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your rate limiter permits 100 requests per second, but the provider says you sent 1000. Explain.</summary>
+      <div class="answer"><p>Resilience4j's RateLimiter is per JVM instance, not cluster-wide, so ten pods each permit 100 requests per second independently. Fix it by dividing the quota by the replica count (fragile under autoscaling), or by moving the limit to a shared counter — Redis-backed limiting at the API gateway or a service mesh policy — so the budget is enforced once for the whole cluster rather than once per process.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.res.circuit</li>
+      <li>ms.res.patterns</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

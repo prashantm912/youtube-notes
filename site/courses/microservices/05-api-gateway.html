@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="API Gateway and BFF module: what the edge is responsible for — routing, authentication and token relay, rate limiting, TLS, CORS, aggregation — the risks of a gateway, Spring Cloud Gateway routes, predicates and filters, and the Backend for Frontend pattern, with verified resources and interview questions.">
+  <title>API Gateway and BFF — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: API Gateway and BFF</h1>
+  <p class="standfirst">Split a system into twenty services and you have just handed every client twenty addresses, twenty auth handshakes and a dozen round trips per screen. The gateway is the front door that hides all of it — and the piece most likely to become the thing that takes production down.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices → API Gateway and BFF</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>An API gateway is the single entry point that sits between clients and your services: it routes requests, terminates TLS, validates tokens once, enforces rate limits, handles CORS, reshapes requests and responses, and occasionally fans one call out to several services and composes the reply. This module covers those edge responsibilities and their costs, then implements them concretely with Spring Cloud Gateway — the route model (id, uri, predicates, filters), built-in and custom filters, and configuration in YAML or the Java DSL.</p>
+    <p>It closes with Backend for Frontend: rather than one gateway trying to satisfy a web app, an Android app and a partner API at the same time, give each client type its own thin gateway shaped for its screens. Versions assumed: Spring Boot 3.x/4.x with the current Spring Cloud Gateway.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why an edge exists: the client's problem</h3>
+    <p>Without a gateway, every client must know the network address of every service, discover them when they move, speak whatever protocol each one chose, and repeat the same cross-cutting work — token validation, retries, CORS preflight handling — in every codebase, including a mobile app you cannot hot-fix. A single mobile screen showing an order, its items, the customer and a loyalty balance becomes four requests over a high-latency link. The gateway collapses that coupling: clients see one host and one API surface, while services stay free to move, split and merge behind it.</p>
+    <p>The core job is <em>routing</em>: match an incoming request (by path, host, method or header) and forward it to the right upstream, usually through a load balancer or service registry rather than a hard-coded host. Everything else at the edge is layered on top of that match-and-forward step. Getting this mental model right matters because interviewers routinely ask you to distinguish a gateway from a plain reverse proxy — the difference is that a gateway is API-aware and owns policy, not just TCP forwarding.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/apigateway.html" rel="noopener">Pattern: API Gateway / Backends for Frontends — microservices.io (Chris Richardson's canonical write-up, including the BFF variant)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/design/gateway" rel="noopener">Using API gateways in microservices — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-routing" rel="noopener">Gateway Routing pattern — Azure Architecture Center (routing multiple services behind one endpoint)</a></li>
+      <li>[Article] <a href="https://www.f5.com/company/blog/nginx/building-microservices-using-an-api-gateway" rel="noopener">Building Microservices: Using an API Gateway — NGINX / F5 (the essay that popularised the pattern)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2BcmN6TG_No" rel="noopener">Microservice: Spring Cloud Eureka + API Gateway + Hystrix, Part 1 — Java Techie</a></li>
+    </ul>
+
+    <h3>Cross-cutting work the edge absorbs — and what it costs</h3>
+    <p>Once every request passes through one place, that place is the cheapest place to do work that would otherwise be duplicated. The usual list: <strong>TLS termination</strong> (certificates managed once, plaintext or mTLS inward); <strong>authentication and token translation</strong> — validate the JWT or opaque token once at the edge, then pass a trusted identity inward as headers or a relayed token, so downstream services do authorization, not authentication; <strong>rate limiting and throttling</strong> per client, key or tenant; <strong>CORS</strong>, so browsers preflight against the gateway instead of every service; <strong>request and response transformation</strong> (strip a path prefix, rewrite a URI, add or remove headers, reshape a legacy payload); and <strong>response aggregation</strong>, where one client call fans out to several services and returns a composed document.</p>
+    <p>All of that is real value, and all of it is a trap if you overdo it. A gateway every request crosses is a single point of failure — it needs redundancy, health checks and its own circuit breakers and timeouts, or one slow upstream drags the whole edge down. It is also a magnet for business logic: a discount rule "just for now" in a filter becomes an undeployable shared component every team must queue behind, which is exactly the coupling microservices were meant to remove. The rule that reads well in an interview: the gateway owns <em>protocol and policy</em>; domain decisions stay in services.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/tokenrelay-factory.html" rel="noopener">TokenRelay GatewayFilter — Spring Cloud Gateway reference (forwarding the OAuth2 access token inward)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-offloading" rel="noopener">Gateway Offloading pattern — Azure Architecture Center (TLS, auth and other shared concerns at the edge)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-aggregation" rel="noopener">Gateway Aggregation pattern — Azure Architecture Center (one client call, several upstreams)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-gateway-rate-limit-by-client-ip" rel="noopener">Rate Limiting With Client IP in Spring Cloud Gateway — Baeldung (token bucket via Redis, custom KeyResolver)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MWvnmyLRUik" rel="noopener">Microservices Security Using JWT with Spring Cloud Gateway — Java Techie</a></li>
+    </ul>
+
+    <h3>Spring Cloud Gateway: the route model</h3>
+    <p>Spring Cloud Gateway expresses the edge as a list of <em>routes</em>. A route has an <code>id</code>, a destination <code>uri</code> (a real host, or <code>lb://service-name</code> to resolve through the load balancer and registry), a set of <strong>predicates</strong> that decide whether the request matches, and a set of <strong>filters</strong> that modify the exchange on the way through. The handler mapping walks the routes in order, and the first route whose predicates all pass wins — so ordering matters, and a broad <code>Path=/**</code> route placed early will swallow everything after it.</p>
+    <p>The common predicate factories are <code>Path</code>, <code>Host</code>, <code>Method</code>, <code>Header</code>, <code>Query</code>, <code>Cookie</code>, <code>RemoteAddr</code> and the time-based <code>After</code>/<code>Before</code>/<code>Between</code>; they compose with logical AND and can be combined in the Java DSL with <code>and()</code>, <code>or()</code> and <code>negate()</code>. Note the property prefix changed as the project split its servers: Spring Cloud Gateway 4.x used <code>spring.cloud.gateway.routes</code>, while the current 5.x reference documents <code>spring.cloud.gateway.server.webflux.routes</code>. Check the version your Spring Boot release train pulls in before copying a snippet.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+          - id: orders
+            uri: lb://order-service      # resolved via the registry
+            predicates:
+            - Path=/api/orders/**
+            - Method=GET,POST
+            filters:
+            - StripPrefix=1              # /api/orders/9 -&gt; /orders/9</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/" rel="noopener">Spring Cloud Gateway — reference documentation (start here)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html" rel="noopener">How It Works — Spring Cloud Gateway (handler mapping, filter chain, pre and post phases)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/request-predicates-factories.html" rel="noopener">Route Predicate Factories — Spring Cloud Gateway reference (Path, Host, Method, Header and the rest)</a></li>
+      <li>[Official] <a href="https://spring.io/guides/gs/gateway/" rel="noopener">Building a Gateway — Spring getting-started guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-gateway" rel="noopener">Exploring the New Spring Cloud Gateway — Baeldung (end-to-end tour of routes, predicates and filters)</a></li>
+    </ul>
+
+    <h3>Filters: built-in, global and custom</h3>
+    <p>A <code>GatewayFilter</code> applies to the route that declares it; a <code>GlobalFilter</code> applies to every route. Both run as a chain with a pre phase (before the request is proxied) and a post phase (after the response comes back), ordered by an <code>Order</code> value — routing, load balancing and metrics are themselves global filters, which is why the framework's own behaviour is inspectable and overridable. Useful built-ins to know by name: <code>StripPrefix</code> and <code>RewritePath</code> for URL shaping, <code>AddRequestHeader</code> / <code>AddResponseHeader</code> / <code>RemoveRequestHeader</code>, <code>SetStatus</code>, <code>Retry</code>, <code>CircuitBreaker</code> (delegating to Resilience4j with a fallback URI), and <code>RequestRateLimiter</code>, whose default implementation is a Redis token bucket driven by a <code>KeyResolver</code>.</p>
+    <p>When nothing built in fits, implement <code>GlobalFilter</code> as a bean, or extend <code>AbstractGatewayFilterFactory</code> for a route-scoped filter with configuration properties. Typical custom filters: injecting a correlation id, mapping a validated JWT into internal identity headers, or logging structured request metadata. Keep them non-blocking — the reactive gateway runs on a small Netty event loop, and one blocking call inside a filter can stall traffic for every route.</p>
+    <pre class="code-block" data-label="YAML"><code>filters:
+- name: RequestRateLimiter
+  args:
+    redis-rate-limiter.replenishRate: 10   # sustained requests per second
+    redis-rate-limiter.burstCapacity: 20   # bucket size
+    key-resolver: "#{@ipKeyResolver}"      # bean deciding the limit key
+- name: CircuitBreaker
+  args:
+    name: ordersCb
+    fallbackUri: forward:/fallback/orders</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories.html" rel="noopener">GatewayFilter Factories — Spring Cloud Gateway reference (the full built-in catalogue)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/global-filters.html" rel="noopener">Global Filters — Spring Cloud Gateway reference (framework filters and ordering)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/requestratelimiter-factory.html" rel="noopener">RequestRateLimiter GatewayFilter — Spring Cloud Gateway reference (Redis token bucket, KeyResolver)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-custom-gateway-filters" rel="noopener">Writing Custom Spring Cloud Gateway Filters — Baeldung (GlobalFilter vs AbstractGatewayFilterFactory)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EKoq98KqvrI" rel="noopener">Building an API Gateway in Java with Spring Cloud Gateway — Dan Vega</a></li>
+    </ul>
+
+    <h3>Configuration style: YAML, the Java DSL, and the servlet variant</h3>
+    <p>Routes can be declared in YAML or built with the fluent <code>RouteLocatorBuilder</code> API. YAML wins for simple, mostly static routing and can be refreshed from a config server; the Java DSL wins when routes are conditional, generated from a list, or need predicates and filters that read awkwardly as strings. They coexist — many teams keep the bulk in YAML and add a small <code>RouteLocator</code> bean for the awkward cases. CORS is configured once globally rather than per route, and the discovery-client route locator can even publish a route per registered service automatically (convenient in demos, usually too loose for production).</p>
+    <p>One deployment detail worth stating in an interview: the reactive server built on Spring WebFlux and Netty is the mainline — it will not run in a traditional servlet container or as a WAR. A servlet-based server (Spring Cloud Gateway Server MVC) also exists for teams standardised on blocking Spring MVC, with its own handler and filter functions rather than the reactive filter factories, and a Proxy Exchange option for hand-rolled forwarding inside a controller.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+RouteLocator routes(RouteLocatorBuilder builder) {
+    return builder.routes()
+        .route("orders", r -&gt; r.path("/api/orders/**")
+            .and().header("X-Api-Version", "v2")
+            .filters(f -&gt; f.stripPrefix(1)
+                           .addRequestHeader("X-Edge", "gateway"))
+            .uri("lb://order-service"))
+        .build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/fluent-java-routes-api.html" rel="noopener">Fluent Java Routes API — Spring Cloud Gateway reference (RouteLocatorBuilder)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/cors-configuration.html" rel="noopener">CORS Configuration — Spring Cloud Gateway reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webmvc.html" rel="noopener">Spring Cloud Gateway Server MVC — the servlet-based variant</a></li>
+      <li>[Official] <a href="https://spring.io/projects/spring-cloud-gateway/" rel="noopener">Spring Cloud Gateway — project page (supported versions and release train mapping)</a></li>
+    </ul>
+
+    <h3>Backend for Frontend: one gateway per client type</h3>
+    <p>A single general-purpose gateway serving a desktop web app, a mobile app and a partner API ends up serving none of them well: every client's needs push changes into one shared component, payloads grow to be a superset of everyone's requirements, and release cadence is set by the slowest consumer. Backend for Frontend — named at SoundCloud and popularised by Sam Newman — flips the ownership: each client experience gets its own thin edge service, owned by the team that owns that client, exposing exactly the endpoints and payload shapes that client's screens need.</p>
+    <p>A mobile BFF might collapse four upstream calls into one lean response with small images; the web BFF returns richer documents; the partner BFF exposes a stable, versioned, rate-limited contract and nothing else. BFFs stay thin — aggregate, reshape, adapt protocols, hold client-specific session or token handling (an increasingly common pattern is the BFF holding the OAuth2 tokens so a browser app keeps only a cookie) — and hold no domain logic. The trade-off to name unprompted: duplicated aggregation code across BFFs and more services to run, accepted in exchange for team autonomy. Guard against BFF proliferation by grouping per client <em>type</em>, not per screen.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/backends-for-frontends" rel="noopener">Backends for Frontends pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://samnewman.io/patterns/architectural/bff/" rel="noopener">Backends For Frontends — Sam Newman (the reference description, including when not to use it)</a></li>
+      <li>[Article] <a href="https://philcalcado.com/2015/09/18/the_back_end_for_front_end_pattern_bff.html" rel="noopener">The Back-end for Front-end Pattern (BFF) — Phil Calçado (how it emerged at SoundCloud)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-gateway-bff-oauth2" rel="noopener">OAuth2 Backend for Frontend With Spring Cloud Gateway — Baeldung (BFF holding the tokens for a browser client)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tmGnpU8xOGE" rel="noopener">Backends for Frontends: what is it? — Software Developer Diaries</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-inter-service-communication.html">← Inter-Service Communication</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="06-service-discovery.html">Service Discovery →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Gateway questions dominate microservices rounds at Indian product and service companies — expect the pattern first, then Spring Cloud Gateway specifics, then a design trade-off:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is an API gateway and why do microservices need one?</summary>
+      <div class="answer"><p>A single entry point between clients and services. It routes requests to the right service and centralises cross-cutting concerns — TLS termination, authentication, rate limiting, CORS, logging. Without it every client must know every service address and repeat that work itself, and services cannot move or split freely.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How is a gateway different from a load balancer or a plain reverse proxy?</summary>
+      <div class="answer"><p>A load balancer distributes traffic across instances of one service; a reverse proxy forwards by host or path with no understanding of your API. A gateway is API-aware: it matches on path, method, headers or query, applies per-route policy such as auth and rate limits, can transform payloads and aggregate several upstream calls. Gateways typically use a load balancer or registry underneath.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Name the main responsibilities you would put at the edge.</summary>
+      <div class="answer"><p>Routing, TLS termination, authentication and token validation, rate limiting and throttling, CORS handling, request/response transformation, response aggregation, plus observability — correlation ids, access logs, metrics. Authorization on domain rules and any business logic stay in the services.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What are predicates and filters in Spring Cloud Gateway?</summary>
+      <div class="answer"><p>A route is id + uri + predicates + filters. Predicates decide whether a request matches the route (Path, Host, Method, Header, Query, Cookie, RemoteAddr, time-based After/Before/Between) and are ANDed together. Filters modify the exchange as it passes — pre phase before proxying, post phase on the response.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Which built-in filters do you use most often?</summary>
+      <div class="answer"><p><code>StripPrefix</code> and <code>RewritePath</code> for reshaping the upstream URL, <code>AddRequestHeader</code> / <code>AddResponseHeader</code> / <code>RemoveRequestHeader</code>, <code>SetStatus</code>, <code>Retry</code>, <code>CircuitBreaker</code> with a fallback URI, and <code>RequestRateLimiter</code>. <code>TokenRelay</code> when the gateway forwards an OAuth2 access token inward.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How does authentication work when the gateway is in front? Do services trust it blindly?</summary>
+      <div class="answer"><p>The gateway validates the token once — signature, expiry, issuer, audience — and passes identity inward, either by relaying the token or by adding trusted headers such as user id, tenant and roles. Downstream services then do authorization, not authentication. They must not trust those headers from anywhere else: enforce it with network policy or mTLS so nothing can reach a service except through the edge. Many teams still re-verify the JWT in each service — cheap, and it removes the blind-trust assumption entirely.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you implement rate limiting in Spring Cloud Gateway?</summary>
+      <div class="answer"><p>The <code>RequestRateLimiter</code> filter with the Redis-backed token bucket: set <code>replenishRate</code> (sustained requests per second), <code>burstCapacity</code> (bucket size) and optionally <code>requestedTokens</code>, and supply a <code>KeyResolver</code> bean that decides the limit key — user id, API key, tenant or client IP. Redis makes the counter shared, so the limit holds across gateway instances; an in-memory limiter would let N replicas allow N times the quota.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> GatewayFilter vs GlobalFilter — when do you write each?</summary>
+      <div class="answer"><p>A GatewayFilter is attached to specific routes, usually via a factory extending <code>AbstractGatewayFilterFactory</code> so it can take configuration. A GlobalFilter runs for every route and needs no declaration — right for correlation ids, access logging or uniform security headers. Both participate in the same ordered chain; the framework's routing and load-balancing steps are themselves global filters.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Route ordering bit you in production. What happened, and how do you debug routing?</summary>
+      <div class="answer"><p>Routes are evaluated in order and the first full predicate match wins, so a broad <code>Path=/**</code> or catch-all route declared early shadows every specific route after it. Debug with the gateway actuator endpoint to list resolved routes, enable trace logging for the handler mapping and filter chain, and prefer specific paths with explicit ordering over catch-alls.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the BFF pattern and when would you choose it over one shared gateway?</summary>
+      <div class="answer"><p>Backend for Frontend gives each client type — web, mobile, partner API — its own thin edge service owned by that client's team, exposing exactly the endpoints and payload shapes it needs. Choose it when client needs have visibly diverged (mobile wants fewer, leaner calls; web wants richer documents) or when one shared gateway has become a release bottleneck between teams. One gateway is fine while clients want essentially the same API.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> The gateway is a single point of failure. How do you keep it from taking the system down?</summary>
+      <div class="answer"><p>Run several stateless replicas behind a load balancer or Kubernetes Service across zones, with readiness and liveness probes and autoscaling. Protect it from upstreams: per-route connect and response timeouts, circuit breakers with fallback URIs, bulkheads or concurrency limits so one slow service cannot exhaust the event loop, and retries only on idempotent methods. Keep filters non-blocking, keep state (rate-limit counters, sessions) in Redis rather than in the instance, and give the edge its own dashboards and alerts on latency and error rate.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why is business logic in the gateway considered an anti-pattern, and where do you draw the line?</summary>
+      <div class="answer"><p>Logic in the edge belongs to no service team but blocks all of them: every change queues behind one shared deploy, tests need the whole edge, and the coupling microservices were meant to remove comes back concentrated in one component. The line: the gateway owns protocol and policy — routing, auth, limits, headers, shaping, aggregation of existing responses. Anything that decides a domain outcome (pricing, eligibility, workflow state) belongs to a service. If aggregation logic starts making decisions, promote it to a BFF or a composition service you can own and deploy independently.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> With a service mesh and Kubernetes Ingress already in place, do you still need an API gateway?</summary>
+      <div class="answer"><p>They solve different axes. Ingress does L7 entry and TLS; a mesh handles service-to-service concerns — mTLS, retries, traffic splitting, telemetry — transparently as a sidecar, mostly east-west. A gateway is north-south and API-aware: client authentication, quotas per consumer, payload shaping, aggregation, API versioning and keys. Common production shape is Ingress or a cloud load balancer in front, a gateway or BFF for client-facing API policy, and a mesh for inter-service traffic. If your clients need none of the API-level policy, the gateway is redundant — say so, that honesty scores.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Spring Cloud Gateway is reactive. What does that constrain, and what is the servlet alternative?</summary>
+      <div class="answer"><p>The mainline server is built on Spring WebFlux, Project Reactor and Netty: it will not run in a traditional servlet container or as a WAR, and any blocking call inside a filter — a JDBC lookup, a synchronous HTTP client — occupies an event-loop thread and degrades every route, not just that one. Offload such work or move it to a service. For teams standardised on blocking Spring MVC there is a servlet-based Spring Cloud Gateway Server MVC with handler and filter functions instead of the reactive filter factories, plus a Proxy Exchange option for controller-level forwarding.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.gw.edge</li>
+      <li>ms.gw.springcloud</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

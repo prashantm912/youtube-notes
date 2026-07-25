@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Inter-Service Communication module: REST vs gRPC vs asynchronous messaging, the synchronous call-chain trap, OpenAPI contracts and client generation, Spring Cloud OpenFeign, RestClient and declarative HTTP interfaces — curated official resources and interview questions.">
+  <title>Inter-Service Communication — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Inter-Service Communication</h1>
+  <p class="standfirst">Inside a monolith a call is a method invocation that cannot fail on its own. Across services it is a network call that can be slow, fail, or quietly succeed twice — and choosing how services talk is the decision that most shapes how the system behaves under load.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Microservices track</a> → Inter-Service Communication</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two decisions live here. First, the communication <em>style</em>: REST over HTTP, gRPC over HTTP/2, or asynchronous messaging through a broker — each with a different failure model, and each honestly better than the others at something. Second, the <em>contract and the client</em>: how the caller knows what the callee accepts, how OpenAPI turns that into a machine-readable artefact, and which Java client you actually write in Spring Boot 3.x and 4.x — Spring Cloud OpenFeign, the modern <code>RestClient</code>, or a declarative HTTP interface.</p>
+    <p>Everything downstream in this track — the gateway, resilience, sagas, tracing, contract testing — assumes you have picked a style deliberately. Pick it by accident and every later module becomes damage control.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Three styles: REST, gRPC and asynchronous messaging</h3>
+    <p>REST/JSON over HTTP is the default because it is ubiquitous and human-debuggable: any browser, <code>curl</code>, proxy or log aggregator understands it, and a junior engineer can reproduce a bug from a request line. The cost is verbosity — text on the wire, reflective serialisation, no schema the compiler enforces — and a contract that lives in documentation rather than in code.</p>
+    <p>gRPC trades that readability for speed and type safety. Protobuf messages are binary and compact, the <code>.proto</code> file <em>is</em> the contract, stubs are generated for both sides, and HTTP/2 multiplexing plus first-class streaming make it excellent for chatty internal service-to-service traffic. The cost is tooling: you cannot eyeball a payload, browser support needs a proxy layer, and every team must adopt the build plugin.</p>
+    <p>Asynchronous messaging is a different shape entirely. The caller publishes an event or command to a broker and returns immediately; the consumer processes it whenever it is healthy. This buys temporal decoupling — the downstream service can be down for ten minutes and nothing is lost — at the price of eventual consistency, at-least-once delivery (so duplicates), and debugging that spans a broker rather than a stack trace.</p>
+    <table>
+      <caption>Choosing a communication style</caption>
+      <thead>
+        <tr><th>Dimension</th><th>REST / JSON</th><th>gRPC / Protobuf</th><th>Async messaging</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Coupling</td><td>Temporal — both up</td><td>Temporal — both up</td><td>Decoupled in time</td></tr>
+        <tr><td>Payload</td><td>Text, verbose</td><td>Binary, compact</td><td>Broker-defined (often JSON or Avro)</td></tr>
+        <tr><td>Contract</td><td>OpenAPI, by convention</td><td><code>.proto</code>, compiler-enforced</td><td>Event schema plus a registry</td></tr>
+        <tr><td>Debuggability</td><td>Excellent</td><td>Needs tooling</td><td>Hardest — trace across the broker</td></tr>
+        <tr><td>Streaming</td><td>Awkward (SSE, chunking)</td><td>Native, bidirectional</td><td>Natural</td></tr>
+        <tr><td>Failure shows up as</td><td>HTTP error or timeout</td><td>Status code or deadline</td><td>Retry, then dead-letter queue</td></tr>
+        <tr><td>Consistency</td><td>Read-your-writes</td><td>Read-your-writes</td><td>Eventual</td></tr>
+      </tbody>
+    </table>
+    <p>The decision rule that survives interviews: <strong>if the caller genuinely needs the answer to continue, use a synchronous call — REST at the edge and for cross-team or public APIs, gRPC for high-volume internal hops where both sides are yours. If the caller only needs the work to eventually happen, publish an event.</strong> Most "we need it synchronously" requirements dissolve under one question: what does the user actually see if this step finishes two seconds later?</p>
+    <pre class="code-block" data-label="Protobuf"><code>service Inventory {
+  rpc GetItem (ItemRequest) returns (Item);        // unary
+  rpc WatchStock (ItemRequest) returns (stream Item); // server streaming
+}
+message ItemRequest { string sku = 1; }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://grpc.io/docs/what-is-grpc/introduction/" rel="noopener">Introduction to gRPC — grpc.io official docs</a></li>
+      <li>[Official] <a href="https://protobuf.dev/overview/" rel="noopener">Protocol Buffers Overview — protobuf.dev (why binary schemas beat ad-hoc JSON)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/communication-style/rpi.html" rel="noopener">Remote Procedure Invocation pattern — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-vs-grpc" rel="noopener">REST vs. gRPC — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AMNWLz_f6qM" rel="noopener">REST vs gRPC in Microservices — Which One Should You Use? — ByteMonk</a></li>
+    </ul>
+
+    <h3>The synchronous call-chain trap</h3>
+    <p>Here is the failure mode that turns a tidy diagram into a production incident. Service A calls B, which calls C, which calls D. Each hop is fast in isolation, so nobody worries. Then D slows from 20 ms to 2 seconds. C's threads block waiting on D; C's pool fills; B's calls to C start timing out; A's request path stalls. One slow leaf has stalled the whole tree, and the alert fires on A — the service that is not broken. Availability multiplies too: four hops at 99.9% each give roughly 99.6% for the chain, and you have spent your error budget on arithmetic.</p>
+    <p>Two mitigations are mandatory for any synchronous hop and are covered later in this track: aggressive, explicit timeouts, and a circuit breaker so a sick dependency fails fast instead of consuming your threads (see <em>Resilience with Resilience4j</em>). But the structural answer is usually to stop making the call at all. If service A only needs to <em>tell</em> B something — order placed, user registered, payment captured — publish an event and let B consume it at its own pace. The request path shortens to one hop, B's downtime becomes broker backlog rather than user-visible errors, and new consumers attach later without A changing a line.</p>
+    <p>What you accept in exchange is eventual consistency and duplicate delivery. Brokers guarantee at-least-once, not exactly-once, so consumers must be idempotent — the same message processed twice must not charge the card twice. That discipline, plus the outbox pattern for publishing reliably alongside a database write, is the subject of the Messaging track and of <em>Distributed Data Patterns</em> later in this one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/index.html" rel="noopener">Messaging — Spring Boot reference (JMS, AMQP, Kafka, Pulsar integrations)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/communication-style/messaging.html" rel="noopener">Messaging pattern — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html" rel="noopener">Idempotent Consumer pattern — microservices.io (handling duplicate delivery)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/microservice-trade-offs.html" rel="noopener">Microservice Trade-Offs — Martin Fowler (distribution costs, eventual consistency)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LMKVzguhFw4" rel="noopener">RPC vs Messaging: When to use which? — CodeOpinion (Derek Comartin)</a></li>
+    </ul>
+
+    <h3>The contract: OpenAPI and generated clients</h3>
+    <p>Once two teams own two services, the interface between them needs to be an artefact, not a conversation. OpenAPI is that artefact for HTTP APIs: a machine-readable description of paths, parameters, request and response schemas, status codes and auth, versioned in a repository and reviewable in a pull request. It gives you rendered documentation for free, request validation, mock servers before the provider exists, and — the part that changes daily work — <em>code generation</em>.</p>
+    <p>Two directions are worth knowing. <strong>Code-first</strong>: annotate the Spring controllers, let springdoc-openapi produce the specification at build or runtime, publish it. Fast, and the spec cannot drift from the implementation, but the API is designed by whoever wrote the controller. <strong>Contract-first</strong>: write or negotiate the YAML first, then generate server interfaces and typed client stubs with OpenAPI Generator for every consumer language. Slower to start, far better across team boundaries — and it makes a breaking change visible as a diff rather than as a 4xx in someone else's logs. A generated client also removes a whole class of bug: nobody hand-types a URL path or misspells a field name.</p>
+    <p>Whichever direction you pick, treat the spec as versioned and additive. Adding an optional field is safe; removing one, renaming one, or tightening a validation rule is a breaking change that needs a version bump and a migration window. Module 12 of this track takes that further with consumer-driven contract testing.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://swagger.io/specification/" rel="noopener">OpenAPI Specification — swagger.io (the full spec, current version)</a></li>
+      <li>[Official] <a href="https://learn.openapis.org/" rel="noopener">Getting started with OpenAPI — OpenAPI Initiative learning site</a></li>
+      <li>[Official] <a href="https://springdoc.org/" rel="noopener">springdoc-openapi — generating OpenAPI 3 from Spring Boot controllers</a></li>
+      <li>[Article] <a href="https://openapi-generator.tech/" rel="noopener">OpenAPI Generator — generating server stubs and typed clients from a spec</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-http-client-from-openapi-spec" rel="noopener">Generating HTTP Clients in Spring Boot from an OpenAPI Spec — Baeldung</a></li>
+    </ul>
+
+    <h3>Java clients: OpenFeign, RestClient and declarative HTTP interfaces</h3>
+    <p>Spring Cloud OpenFeign is the long-standing answer in Spring microservices: declare a Java interface, annotate it with <code>@FeignClient</code> and Spring MVC annotations, and Spring generates the implementation. Because the client resolves a <em>service name</em>, it composes with service discovery and client-side load balancing, and it plugs into Resilience4j for circuit breaking and fallbacks. It remains synchronous and thread-per-request, which is exactly right for most business services.</p>
+    <p>On the Spring Framework side the picture has consolidated. <code>RestTemplate</code> is in maintenance mode — still supported, no new features, not the choice for new code. <code>RestClient</code> is the modern synchronous client with a fluent API and the same underlying infrastructure. <code>WebClient</code> is the reactive, non-blocking option, correct when you are already in a reactive stack or fanning out many calls concurrently. And on top of any of them sit <em>declarative HTTP interfaces</em>: annotate an interface with <code>@HttpExchange</code> / <code>@GetExchange</code>, build a proxy with <code>HttpServiceProxyFactory</code>, and you get Feign-style ergonomics from Spring Framework itself with no extra dependency.</p>
+    <p>The pragmatic rule for a Spring Boot 3.x or 4.x service: use OpenFeign if you are already on Spring Cloud and want discovery and load balancing wired in for free; use HTTP interfaces over <code>RestClient</code> for a plain typed client with fewer moving parts; use <code>WebClient</code> when reactive or genuinely concurrent. Whichever you pick, always set connect and read timeouts explicitly — the defaults on the underlying HTTP client are far too generous for a service mesh, and an unbounded read timeout is how the call-chain trap above starts.</p>
+    <pre class="code-block" data-label="Java"><code>// Spring Cloud OpenFeign — resolves "inventory" through discovery
+@FeignClient(name = "inventory")
+public interface InventoryClient {
+    @GetMapping("/api/items/{sku}")
+    ItemDto find(@PathVariable String sku);
+}</code></pre>
+    <pre class="code-block" data-label="Java"><code>// Spring Framework declarative HTTP interface over RestClient
+public interface InventoryApi {
+    @GetExchange("/api/items/{sku}")
+    ItemDto find(@PathVariable String sku);
+}
+
+RestClient client = RestClient.create("https://inventory.internal");
+InventoryApi api = HttpServiceProxyFactory
+        .builderFor(RestClientAdapter.create(client)).build()
+        .createClient(InventoryApi.class);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-openfeign/reference/spring-cloud-openfeign.html" rel="noopener">Spring Cloud OpenFeign — reference documentation (@FeignClient, configuration, fallbacks)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/integration/rest-clients.html" rel="noopener">REST Clients — Spring Framework reference (RestClient, WebClient, HTTP Interface, RestTemplate status)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/io/rest-client.html" rel="noopener">Calling REST Services — Spring Boot reference (auto-configuration, timeouts, request factories)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-openfeign" rel="noopener">Introduction to Spring Cloud OpenFeign — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-6-http-interface" rel="noopener">HTTP Interface in Spring — Baeldung (@HttpExchange and HttpServiceProxyFactory)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KiGE3QtyE1Y" rel="noopener">Microservice Communication Made Easy — Feign Client in Spring Boot — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aR580OCEp7w" rel="noopener">Spring MVC Http Interfaces — a REST client with almost no code — Dan Vega</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-data-per-service.html">← Data per Service</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="05-api-gateway.html">API Gateway and BFF →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>What Indian product and service companies actually ask about service-to-service calls — from screening rounds to architecture discussions:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the main styles of inter-service communication?</summary>
+      <div class="answer"><p>Synchronous request/response — REST over HTTP or gRPC over HTTP/2, where the caller blocks for an answer — and asynchronous messaging through a broker such as Kafka or RabbitMQ, where the caller publishes and moves on. A further axis is one-to-one (a command to one service) versus one-to-many (an event many services consume).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> REST or gRPC — how do you choose?</summary>
+      <div class="answer"><p>REST for public and cross-team APIs, anything a browser or third party touches, and anywhere human debuggability matters. gRPC for high-volume internal hops between services you own, where the compact binary payload, generated stubs and native streaming pay for the extra tooling. Many systems use both: REST at the edge, gRPC inside.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is <code>@FeignClient</code> and what does Spring do with it?</summary>
+      <div class="answer"><p>It marks a Java interface as a declarative HTTP client. With <code>@EnableFeignClients</code>, Spring Cloud scans for those interfaces and generates a proxy implementation that translates each annotated method into an HTTP call — resolving the service name through discovery and load balancing when Spring Cloud is on the classpath. You write the interface, not the HTTP plumbing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Synchronous versus asynchronous — what actually differs for the caller?</summary>
+      <div class="answer"><p>Synchronous: the caller holds a thread until the response arrives, needs the callee to be up right now, and gets read-your-writes consistency. Asynchronous: the caller returns as soon as the broker accepts the message, tolerates the consumer being down, and accepts that the effect happens later — eventual consistency.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Describe the synchronous call-chain problem.</summary>
+      <div class="answer"><p>A request that traverses A to B to C to D couples all four in latency and availability. One slow service saturates its callers' thread pools, and the stall propagates upward — the alert fires on the healthy front-end service. Availability multiplies: four hops at 99.9% each give about 99.6%. Mitigate with explicit timeouts and circuit breakers; fix structurally by replacing hops with events where the caller does not need the answer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is Protobuf faster than JSON, and what do you give up?</summary>
+      <div class="answer"><p>Fields are encoded by numeric tag with a compiled schema, so there are no field names on the wire, no text parsing and no reflection — smaller payloads and cheaper serialisation. You give up human readability (you cannot read a payload from a log or replay it with curl), you take on a build-time code generation step, and browsers need a proxy such as gRPC-Web.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> <code>RestTemplate</code>, <code>RestClient</code>, <code>WebClient</code>, Feign — which do you use in a new Spring Boot service?</summary>
+      <div class="answer"><p><code>RestTemplate</code> is in maintenance mode: keep it in legacy code, do not choose it for new work. <code>RestClient</code> is the modern synchronous fluent client. <code>WebClient</code> is the reactive, non-blocking option — right for reactive stacks and high-concurrency fan-out. OpenFeign or a Spring HTTP interface sits above these and gives a declarative, typed interface; pick Feign when you want Spring Cloud discovery and load balancing wired in.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a declarative HTTP interface in Spring Framework?</summary>
+      <div class="answer"><p>An interface whose methods are annotated with <code>@HttpExchange</code> or its shortcuts (<code>@GetExchange</code>, <code>@PostExchange</code>). <code>HttpServiceProxyFactory</code>, backed by a <code>RestClientAdapter</code> or <code>WebClientAdapter</code>, builds a proxy that performs the calls. It gives Feign-style ergonomics with no Spring Cloud dependency — the framework's own answer to declarative clients.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does OpenAPI help two teams that own two services?</summary>
+      <div class="answer"><p>It turns the interface into a versioned, reviewable artefact instead of a conversation. From one YAML file both sides get rendered documentation, request validation, mock servers, and generated server interfaces and typed clients. Breaking changes surface as a diff in a pull request rather than as a 4xx in the consumer's logs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Code-first or contract-first — which and why?</summary>
+      <div class="answer"><p>Code-first (annotate controllers, let springdoc emit the spec) is faster and never drifts from the implementation — good inside one team. Contract-first (write the YAML, generate both sides with OpenAPI Generator) is better across team or company boundaries because the API is designed and agreed before either side is built, and consumers can start against a mock immediately.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A Feign call to a downstream service starts failing. What is your handling strategy?</summary>
+      <div class="answer"><p>Set connect and read timeouts explicitly so the failure is fast and bounded. Wrap the call in a Resilience4j circuit breaker with a fallback that degrades gracefully — cached data, a partial response, or a clear error — rather than propagating a stack trace. Retry only idempotent operations, with backoff and jitter. Use an <code>ErrorDecoder</code> to map downstream status codes onto meaningful domain exceptions, and make sure the failure is visible in traces and metrics.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Messaging brokers give at-least-once delivery. What does that force on you?</summary>
+      <div class="answer"><p>Consumers must be idempotent, because the same message will eventually arrive twice — after a redelivery, a rebalance, or a retry. Standard techniques: a business or message id recorded in a processed-messages table inside the same transaction as the effect, natural idempotency (set a state rather than increment), or a unique constraint that makes the duplicate a no-op. Pair it with the transactional outbox pattern so publishing and the database write cannot diverge, and a dead-letter queue for messages that will never succeed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you evolve an inter-service API without breaking consumers?</summary>
+      <div class="answer"><p>Be additive: new optional fields and new endpoints are safe; removals, renames and tightened validation are not. Tolerant readers — consumers that ignore unknown fields — make evolution possible. For anything breaking, version the endpoint or media type, run both versions during a migration window, and instrument the old one so you can see when the last consumer leaves. In Protobuf, never reuse or renumber a field tag; mark removed ones reserved. Consumer-driven contract tests turn all of this from a promise into a build failure.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your architect wants every call synchronous "so the data is always correct". How do you argue?</summary>
+      <div class="answer"><p>Show that synchronous chains do not give correctness, only the appearance of it: a partial failure mid-chain leaves the system inconsistent anyway, with no record of what to compensate. Then price the coupling — multiplied unavailability, thread-pool exhaustion, latency that is the sum of every hop. Ask what the user genuinely sees if a step lands a second later; for confirmation emails, analytics, search indexing and inventory sync the answer is nothing. Keep synchronous calls where the caller needs the answer to render a response, and make the rest events with idempotent consumers.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.comm.styles — REST vs gRPC vs messaging, synchronous vs asynchronous tradeoffs</li>
+      <li>ms.comm.clients — API contracts, OpenAPI, client generation, Spring Cloud OpenFeign and RestClient</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

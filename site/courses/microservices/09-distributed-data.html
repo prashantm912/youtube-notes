@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Distributed data patterns module: why two-phase commit is rejected across microservices, the saga pattern with compensating transactions, choreography versus orchestration, semantic locks and ACD consistency, the transactional outbox, change data capture with Debezium, idempotency keys and the exactly-once myth — with verified resources and interview questions.">
+  <title>Distributed Data Patterns — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Distributed Data Patterns</h1>
+  <p class="standfirst">The moment each service owns its own database, "just wrap it in a transaction" stops being an option. A single business operation now spans several databases that will never share a commit — and everything in this module exists to make that survivable.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → Distributed Data Patterns</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Database-per-service buys you independent deployment and independent scaling, and charges you a bill in consistency. Placing an order now touches the order service, the payment service and the inventory service — three databases, three separate commits, and no <code>BEGIN</code> that covers all of them. Any of the three can succeed while another fails, which means partial, inconsistent outcomes are not an edge case but the default behaviour you must design against.</p>
+    <p>This module covers the two patterns that answer that problem. The <strong>saga</strong> turns one distributed transaction into a chain of local transactions with explicit compensations for failure, in either a choreographed or an orchestrated arrangement. The <strong>transactional outbox</strong> solves the smaller but nastier problem hiding inside every saga step: writing to your database and publishing an event are two systems, and something has to guarantee that either both happen or neither does. Around them sit idempotency keys, consumer-side deduplication, and an honest account of what "exactly-once" actually means.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why you cannot just use a distributed transaction: 2PC and XA</h3>
+    <p>The textbook answer to "update two databases atomically" is the two-phase commit protocol: a transaction coordinator asks every participant to <em>prepare</em>, each participant durably promises it can commit and locks the affected rows, and once all have voted yes the coordinator tells them all to <em>commit</em>. On the JVM this arrives as JTA plus XA resource managers, and it genuinely works — inside a single organisation, over a fast network, with datastores that implement <code>XAResource</code>.</p>
+    <p>It is nonetheless the wrong tool between microservices, for four reasons worth being able to recite. It is <em>blocking</em>: participants hold locks from prepare until the coordinator's verdict, so a coordinator that dies mid-protocol leaves rows locked and the system stuck (2PC's famous unresolved failure window). It is a <em>coupling</em> mechanism: every service must be up and responsive simultaneously, so overall availability is the product of the participants' availabilities, not the maximum. It <em>scales badly</em>: cross-service lock duration is bounded by the slowest participant plus network latency, which destroys throughput on hot rows. And it is <em>largely unsupported</em> by the datastores modern services actually use — most NoSQL stores, most message brokers, and plenty of managed cloud databases offer no XA at all. So the industry took the other branch: give up atomicity across services, keep atomicity <em>within</em> each service, and manage the rest with a saga.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/database-per-service.html" rel="noopener">Pattern: Database per service — microservices.io (Chris Richardson, including the consistency problem it creates)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/two-phase-commit.html" rel="noopener">Two Phase Commit — Patterns of Distributed Systems (martinfowler.com)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/two-phase-commit-vs-saga-pattern" rel="noopener">Difference Between Two-Phase Commit and Saga Pattern — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://vladmihalcea.com/jta-transaction-type/" rel="noopener">JTA transaction type — Vlad Mihalcea (what XA and 2PC actually look like on the JVM)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/dotnet/architecture/cloud-native/distributed-data" rel="noopener">Distributed data — Architecting Cloud Native Applications (Microsoft Learn)</a></li>
+    </ul>
+
+    <h3>The saga: local transactions plus compensating transactions</h3>
+    <p>A saga is a sequence of local transactions. Each step updates exactly one service's database inside an ordinary ACID transaction and then emits an event or command that triggers the next step. If step four fails, there is nothing to roll back — steps one to three already committed and are visible to the world — so the saga runs <em>compensating transactions</em> backwards through the completed steps: release the reserved stock, refund the payment, cancel the order. The concept predates microservices by decades; Garcia-Molina and Salem described it in 1987 for long-lived database transactions, and the microservices community rediscovered it.</p>
+    <p>The critical mental shift is that a compensation is a <em>semantic</em> undo, not a rollback. You cannot un-send an email, so you send an apology. You cannot un-ship a parcel, so you raise a returns request. Some steps are genuinely uncompensatable, which is why saga design classifies steps into <em>compensatable</em> transactions (can be semantically undone), the <em>pivot</em> transaction (the point of no return — once it commits the saga must go forward), and <em>retriable</em> transactions (guaranteed to eventually succeed, placed only after the pivot). Ordering steps so the risky, easily-undone work happens before the pivot is most of the design work. And compensations must themselves be idempotent and retryable, because the failure that triggered them may also strike while they run.</p>
+    <pre class="code-block" data-label="Text"><code>Order saga, happy path:
+  1. Order service      createOrder(PENDING)        [compensatable -> cancelOrder]
+  2. Customer service   reserveCredit()             [compensatable -> releaseCredit]
+  3. Inventory service  reserveStock()              [compensatable -> releaseStock]
+  4. Payment service    capturePayment()            [PIVOT: no compensation beyond refund]
+  5. Order service      approveOrder(CONFIRMED)     [retriable: must eventually succeed]
+
+Failure at step 3 -> run compensations for 2 and 1, in reverse order.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/saga.html" rel="noopener">Pattern: Saga — microservices.io (the canonical definition, with the compensatable/pivot/retriable taxonomy)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/reference-architectures/saga/saga" rel="noopener">Saga distributed transactions pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction" rel="noopener">Compensating Transaction pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf" rel="noopener">Sagas — Hector Garcia-Molina and Kenneth Salem, ACM SIGMOD 1987 (the original paper, PDF)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=d2z78guUR4g" rel="noopener">Saga Pattern: Distributed Transactions in Microservices — ByteMonk</a></li>
+    </ul>
+
+    <h3>Choreography versus orchestration, and how to choose</h3>
+    <p><strong>Choreography</strong> has no coordinator. Each service subscribes to the events of the others and decides for itself what to do: the order service publishes <code>OrderCreated</code>, the payment service reacts and publishes <code>PaymentCompleted</code>, the inventory service reacts to that, and a failure event flowing backwards triggers each service's own compensation. It is genuinely simple to start — no new component, no central dependency, services stay loosely coupled — and it degrades badly as the flow grows. The business process exists nowhere in the code; to answer "what happens when an order is placed?" you read six services and reconstruct the graph in your head. Cyclic event dependencies creep in, and there is no single place to see that a saga is stuck.</p>
+    <p><strong>Orchestration</strong> introduces a saga orchestrator — a state machine, usually persisted, that sends a command to each participant and waits for its reply before deciding the next step. The flow lives in one readable class, the current state of every in-flight saga is queryable, and the whole thing is unit-testable with mocked participants. The costs are real: a new component to build, deploy, monitor and keep available, plus the risk of a smart orchestrator turning dumb participants into an anaemic distributed monolith if you let it make their business decisions for them. The usable decision rule: choreography for short sagas of two or three steps with no branching; orchestration once there are four or more steps, conditional branches, timeouts, or a compliance need to explain exactly where a transaction stopped. Frameworks such as Eventuate Tram Sagas, Axon, Camunda, Temporal and Orkes Conductor exist because most teams eventually want orchestration without writing the state machine plumbing themselves.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/post/microservices/2019/07/09/developing-sagas-part-1.html" rel="noopener">Developing sagas, part 1: choreography-based sagas — Chris Richardson</a></li>
+      <li>[Official] <a href="https://chrisrichardson.net/post/sagas/2019/08/04/developing-sagas-part-2.html" rel="noopener">Developing sagas, part 2: orchestration-based sagas — Chris Richardson</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/saga.html" rel="noopener">Saga pattern — AWS Prescriptive Guidance (both variants, with tradeoffs)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aOen1-pQLZg" rel="noopener">Microservices Architecture Patterns: SAGA Choreography Explained — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JtTIXwZtScY" rel="noopener">Saga Orchestration in Microservices Explained with a Movie Booking Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Sagas are ACD, not ACID: semantic locks and countermeasures</h3>
+    <p>The letter a saga loses is <strong>I</strong>. Atomicity survives (through compensation), consistency and durability survive, but isolation does not: between step one and step five the intermediate state is committed and fully visible to every other transaction in the system. Another request can read an order that is in the process of being cancelled, or reserve stock that a compensating transaction is about to release. This produces the two classic anomalies interviewers ask about: <em>dirty reads</em> (someone reads data a compensation will later undo) and <em>lost updates</em> (a concurrent saga overwrites a value the first saga still needs).</p>
+    <p>The countermeasures are application-level, and knowing them by name is a strong signal in an interview. A <strong>semantic lock</strong> marks the record with an in-progress flag — <code>status = PENDING</code>, <code>APPROVAL_PENDING</code> — so other transactions can see the record is unsettled and either wait, fail, or handle it explicitly; the flag is cleared by the final or the compensating transaction. <strong>Commutative updates</strong> make operations order-independent (a credit and a debit of the same amount compose to nothing regardless of sequence), which sidesteps lost updates entirely. <strong>Pessimistic view</strong> reorders the saga so the steps that would expose damaging intermediate state happen after the risky ones. <strong>Reread value</strong> re-checks a record before updating it and aborts the saga if it changed — optimistic locking, applied to a saga step. <strong>Version files</strong> record incoming operations so out-of-order arrivals can be reordered. And <strong>by value</strong> is the escape hatch: route low-risk requests through a saga and genuinely high-risk ones through a distributed transaction or a manual process.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/saga" rel="noopener">Saga design pattern — Azure Architecture Center (issues, considerations and anomalies)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/saga-pattern-microservices" rel="noopener">Saga Pattern in Microservices — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/transactions-across-microservices" rel="noopener">Transactions Across Microservices — Baeldung (2PC, sagas and the tradeoffs in Java terms)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/microservice-trade-offs.html" rel="noopener">Microservice Trade-Offs — Martin Fowler (the consistency section is the honest cost summary)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0UTOLRTwOX0" rel="noopener">Distributed Sagas: A Protocol for Coordinating Microservices — Caitie McCaffrey (J On The Beach)</a></li>
+    </ul>
+
+    <h3>The dual-write problem and the transactional outbox</h3>
+    <p>Every saga step does two things: it commits a local database transaction and it publishes an event. Those are two different systems, and there is no transaction that spans both. Commit first and the process can die before publishing — the order exists but nobody downstream ever hears about it, and the saga stalls forever. Publish first and the commit can fail — subscribers act on an order that does not exist. Wrapping the publish inside <code>@Transactional</code> changes nothing, because the broker is not enrolled in your database transaction. This is the <strong>dual-write problem</strong>, and it is the single most common source of quiet data drift in event-driven systems.</p>
+    <p>The <strong>transactional outbox</strong> removes the second system from the critical path. In the same local transaction that inserts the order, you also insert a row into an <code>outbox</code> table in the same database. One transaction, one commit, atomic by construction: either both the business row and the event row exist, or neither does. A separate <em>message relay</em> then reads unpublished outbox rows and delivers them to the broker, marking or deleting them afterwards. The event is now guaranteed to be published eventually — and, because the relay can crash after publishing but before marking the row, it may be published more than once, which is exactly why the consumer side of this module matters.</p>
+    <pre class="code-block" data-label="SQL"><code>-- one local transaction, two inserts, atomic together
+BEGIN;
+  INSERT INTO orders (id, customer_id, total, status)
+  VALUES ('ord-7714', 'cus-33', 4990, 'PENDING');
+
+  INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, payload)
+  VALUES (gen_random_uuid(), 'Order', 'ord-7714', 'OrderCreated',
+          '{"orderId":"ord-7714","total":4990}');
+COMMIT;
+-- a separate relay publishes the outbox row to Kafka and then clears it</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional outbox — microservices.io (Chris Richardson)</a></li>
+      <li>[Official] <a href="https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/" rel="noopener">Reliable Microservices Data Exchange With the Outbox Pattern — Debezium blog (Gunnar Morling)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/transactional-outbox-cosmos" rel="noopener">Transactional Outbox pattern with Azure Cosmos DB — Microsoft Learn</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/saga-orchestration-outbox/" rel="noopener">Saga Orchestration for Microservices Using the Outbox Pattern — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=01jVbPHr3hc" rel="noopener">Microservice Transactional Outbox Pattern: Realtime Hands-On Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Relaying the outbox: change data capture with Debezium, or a polling publisher</h3>
+    <p>Two implementations of the message relay, and interviewers like the comparison. <strong>Transaction log tailing (CDC)</strong> reads the database's own replication log — the PostgreSQL write-ahead log, the MySQL binlog, the MongoDB oplog — and turns every committed change into a message. Debezium is the reference implementation: a Kafka Connect source connector that streams committed row changes with no polling and no load on your application, plus an Outbox Event Router transform that reshapes outbox rows into properly-keyed domain events on per-aggregate topics. Because it reads the log, it sees exactly what committed, in commit order, and never misses a write. The costs are operational: replication-slot privileges on the database, a Kafka Connect cluster to run and monitor, schema-change handling, and a genuinely deeper failure model to learn.</p>
+    <p><strong>Polling publisher</strong> is the low-tech alternative: a scheduled job runs <code>SELECT ... FROM outbox WHERE published = false ORDER BY id LIMIT n</code>, publishes each row, and marks it. It needs no extra infrastructure and takes an afternoon to write, which makes it the right first choice for most teams. Its drawbacks are latency (you publish at the poll interval, not at commit), constant read load on the database, and ordering that you have to enforce yourself — and once several application instances poll the same table you need <code>SELECT ... FOR UPDATE SKIP LOCKED</code> or a similar claim mechanism so two pods do not publish the same row. A pragmatic path is to start with polling behind a small publisher interface and swap in Debezium when latency or database load makes it worth the operational cost.</p>
+    <pre class="code-block" data-label="SQL"><code>-- polling publisher: claim a batch safely across many app instances
+SELECT id, aggregate_id, event_type, payload
+FROM   outbox
+WHERE  published_at IS NULL
+ORDER  BY id
+LIMIT  100
+FOR UPDATE SKIP LOCKED;   -- other pollers skip claimed rows instead of blocking</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/transaction-log-tailing.html" rel="noopener">Pattern: Transaction log tailing — microservices.io</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/polling-publisher.html" rel="noopener">Pattern: Polling publisher — microservices.io</a></li>
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html" rel="noopener">Outbox Event Router — Debezium reference documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6nU9i022yeY" rel="noopener">Microservices and Data: Implementing the Outbox Pattern with Debezium — Thorben Janssen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=YM2RRrSgGaA" rel="noopener">Publish Order Events to RabbitMQ using the Outbox Pattern — SivaLabs</a></li>
+    </ul>
+
+    <h3>Idempotency keys and the idempotent consumer</h3>
+    <p>Once the outbox guarantees at-least-once publication, duplicates are not a bug to be eliminated but a condition to be absorbed. They arrive from everywhere: a relay that crashed after publishing but before marking the row, a broker redelivering after a consumer failed to acknowledge, a Kafka consumer group rebalancing and reprocessing from the last committed offset, an upstream client retrying a timed-out HTTP call. The fix is on the receiving side — make processing <strong>idempotent</strong>, so handling the same message five times leaves the system in the state it would be in after one.</p>
+    <p>Two mechanisms do the work. An <strong>idempotency key</strong> is a client-generated unique id carried with the request or event (the <code>Idempotency-Key</code> HTTP header popularised by Stripe, or the event id in a message header). The server records the key with the outcome of the first execution and returns that stored outcome for any repeat, rather than executing again. An <strong>idempotent consumer</strong> generalises this to messaging: keep a <code>processed_messages</code> table keyed by message id, and insert into it <em>in the same local transaction</em> as the business update — the primary-key violation on a duplicate is what makes the deduplication reliable, because a separate "have I seen this?" check followed by a write is a race, not a guarantee. Where the operation is naturally idempotent — an upsert on a natural key, a state transition guarded by <code>WHERE status = 'PENDING'</code>, a set-to-value rather than an increment — you get the property for free and should prefer that design. Also give the dedup store a retention window rather than letting it grow forever, and size that window comfortably wider than your broker's maximum redelivery span.</p>
+    <pre class="code-block" data-label="Java"><code>@Transactional                                   // one local transaction
+public void on(OrderCreated event, String messageId) {
+    try {
+        processed.insert(messageId);             // PK violation on a duplicate
+    } catch (DuplicateKeyException seenBefore) {
+        return;                                  // already handled; ack and move on
+    }
+    inventory.reserve(event.orderId(), event.items());
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html" rel="noopener">Pattern: Idempotent Consumer — microservices.io</a></li>
+      <li>[Official] <a href="https://docs.stripe.com/api/idempotent_requests" rel="noopener">Idempotent requests — Stripe API reference (the canonical idempotency-key contract)</a></li>
+      <li>[Official] <a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/" rel="noopener">The Idempotency-Key HTTP Header Field — IETF HTTPAPI working group draft</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/IdempotentReceiver.html" rel="noopener">Idempotent Receiver — Enterprise Integration Patterns (Hohpe and Woolf)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/idempotent-operations" rel="noopener">What Is an Idempotent Operation? — Baeldung on Computer Science</a></li>
+    </ul>
+
+    <h3>The exactly-once myth: at-least-once plus idempotent processing</h3>
+    <p>There are three delivery semantics and only two of them are buildable. <em>At-most-once</em> means fire and forget: no retries, so messages can be lost. <em>At-least-once</em> means retry until acknowledged: nothing is lost, duplicates are possible. <em>Exactly-once delivery</em> — the guarantee that a message crosses the network and is acted on precisely once — is not achievable over an unreliable network, and this is a proven result, not an engineering gap. The sender can never distinguish "the message was lost" from "the acknowledgement was lost", so it must either retry (risking a duplicate) or not retry (risking a loss). No protocol escapes that fork; adding another acknowledgement round just moves the ambiguity one hop.</p>
+    <p>What does exist, and what senior candidates should say instead, is <strong>effectively-once</strong>: at-least-once delivery combined with idempotent processing, so duplicates are delivered but have no visible effect. Kafka's much-cited "exactly-once semantics" is precisely this, and it is worth being able to describe honestly — an idempotent producer (a producer id plus a sequence number lets the broker discard duplicate writes on retry) and transactions that atomically commit produced records together with the consumer offsets, giving exactly-once <em>processing</em> within the boundaries of a Kafka read-process-write pipeline. Step outside those boundaries — write to an external database, call a payment gateway, send an email — and the guarantee stops at the edge, which is why the outbox plus an idempotent consumer remains the pattern that actually holds a microservice estate together.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/documentation/#semantics" rel="noopener">Message Delivery Semantics — Apache Kafka documentation (what the three guarantees really mean)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/courses/architecture/transactions/" rel="noopener">Transactions and exactly-once semantics — Confluent Developer (Kafka internals course)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/" rel="noopener">Exactly-Once Semantics Are Possible: Here's How Kafka Does It — Confluent blog</a></li>
+      <li>[Article] <a href="https://bravenewgeek.com/you-cannot-have-exactly-once-delivery/" rel="noopener">You Cannot Have Exactly-Once Delivery — Brave New Geek (Tyler Treat)</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/GuaranteedMessaging.html" rel="noopener">Guaranteed Delivery — Enterprise Integration Patterns</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-resilience.html">← Resilience with Resilience4j</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="10-cqrs-event-sourcing.html">CQRS and Event Sourcing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Distributed data is where microservices interviews get hard in Indian product and service companies alike — saga choreography versus orchestration and "how do you handle duplicate messages?" come up in almost every round above two years' experience:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Why can't you use a single database transaction across microservices?</summary>
+      <div class="answer"><p>Because each service owns a separate database, and a transaction is scoped to one datastore. There is no shared connection, no shared lock manager, and no shared commit. Distributed transactions via 2PC/XA technically span datastores, but they block on locks, couple availability across all participants, scale poorly, and are unsupported by most NoSQL stores and brokers — so the industry uses sagas instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the saga pattern in one paragraph?</summary>
+      <div class="answer"><p>A saga replaces one distributed transaction with a sequence of local transactions, one per service. Each step commits in its own database and emits an event or command triggering the next. If a step fails, the saga runs compensating transactions that semantically undo the already-committed earlier steps, in reverse order. The result is eventual consistency instead of immediate consistency.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a compensating transaction, and why isn't it just a rollback?</summary>
+      <div class="answer"><p>A rollback discards uncommitted changes and leaves no trace. A compensation is a new business transaction that semantically reverses a change everyone has already seen: refund the payment, release the stock, cancel the booking. Some effects cannot be reversed at all — you cannot un-send an email, so you send an apology — which is why compensations are designed per business step and must themselves be idempotent and retryable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Choreography versus orchestration — explain the difference.</summary>
+      <div class="answer"><p>Choreography is peer-to-peer: services subscribe to each other's events and each decides its own next action, with no coordinator. Orchestration adds a central saga orchestrator that sends explicit commands to each participant and tracks the saga's state. Choreography means less infrastructure but an invisible, hard-to-debug flow; orchestration makes the flow explicit, testable and queryable at the cost of a new component to own.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the transactional outbox pattern?</summary>
+      <div class="answer"><p>Instead of writing to the database and then publishing to the broker as two separate operations, you insert the event into an outbox table in the <em>same</em> local transaction as the business data. One commit makes both durable together. A separate message relay then reads the outbox and publishes to the broker, so an event is never lost when the process dies between the write and the publish.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which would you choose, choreography or orchestration, and on what rule?</summary>
+      <div class="answer"><p>Choreography for short sagas — two or three steps, no branching, no cross-service reporting need — because it adds nothing to operate. Orchestration once you have four or more steps, conditional paths, timeouts, or a need to answer "where did order 7714 stop?" from one place. Also lean to orchestration when compliance or support teams need the flow explained, since the state machine is the documentation. Frameworks such as Camunda, Temporal, Axon or Eventuate Tram Sagas exist so you do not hand-write the state machine.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Sagas are said to be ACD rather than ACID. Which property is missing and what breaks?</summary>
+      <div class="answer"><p>Isolation. Each step commits immediately, so intermediate state is visible to every other transaction while the saga is still running. That produces dirty reads (someone reads data a compensation will undo) and lost updates (a concurrent saga overwrites a value the first still needs). Atomicity is preserved only in the semantic sense, through compensations; consistency and durability are unaffected.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a semantic lock, and name two other saga countermeasures.</summary>
+      <div class="answer"><p>A semantic lock marks the record with an in-progress flag — <code>status = PENDING</code> — so other transactions can see it is unsettled and decide whether to wait, reject, or handle it; the final or compensating transaction clears the flag. Others: commutative updates (make operations order-independent, like matched credit and debit), pessimistic view (reorder steps so damaging intermediate state is exposed as late as possible), reread value (optimistic-lock style re-check before updating and abort if changed), version file (record operations so out-of-order arrivals can be reordered), and by value (route high-risk requests through a distributed transaction or manual review instead).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the dual-write problem, and why doesn't @Transactional solve it?</summary>
+      <div class="answer"><p>Dual write is updating the database and publishing to a broker as two independent operations with no atomicity between them — commit-then-publish can lose the event, publish-then-commit can announce work that never happened. <code>@Transactional</code> only governs the database connection; the broker is not a participant in that transaction, so a publish inside the method still succeeds or fails independently of the commit. You need the outbox (or CDC) to make the two a single durable act.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> CDC with Debezium versus a polling publisher for the outbox relay?</summary>
+      <div class="answer"><p>Debezium tails the database transaction log (WAL/binlog/oplog), so it publishes with near-zero latency, in commit order, and puts no query load on the database — at the cost of replication-slot privileges, a Kafka Connect cluster to operate, and a deeper failure model. A polling publisher is a scheduled <code>SELECT</code> over unpublished outbox rows: trivial to build, no new infrastructure, but it adds poll-interval latency and constant database reads, and needs <code>FOR UPDATE SKIP LOCKED</code> so multiple app instances do not publish the same row. Start with polling behind an interface; move to CDC when latency or load justifies it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you make a consumer idempotent?</summary>
+      <div class="answer"><p>Record the message id in a <code>processed_messages</code> table and insert it in the same local transaction as the business update — the primary-key violation on a duplicate is the deduplication, and doing the check and the write in one transaction avoids the race that a separate "have I seen this?" lookup creates. Better still, make the operation naturally idempotent: upsert on a natural key, guard a state transition with <code>WHERE status = 'PENDING'</code>, set an absolute value rather than incrementing. Give the dedup table a retention window wider than the broker's maximum redelivery span.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Does exactly-once delivery exist? Explain what Kafka actually gives you.</summary>
+      <div class="answer"><p>Exactly-once <em>delivery</em> is impossible over an unreliable network: the sender cannot distinguish a lost message from a lost acknowledgement, so it must either retry (possible duplicate) or not (possible loss). What exists is at-least-once delivery plus idempotent processing, often called effectively-once. Kafka's "exactly-once semantics" is exactly-once <em>processing</em> inside a Kafka read-process-write pipeline: an idempotent producer (producer id plus sequence number lets the broker discard duplicate writes) and transactions that atomically commit output records together with consumer offsets. The guarantee ends at the first external side effect — a database in another service, a payment gateway, an email.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the order-placement saga for an e-commerce checkout. Where is the pivot?</summary>
+      <div class="answer"><p>Create order as <code>PENDING</code> (semantic lock), reserve credit, reserve stock, capture payment, then approve the order. The pivot is the payment capture: everything before it is compensatable (cancel the order, release the credit, release the stock), everything after it must be retriable and eventually succeed. Order the steps so cheap, easily-undone work happens first and the irreversible step happens as late as possible. Capturing payment before reserving stock is the classic wrong answer — you have taken money for goods you may not have.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A saga step neither completes nor fails — the participant simply never replies. What now?</summary>
+      <div class="answer"><p>Every orchestrated step needs a timeout, because absence of a reply is not a failure signal. On expiry the orchestrator must decide deliberately: retry the command (safe only if the participant is idempotent), compensate the completed prefix, or park the saga for human intervention. Persist saga state so a restarted orchestrator resumes rather than forgets, and expose in-flight sagas with their current step and age so stuck ones are visible on a dashboard. In choreography there is no such natural home for timeouts, which is one of the strongest arguments for orchestration in long-running flows.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your outbox relay publishes a row, crashes before marking it, and republishes on restart. Is that a bug?</summary>
+      <div class="answer"><p>No — it is the expected behaviour, and trying to remove it is the mistake. Marking and publishing are themselves a dual write, so the relay can only be at-least-once; the outbox guarantees "at least once, never lost", and the consumer supplies the deduplication. Design accordingly: a stable event id in the outbox row that survives republication, consumer-side dedup keyed on it, and monitoring on outbox lag (oldest unpublished row age) so a stalled relay is detected before it becomes an incident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Compensation itself fails — the refund is rejected. How do you keep the system consistent?</summary>
+      <div class="answer"><p>Compensations must be retriable and idempotent, so first retry with backoff, keyed so repeats do not double-refund. If it still fails after the retry budget, the saga cannot self-heal: park it in a dead-letter or manual-intervention queue with full context, keep the semantic lock in place so nothing downstream treats the record as settled, and alert. Consistency here is a business decision, not a technical one — that is why the pivot transaction should be placed so the uncompensatable work is minimal and the failure mode is a support ticket rather than corrupted money.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.dd.saga</li>
+      <li>ms.dd.outbox</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

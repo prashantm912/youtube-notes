@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Data per Service module: database per service and private data ownership, why a shared database recreates the monolith, polyglot persistence, API composition and its limits, CQRS read models, reporting pipelines and eventual consistency — with verified resources and interview questions.">
+  <title>Data per Service — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Data per Service</h1>
+  <p class="standfirst">Teams rarely fail at splitting the code. They fail at splitting the database — and a set of services still wired into one schema is a monolith that now pays for network hops. This module is about owning your data and living with the queries that ownership costs you.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices → Data per Service</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Database per service is the pattern that makes microservices independently deployable: a service owns its schema, and nobody else touches it. The price is paid at query time — the single <code>JOIN</code> that used to answer "show me orders with customer names and stock levels" now spans three services and three databases.</p>
+    <p>So this module runs in two halves. First, private data ownership: what shared-nothing actually means, and why a shared database gives you a distributed monolith. Then the hard part: API composition and where it breaks, CQRS read models as the heavier answer, reporting via a separate data pipeline, and eventual consistency as the bill that arrives with all of it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Database per service: private data, shared nothing</h3>
+    <p>The rule is short: a service's persistent data is private to that service. Its tables, its column types, its indexes, its choice of ORM — all implementation details, invisible from outside. Other services read that data only by calling the owning service's API or by consuming events it publishes. "Database per service" is a logical statement, not a hardware one: separate schemas or separate users with non-overlapping grants on one physical cluster still count, provided no other service can issue a query against them.</p>
+    <p>Why it matters: independent deployability is the entire point of microservices, and it is a property of the <em>data</em>, not the code. If the Order service can add a nullable column and ship on Tuesday without a cross-team migration meeting, you have microservices. If a schema change requires four teams to coordinate a release, you have a distributed system with monolithic release cadence — the worst of both. Loose coupling at the API layer is easy to fake; loose coupling at the storage layer is what actually holds.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Logical separation on one cluster: still "database per service"
+CREATE SCHEMA orders    AUTHORIZATION svc_orders;
+CREATE SCHEMA inventory AUTHORIZATION svc_inventory;
+
+REVOKE ALL ON SCHEMA inventory FROM svc_orders; -- orders CANNOT read inventory
+-- Cross-context reads go through the Inventory API, never through SQL.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/database-per-service.html" rel="noopener">Pattern: Database per service — microservices.io (Chris Richardson)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-data-persistence/database-per-service.html" rel="noopener">Database-per-service pattern — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/design/data-considerations" rel="noopener">Data considerations for microservices — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/dotnet/architecture/microservices/architect-microservice-container-applications/data-sovereignty-per-microservice" rel="noopener">Data sovereignty per microservice — Microsoft .NET microservices architecture guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=la2q1vFA5q0" rel="noopener">Database per Service Pattern in Microservices — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>The shared database, and how it produces a distributed monolith</h3>
+    <p>A shared database is the path of least resistance during a migration, and it is honest about one thing: transactions and joins keep working. But it re-creates every coupling the split was meant to remove. Two services reading the same table are now bound to that table's shape, so nobody can rename a column, change a type or add a constraint without a coordinated release. Runtime coupling follows: one service's runaway report locks rows or exhausts the connection pool that another service needs, and a single database becomes the single point of failure the architecture diagram claims not to have.</p>
+    <p>Martin Fowler's older framing is the sharpest one — an <em>integration database</em> is shared by many applications and therefore hard to change, whereas an <em>application database</em> is controlled by a single application and can evolve freely. Microservices simply insist on the second. When teams keep the shared database and split only the deployables, the result is the distributed monolith: the same lockstep releases, the same blast radius, plus serialization costs, network latency and partial failure. If you must share during a strangler-fig migration, treat it as debt with a dated exit plan, not as a design.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/shared-database.html" rel="noopener">Pattern: Shared database (and why it is usually the wrong answer) — microservices.io</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-data-persistence/shared-database.html" rel="noopener">Shared-database antipattern — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/IntegrationDatabase.html" rel="noopener">IntegrationDatabase — Martin Fowler (the coupling this pattern creates)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/ApplicationDatabase.html" rel="noopener">ApplicationDatabase — Martin Fowler (the alternative, and its trade-offs)</a></li>
+      <li>[Article] <a href="https://samnewman.io/books/monolith-to-microservices/" rel="noopener">Monolith to Microservices — Sam Newman (chapter guide to decomposing the database)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9iW_2MMLd4w" rel="noopener">Don't Build a Distributed Monolith — Jonathan J. Tower (NDC Conferences)</a></li>
+    </ul>
+
+    <h3>Polyglot persistence: an option, not an obligation</h3>
+    <p>Once each service owns its storage, each service can pick storage that fits its access pattern: relational for orders and money, a document store for a product catalogue with irregular attributes, a search index for full-text queries, a key-value store for sessions, a graph for recommendations. That freedom is real, and it is one of the genuine upsides of the split — the choice becomes local, so a bad fit affects one team instead of the whole company.</p>
+    <p>The trap is treating polyglot persistence as a requirement. Every additional engine is another backup and restore runbook, another upgrade path, another failure mode on call, another set of drivers and another skill the team must hire for. Most successful microservice estates are boringly uniform — the same managed PostgreSQL for almost everything, with one or two specialised stores where the access pattern genuinely demands it. Add a database when a measured requirement forces it, not when the architecture diagram looks too plain.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/bliki/PolyglotPersistence.html" rel="noopener">PolyglotPersistence — Martin Fowler (the term, and what it does and does not promise)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/data-guide/technology-choices/understand-data-store-models" rel="noopener">Understand data store models — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/microservices-db-design" rel="noopener">Database Design in a Microservices Architecture — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ayV1itxCgBI" rel="noopener">Polyglot Architecture — Designing Event-Driven Microservices (Confluent)</a></li>
+    </ul>
+
+    <h3>Querying across services: API composition and its limits</h3>
+    <p>API composition is the first thing to reach for. A composer — the API gateway, a backend-for-frontend, or just the service that owns the use case — calls each provider service, then joins the responses in memory. For "order detail: order, customer, shipment", that is three parallel calls and a small merge, and it needs no new infrastructure. Keep the calls concurrent, give every one of them a timeout, and decide in advance which parts of the response are optional so a slow provider degrades the page instead of failing it.</p>
+    <p>The limits arrive quickly, and interviewers go straight to them. Availability multiplies: composing four services at three nines each gives you materially less than three nines. Latency is the slowest call, not the average. A list endpoint invites the classic fan-out — fetch fifty orders, then fifty customer lookups — so you need batch endpoints, not per-item calls. Worst of all, <strong>pagination and sorting break</strong>: you cannot sort a page by a field that lives in another service without pulling far more data than you wanted, and "page 40 sorted by customer city" degenerates into a large in-memory join. Filtering across services has the same shape. When those requirements are real rather than hypothetical, composition has run out and you need a read model.</p>
+    <pre class="code-block" data-label="Java"><code>// Compose in parallel, not in sequence — latency is the slowest call.
+var order    = CompletableFuture.supplyAsync(() -&gt; orderClient.byId(id));
+var customer = order.thenComposeAsync(o -&gt; supply(() -&gt; customerClient.byId(o.customerId())));
+var shipment = CompletableFuture.supplyAsync(() -&gt; shipmentClient.forOrder(id))
+                                .exceptionally(e -&gt; Shipment.unknown()); // optional part
+
+return new OrderView(order.join(), customer.join(), shipment.join());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/api-composition.html" rel="noopener">Pattern: API Composition — microservices.io (Chris Richardson)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-data-persistence/api-composition.html" rel="noopener">API composition pattern — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-aggregation" rel="noopener">Gateway Aggregation pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/system-design/api-composition-pattern-in-microservices/" rel="noopener">API Composition Pattern in Microservices — GeeksforGeeks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5pYLlYsy6fQ" rel="noopener">API Composition Pattern in Microservices — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>CQRS read models: the heavier answer</h3>
+    <p>When composition cannot serve the query, you build a read model: a denormalised, purpose-built view maintained by subscribing to the domain events the owning services publish. The Order service emits <code>OrderPlaced</code>, the Customer service emits <code>CustomerRenamed</code>, and a query-side component folds both into a single table that already contains everything the screen needs. Now the query is one index lookup again — sortable, filterable, paginable — because you paid for the join in advance, on write.</p>
+    <p>This is Command Query Responsibility Segregation: the write side keeps the normalised model that protects invariants, the read side keeps whatever shape the queries want, and events carry changes between them. It is genuinely more machinery — an event stream, a projector, replay and rebuild tooling, and a read model that is by definition slightly behind. Reach for it when composition has demonstrably failed a real requirement, not as the default. Module 10 goes into the read-side mechanics, event stores, replay and snapshots.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/cqrs.html" rel="noopener">Pattern: Command Query Responsibility Segregation (CQRS) — microservices.io</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-data-persistence/cqrs-pattern.html" rel="noopener">CQRS pattern — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/CQRS.html" rel="noopener">CQRS — Martin Fowler (including when it is the wrong choice)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view" rel="noopener">Materialized View pattern — Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fzGZPf0FMao" rel="noopener">CQRS Design Pattern with Spring Boot and Apache Kafka — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sthMcMrspCM" rel="noopener">Implement CQRS Design Pattern with Spring Boot — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Reporting and analytics: a pipeline, not a query</h3>
+    <p>Finance wants a monthly revenue report. The data team wants to join five years of orders against customers and campaigns. Neither of those belongs on your production services: they are unbounded scans with unpredictable cost, and running them through service APIs means either an all-night fan-out or a "just give analytics read access to the database" that quietly re-creates the shared-database coupling you removed.</p>
+    <p>The right answer is a separate data path. Each service publishes its changes — as domain events it deliberately designs, or via change data capture reading the database's transaction log with a tool such as Debezium — into a stream, and a downstream pipeline lands them in a warehouse or lakehouse where analysts can join whatever they like. Production services stay unaware of, and unaffected by, the reporting workload. The organisational version of this idea is data mesh: each team owns and publishes its domain data as a product with a contract, instead of a central team scraping everyone's tables.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/transaction-log-tailing.html" rel="noopener">Pattern: Transaction log tailing — microservices.io</a></li>
+      <li>[Official] <a href="https://debezium.io/documentation/reference/stable/index.html" rel="noopener">Debezium documentation — change data capture connectors and deployment</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/ReportingDatabase.html" rel="noopener">ReportingDatabase — Martin Fowler</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/data-monolith-to-mesh.html" rel="noopener">How to Move Beyond a Monolithic Data Lake to a Distributed Data Mesh — Zhamak Dehghani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=01jVbPHr3hc" rel="noopener">Microservice Transactional Outbox Pattern — Java Techie</a></li>
+    </ul>
+
+    <h3>Eventual consistency: the tax you agreed to pay</h3>
+    <p>The moment data is private and copies are propagated by events, cross-service consistency becomes eventual. There is no distributed transaction spanning Order and Inventory; there is a sequence of local transactions and a window — usually milliseconds, occasionally minutes when a consumer lags — during which two services disagree. Design for it explicitly: idempotent consumers, retries with backoff, a dead-letter path, and a way to detect and reconcile drift. Compensating actions (module 9's sagas) replace rollback.</p>
+    <p>The part interviewers actually probe is the conversation with a product owner. Do not say "eventual consistency"; say what the user sees and for how long. "After you place the order, the tracking page can show the old status for up to two seconds" is a specification someone can accept or reject. Then design around it: read your own writes from the write side immediately after a command, show an explicit pending state instead of a stale-looking final one, and keep the genuinely non-negotiable invariants — do not oversell one card twice — inside a single service where a real transaction still applies. The engineering skill is choosing which staleness is affordable, and making the rest impossible by ownership.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/event-driven-architecture.html" rel="noopener">Pattern: Event-driven architecture — microservices.io</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/managing-data-microservices/" rel="noopener">Managing Data in Microservices — InfoQ</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/system-design/eventual-consistency-in-distributive-systems-learn-system-design/" rel="noopener">Eventual Consistency in Distributed Systems — GeeksforGeeks</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9uCP3qHNbWw" rel="noopener">Distributed Systems 7.3: Eventual consistency — Martin Kleppmann (Cambridge lecture series)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_lyPYG1hdtE" rel="noopener">Eventual Consistency: Good, Bad, and a HUGE Mistake — CodeOpinion</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-decomposition.html">← Service Decomposition</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="04-inter-service-communication.html">Inter-Service Communication →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Data ownership is the deepest part of a microservices round in Indian product and service companies — expect these from the second round onwards, often with a whiteboard:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the database-per-service pattern?</summary>
+      <div class="answer"><p>Each service owns its persistent data privately: only that service reads or writes its tables, and everyone else goes through its API or its published events. It can be a separate database instance, or just a separate schema and user with no cross-grants on a shared cluster — the requirement is exclusive access, not separate hardware.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why not just let two services share one database? It is simpler.</summary>
+      <div class="answer"><p>Because it reinstates the coupling you split to remove. Both services depend on the table's shape, so no schema change ships independently; one service's heavy query starves the other's connection pool; and the database is a single point of failure. You keep monolithic release coordination and add network latency on top.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Order service needs the customer's name. How does it get it?</summary>
+      <div class="answer"><p>Three legitimate options. Call the Customer API at read time (simple, adds a runtime dependency). Subscribe to customer events and cache the fields you need locally (fast reads, eventually consistent). Or copy the name onto the order at placement time as a historical fact — often the correct answer, since an invoice should show the name as it was, not as it is now. What it must not do is <code>SELECT</code> from the customer table.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is polyglot persistence, and should every service use a different database?</summary>
+      <div class="answer"><p>It means each service picks the storage engine that fits its access pattern — relational, document, key-value, search, graph. Private data ownership makes it possible. It is not an obligation: every extra engine adds backup, upgrade, monitoring and on-call burden. Standardise by default and specialise where a measured requirement justifies it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A report needs a join across Order, Customer and Inventory. Walk through your options.</summary>
+      <div class="answer"><p>Start with API composition — call the three services concurrently and merge in memory — if the result set is small and paging is simple. If the query needs sorting, filtering or pagination across service boundaries, build a CQRS read model fed by events. If it is analytics rather than an application screen, do neither: push change events or CDC into a warehouse and query there. Never open a cross-service SQL join.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a distributed monolith and how would you recognise one in a codebase you just joined?</summary>
+      <div class="answer"><p>Services that must be released together. Tell-tale signs: one shared database or shared entity library, a release train where every service version must match, a change request that opens pull requests in four repositories, and synchronous call chains where any single service being down takes the whole flow down. It has the operational cost of distribution with none of the independence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where exactly does API composition break down?</summary>
+      <div class="answer"><p>Availability multiplies across the composed services, so the composite endpoint is less available than any provider. Latency equals the slowest call. List endpoints invite N+1 fan-out unless providers expose batch lookups. And pagination, sorting and filtering on a field owned by another service force you to pull large result sets into memory to sort them — the point where you stop composing and build a read model.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you split a shared database without a big-bang migration?</summary>
+      <div class="answer"><p>Incrementally. Separate the code first: route all access to a table through one service's repository layer while the schema stays put. Then split the schema — move tables into a new schema with its own credentials and revoke the old grants. Break foreign keys across the new boundary and replace them with API calls or events. Dual-write and verify during the cut-over, then remove the old path. Sam Newman's decomposition patterns cover each step.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you explain a stale read to a product owner?</summary>
+      <div class="answer"><p>In user-visible terms with a number, not in jargon: "for up to two seconds after checkout the tracking page may still show the previous status." Then offer the mitigations — show an explicit pending state, read from the owning service immediately after the user's own write, or refresh the view — and let them decide whether that window is acceptable for that screen. A vague "it is eventually consistent" is what gets escalated later.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Which invariants can survive eventual consistency and which cannot?</summary>
+      <div class="answer"><p>Anything that must never be violated at any instant — do not sell the same seat twice, do not let a balance go negative — must live inside a single service's transaction boundary. That is a decomposition constraint: if two services both need to enforce one invariant, the boundary is wrong. Invariants that can be detected and compensated after the fact (over-allocated stock, duplicate shipment) are fine eventually consistent, provided you build reconciliation and compensating actions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> CQRS read model versus a read replica of each service's database — why is the replica wrong?</summary>
+      <div class="answer"><p>A replica exposes the owning service's internal schema to a consumer, so it is the shared-database coupling with extra steps — the owner can no longer refactor its tables freely. A read model consumes published events, which are a deliberately designed contract, and stores whatever shape the query needs. The replica couples on implementation; the read model couples on interface.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you keep a read model or event-driven cache correct over months of operation?</summary>
+      <div class="answer"><p>Make consumers idempotent (dedupe on event id or use upserts keyed by aggregate id), handle out-of-order delivery with a version or sequence number and drop older versions, retry with backoff and a dead-letter queue for poison messages, and keep the projector rebuildable — retain the event log or a snapshot so you can replay from scratch after a bug. Add a periodic reconciliation job that compares the projection against the source of truth and reports drift, because silent divergence is the real failure mode.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Publishing an event and committing the local transaction are two writes. How do you make them atomic?</summary>
+      <div class="answer"><p>You do not use a distributed transaction. Use the transactional outbox: write the domain change and an outbox row in the same local transaction, then a separate relay publishes outbox rows to the broker — either by polling or by tailing the transaction log with change data capture. Delivery is at-least-once, so consumers must be idempotent. Without this, a crash between commit and publish silently loses the event and your read models drift forever.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.data.private — Database per service, shared-nothing, why a shared database defeats the point</li>
+      <li>ms.data.query — Querying across services: API composition, reporting, eventual consistency</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

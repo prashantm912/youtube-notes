@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Microservices tracing module: traces and spans, parent/child relationships, span attributes and events, the W3C traceparent header and context propagation over HTTP and messaging, head- and tail-based sampling, OpenTelemetry, Micrometer Tracing as the successor to Spring Cloud Sleuth, trace ids in the MDC, structured JSON logs and a worked cross-service debugging narrative.">
+  <title>Tracing and Debugging Across Services — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Tracing and Debugging Across Services</h1>
+  <p class="standfirst">In a monolith a stack trace tells you what happened. Across twelve services it tells you almost nothing — the frame you need is in a different process, on a different host, three hops away. Distributed tracing rebuilds that missing call stack.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → Tracing and Debugging Across Services</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Decomposition bought you independent deploys and cost you the call stack. A checkout request that used to be one thread through one JVM is now an HTTP hop to the order service, a gRPC call to pricing, a Kafka message consumed by inventory and a retry against a payment gateway — five processes, five log files, and no single artefact that ties them together. This module is about rebuilding that thread: the trace and span model, how trace context rides along on every call, how you sample it affordably, and how you get from an alert to the exact log line in the exact service that caused it.</p>
+    <p>Scope note: this is the <em>microservices-shaped</em> view of observability — tracing a single request across service boundaries, and correlating logs to it. The full observability deep dive (metrics and Micrometer meters, Prometheus and Grafana, log aggregation pipelines, dashboards, SLOs and error budgets, alerting strategy) is a separate later track. Here we stay on the request path. Stack throughout: Spring Boot 3.x/4.x with Micrometer Tracing, bridged to a current OpenTelemetry SDK.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why a stack trace stops at the process boundary: traces, spans and parent/child</h3>
+    <p>A <strong>span</strong> is one timed unit of work in one process — an incoming HTTP request, an outgoing client call, a database query, a message handler. It carries a name, a start time and duration, a span id, and the id of the span that caused it. A <strong>trace</strong> is the whole tree of spans produced by one logical request, tied together by a single trace id that every participating service sees. Read the tree top-down and you have the distributed equivalent of a stack trace; read the durations and you have a flame graph of where the request actually spent its time — including the gaps between services, which is where queueing and network time hide.</p>
+    <p>The parent/child edge is the part people get wrong in interviews. The root span is created at the edge (gateway or first service) with no parent; every span created downstream records the id of the span that triggered it, so the backend can reassemble the tree without any service knowing the shape of the whole call graph. This model was popularised by Google's Dapper paper in 2010 — annotations, a trace tree, and low-overhead sampling — and every tracing system since (Zipkin, Jaeger, OpenTelemetry) is a descendant of it. Note also what a trace is <em>not</em>: it is not a log stream and not a metric. Metrics tell you <em>that</em> latency rose; traces tell you <em>which hop</em> caused it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/traces/" rel="noopener">Traces — OpenTelemetry concepts (spans, span context, parent/child, span kind)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/observability-primer/" rel="noopener">Observability primer — OpenTelemetry (how traces, metrics and logs differ and relate)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/observability/distributed-tracing.html" rel="noopener">Pattern: Distributed tracing — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://research.google/pubs/dapper-a-large-scale-distributed-systems-tracing-infrastructure/" rel="noopener">Dapper, a Large-Scale Distributed Systems Tracing Infrastructure — Google Research (the founding paper)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UgirTJiBkV4" rel="noopener">Implementing Distributed Tracing in Microservices with Spring Boot 3.0, Micrometer, and Zipkin — Techworld with Preet</a></li>
+    </ul>
+
+    <h3>Anatomy of a span: attributes, events, status and span kind</h3>
+    <p>A bare span with a name and a duration is nearly useless during an incident — you can see that <code>GET /orders/{id}</code> took a long time, but not for which customer, which tenant, or which downstream. <strong>Attributes</strong> (Micrometer calls them tags) are the key-value pairs that make a span searchable: <code>http.response.status_code</code>, <code>db.system</code>, <code>messaging.destination.name</code>, plus your own business dimensions such as order id, tenant or payment method. Keep them low-cardinality where they will also become metric dimensions, and never put PII, tokens or card numbers in a span — traces leave your network and land in a third-party backend.</p>
+    <p>Three more pieces round out a span. <strong>Events</strong> are timestamped annotations inside the span ("cache miss", "retry attempt 2", "payment authorised"), which is how you explain a gap in the middle of a long span; a recorded exception is just a specially-named event. <strong>Status</strong> is <code>UNSET</code>, <code>OK</code> or <code>ERROR</code> and is what makes a trace filterable as "failed" — set it deliberately, because a downstream returning HTTP 404 is often not an error for your service. <strong>Span kind</strong> (<code>SERVER</code>, <code>CLIENT</code>, <code>PRODUCER</code>, <code>CONSUMER</code>, <code>INTERNAL</code>) is what lets the backend pair a caller's client span with the callee's server span and compute the network time between them. Prefer the OpenTelemetry semantic conventions for standard attribute names, so your traces are legible to tools that did not know about your service.</p>
+    <pre class="code-block" data-label="Java"><code>// Micrometer Tracing: enrich the span the framework already created for you
+Span span = tracer.currentSpan();
+if (span != null) {
+    span.tag("order.id", order.id());            // searchable business dimension
+    span.tag("payment.method", order.method());
+    span.event("payment.authorised");            // timestamped marker inside the span
+}
+
+// A child span you own, around work the framework cannot see
+Span child = tracer.nextSpan().name("repricing").start();
+try (Tracer.SpanInScope scope = tracer.withSpan(child)) {
+    repricer.apply(order);
+} catch (RuntimeException e) {
+    child.error(e);                              // sets status ERROR + records the exception
+    throw e;
+} finally {
+    child.end();                                 // never skip: an unclosed span leaks the trace
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/specs/otel/trace/api/" rel="noopener">Tracing API — OpenTelemetry specification (span lifecycle, attributes, events, status)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/languages/java/api/" rel="noopener">Java API — OpenTelemetry (Tracer, SpanBuilder, Scope and the manual-instrumentation surface)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/tracing/reference/api.html" rel="noopener">Micrometer Tracing API — creating spans, tags, events and scopes</a></li>
+      <li>[Official] <a href="https://www.jaegertracing.io/docs/latest/architecture/" rel="noopener">Architecture and terminology — Jaeger documentation (spans, references, tags, logs)</a></li>
+    </ul>
+
+    <h3>Context propagation: the W3C traceparent header across HTTP and messaging</h3>
+    <p>None of this works unless the trace id survives the hop. That is <strong>context propagation</strong>: before an outbound call the tracer serialises the active span context into the carrier (HTTP headers, Kafka record headers, AMQP properties) — the <em>inject</em> step — and on the receiving side it deserialises it back into an active context before your handler runs — the <em>extract</em> step. The interoperable format is the W3C Trace Context recommendation, a <code>traceparent</code> header of four dash-separated fields: version, a 16-byte trace id, the caller's span id (the "parent id" for the span you are about to create), and trace flags whose low bit is the sampled decision. A companion <code>tracestate</code> header carries vendor-specific data without breaking anyone else's parsing.</p>
+    <p>Two boundaries reliably break propagation in practice, and both are favourite interview follow-ups. First, <strong>asynchronous work inside your own process</strong>: hand a task to a raw <code>ExecutorService</code>, a <code>CompletableFuture</code> or a reactive scheduler and the thread-local context does not follow it, so the child span becomes an orphan root — you need the instrumented executor wrapper or Micrometer's context propagation support. Second, <strong>messaging</strong>: over Kafka or RabbitMQ the "call" is producer-to-consumer with an arbitrary delay, so the context must be written into message headers and the consumer span must be linked to the producer rather than nested inside its lifetime; that is what span links and the <code>PRODUCER</code>/<code>CONSUMER</code> kinds exist for. Separately, <strong>baggage</strong> propagates arbitrary user-defined key-value pairs alongside the trace context — useful for a tenant or order id, but every value travels on every hop, so keep it tiny and never put secrets in it.</p>
+    <pre class="code-block" data-label="HTTP"><code>GET /api/orders/8123/status HTTP/1.1
+Host: order-service.internal
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+tracestate: acme=t61rcWkgMzE
+baggage: order.id=ORD-8123,tenant=in-south
+
+# traceparent fields, left to right:
+#   00                                 version
+#   4bf92f3577b34da6a3ce929d0e0e4736   trace-id  (16 bytes, same on every hop)
+#   00f067aa0ba902b7                   parent-id (the CALLER's span id)
+#   01                                 flags; low bit set = this trace is sampled</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.w3.org/TR/trace-context/" rel="noopener">Trace Context — W3C Recommendation (the traceparent and tracestate header formats)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/context-propagation/" rel="noopener">Context propagation — OpenTelemetry concepts (context, propagators, inject and extract)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/specs/otel/context/api-propagators/" rel="noopener">Propagators API — OpenTelemetry specification</a></li>
+      <li>[Official] <a href="https://www.w3.org/TR/baggage/" rel="noopener">Propagation format for distributed context: Baggage — W3C</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xF7aZJlfTSw" rel="noopener">Correlated Logs in Spring Apps with Reactive Parts — SpringDeveloper (context across threads and reactive boundaries)</a></li>
+    </ul>
+
+    <h3>Sampling: why you cannot trace everything, head-based versus tail-based</h3>
+    <p>Tracing is not free. Every sampled request produces one span per hop, each with attributes and events, and all of it must be serialised, exported over the network, ingested and stored. At even modest traffic that is a larger data volume than your application logs and a real CPU and bandwidth cost on the hot path — which is precisely why Dapper's headline contribution was low-overhead sampling, not the data model. So you decide, per trace, whether to record it.</p>
+    <p><strong>Head-based sampling</strong> decides at the root, before anything has happened — typically a probability (keep one trace in ten) — and stamps the decision into the sampled flag so every downstream service honours it. Its virtues are that it is cheap, stateless, and guarantees complete traces: either the whole tree is recorded or none of it is. Its flaw is that it is blind — the interesting traces are the slow ones and the failed ones, and at one percent sampling you will usually have thrown away the one the customer is complaining about. <strong>Tail-based sampling</strong> inverts this: buffer all spans of a trace (in the OpenTelemetry Collector, not in your service) until it completes, then decide using the outcome — keep every trace containing an error, every trace over the latency threshold, and a small percentage of the boring successes. You get exactly the traces worth having, at the cost of a stateful, memory-hungry collector tier that must see every span of a trace, which constrains how you shard and load-balance it. Common production answer: head-based sampling at a generous rate feeding a tail-sampling Collector, plus always-on for a designated debug header.</p>
+    <pre class="code-block" data-label="YAML"><code># Spring Boot: head-based probability sampling (1.0 in dev, far lower in production)
+management:
+  tracing:
+    sampling:
+      probability: 0.1        # keep one trace in ten; flag propagates to every hop
+
+# OpenTelemetry Collector: tail-based, decided after the trace completes
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: keep-slow
+        type: latency
+        latency: { threshold_ms: 1500 }
+      - name: baseline
+        type: probabilistic
+        probabilistic: { sampling_percentage: 2 }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/sampling/" rel="noopener">Sampling — OpenTelemetry concepts (head vs tail, parent-based, consistent sampling)</a></li>
+      <li>[Official] <a href="https://www.jaegertracing.io/docs/latest/sampling/" rel="noopener">Sampling — Jaeger documentation (probabilistic, rate-limiting, remote and adaptive strategies)</a></li>
+      <li>[Article] <a href="https://opentelemetry.io/blog/2022/tail-sampling/" rel="noopener">Tail sampling with the OpenTelemetry Collector — OpenTelemetry blog</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/2022/05/11/an-introduction-to-trace-sampling-with-grafana-tempo-and-grafana-agent/" rel="noopener">An introduction to trace sampling — Grafana Labs blog</a></li>
+    </ul>
+
+    <h3>OpenTelemetry: the vendor-neutral API, SDK, Java agent and Collector</h3>
+    <p>OpenTelemetry is the CNCF project that merged OpenTracing and OpenCensus and is now the industry standard for producing telemetry — the point being that instrumentation is written once and any backend can consume it. Learn its four parts separately, because interviewers probe the distinction. The <strong>API</strong> is what library and application code compiles against; with no SDK installed it is a no-op, so a library can be instrumented without forcing a tracing dependency on its users. The <strong>SDK</strong> is the implementation you configure: samplers, span processors (batching), resource attributes such as <code>service.name</code>, and exporters. <strong>OTLP</strong> is the wire protocol they export over. The <strong>Collector</strong> is a separate process — receive, process, export — that decouples your services from any particular vendor: your apps speak OTLP to the Collector, and swapping Jaeger for Tempo or a SaaS backend is a Collector config change, not a redeploy of forty services.</p>
+    <p>On the JVM there is also <strong>zero-code instrumentation</strong>: attach <code>opentelemetry-javaagent.jar</code> with <code>-javaagent:</code> and it bytecode-instruments hundreds of common libraries — servlet containers, Spring MVC and WebFlux, JDBC, JPA, the HTTP clients, Kafka, Redis, gRPC — producing a full trace with no source changes at all. That is the fastest way to get an existing estate traced, and it composes with manual spans for your own business logic. The trade-off versus Micrometer Tracing (next topic) is real: the agent gives breadth for free and works for non-Spring services in the same estate, while the in-process library gives you idiomatic Spring configuration and a single API for tracing and metrics. Many teams run the agent in production and the library API in code.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/languages/java/" rel="noopener">Java — OpenTelemetry documentation (API, SDK, exporters, configuration)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/zero-code/java/agent/" rel="noopener">Java agent — OpenTelemetry zero-code instrumentation</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/collector/" rel="noopener">Collector — OpenTelemetry documentation (receivers, processors, exporters, deployment modes)</a></li>
+      <li>[Official] <a href="https://github.com/open-telemetry/opentelemetry-java-instrumentation" rel="noopener">opentelemetry-java-instrumentation — GitHub (the supported-library matrix worth bookmarking)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2024/11/jaeger-v2-opentelemetry/" rel="noopener">Jaeger Releases Version 2 with OpenTelemetry at the Core — InfoQ</a></li>
+    </ul>
+
+    <h3>Micrometer Tracing: Spring Boot's abstraction, and the end of Spring Cloud Sleuth</h3>
+    <p>Say this explicitly in an interview, because it dates a candidate instantly: <strong>Spring Cloud Sleuth is discontinued.</strong> It was not carried into Spring Boot 3 — the project was moved to maintenance and its tracing capability was donated to Micrometer as <strong>Micrometer Tracing</strong>. If a codebase still has <code>spring-cloud-starter-sleuth</code> on the classpath, that is a Boot 2 application, and the Boot 3 upgrade path is to remove it and add the Micrometer Tracing bridge.</p>
+    <p>Micrometer Tracing is a facade, in exactly the way SLF4J is a facade for logging: your code uses <code>Tracer</code>, <code>Span</code> and the <code>Observation</code> API, and a <em>bridge</em> dependency decides the implementation — <code>micrometer-tracing-bridge-otel</code> for OpenTelemetry (the default choice today) or <code>micrometer-tracing-bridge-brave</code> for Brave, Zipkin's tracer. On top sits Micrometer <strong>Observation</strong>, the one abstraction Spring instruments internally: you record an observation once and it fans out to a timer metric <em>and</em> a span, which is why the tracing you get out of the box already covers controllers, <code>RestClient</code>/<code>WebClient</code>/<code>RestTemplate</code>, Spring Data repositories, Spring Kafka and scheduled tasks — provided the client beans are created from the auto-configured builder rather than with <code>new</code>, the single most common reason a team's traces come out broken.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;!-- Spring Boot 3.x/4.x: Micrometer Tracing bridged to OpenTelemetry, exported over OTLP --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-actuator&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;io.micrometer&lt;/groupId&gt;
+  &lt;artifactId&gt;micrometer-tracing-bridge-otel&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;io.opentelemetry&lt;/groupId&gt;
+  &lt;artifactId&gt;opentelemetry-exporter-otlp&lt;/artifactId&gt;
+&lt;/dependency&gt;
+&lt;!-- Swap the bridge for micrometer-tracing-bridge-brave to report to Zipkin instead.
+     Do NOT also add spring-cloud-starter-sleuth: it is discontinued and does not apply. --&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/tracing/reference/" rel="noopener">Micrometer Tracing — reference documentation (bridges, supported tracers, concepts)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/tracing/reference/configuring.html" rel="noopener">Configuring Micrometer Tracing — propagation, baggage, samplers and handlers</a></li>
+      <li>[Official] <a href="https://github.com/spring-cloud/spring-cloud-sleuth" rel="noopener">spring-cloud/spring-cloud-sleuth — GitHub (the discontinuation notice and where the code went)</a></li>
+      <li>[Article] <a href="https://spring.io/blog/2022/10/12/observability-with-spring-boot-3" rel="noopener">Observability with Spring Boot 3 — Spring Blog (the Observation API, announced by the team)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=J2N1X11pYnY" rel="noopener">Spring Boot 3 Observability — Monitor Method and Service Performance — Java Techie</a></li>
+    </ul>
+
+    <h3>Wiring it up: Actuator properties, and where the spans actually land</h3>
+    <p>With the bridge on the classpath, Spring Boot Actuator auto-configures the tracer and the exporter and you are left with a handful of properties. <code>spring.application.name</code> becomes the <code>service.name</code> resource attribute — get it wrong and every service shows up as "unknown_service" in the backend. <code>management.tracing.sampling.probability</code> sets the head sampler. <code>management.otlp.tracing.endpoint</code> points at the Collector (or directly at a backend that speaks OTLP), while <code>management.zipkin.tracing.endpoint</code> is the Brave/Zipkin path. Expose <code>/actuator/health</code> and friends as usual, and remember the propagation setting: Boot defaults to W3C, but a legacy estate may still speak Zipkin's B3 headers, in which case set <code>management.tracing.propagation.type</code> to <code>b3</code> or to both during migration — mismatched propagators are the classic "each service produces its own trace" bug.</p>
+    <p>For the backend, three open-source options dominate and any of them is a defensible interview answer. <strong>Zipkin</strong> is the oldest and simplest — a single jar, easy for local development and small estates. <strong>Jaeger</strong> is the CNCF project, now built on OpenTelemetry internals, with stronger service-dependency graphs and adaptive sampling. <strong>Grafana Tempo</strong> is object-storage-backed and cheap at very high volume; it deliberately indexes only the trace id, which is exactly why the log-to-trace correlation in the next topics matters so much — with Tempo the normal way you find a trace is by having its id already, from a log line or an exemplar. Whichever you pick, put the Collector between it and your services so the choice stays reversible.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  application:
+    name: order-service          # becomes the service.name every span is tagged with
+management:
+  tracing:
+    enabled: true
+    propagation:
+      type: w3c                  # b3 only for legacy Zipkin/Sleuth estates; both while migrating
+  otlp:
+    tracing:
+      endpoint: http://otel-collector.observability:4318/v1/traces
+  endpoints:
+    web:
+      exposure:
+        include: health,info</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/tracing.html" rel="noopener">Tracing — Spring Boot Actuator reference (supported tracers, properties, exporters)</a></li>
+      <li>[Official] <a href="https://zipkin.io/" rel="noopener">Zipkin — project site (architecture, quickstart, the B3 propagation format)</a></li>
+      <li>[Official] <a href="https://www.jaegertracing.io/docs/latest/getting-started/" rel="noopener">Getting started — Jaeger documentation (all-in-one, OTLP ingestion, the UI)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/tempo/latest/" rel="noopener">Grafana Tempo documentation (trace-id-only indexing, TraceQL, object-storage backend)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jx_-0qfn-hc" rel="noopener">Spring Boot + Micrometer + Zipkin — Distributed Tracing in Microservices — Codefarm</a></li>
+    </ul>
+
+    <h3>Correlation ids in logs: putting trace and span ids in the MDC</h3>
+    <p>A trace UI shows you which service was slow. It does not show you the <code>NullPointerException</code>, the SQL that ran, or the warning your own code logged — those live in logs. The join between the two is the trace id printed on every log line, and the mechanism is the <strong>MDC</strong> (Mapped Diagnostic Context): a thread-local map, part of SLF4J and implemented by Logback and Log4j2, whose entries the log pattern can interpolate with <code>%X{key}</code>. Put <code>traceId</code> and <code>spanId</code> in the MDC at the start of the request and every subsequent line — from your code, from Spring, from Hibernate — carries them for free.</p>
+    <p>On Spring Boot 3 you get this without writing a filter: when a tracer is present, Boot's default log pattern already includes the application name, trace id and span id, and Micrometer Tracing keeps the MDC in step with the current span as scopes open and close. Two operational rules matter. First, <strong>always clean up</strong> — the MDC is thread-local and threads are pooled, so a value you forget to remove leaks into the next unrelated request; use try/finally, or better, let the framework's scope management do it. Second, <strong>async work needs help again</strong>: the MDC does not cross a thread hand-off any more than the span context does, so wrap executors (Spring's <code>ContextPropagatingTaskDecorator</code> or an instrumented executor) rather than sprinkling manual copies. Once the ids are in every line, the whole debugging workflow becomes one query: filter your log store on that trace id and you have every log line from every service for that one request, in time order.</p>
+    <pre class="code-block" data-label="Properties"><code># Spring Boot 3 default when a tracer is on the classpath — shown so you can see what it does
+logging.pattern.level=%5p [${spring.application.name:-},%X{traceId:-},%X{spanId:-}]
+
+# Logback pattern doing it by hand, plus a business id you put in the MDC yourself
+# &lt;pattern&gt;%d %-5level [%X{traceId:-},%X{spanId:-}] [%X{correlationId:-}] %logger{36} - %msg%n&lt;/pattern&gt;
+
+# Resulting line: the trace id is the grep key that joins twelve services together
+# INFO [order-service,4bf92f3577b34da6a3ce929d0e0e4736,00f067aa0ba902b7] c.a.o.OrderService - reserving stock</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/logging.html" rel="noopener">Logging — Spring Boot reference (log format, log correlation, the default tracing pattern)</a></li>
+      <li>[Official] <a href="https://www.slf4j.org/api/org/slf4j/MDC.html" rel="noopener">MDC — SLF4J API javadoc (put, get, remove, and the thread-local contract)</a></li>
+      <li>[Official] <a href="https://logback.qos.ch/manual/mdc.html" rel="noopener">Mapped Diagnostic Context — Logback manual (patterns, thread pools, cleanup pitfalls)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mdc-in-log4j-2-logback" rel="noopener">Java Logging with Mapped Diagnostic Context (MDC) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ySXZ60R_2_M" rel="noopener">End-to-End Distributed Logging with MDC, Correlation ID and Trace ID — Concept &amp;&amp; Coding (Shrayansh)</a></li>
+    </ul>
+
+    <h3>Structured JSON logs and the business correlation id</h3>
+    <p>Grepping a text pattern works on one pod. Across a log aggregator it does not: you want <code>traceId = "4bf92f…"</code> as a queryable field, not a substring inside a formatted string. <strong>Structured logging</strong> emits each line as JSON with the MDC entries as first-class fields, which makes filtering exact, cheap and immune to format drift. Spring Boot 3.4 and later has this built in — <code>logging.structured.format.console</code> accepts <code>ecs</code> (Elastic Common Schema), <code>gelf</code>, <code>logstash</code> or your own format — so you no longer need a hand-rolled Logstash encoder. Log to stdout in JSON and let the platform ship it; do not write application log files inside a container.</p>
+    <p>Alongside the trace id, propagate a <strong>business correlation id</strong> — the order id, payment reference or ticket number that support and business users actually quote. The distinction is worth stating clearly in an interview: a trace id is generated per request and identifies one technical execution; a business correlation id identifies a real-world entity and can span many requests, retries, and asynchronous follow-ups over hours. When a customer says "my order ORD-8123 did not ship", the order id is the only handle you have, and you need it to lead you to logs and then to trace ids. Implement it as an inbound header (accept <code>X-Correlation-Id</code>, generate a UUID when absent), put it in the MDC, propagate it to downstream calls — via baggage if you want it on spans as well as logs — and echo it in error responses so support tickets arrive with a key you can search on.</p>
+    <pre class="code-block" data-label="Java"><code>@Component
+public class CorrelationIdFilter extends OncePerRequestFilter {
+    public static final String HEADER = "X-Correlation-Id";
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+            throws ServletException, IOException {
+        String id = Optional.ofNullable(req.getHeader(HEADER))
+                            .filter(s -&gt; !s.isBlank())
+                            .orElseGet(() -&gt; UUID.randomUUID().toString());
+        MDC.put("correlationId", id);
+        res.setHeader(HEADER, id);               // echo it back so clients can quote it
+        try {
+            chain.doFilter(req, res);
+        } finally {
+            MDC.remove("correlationId");         // pooled threads: always clean up
+        }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/logging.html#features.logging.structured" rel="noopener">Structured logging — Spring Boot reference (ECS, GELF, Logstash and custom formats)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/logs/" rel="noopener">Logs — OpenTelemetry concepts (log records, trace context on logs, correlation)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/observability/application-logging.html" rel="noopener">Pattern: Application logging — microservices.io</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-structured-logging" rel="noopener">Structured Logging in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QzCb8HH6kNY" rel="noopener">Spring Boot RestClient Observability — Correlation ID, MDC Filter and Interceptors — Codefarm</a></li>
+    </ul>
+
+    <h3>Working the incident: from an alert to a trace to one slow span to the logs</h3>
+    <p>Here is the workflow the whole module exists to enable, and the narrative to tell when an interviewer asks "how would you debug a slow checkout in production?". <strong>An alert fires</strong>: checkout p99 latency has tripled. Metrics tell you <em>that</em> it is slow and roughly when it started, and nothing more. <strong>You find a representative trace</strong>: filter the tracing backend for the checkout endpoint above the latency threshold in that window — this is where tail-based sampling earns its keep, because head sampling may have discarded every slow trace. Alternatively, jump straight from a metric exemplar or from a support ticket's correlation id to the trace id. <strong>You read the waterfall</strong>: the root span is a long bar, and under it one child dominates — pricing-service is taking most of the request, or, more interestingly, the child spans account for only a fraction of the parent and the rest is a gap, which means the time went somewhere untraced: connection-pool wait, thread-pool queueing, garbage collection or a lock.</p>
+    <p><strong>You pivot from the span to the logs</strong>: take the trace id off the slow span and query your log store for it. Because every service stamps the trace id into the MDC, you get every log line from every service for that exact request in one result set, and the cause is usually visible immediately — a connection-pool timeout, a retry storm, an N+1 query, a circuit breaker half-open probe. <strong>Then you close the loop</strong>: confirm the pattern is systematic rather than one unlucky request by grouping similar traces or checking the corresponding metric, and record the trace id in the incident notes. Two habits make this fast rather than heroic: span attributes rich enough to search on (tenant, order id, payment method), and log-to-trace linking configured in the UI so a trace id in a log line is a clickable hyperlink into the trace, and back. Practise saying this sequence out loud — alert, trace, span, logs, confirm — because a crisp answer to the debugging question is worth more in an interview than reciting the configuration properties.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/observability.html" rel="noopener">Observability — Spring Boot Actuator reference (the Observation API, context propagation, common tags)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-3-observability" rel="noopener">Observability With Spring Boot 3 — Baeldung (end-to-end walkthrough across two services)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-opentelemetry-setup" rel="noopener">OpenTelemetry Setup in a Spring Boot Application — Baeldung</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/OpenTelemetry-instrumentation/" rel="noopener">Building a Future-Proof Observability Platform to Empower Engineers — InfoQ presentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=71Qw1sOWHwE" rel="noopener">Spring Boot Microservices Tutorial: Observability using Prometheus, Loki, Tempo and Grafana — SivaLabs</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-cqrs-event-sourcing.html">← CQRS and Event Sourcing</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="12-versioning-testing.html">Versioning, Contracts and Testing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Tracing is the question Indian product and service companies use to separate candidates who have run microservices in production from candidates who have only built them — the concepts are easy to state and hard to fake, and the "how would you debug it" question comes up in almost every senior round:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is distributed tracing, and what problem does it solve?</summary>
+      <div class="answer"><p>It reconstructs the path of a single request as it travels through multiple services, recording a timed span for each unit of work and tying them together with one trace id. It solves the loss of the call stack that comes with decomposition: a stack trace ends at the process boundary, so without tracing you cannot see which of the ten services in a request chain was slow or failed, or how much time went to the network between them.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Explain trace, span, trace id and span id.</summary>
+      <div class="answer"><p>A span is one timed operation in one service — it has a name, start time, duration, a span id, a parent span id and a status. A trace is the tree of all spans belonging to one logical request. The trace id is the same 16-byte value on every span in that tree and is what you search on; the span id identifies one node, and the parent span id is the edge that lets the backend rebuild the tree.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How does the trace context travel from one service to the next?</summary>
+      <div class="answer"><p>Through headers. The client-side instrumentation injects the active context into the outgoing request — under W3C Trace Context that is the <code>traceparent</code> header carrying version, trace id, the caller's span id and the sampled flag, with optional <code>tracestate</code>. The receiving service extracts it before the handler runs and creates its server span as a child. Over Kafka or RabbitMQ the same values ride in message headers instead of HTTP headers.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is Micrometer Tracing, and what happened to Spring Cloud Sleuth?</summary>
+      <div class="answer"><p>Sleuth is discontinued — it was not ported to Spring Boot 3 and its tracing capability moved into Micrometer Tracing. Micrometer Tracing is a vendor-neutral facade (SLF4J-style) over an actual tracer: you add <code>micrometer-tracing-bridge-otel</code> for OpenTelemetry or <code>micrometer-tracing-bridge-brave</code> for Brave/Zipkin, and Spring Boot Actuator auto-configures it. Saying "we use Sleuth" on a Boot 3 project is an immediate red flag.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a correlation id, and how is it different from a trace id?</summary>
+      <div class="answer"><p>A trace id is generated per request by the tracing library and identifies one technical execution across services. A business correlation id identifies a real-world thing — an order, a payment, a ticket — and can span many separate requests, retries and asynchronous follow-ups over hours or days. You want both: the trace id for the engineering view, the correlation id because that is what the customer and the support ticket actually quote.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do trace and span ids end up on every log line?</summary>
+      <div class="answer"><p>Via the MDC, a thread-local key-value map in SLF4J that the log pattern interpolates with <code>%X{traceId}</code>. Micrometer Tracing keeps the MDC synchronised with the current span as scopes open and close, and Spring Boot's default log pattern already prints application name, trace id and span id when a tracer is present. Since the MDC is thread-local you must remove entries in a finally block for anything you put there yourself, because pooled threads outlive requests.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Head-based versus tail-based sampling — which would you use and why?</summary>
+      <div class="answer"><p>Head-based decides at the root before the outcome is known, usually probabilistically, and stamps the decision into the sampled flag so the trace is either complete or absent; it is cheap and stateless but blind, so at low rates you throw away exactly the slow and failed traces you needed. Tail-based buffers all spans in the Collector until the trace finishes and then keeps errors, slow traces and a small baseline sample; it captures the interesting traces at the cost of a stateful, memory-hungry collector tier that must receive every span of a trace. Production answer: both — generous head sampling feeding a tail-sampling Collector.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Traces break when a request goes async inside your service. Why, and what fixes it?</summary>
+      <div class="answer"><p>The span context and the MDC are held in thread-locals. Hand work to a raw <code>ExecutorService</code>, <code>CompletableFuture</code> or a reactive scheduler and the new thread has no context, so the child span becomes an orphan root and the log lines lose their trace id. Fix by wrapping the executor — Spring's context-propagating task decorator, Micrometer's context propagation support, or the instrumented executor from the OpenTelemetry agent — rather than copying values by hand at every call site.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the OpenTelemetry Collector, and why put one in the path?</summary>
+      <div class="answer"><p>A standalone process with receivers, processors and exporters that sits between your services and the backend. It gives you vendor neutrality (swap Jaeger for Tempo or a SaaS backend by editing Collector config, not redeploying every service), a place to do tail sampling, batching, retry and buffering off the application's hot path, and a single point to strip sensitive attributes or add environment metadata. Services just speak OTLP to it.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Java agent auto-instrumentation versus Micrometer Tracing in code — when do you pick which?</summary>
+      <div class="answer"><p>The OpenTelemetry Java agent bytecode-instruments hundreds of libraries with no code change, so it is the fastest way to trace an existing estate and it works for non-Spring services too. Micrometer Tracing is in-process, idiomatic for Spring, gives one Observation API that produces both metrics and spans, and is easier to reason about and test. Many teams do both: the agent for breadth, the library API for business spans. The agent's costs are startup time, a little more overhead and less control over what gets instrumented.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Every service is producing its own trace instead of one shared trace. How do you diagnose that?</summary>
+      <div class="answer"><p>Context is not being propagated. Check in order: the caller is using an auto-configured <code>RestClient</code>/<code>WebClient</code>/<code>RestTemplate</code> builder rather than a hand-constructed instance (the most common cause); propagator formats match on both sides (W3C on one service and B3 on the other silently produces disconnected traces — set <code>management.tracing.propagation.type</code> consistently, or accept both during migration); a gateway or proxy is not stripping the <code>traceparent</code> header; and async hand-offs use context-propagating executors. Confirm by dumping the inbound headers on the callee.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Walk me through debugging a slow checkout in production using tracing.</summary>
+      <div class="answer"><p>Alert on p99 latency tells me it is slow and when it started. I filter the tracing backend for that endpoint above the latency threshold in that window and open a representative trace. I read the waterfall: if one child span dominates, that service or its dependency is the culprit; if the children only account for part of the parent's duration, the gap is untraced time — connection-pool wait, thread-pool queueing, GC or lock contention. I take the trace id from the slow span and query the log store for it, which returns every log line from every service for that one request, and the specific error or timeout is usually visible there. Finally I check whether the pattern is systematic by grouping similar traces, and record the trace id in the incident notes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A span shows a long duration but its children only explain part of it. What is in the gap?</summary>
+      <div class="answer"><p>Untraced time inside the process. Usual suspects: waiting for a connection from a pool (HikariCP or an HTTP client pool) before the query span even starts, queueing in a bounded thread pool or the servlet container's accept queue, garbage collection pauses, lock or synchronisation contention, serialisation of a large payload, and DNS or TLS handshake time on a fresh connection. Add explicit spans or span events around pool acquisition and heavy in-process work, and cross-check the JVM and pool metrics for the same interval.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What are the risks of putting business data into span attributes and baggage?</summary>
+      <div class="answer"><p>Three. Privacy: spans are exported out of your network to a tracing backend, so PII, tokens, card numbers and full request bodies must never go into attributes — sanitise at the Collector as a second line of defence. Cost and cardinality: high-cardinality attributes blow up index size, and if the same observation also produces a metric, a per-user tag creates a time series explosion. Overhead: baggage travels on the wire on every hop of every request, so a large baggage payload is a permanent tax on latency and bandwidth — keep it to one or two short, genuinely cross-cutting values such as tenant or order id.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your backend is Grafana Tempo, which only indexes trace ids. How do you find the trace for a customer complaint?</summary>
+      <div class="answer"><p>You start from the logs, not the trace UI. The customer quotes an order id or correlation id; you query the log aggregator for that field, which returns log lines that also carry the trace id in the MDC, and you follow that id into Tempo. That is exactly why correlation ids in structured logs are not optional with a trace-id-indexed backend, and why log-to-trace linking should be configured so the trace id in a log line is a clickable jump. Tail sampling must also be tuned so the traces worth keeping — errors and slow requests — are actually retained, otherwise the id you found points at nothing.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.obs.tracing</li>
+      <li>ms.obs.correlate</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

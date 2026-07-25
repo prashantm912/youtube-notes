@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Microservices versioning, contracts and testing module: backward-compatible API evolution, tolerant reader, URI/header/media-type versioning, deprecation and Sunset headers, expand-contract migration, consumer-driven contracts with Pact and Spring Cloud Contract, the microservice chassis, deployment topologies, a service mesh survey and the microservices testing pyramid — with verified resources and interview questions.">
+  <title>Versioning, Contracts and Testing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Versioning, Contracts and Testing</h1>
+  <p class="standfirst">Independent deployability is the entire promise of microservices — and it dies the instant two services have to be released together. This closing module is about keeping that promise: evolving APIs without breaking callers, proving compatibility in CI instead of production, and the platform machinery that makes a dozen services survivable.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Microservices track → Versioning, Contracts and Testing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every earlier module in this track bought you something — a bounded context, a database per service, an asynchronous edge, a circuit breaker, a trace id. All of it exists to let one team ship one service on a Tuesday afternoon without a release train, a coordination meeting, or a rollback plan involving four other squads. The moment a change to service A forces service B to redeploy on the same day, you have paid the full operational price of distribution and received a distributed monolith in exchange.</p>
+    <p>The first half of this module is about that contract discipline: which API changes are safe, how to version when a breaking change is unavoidable, how to retire an old version honestly, and how consumer-driven contract testing (Pact, Spring Cloud Contract) turns "I think nobody uses that field" into a build failure. The second half is the platform synthesis the track has been building toward: the microservice chassis and service template, deployment topologies, a service mesh survey, and a testing strategy that ends in production rather than pretending production does not exist.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Independent deployability, and what actually counts as a breaking change</h3>
+    <p>The test for whether you have microservices or a distributed monolith is simple: can you deploy any one service to production, right now, without deploying any other? If the answer is no, the cause is almost always an API change that consumers cannot absorb on their own schedule. So the working rule for evolving a service API is <em>additive only</em>. Adding a new optional field, a new endpoint, or a new enum value that old clients can ignore is safe. Removing a field, renaming it, narrowing its type, tightening validation, making an optional request field required, or changing the meaning of an existing value is breaking — even when your own tests pass, because your tests are written by you and the breakage lands on somebody else.</p>
+    <p>The counterpart rule lives on the consumer side: be a <em>tolerant reader</em>. Deserialize only the fields you actually need, ignore everything you do not recognise instead of failing on unknown properties, and never assume element ordering or the absence of extra data. A strict consumer converts a provider's safe additive change into an outage, which then teaches the provider that no change is safe and freezes the API forever. Postel's advice — be conservative in what you send, liberal in what you accept — is the operational rule that makes independent deployment possible at all. Codify the shape in an OpenAPI document so "the contract" is a reviewable artefact rather than tribal memory.</p>
+    <pre class="code-block" data-label="JSON"><code>// v1 response the provider ships today
+{ "orderId": "A-1042", "status": "SHIPPED", "total": 2499 }
+
+// SAFE: new optional field added. A tolerant reader ignores it.
+{ "orderId": "A-1042", "status": "SHIPPED", "total": 2499, "carrier": "BlueDart" }
+
+// BREAKING: renamed, retyped, and a new enum value old clients cannot map
+{ "id": "A-1042", "status": "OUT_FOR_DELIVERY", "total": { "amount": 2499, "currency": "INR" } }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloud.google.com/apis/design/compatibility" rel="noopener">Backwards compatibility — Google API Design Guide (a precise catalogue of breaking vs non-breaking changes)</a></li>
+      <li>[Official] <a href="https://swagger.io/specification/" rel="noopener">OpenAPI Specification — the contract document format</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TolerantReader.html" rel="noopener">TolerantReader — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://opensource.zalando.com/restful-api-guidelines/" rel="noopener">RESTful API Guidelines — Zalando (compatibility and deprecation rules used at scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V3NQt5KP7EM" rel="noopener">The Problem with Microservices — Dave Farley, GOTO 2021 (independent deployability as the only real test)</a></li>
+    </ul>
+
+    <h3>Versioning strategies: URI path, header, and media type</h3>
+    <p>Sometimes a breaking change is genuinely unavoidable and you must run two shapes of the API at once. Three mechanisms are standard. <strong>URI path versioning</strong> (<code>/api/v1/orders</code>) is explicit, trivially cacheable, browsable in a browser bar and greppable in logs; purists dislike it because the URI is supposed to identify the resource, not a representation of it. <strong>Header versioning</strong> (a custom <code>X-API-Version</code> or the newer <code>API-Version</code> header) keeps URIs clean but is invisible in a browser and easy to lose at a proxy or CDN unless you add it to the cache key. <strong>Media type versioning</strong> (<code>Accept: application/vnd.acme.order.v2+json</code>) is the most REST-correct — content negotiation is exactly what <code>Accept</code> is for — and the most awkward for ordinary clients and for anyone debugging with a browser.</p>
+    <p>The honest recommendation: version at the URI path for public and partner APIs, because discoverability and support-desk debuggability beat theoretical purity, and keep the version at the coarsest sensible granularity — one version per service API, not per endpoint and never per field. Bump the major version rarely; most changes should be additive and require no bump at all. Spring Framework 7 / Spring Boot 4 finally made this first-class with built-in API versioning: a <code>version</code> attribute on <code>@RequestMapping</code> plus a configurable resolver (path segment, request header, query parameter or media type), so you declare the strategy once instead of hand-rolling it with URL prefixes and interceptors.</p>
+    <pre class="code-block" data-label="HTTP"><code>GET /api/v2/orders/A-1042            # 1. URI path  — explicit, cacheable, greppable
+GET /api/orders/A-1042
+API-Version: 2                       # 2. header    — clean URIs, invisible in a browser
+GET /api/orders/A-1042
+Accept: application/vnd.acme.order.v2+json   # 3. media type — pure content negotiation</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloud.google.com/apis/design/versioning" rel="noopener">Versioning — Google API Design Guide (major versions, stability channels)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-framework/reference/web/webmvc-versioning.html" rel="noopener">API Versioning — Spring Framework reference documentation (version resolvers, deprecation handling)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rest-versioning" rel="noopener">Versioning a REST API — Baeldung (all four strategies with the tradeoffs)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/enterpriseREST.html" rel="noopener">REST APIs must be hypertext-driven? Enterprise REST — martinfowler.com (versioning in the large)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xDMjJuF4fDk" rel="noopener">All You Want to Know About Spring API Versioning — SivaLabs</a></li>
+    </ul>
+
+    <h3>Deprecation, Sunset headers, and the expand–contract migration</h3>
+    <p>Publishing v2 is the easy half; retiring v1 is where teams fail, and an API you can never delete is a permanent tax on every future change. Deprecation should be a machine-readable, dated announcement rather than an email nobody read. Two standards-track headers exist for exactly this: <code>Deprecation</code> (RFC 9745) states that the endpoint is deprecated and when it became so, and <code>Sunset</code> (RFC 8594) gives the HTTP-date after which the resource is expected to stop responding, usually accompanied by a <code>Link</code> header pointing at the migration guide and the successor version. Emit them from the moment v2 ships, log every call still arriving on the deprecated version tagged by consumer, and let that per-consumer call count — not a calendar guess — decide when it is actually safe to delete.</p>
+    <p>For the change itself, use <em>expand–contract</em> (also called parallel change), which is the single most useful migration pattern in this module and applies equally to REST payloads, event schemas and database columns. <strong>Expand:</strong> add the new field, endpoint or column alongside the old one and write to both, so the service now satisfies old and new consumers simultaneously. <strong>Migrate:</strong> move consumers over one at a time, at their own pace, with no coordinated release. <strong>Contract:</strong> once telemetry proves nobody reads the old shape, delete it. Each of the three steps is independently deployable and independently revertible, which is precisely why it works — a big-bang cutover requires every team to move on one date, which is the coordinated release you built microservices to avoid.</p>
+    <pre class="code-block" data-label="HTTP"><code>HTTP/1.1 200 OK
+Deprecation: @1761955200                     # RFC 9745 — deprecated since this instant
+Sunset: Sat, 31 Jan 2026 00:00:00 GMT        # RFC 8594 — expected to stop responding
+Link: &lt;https://api.acme.com/docs/migrating-to-v2&gt;; rel="deprecation"
+Link: &lt;https://api.acme.com/api/v2/orders&gt;; rel="successor-version"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc8594.html" rel="noopener">RFC 8594 — The Sunset HTTP Header Field</a></li>
+      <li>[Official] <a href="https://www.rfc-editor.org/rfc/rfc9745.html" rel="noopener">RFC 9745 — The Deprecation HTTP Header Field</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/ParallelChange.html" rel="noopener">ParallelChange (expand–migrate–contract) — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design" rel="noopener">API design best practices — Azure Architecture Center (versioning and evolution section)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SUfYMpWXJ7g" rel="noopener">Spring Boot 4 API Versioning — Stop Breaking Client APIs — Java Techie</a></li>
+    </ul>
+
+    <h3>Consumer-driven contracts: catching breakage in CI instead of production</h3>
+    <p>Integration tests that spin up every service are slow, flaky and impossible to run per-commit; mocks are fast but drift from reality the moment the provider changes, so they will happily let you ship a green build against an API that no longer exists. Consumer-driven contract testing solves both. The <em>consumer</em> writes a test against a local mock of the provider, and the framework records the request/response pairs that test relied on into a machine-readable <strong>pact</strong>. That pact is then replayed against the <em>real provider</em> in the provider's own build: the provider's pipeline sets up the declared state, receives the recorded request, and asserts its actual response satisfies what the consumer expects. Neither build ever needs both services running at once, yet a breaking change fails a pipeline within minutes.</p>
+    <p>The word "consumer-driven" is the important part. The contract encodes only what consumers genuinely use, so it is simultaneously a compatibility test and an accurate map of which fields you are allowed to delete — the answer to "does anyone still read <code>customerName</code>?" becomes a query against the contracts rather than a guess. Two rules keep it healthy: match on <em>types and matchers</em>, not exact literal values, or every harmless data change turns red; and keep contracts to structural expectations rather than business assertions — a contract test proves the two sides can talk, it does not prove the provider's discount calculation is right. Pact is the polyglot, HTTP-and-messaging standard here, with a mature JVM implementation and JUnit 5 support.</p>
+    <pre class="code-block" data-label="Java"><code>// Consumer side (Pact JUnit 5): declare what THIS consumer actually needs
+@Pact(consumer = "shipping-service", provider = "order-service")
+public RequestResponsePact orderExists(PactDslWithProvider builder) {
+    return builder
+        .given("an order A-1042 exists")            // provider state, set up in provider build
+        .uponReceiving("a request for that order")
+        .path("/api/v2/orders/A-1042").method("GET")
+        .willRespondWith().status(200)
+        .body(new PactDslJsonBody()
+            .stringType("orderId", "A-1042")        // match on TYPE, never on the literal
+            .stringMatcher("status", "SHIPPED|DELIVERED", "SHIPPED"))
+        .toPact();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.pact.io/" rel="noopener">Pact — official documentation home</a></li>
+      <li>[Official] <a href="https://docs.pact.io/getting_started/how_pact_works" rel="noopener">How Pact works — Pact documentation (the consumer/provider handshake, step by step)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/consumerDrivenContracts.html" rel="noopener">Consumer-Driven Contracts: A Service Evolution Pattern — Ian Robinson on martinfowler.com</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/pact-junit-consumer-driven-contracts" rel="noopener">Consumer-Driven Contracts with Pact — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yaAe0aR1G-U" rel="noopener">Microservices: Contract Testing Using PACT — GeekNight, ThoughtWorks</a></li>
+    </ul>
+
+    <h3>The Pact Broker and the can-i-deploy gate</h3>
+    <p>Contract files sitting in a Git repository are a half-finished implementation. The <strong>Pact Broker</strong> is the missing piece: consumers publish their pacts to it tagged with a version and a branch, providers pull the pacts of every consumer that matters and publish verification results back, and the broker maintains the resulting compatibility matrix — which consumer version is proven to work with which provider version, in which environment. It also draws the live dependency graph of your estate, which is frequently the only accurate one anybody has.</p>
+    <p>The payoff is the <code>can-i-deploy</code> check, and it is what turns contract testing from a nice test into a genuine release gate. Before a deployment step runs, the pipeline asks the broker whether this exact version of this service is verified compatible with everything currently running in the target environment; if a consumer's expectation has not been verified against this build, the deploy stops. Add a broker webhook so that publishing a new pact automatically triggers the provider's verification build, record deployments with <code>record-deployment</code> so the broker knows what is actually live, and use pending pacts and WIP pacts so a brand-new consumer expectation cannot break the provider's main build before the provider has had a chance to implement it.</p>
+    <pre class="code-block" data-label="Shell"><code># Provider build: verify every consumer contract, publish the results
+./gradlew pactVerify -Ppact.verifier.publishResults=true
+
+# Release gate: refuse to deploy unless the broker says this version is compatible
+pact-broker can-i-deploy \
+  --pacticipant order-service --version "$GIT_SHA" \
+  --to-environment production --retry-while-unknown 6
+
+pact-broker record-deployment \
+  --pacticipant order-service --version "$GIT_SHA" --environment production</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.pact.io/pact_broker" rel="noopener">Pact Broker — official documentation (matrix, tags, webhooks)</a></li>
+      <li>[Official] <a href="https://docs.pact.io/pact_broker/can_i_deploy" rel="noopener">can-i-deploy — Pact documentation (the release gate)</a></li>
+      <li>[Official] <a href="https://docs.pact.io/getting_started/versioning_in_the_pact_broker" rel="noopener">Versioning in the Pact Broker — Pact documentation (branches, environments, consumer version selectors)</a></li>
+      <li>[Official] <a href="https://docs.pact.io/implementation_guides/jvm" rel="noopener">Pact JVM implementation guide — JUnit 5, Spring, Gradle and Maven plugins</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NQkoMmu_Crs" rel="noopener">Microservices — Test Smarter, not Harder — Beth Skurrie (Pact maintainer), GOTO/YOW! 2019</a></li>
+    </ul>
+
+    <h3>Spring Cloud Contract: provider-first contracts and generated stubs</h3>
+    <p>Spring Cloud Contract attacks the same problem from the other end and is the more natural fit for an all-JVM, all-Spring estate. Contracts are written as Groovy DSL, YAML or Java files that live with the <em>provider</em> (agreed with consumers in a pull request, or kept in a shared contracts repository). At provider build time the plugin generates JUnit tests from those contracts and runs them against the real controller — so the provider physically cannot merge a change that violates a contract — and then packages the same contracts as a <strong>stub JAR</strong> published to your artifact repository.</p>
+    <p>Consumers then pull that stub JAR and run <code>@AutoConfigureStubRunner</code>, which boots a WireMock server serving exactly the provider's agreed responses on a real HTTP port. The consumer's integration test therefore runs against a mock that is generated from the provider's verified contract rather than hand-written and stale — that is the whole trick, and it is why stub-runner tests do not drift. Spring Cloud Contract also covers messaging contracts for Kafka and RabbitMQ, which Pact supports too but which most teams forget to test at all. Rough guidance: choose Pact when consumers are polyglot (a React app, a Node service, a Python job) or when consumers must genuinely drive the contract; choose Spring Cloud Contract when everything is Spring Boot and you want contracts and stubs to fall out of the normal Maven/Gradle build.</p>
+    <pre class="code-block" data-label="Groovy"><code>// provider: src/test/resources/contracts/shouldReturnOrder.groovy
+Contract.make {
+    request  { method 'GET'; url '/api/v2/orders/A-1042' }
+    response {
+        status 200
+        headers { contentType(applicationJson()) }
+        body(orderId: 'A-1042', status: 'SHIPPED', total: 2499)
+        bodyMatchers { jsonPath('$.total', byType()) }   // type, not literal
+    }
+}
+// consumer test: WireMock is fed from the provider's published stub JAR
+@AutoConfigureStubRunner(ids = "com.acme:order-service:+:stubs:8090",
+                         stubsMode = StubRunnerProperties.StubsMode.REMOTE)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/" rel="noopener">Spring Cloud Contract — reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/getting-started/introducing-spring-cloud-contract.html" rel="noopener">Introducing Spring Cloud Contract — the problem it solves and the workflow</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-cloud-contract/reference/getting-started/first-application.html" rel="noopener">Developing your first Spring Cloud Contract application — provider tests and stub runner</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-contract" rel="noopener">An Intro to Spring Cloud Contract — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QHlhYQQa7bg" rel="noopener">Consumer Driven Contract Testing with Spring Cloud Contract — SpringDeveloper</a></li>
+    </ul>
+
+    <h3>The microservice chassis and the service template</h3>
+    <p>Twelve services means twelve chances to wire up logging, metrics, tracing, health checks, configuration, security, resilience defaults and graceful shutdown — and twelve slightly different answers, which is how you end up unable to correlate a trace across your own estate. The <strong>microservice chassis</strong> pattern says the cross-cutting concerns belong in a framework layer that every service inherits rather than in each service's own code. On the JVM this is largely Spring Boot plus a thin in-house starter: an <code>acme-service-starter</code> dependency that auto-configures the log format with trace ids, the Micrometer registry and OpenTelemetry exporter, the actuator endpoints and their security, the standard error response body, the default Resilience4j configuration and the shared HTTP client conventions.</p>
+    <p>The <strong>service template</strong> is the chassis's delivery mechanism: one blessed, generated starting point — a Spring Initializr configuration, a Backstage software template, a Cookiecutter or a maintained example repository — that produces a new service already carrying the chassis, a working pipeline, a Dockerfile, a Helm chart and a passing test. The subtle failure mode is worth naming in interviews: a chassis is a shared library, so a chassis upgrade is a coordinated upgrade across every service, which is the exact coupling you were trying to escape. Keep the chassis thin and strictly non-business, version it so services can adopt at their own pace, and accept that some concerns (mTLS, retries, traffic shifting) are better pushed out of the library and into the platform — which is the argument for a service mesh.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;!-- every service inherits the same cross-cutting behaviour, versioned independently --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.acme.platform&lt;/groupId&gt;
+  &lt;artifactId&gt;acme-service-starter&lt;/artifactId&gt;   &lt;!-- logging + tracing + actuator + --&gt;
+  &lt;version&gt;4.2.0&lt;/version&gt;                          &lt;!-- error format + resilience defaults --&gt;
+&lt;/dependency&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html" rel="noopener">Actuator endpoints — Spring Boot reference (health, info, metrics: the chassis baseline)</a></li>
+      <li>[Official] <a href="https://start.spring.io/" rel="noopener">Spring Initializr — the generator most JVM service templates are built on</a></li>
+      <li>[Official] <a href="https://backstage.io/docs/features/software-templates/" rel="noopener">Software Templates — Backstage documentation (golden-path service scaffolding)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/microservice-chassis.html" rel="noopener">Pattern: Microservice chassis — microservices.io (Chris Richardson)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0GEPSCp4CJQ" rel="noopener">Microservice Architecture Made Easy with the Chassis Pattern — Pragmatic Reviews</a></li>
+    </ul>
+
+    <h3>Deployment topologies: host, VM, container, serverless</h3>
+    <p>Four topologies, in roughly the order the industry walked through them. <strong>Multiple services per host</strong> is the cheapest and the worst: services share a machine, a JVM tuning profile and a fate, so one memory leak takes down five services and resource isolation is wishful thinking. <strong>Service per VM</strong> gives real isolation and independent scaling at the cost of minutes-long boot times and heavy per-instance overhead — sensible when a machine image is your unit of deployment, expensive when you have fifty services. <strong>Service per container</strong> is today's default: seconds to start, an immutable image that is identical from a developer laptop to production, kernel-level resource limits, and an orchestrator (Kubernetes almost everywhere) handling placement, restarts, rolling updates and service discovery. <strong>Serverless</strong> removes the server abstraction altogether — you deploy a function, pay per invocation and scale to zero — at the price of cold starts, execution-time limits, constrained runtimes and much heavier vendor coupling.</p>
+    <p>The interview-worthy point is that the topology decides what your other patterns look like. On Kubernetes, service discovery is a DNS name and a <code>Service</code> object rather than a Eureka client; configuration is ConfigMaps and Secrets; health checks become liveness, readiness and startup probes, and getting readiness wrong is why a rolling update drops traffic. Serverless makes stateful patterns awkward — an in-process circuit breaker or rate limiter is meaningless when each invocation may be a fresh sandbox — so those concerns move to the gateway or the mesh. Choose deliberately, and prefer the boring answer: for a typical Indian product team running a dozen JVM services, service-per-container on managed Kubernetes is the correct default, with serverless reserved for spiky, stateless, event-driven edges.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/service/" rel="noopener">Service — Kubernetes documentation (discovery and load balancing in the container topology)</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/deployment/multiple-services-per-host.html" rel="noopener">Pattern: Multiple service instances per host — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/deployment/service-per-vm.html" rel="noopener">Pattern: Service instance per VM — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/deployment/service-per-container.html" rel="noopener">Pattern: Service instance per container — microservices.io</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/deployment/serverless-deployment.html" rel="noopener">Pattern: Serverless deployment — microservices.io</a></li>
+    </ul>
+
+    <h3>Service mesh survey: Istio, Linkerd, sidecar and ambient</h3>
+    <p>A service mesh moves service-to-service networking out of your application and into the platform. Classically it does this with a <em>sidecar</em>: a proxy container injected next to every service pod, intercepting all inbound and outbound traffic, so mTLS, retries, timeouts, load balancing, traffic splitting and golden-signal telemetry are configured declaratively by the platform team and apply uniformly to Java, Go, Node and Python services alike. The control plane distributes policy and certificates; the data plane (the proxies) enforces it. The appeal is obvious once your chassis library is the thing blocking a fleet-wide TLS rotation.</p>
+    <p><strong>Istio</strong> is the feature-complete option — Envoy-based, enormously configurable, with fine-grained traffic management, authorization policy and multi-cluster support — and its complexity is real. <strong>Linkerd</strong> is the deliberately minimal alternative, with a purpose-built Rust micro-proxy, near-zero configuration, automatic mTLS on by default and a much smaller operational and resource footprint; it is the CNCF-graduated "boring" choice. The newest development is <strong>ambient mode</strong> in Istio, which removes the per-pod sidecar entirely: a per-node ztunnel handles mTLS and L4 telemetry, and an optional per-namespace waypoint proxy handles L7 policy only where you actually need it. That drops the memory tax and the sidecar lifecycle problems (injection ordering, jobs that never terminate because the proxy is still running) that made sidecars painful at scale.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://istio.io/latest/docs/overview/what-is-istio/" rel="noopener">What is Istio? — Istio documentation</a></li>
+      <li>[Official] <a href="https://istio.io/latest/docs/ambient/overview/" rel="noopener">Ambient mode overview — Istio documentation (sidecar-less ztunnel and waypoint proxies)</a></li>
+      <li>[Official] <a href="https://linkerd.io/what-is-a-service-mesh/" rel="noopener">What is a service mesh? — Linkerd</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/deployment/service-mesh.html" rel="noopener">Pattern: Service mesh — microservices.io</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=16fgzklcF7Y" rel="noopener">Istio and Service Mesh — simply explained — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>What the mesh takes over from your libraries — and what it costs</h3>
+    <p>Concretely, a mesh can own: mutual TLS and workload identity (certificates issued and rotated automatically, so encryption in transit stops being an application concern); retries, timeouts and outlier ejection at the connection level; load balancing policy; traffic shifting for canary and blue-green releases by weight or by header; and consistent request-level metrics for every hop without instrumenting anything. Notice how much of that overlaps with the resilience and discovery modules earlier in this track — that overlap is the design decision. Anything the mesh does is uniform across languages and changeable without a redeploy; anything your library does is per-language but has business context the proxy will never have.</p>
+    <p>The honest split: keep <em>semantic</em> resilience in the application — fallbacks, bulkheads sized from your own thread model, idempotency keys, and the decision that a payment must never be retried — because a proxy cannot know that a POST is unsafe to replay. Push <em>transport</em> concerns to the mesh. And price the mesh properly before adopting it: a second proxy on every request path adds latency and memory, someone must own control-plane upgrades and certificate expiry, and debugging gains an extra hop where a misconfigured policy returns a 503 that appears in neither service's logs. For a team running eight services on one cluster with a working chassis, a mesh is usually premature; at forty services, several languages, and a compliance requirement for encryption everywhere, it stops being optional.</p>
+    <pre class="code-block" data-label="YAML"><code># Istio: shift 10% of traffic to v2 with no application change and no redeploy
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata: { name: order-service }
+spec:
+  hosts: [ order-service ]
+  http:
+    - route:
+        - destination: { host: order-service, subset: v1 }
+          weight: 90
+        - destination: { host: order-service, subset: v2 }
+          weight: 10
+      retries: { attempts: 3, perTryTimeout: 2s, retryOn: 5xx,connect-failure }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://istio.io/latest/docs/concepts/traffic-management/" rel="noopener">Traffic management — Istio concepts (routing, weights, retries, outlier ejection)</a></li>
+      <li>[Official] <a href="https://istio.io/latest/docs/concepts/security/" rel="noopener">Security — Istio concepts (workload identity, automatic mTLS, authorization policy)</a></li>
+      <li>[Official] <a href="https://linkerd.io/2-edge/features/automatic-mtls/" rel="noopener">Automatic mTLS — Linkerd documentation</a></li>
+      <li>[Official] <a href="https://istio.io/latest/docs/ambient/architecture/" rel="noopener">Ambient mode architecture — Istio documentation (where the cost actually goes)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=up3fKwXdEgc" rel="noopener">What is the Linkerd service mesh? — Buoyant</a></li>
+    </ul>
+
+    <h3>The testing pyramid for microservices</h3>
+    <p>The classic pyramid still holds, but the layers mean different things once the system is distributed. <strong>Unit tests</strong> (the wide base) cover domain logic with no Spring context and no network — fast, numerous, and where most of your assertions should live. <strong>Component or service tests</strong> boot one service in isolation with its collaborators stubbed, proving the service's own behaviour end to end within its boundary. <strong>Integration tests</strong> exercise the real adapters — the actual database, the actual broker, the actual HTTP client — because an ORM mapping, a migration script or a serializer is exactly the sort of thing a mock will never catch. <strong>Contract tests</strong> occupy the layer that used to be the pyramid's weak point: they prove two services agree without either running the other.</p>
+    <p>At the top sits a <em>deliberately thin</em> layer of end-to-end tests. Full-estate end-to-end suites are the single most common testing failure in microservices: they are slow, they require a shared environment that is never in a known state, they are flaky enough that teams learn to re-run rather than investigate, and their ownership is ambiguous so nobody fixes them. Keep a handful covering your two or three revenue-critical journeys (sign up, place order, take payment), run them against a real deployed environment, treat any failure as a release blocker — and resist every request to add the fifty-first. Everything the deleted end-to-end tests were nominally covering should be re-expressed as contract tests plus production monitoring.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://testcontainers.com/" rel="noopener">Testcontainers — real dependencies in tests, on demand</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/microservice-testing/" rel="noopener">Testing Strategies in a Microservice Architecture — Toby Clemson on martinfowler.com (the canonical layer-by-layer breakdown)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/practical-test-pyramid.html" rel="noopener">The Practical Test Pyramid — Ham Vocke on martinfowler.com</a></li>
+      <li>[Article] <a href="https://microservices.io/patterns/testing/service-integration-contract-test.html" rel="noopener">Pattern: Service integration contract test — microservices.io</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8XbuJ_DczL8" rel="noopener">Effective testing in microservice systems — Christian Horsdal, NDC Oslo 2022</a></li>
+    </ul>
+
+    <h3>Integration tests that use the real thing: Testcontainers</h3>
+    <p>The old compromise was an in-memory H2 database standing in for PostgreSQL and an embedded broker standing in for Kafka — which means your tests validate behaviour that production does not have, and miss behaviour that it does (dialect differences, JSONB columns, transaction isolation, partition rebalancing). Testcontainers removes the compromise: your JUnit test starts a real PostgreSQL, Kafka, Redis, MongoDB or LocalStack container from a Docker image, hands Spring the generated connection URL through <code>@DynamicPropertySource</code> or a <code>@ServiceConnection</code> bean, and tears it down afterwards. The dependency is genuine, the test is hermetic, and it runs the same on a laptop and in CI.</p>
+    <p>Spring Boot 3 and later make this first-class: <code>@ServiceConnection</code> removes the property-wiring boilerplate entirely, and Testcontainers-at-development-time lets <code>bootTestRun</code> start the same containers for local development so a new joiner needs Docker and nothing else. Two practical notes for interviews: reuse containers across test classes (a single static container per class hierarchy, or <code>testcontainers.reuse.enable</code>) or startup cost will dominate your build; and pin exact image tags, because a floating <code>latest</code> tag turns your test suite into an unpinned dependency on someone else's release schedule.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootTest
+@Testcontainers
+class OrderRepositoryIT {
+
+    @Container
+    @ServiceConnection                                  // Spring Boot wires the datasource itself
+    static PostgreSQLContainer&lt;?&gt; db =
+        new PostgreSQLContainer&lt;&gt;("postgres:16.4-alpine");   // pin the tag, never "latest"
+
+    @Autowired OrderRepository repository;
+
+    @Test void persistsAndReloadsAnOrder() {
+        repository.save(new Order("A-1042", Status.SHIPPED));
+        assertThat(repository.findById("A-1042")).isPresent();
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://java.testcontainers.org/" rel="noopener">Testcontainers for Java — official documentation (modules, lifecycle, reuse)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers — Spring Boot reference documentation (@ServiceConnection, dev-time containers)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-testcontainers-integration-test" rel="noopener">Testing Spring Boot Applications with Testcontainers — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q-0Z6KZF1xM" rel="noopener">Spring Boot 3 Integration Testing With Testcontainers and JUnit 5 — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=41Ry2ojnJFM" rel="noopener">Spring Boot 3 Integration Testing With Testcontainers — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Testing in production: canary releases, feature flags and synthetic monitoring</h3>
+    <p>No pre-production environment reproduces production's data volume, traffic mix, third-party behaviour or hardware, so the last testing layer necessarily runs in production — the choice is only whether you do it deliberately. A <strong>canary release</strong> routes a small slice of live traffic to the new version, compares its error rate and latency against the incumbent, and promotes or rolls back automatically on that evidence; Argo Rollouts and Flagger drive this on Kubernetes, and a service mesh supplies the traffic weights. Blue-green is the coarser sibling: two full environments, an instant switch and an instant rollback, at the cost of running double capacity and needing a database schema both versions can serve — which is expand–contract again, now applied to your tables.</p>
+    <p><strong>Feature flags</strong> decouple deploy from release: ship the code dark, enable it for internal users, then a percentage of traffic, then everyone, and kill it instantly if the graphs turn without needing a redeploy. The discipline that keeps this from becoming technical debt is a removal date on every release toggle — long-lived flags multiply the code paths you must reason about and are a genuine source of production incidents. Finally, <strong>synthetic monitoring</strong> runs your critical journeys as scripted transactions against production on a schedule, from outside the network, so you find out the checkout flow is broken from a robot at three in the morning rather than from a customer at nine. Pair it with real-user monitoring and SLO-based alerting: at this stage of a distributed system, your monitoring genuinely is part of your test suite.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://argoproj.github.io/argo-rollouts/" rel="noopener">Argo Rollouts — progressive delivery for Kubernetes (canary and blue-green with automated analysis)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/CanaryRelease.html" rel="noopener">CanaryRelease — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/feature-toggles.html" rel="noopener">Feature Toggles (aka Feature Flags) — Pete Hodgson on martinfowler.com</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book (black-box and synthetic probes, the four golden signals)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MDERgrcaT6w" rel="noopener">Feature Flags Suck — the problems with feature flagging and how to avoid them — Pete Hodgson, CNCF</a></li>
+    </ul>
+
+    <h3>The verdict: what you would actually do on Monday</h3>
+    <p>Closing this track, here is the defensible ordering. <strong>First,</strong> write down the compatibility rules and enforce them in code review: additive changes only, tolerant readers everywhere, no field ever renamed. That costs nothing and prevents most breakage. <strong>Second,</strong> pick your two noisiest service pairs — the ones that have actually broken each other — and put contract tests between them, plus a broker and a <code>can-i-deploy</code> gate in those two pipelines. Do not attempt estate-wide contract testing in month one; a contract suite nobody trusts is worse than none. <strong>Third,</strong> delete end-to-end tests aggressively as contract coverage arrives, and replace the confidence with Testcontainers-backed integration tests plus real production monitoring.</p>
+    <p><strong>Fourth,</strong> invest in the chassis and the service template before you invest in a mesh — a shared starter that gives every service the same logs, traces, health checks and error format pays back immediately and costs one library. <strong>Fifth,</strong> adopt a mesh only when the pain is concretely one a mesh solves: many languages, mandatory mTLS, or traffic shifting you cannot do at the gateway; and when you do, start with the smaller tool or with ambient mode rather than the maximal configuration. <strong>Sixth,</strong> put canary releases and feature flags in place early, because they are what let you ship on a Friday and sleep. If you only remember one line from this module: microservices are not about small services, they are about independent deployment — and contracts, tests and a boring platform are the only three things that keep it independent.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.pact.io/getting_started/what_is_pact_good_for" rel="noopener">What is Pact good for? — Pact documentation (and, importantly, what it is not for)</a></li>
+      <li>[Official] <a href="https://docs.pact.io/pact_nirvana" rel="noopener">Pact Nirvana — the staged adoption roadmap for contract testing</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/IntegrationContractTest.html" rel="noopener">IntegrationContractTest — Martin Fowler bliki</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TestPyramid.html" rel="noopener">TestPyramid — Martin Fowler bliki</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JEmpIDiX7LU" rel="noopener">Consumer Driven Contracts and Your Microservice Architecture — Marcin Grzejszczak and Adib Saikali, SpringDeveloper</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-tracing-debugging.html">← Tracing and Debugging Across Services</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="index.html">Back to the Microservices track →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>These are the architecture-judgement questions that close a senior microservices round in Indian product and service companies — the versioning and contract questions come up almost every time, and the platform ones are where interviewers decide between "has used microservices" and "has run microservices":</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes an API change backward compatible?</summary>
+      <div class="answer"><p>Existing clients keep working without any change on their side. Safe: adding an optional response field, adding a new endpoint, adding an optional request parameter, adding a new enum value that clients can ignore. Breaking: removing or renaming a field, changing its type, making an optional request field required, tightening validation, or changing the meaning of an existing value. The rule of thumb is additive-only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a tolerant reader, and why does it matter?</summary>
+      <div class="answer"><p>A consumer that reads only the fields it needs and ignores everything else instead of failing on unknown properties. It matters because a strict consumer turns the provider's safe additive change into an outage, which teaches the provider that no change is safe and freezes the API permanently. In Jackson terms: do not enable fail-on-unknown-properties for inbound service responses.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the ways to version a REST API, with one tradeoff each.</summary>
+      <div class="answer"><p>URI path (/api/v2/orders) — explicit and cacheable, but the version leaks into the resource identifier. Request header (API-Version: 2) — clean URIs, but invisible in a browser and easy to lose at a proxy unless you add it to the cache key. Media type (Accept: application/vnd.acme.order.v2+json) — most REST-correct content negotiation, most awkward for ordinary clients. Query parameter — simplest, but easily dropped and messy to cache.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a distributed monolith, and how would you spot one?</summary>
+      <div class="answer"><p>Services that are physically separate but must be released together. Symptoms: a shared release train, a version-matrix spreadsheet, "deploy A before B" runbooks, a shared database schema, and one team blocking another's deploy. The single diagnostic question is whether you can deploy any one service to production right now without deploying anything else.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the expand–contract (parallel change) pattern.</summary>
+      <div class="answer"><p>Three independently deployable steps. Expand: add the new field, endpoint or column beside the old one and write to both, so old and new consumers are both satisfied. Migrate: move consumers over one at a time on their own schedule. Contract: once telemetry shows nobody reads the old shape, delete it. Each step is separately revertible, which is what avoids the coordinated big-bang cutover. It applies identically to REST payloads, event schemas and database columns.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you retire an old API version responsibly?</summary>
+      <div class="answer"><p>Announce it in the protocol, not just in email: emit the Deprecation header (RFC 9745) and a Sunset header (RFC 8594) with the date the endpoint stops responding, plus Link headers to the migration guide and successor version. Then instrument every call still hitting the old version tagged by consumer, chase the remaining callers individually, and delete only when that count reaches zero — the metric decides the date, not the calendar.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is consumer-driven contract testing and what problem does it solve that mocks do not?</summary>
+      <div class="answer"><p>The consumer writes a test against a mock provider; the framework records the interactions it relied on as a contract, and the provider's own build replays that contract against the real provider. A hand-written mock is a guess about the provider that silently drifts, so a green consumer build can ship against an API that no longer exists. A contract is verified against the real provider in CI, so drift becomes a build failure — and neither pipeline ever needs both services running.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Pact versus Spring Cloud Contract — how do you choose?</summary>
+      <div class="answer"><p>Pact is polyglot and genuinely consumer-first: the consumer generates the pact, the broker distributes it, providers verify. Choose it when consumers include non-JVM clients or when consumers must drive the contract. Spring Cloud Contract is provider-first and JVM-native: contracts live with the provider, generate provider tests, and are published as a WireMock stub JAR consumers run via stub runner. Choose it for an all-Spring estate where you want contracts and stubs to fall out of the normal Maven or Gradle build. Both support messaging contracts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should contract tests match on types rather than exact values?</summary>
+      <div class="answer"><p>Because a contract's job is to prove the shape of the conversation, not the content of one sample. Asserting the literal string "A-1042" or a fixed timestamp makes the contract fail on any harmless data change, teams start ignoring red builds, and the safety net stops being trusted. Use type and regex matchers for values, and keep business assertions in the provider's own unit tests where they belong.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a microservice chassis, and what is the catch?</summary>
+      <div class="answer"><p>A shared framework layer giving every service the same cross-cutting behaviour — structured logging with trace ids, metrics and tracing exporters, health and actuator endpoints, the standard error body, security and resilience defaults — usually as an in-house Spring Boot starter, delivered through a service template. The catch is that it is a shared library, so a chassis upgrade is a coordinated change across every service, the exact coupling microservices exist to avoid. Keep it thin, strictly non-business, versioned so services adopt at their own pace, and push transport concerns to the platform instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Compare the four deployment topologies and say which you would pick today.</summary>
+      <div class="answer"><p>Multiple services per host: cheapest, no isolation, shared fate — avoid. Service per VM: real isolation and independent scaling, but minutes to boot and heavy per-instance overhead. Service per container on an orchestrator: seconds to start, immutable images, kernel-enforced resource limits, and the platform supplies discovery, restarts and rolling updates — the default answer for a typical dozen-service JVM estate. Serverless: scale to zero and per-invocation billing, at the cost of cold starts, runtime limits and vendor coupling; reserve it for spiky, stateless, event-driven edges. Also note that the topology dictates your other patterns — on Kubernetes, discovery is DNS and readiness probes replace much of what a discovery client did.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you adopt a service mesh, and what does it take over from your code?</summary>
+      <div class="answer"><p>Adopt when the pain is one a mesh actually solves: several languages needing identical networking behaviour, mandatory mutual TLS with automatic certificate rotation, or traffic shifting you cannot do at the gateway. It takes over transport concerns — mTLS and workload identity, connection-level retries and timeouts, load balancing, outlier ejection, weighted traffic splitting, and uniform request telemetry — configurable without redeploying anything. It does not take over semantic resilience: fallbacks, bulkhead sizing, idempotency keys and the decision that a payment must never be replayed stay in the application, because a proxy has no business context. The cost is a proxy on every request path, control-plane and certificate ownership, and an extra hop that can fail invisibly to both services.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Istio sidecar mode versus ambient mode — what changed and why?</summary>
+      <div class="answer"><p>Sidecar mode injects an Envoy proxy into every pod: uniform but expensive in memory, and it brings lifecycle problems — injection ordering, pods that never terminate because the proxy outlives the job, and a restart of every workload to upgrade the mesh. Ambient mode splits the data plane: a per-node ztunnel handles mTLS and L4 telemetry for all pods on that node, and an optional per-namespace waypoint proxy handles L7 policy only where you need it. The result is a much lower resource tax, no per-pod injection, and incremental adoption — you can get encryption everywhere first and add L7 policy selectively.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your team has 300 end-to-end tests and a red pipeline most mornings. What do you do?</summary>
+      <div class="answer"><p>Treat the suite as the defect, not the symptom. Keep three to five end-to-end journeys covering revenue-critical flows and make those blocking; delete or quarantine the rest. Re-express what they covered one layer down: contract tests for every cross-service expectation, Testcontainers-backed integration tests for real database and broker behaviour, and unit tests for domain logic. Backfill the residual risk with production signal — canary analysis, SLO alerting and synthetic probes on the same critical journeys. Full-estate end-to-end suites fail because they need a shared environment nobody owns and produce flakiness that trains people to re-run instead of investigate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does a contract-testing pipeline actually block a bad deploy?</summary>
+      <div class="answer"><p>Consumers publish pacts to a broker tagged with version and branch; a broker webhook triggers the provider's verification build, which replays every relevant consumer contract against the real provider and publishes results back. The broker maintains the compatibility matrix of which consumer version works with which provider version in which environment. Before deploying, the pipeline runs can-i-deploy against the target environment — if this build is not verified compatible with what is currently live there, the deploy step fails. Record deployments back to the broker so it knows the true state, and use pending and WIP pacts so a brand-new consumer expectation cannot break the provider's main build before it is implemented.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Canary release versus blue-green versus feature flags — when is each right?</summary>
+      <div class="answer"><p>Blue-green runs two full environments and switches all traffic at once: instant rollback, simple to reason about, needs double capacity and a schema both versions can serve. Canary shifts a small percentage of live traffic to the new version and promotes or rolls back on observed error rate and latency: the best evidence, needs traffic-splitting infrastructure and good metrics. Feature flags separate deploy from release entirely, so the code ships dark and is enabled per user segment and killed without a redeploy — the finest-grained control, at the cost of code paths that multiply if flags are not removed on a schedule. In practice mature teams run all three: flags for functional risk, canary for operational risk, blue-green where an instant whole-system rollback is required.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.ver.compat — API versioning, backward compatibility, consumer-driven contracts (Spring Cloud Contract, Pact)</li>
+      <li>ms.ver.platform — Microservice chassis and service templates, deployment topologies, service mesh survey, testing strategy</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

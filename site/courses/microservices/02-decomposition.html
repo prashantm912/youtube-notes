@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Service Decomposition module: decomposing by business capability and subdomain, bounded contexts, ubiquitous language, aggregates as consistency boundaries, the strangler fig migration, the anti-corruption layer and how to size a service — with verified resources and interview questions.">
+  <title>Microservices: Service Decomposition — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Service Decomposition</h1>
+  <p class="standfirst">The hardest question in microservices is not how to deploy them — it is where to cut. This module gives you the vocabulary that makes the cut arguable instead of arbitrary, and the migration patterns that let you make it without a big-bang rewrite.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Microservices</a> → Service Decomposition</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two families of decomposition heuristics — by business capability (what the organisation <em>does</em>) and by subdomain (how domain-driven design carves the problem space) — and the DDD-lite vocabulary that turns boundary arguments into design decisions: bounded context, ubiquitous language, context mapping, and the aggregate as a consistency boundary.</p>
+    <p>Then the part most real projects actually need: migrating an existing monolith with the strangler fig pattern, keeping the legacy model out of the new code with an anti-corruption layer, and sizing services so the word "micro" does not mislead you into a distributed mess.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Decomposition by business capability and by subdomain</h3>
+    <p>Decomposing <em>by business capability</em> asks what the business does — <code>Order Management</code>, <code>Inventory</code>, <code>Payments</code>, <code>Shipping</code> — and makes one service per capability. Capabilities are stable: an e-commerce company will still take orders and ship parcels after three replatformings, so boundaries drawn on them age well. Decomposing <em>by subdomain</em> is the DDD version of the same instinct: analyse the problem space, split it into core subdomains (the differentiator worth your best engineers), supporting subdomains (needed but not special) and generic subdomains (buy or use off-the-shelf), then align services to them.</p>
+    <p>The two heuristics usually converge, and where they disagree the disagreement is informative — it is a sign the org chart and the domain have drifted apart. What you must <em>not</em> decompose by is technical layer (a "controller service", a "DAO service") or by entity table, because both guarantee that every user-visible change touches several services at once. The test of a good boundary is the opposite: most feature requests land inside one service, and cross-service chatter stays rare.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/decomposition/decompose-by-business-capability.html" rel="noopener">Pattern: Decompose by business capability — microservices.io (Chris Richardson)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/decomposition/decompose-by-subdomain.html" rel="noopener">Pattern: Decompose by subdomain — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/break-monolith-into-microservices.html" rel="noopener">How to break a Monolith into Microservices — martinfowler.com (Zhamak Dehghani)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/model/domain-analysis" rel="noopener">Domain analysis for microservices — Microsoft Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.geeksforgeeks.org/system-design/decomposition-of-microservices-architecture/" rel="noopener">Decomposition of Microservices Architecture — GeeksforGeeks</a></li>
+    </ul>
+
+    <h3>Bounded context, ubiquitous language and context mapping</h3>
+    <p>A bounded context is the boundary within which a model — and the words used for it — has one unambiguous meaning. The canonical example is the one that breaks naive shared-model designs: "Customer" in <strong>billing</strong> is a legal entity with a tax id, credit limit and invoicing address; "Customer" in <strong>shipping</strong> is a name, a phone number and a delivery address with a landmark; "Customer" in <strong>support</strong> is a contact history and an entitlement tier. Trying to build one <code>Customer</code> class that satisfies all three produces the bloated god-object that makes a monolith unmaintainable — and, if you split anyway, a shared library that couples every service.</p>
+    <p>The ubiquitous language is the rule that the words in the code are the words the domain experts use, <em>inside that context only</em>. Context mapping then documents the relationships between contexts — shared kernel, customer/supplier, conformist, anti-corruption layer, published language — so integration is a deliberate choice rather than an accident of whoever called whose API first. In practice a bounded context is the strongest single candidate for a service boundary: it already owns its model, its language and its data.</p>
+    <pre class="code-block" data-label="Java"><code>// Same word, two contexts, deliberately different models.
+package billing;   record Customer(CustomerId id, TaxId gstin, Money creditLimit) { }
+package shipping;  record Customer(CustomerId id, String name, Address dropPoint) { }
+// Shared: only the id. Never a shared Customer class across the boundary.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/BoundedContext.html" rel="noopener">BoundedContext — martinfowler.com bliki</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/UbiquitousLanguage.html" rel="noopener">UbiquitousLanguage — martinfowler.com bliki</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/DomainDrivenDesign.html" rel="noopener">DomainDrivenDesign — martinfowler.com bliki (strategic vs tactical DDD)</a></li>
+      <li>[Article] <a href="https://www.domainlanguage.com/ddd/reference/" rel="noopener">Domain-Driven Design Reference — Eric Evans (the free pattern summaries, incl. context maps)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yPvef9R3k-M" rel="noopener">DDD &amp; Microservices: At Last, Some Boundaries! — Eric Evans, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>Aggregates: the consistency boundary that must not span services</h3>
+    <p>An aggregate is a cluster of domain objects treated as one unit for data changes, reached only through its root, and — the part that matters here — the boundary of a single transaction. <code>Order</code> with its <code>OrderLine</code>s is the textbook aggregate: you never update a line without the order deciding whether the update is legal, because the invariant ("total must equal the sum of lines", "a shipped order cannot be edited") lives on the root.</p>
+    <p>Once you accept that an aggregate is a transaction boundary, service boundaries follow almost mechanically: an aggregate must live entirely inside one service, because splitting it would put a single invariant behind two databases and a network. The corollary is the design rule that shapes every later module in this track — one transaction touches one aggregate; anything spanning aggregates (and therefore services) becomes eventual consistency, an event, or a saga. Oversized aggregates are the other failure mode: they create contention, lock-heavy writes and a service nobody can split later.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/DDD_Aggregate.html" rel="noopener">DDD_Aggregate — martinfowler.com bliki</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/aggregate.html" rel="noopener">Pattern: Aggregate — microservices.io</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/model/tactical-ddd" rel="noopener">Using tactical DDD to design microservices — Microsoft Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.dddcommunity.org/library/vernon_2011/" rel="noopener">Effective Aggregate Design — Vaughn Vernon (free three-part paper, DDD Community)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8SPVfacnFvM" rel="noopener">Domain-Driven Design: Bounded Contexts Explained — ByteMonk</a></li>
+    </ul>
+
+    <h3>Strangler fig migration: peeling a monolith apart incrementally</h3>
+    <p>Named after the fig that grows around a host tree until the tree is gone, the strangler fig pattern replaces a legacy system a slice at a time. You put a facade (an HTTP proxy, an API gateway, or an interception point in the monolith itself) in front of the existing application; every request still goes to the monolith by default, but as each capability is extracted the facade routes that path to the new service instead. When the last route has moved, the monolith is switched off — it was never rewritten, it was starved.</p>
+    <p>Why interviewers love it: it is the honest answer to "how would you migrate our legacy system?" A big-bang rewrite freezes feature delivery for a year and bets the company on a cutover; the strangler ships value continuously, keeps rollback cheap (flip the route back), and lets you validate each new service under real traffic. The costs are real too — you run two systems, you need data synchronisation during the overlap, and without a deadline the migration stalls half-done, which is the worst of both architectures.</p>
+    <pre class="code-block" data-label="YAML"><code># Strangler facade: /orders/** already extracted, everything else still legacy.
+routes:
+  - path: /orders/**
+    uri: http://order-service
+  - path: /**
+    uri: http://legacy-monolith</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/refactoring/strangler-application.html" rel="noopener">Pattern: Strangler application — microservices.io</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/StranglerFigApplication.html" rel="noopener">StranglerFigApplication — martinfowler.com bliki (the original write-up)</a></li>
+      <li>[Article] <a href="https://samnewman.io/patterns/refactoring/strangler-fig-application/" rel="noopener">Pattern: Strangler Fig Application — Sam Newman</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/strangler-fig" rel="noopener">Strangler Fig pattern — Microsoft Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gwu3lVUvIqQ" rel="noopener">Strangler Fig Pattern in Microservices: Migrate Monolithic to Microservices — Java Guides</a></li>
+    </ul>
+
+    <h3>The anti-corruption layer: keeping the legacy model out</h3>
+    <p>Extraction fails quietly when the legacy model leaks into the new service. The old schema's quirks — a <code>CUST_MSTR</code> table with nine nullable status flags, a "customer type" code whose meanings are documented in a spreadsheet — get imported into the new code because it is the fastest way to make the integration work, and within a quarter the new service is the monolith with a REST facade. The anti-corruption layer is the deliberate defence: a translation layer at the boundary whose only job is to convert between the legacy model and the new bounded context's model, so neither side's vocabulary crosses.</p>
+    <p>Practically it is a small package of adapters and mappers owned by the new service, often paired with the strangler facade during migration and deleted when the legacy side is gone. It is also the honest answer to a common design-review question: yes, it is extra code, and yes, it is throwaway code — that is exactly what makes it safe, because the alternative is permanent contamination of the model you were extracting in order to improve.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/refactoring/anti-corruption-layer.html" rel="noopener">Pattern: Anti-corruption layer — microservices.io</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/anti-corruption-layer" rel="noopener">Anti-corruption Layer pattern — Microsoft Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/migrate-monolith" rel="noopener">Migrate a monolith application to microservices — Microsoft Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/microservices-strangler-pattern" rel="noopener">The Strangler Fig Pattern in Microservices — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9I9GdSQ1bbM" rel="noopener">Monolith Decomposition Patterns — Sam Newman, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>Sizing services: why "micro" is a misleading name</h3>
+    <p>There is no line count, no "under 500 lines", no "one entity per service". The size prefix is the single most damaging thing about the name: teams read it as an instruction to make services small, split by entity, and end up with a distributed monolith where a single checkout request fans out across eleven hops and no team can deploy independently. The useful sizing rules are organisational and semantic: <strong>one team can own it end to end</strong> (build, deploy, page for it at 2 a.m.), and <strong>it has a single reason to change</strong> — one bounded context, one cohesive capability, one set of invariants.</p>
+    <p>Two practical smells tell you the size is wrong. Too small: most changes require coordinated releases of several services, and the services chat constantly to answer one request. Too large: two sub-teams keep colliding in the same repository and want different release cadences. Start coarser than you think you need — merging is far cheaper than splitting once other services depend on your API — and remember Conway's law is doing the sizing whether or not you are.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/decomposition/service-per-team.html" rel="noopener">Pattern: Service per team — microservices.io</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/decomposition/self-contained-service.html" rel="noopener">Pattern: Self-contained service — microservices.io</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/microservices/model/microservice-boundaries" rel="noopener">Identifying microservice boundaries — Microsoft Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/microservices-design-ideals/" rel="noopener">Microservices: Design Ideals and Boundaries — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GBTdnfD6s5Q" rel="noopener">When To Use Microservices (And When Not To!) — Sam Newman &amp; Martin Fowler, GOTO Conferences</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-monolith-vs-microservices.html">← Monolith vs Microservices</a>
+    <a href="index.html">All Microservices modules</a>
+    <a href="03-data-per-service.html">Data per Service →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Decomposition is the design-round staple in Indian product and service company interviews — expect these from screening through architect panels:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a bounded context, and why does it matter for microservices?</summary>
+      <div class="answer"><p>The boundary within which a domain model and its terminology have one unambiguous meaning. It matters because it is the strongest candidate for a service boundary: inside it, one model and one vocabulary are consistent; outside it, the same word may legitimately mean something else.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Give a concrete example of one word meaning different things in two contexts.</summary>
+      <div class="answer"><p>"Customer": in billing it is a legal entity with tax id, credit limit and invoicing address; in shipping it is a name, phone and delivery address; in support it is a ticket history and entitlement tier. One shared Customer class satisfying all three becomes a god object and couples every service to it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Decompose by business capability vs by subdomain — what is the difference?</summary>
+      <div class="answer"><p>By capability you look at what the business does (order management, inventory, payments) and make a service per capability. By subdomain you analyse the problem space in DDD terms — core, supporting, generic subdomains — and align services to those. They usually converge; when they disagree, the org chart and the domain have drifted apart.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is decomposing by technical layer a bad idea?</summary>
+      <div class="answer"><p>A "controller service" plus a "DAO service" means every user-visible feature change touches several services and needs a coordinated release — you paid the distributed-systems cost and got none of the independent-deployability benefit. Good boundaries make most changes land inside one service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the strangler fig pattern in one sentence?</summary>
+      <div class="answer"><p>Put a facade in front of the legacy system and route capability after capability to newly extracted services until nothing routes to the monolith, then delete it — incremental replacement instead of a big-bang rewrite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you migrate our ten-year-old monolith? Walk through your first ninety days.</summary>
+      <div class="answer"><p>Map capabilities and current pain (deploy frequency, failure blast radius, team collisions), pick one bounded context that is high value and low coupling — often a read-heavy or clearly peripheral one — put a routing facade in front, extract that service with an anti-corruption layer, run both paths with the ability to route back, then repeat. Set an explicit end date so the migration does not stall half-done.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is an anti-corruption layer and where exactly does it sit?</summary>
+      <div class="answer"><p>A translation layer at the boundary between the new bounded context and the legacy (or third-party) model, owned by the new service. It maps legacy concepts to the clean model in both directions so the old vocabulary never enters the new code. During a strangler migration it usually sits beside the facade and gets deleted when the legacy side is retired.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you decide how big a service should be?</summary>
+      <div class="answer"><p>Not by lines of code. Two rules: one team can own it end to end (develop, deploy, operate, get paged for it), and it has a single reason to change — one bounded context, one cohesive capability. Start coarser than you think; merging is cheap, splitting after other services depend on your API is not.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should an aggregate never span two services?</summary>
+      <div class="answer"><p>The aggregate is the transaction and invariant boundary. Splitting it puts one invariant behind two databases and a network call, so you would need a distributed transaction to enforce it. Keeping an aggregate inside one service is what makes "one transaction, one aggregate" achievable — anything wider becomes an event or a saga.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a distributed monolith and how do you recognise one you inherited?</summary>
+      <div class="answer"><p>Services that are separately deployed but not independently deployable. Signs: releases have to be coordinated across services, one request fans out through many synchronous hops, services share a database or a common entity library, and a schema change breaks several teams at once. It carries every microservices cost with none of the benefits.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Two teams disagree: one wants a shared Customer service, the other wants a customer model per context. How do you resolve it?</summary>
+      <div class="answer"><p>Separate identity from model. A single service can own customer identity and lifecycle (the id, registration, authentication), while billing, shipping and support each keep their own local model keyed by that id. Sharing only the identifier avoids both the god object and duplicated ownership of the source of truth; document the relationship explicitly on the context map.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> During a strangler migration, both the monolith and the new service need the same data. Options?</summary>
+      <div class="answer"><p>Either the new service owns the data and the monolith calls it through the anti-corruption layer (cleanest, needs monolith changes), or the monolith remains the owner and the new service reads a synchronised copy fed by change data capture or an outbox-published event stream. Two-way synchronisation is the trap — pick one writer per field, keep the overlap period short, and reconcile continuously.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is a bounded context always exactly one microservice?</summary>
+      <div class="answer"><p>No. A bounded context is a modelling boundary, a service is a deployment boundary. One context can be split into several services when scale or differing availability needs justify it, and several small related contexts can start inside one service when none alone justifies the operational overhead. Start with one service per context and diverge only for a stated reason.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does Conway's law affect your decomposition, and what do you do about it?</summary>
+      <div class="answer"><p>System structure tends to mirror the communication structure of the organisation, so a decomposition that cuts across team boundaries will be pushed back into alignment by day-to-day pressure. The inverse manoeuvre is to reshape the teams to match the target architecture — stream-aligned teams owning whole capabilities — before or alongside the split, otherwise the boundaries erode.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Microservices checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ms.dec.ddd — DDD-lite: bounded contexts, aggregates, decomposition by business capability and subdomain</li>
+      <li>ms.dec.strangler — Strangler fig migration, anti-corruption layer, sizing services</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Microservices track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
