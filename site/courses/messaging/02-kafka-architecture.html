@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kafka Architecture module: the partitioned commit log, offsets and per-partition ordering, segments and retention, brokers and leader election, replication with ISR, acks and min.insync.replicas, KRaft after the removal of ZooKeeper in Kafka 4.0, log versus queue semantics and KIP-932 share groups — with verified resources and interview questions.">
+  <title>Kafka Architecture — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Kafka Architecture</h1>
+  <p class="standfirst">Kafka is not a queue with extra features. It is a distributed, replicated, append-only commit log that consumers read at their own pace — and once that single idea lands, almost every other behaviour stops being surprising.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Kafka Architecture</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Most confusion about Kafka comes from importing expectations built on message brokers. In a broker, a message is delivered and gone; in Kafka a record is written to a file, stays there until a retention policy deletes it, and any number of independent consumers can read it — repeatedly, from wherever they choose. The broker holds the data; the consumer holds the position.</p>
+    <p>This module works outward from that storage model. First the log itself: topics, partitions, offsets, segments and retention, and why ordering is guaranteed per partition and nowhere else. Then the cluster: brokers, partition leaders and followers, the in-sync replica set, and how <code>acks</code> and <code>min.insync.replicas</code> together define your durability contract. Then KRaft, the controller quorum that replaced ZooKeeper outright in Kafka 4.0. Finally the honest comparison — where log semantics beat queue semantics, where they do not, and how KIP-932 share groups have changed the old answer. Apache Kafka 4.x is current throughout.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The commit log: topics, partitions, offsets, and why ordering is per partition</h3>
+    <p>A topic is a name; a <em>partition</em> is the actual storage unit. Each partition is an ordered, immutable sequence of records that is only ever appended to, and every record in it gets a monotonically increasing integer — its <strong>offset</strong> — which is nothing more than its position in that file. There is no global sequence number across a topic, no per-record delete, no in-place update. Reading is a sequential scan from an offset you nominate, which is why Kafka's throughput is bounded by disk and network rather than by broker bookkeeping.</p>
+    <p>Two consequences interviewers push on constantly. First, <strong>ordering is guaranteed within a partition only</strong>. A topic with six partitions is six independent logs on possibly six different machines; records that must be processed in order have to land in the same partition, which is what the message key is for — the default partitioner hashes the key, so all events for one <code>orderId</code> or <code>customerId</code> share a partition and therefore an order. Second, partitions are the unit of parallelism: within a classic consumer group a partition is assigned to exactly one consumer, so partition count sets the ceiling on how many consumers can work in parallel. Partition count can be increased later but never decreased, and increasing it re-maps the key hash, so existing keys move to different partitions and their historical ordering relationship breaks.</p>
+    <pre class="code-block" data-label="Shell"><code># A topic is a logical name over N independent ordered logs
+$ kafka-topics.sh --bootstrap-server localhost:9092 \
+    --create --topic orders --partitions 6 --replication-factor 3
+
+# key -&gt; partition is a hash, so one customer's events stay in one log
+# orders-0 : [0][1][2][3] ...   append-only, offsets are positions
+# orders-1 : [0][1][2] ...      no ordering relationship with orders-0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/intro" rel="noopener">Introduction — Apache Kafka (events, topics, partitions, the core abstractions)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/" rel="noopener">Design — Apache Kafka documentation (why the log is the primitive)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/apache-kafka/partitions/" rel="noopener">Intro to Kafka Partitions — Confluent Developer (Apache Kafka 101)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-topics-partitions" rel="noopener">Understanding Kafka Topics and Partitions — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8L-1HSTf97E" rel="noopener">Partitions — Apache Kafka 101 (2025 Edition) — Confluent Developer</a></li>
+    </ul>
+
+    <h3>Segments and retention: Kafka forgets by clock and by size, not by consumption</h3>
+    <p>A partition is not one enormous file. On disk it is a directory of <em>segments</em>: an active segment being appended to, plus closed segments, each with index files mapping offsets and timestamps to byte positions so a seek is a lookup rather than a scan. A segment rolls when it reaches <code>segment.bytes</code> (1 GiB by default) or when <code>segment.ms</code> elapses (7 days by default). Retention and cleanup then operate a whole segment at a time, which is why the active segment is never deleted and why very small retention windows behave oddly if your segments are large.</p>
+    <p>The behaviour that most surprises broker veterans: <strong>a record is not deleted when it is consumed.</strong> Deletion is driven by <code>retention.ms</code> (7 days by default) or <code>retention.bytes</code>, entirely independently of whether anybody read it — a hundred consumer groups can read the same bytes, and a group can rewind and read them again tomorrow. That is what makes replay, reprocessing after a bug fix, and bootstrapping a brand-new consumer from the start of history routine operations rather than recovery projects. The alternative policy, <code>cleanup.policy=compact</code>, keeps the latest record per key forever instead of deleting by age, turning the topic into a durable changelog you can rebuild state from; delete and compact can be combined on one topic.</p>
+    <pre class="code-block" data-label="Properties"><code># Time/size retention: nothing here mentions consumers
+retention.ms=604800000        # keep 7 days of history
+retention.bytes=-1            # no size cap on the partition
+segment.bytes=1073741824      # roll a new segment every 1 GiB
+segment.ms=604800000          # ...or every 7 days, whichever comes first
+cleanup.policy=delete         # 'compact' keeps the latest value per key instead</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#persistence" rel="noopener">Persistence — Apache Kafka design documentation (segments, sequential I/O, page cache)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#log-compaction" rel="noopener">Log Compaction — Apache Kafka documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-retention" rel="noopener">Configuring Message Retention Period in Apache Kafka — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kafka-log-segment-bytes-vs-log-retention-hours" rel="noopener">log.segment.bytes vs. log.retention.hours — Baeldung on Ops</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/okay-store-data-apache-kafka/" rel="noopener">Is it okay to store data in Apache Kafka? — Confluent blog (Jay Kreps on the log as a store)</a></li>
+    </ul>
+
+    <h3>Brokers and the cluster: leaders, followers and who is allowed to serve a read</h3>
+    <p>A broker is one Kafka server process holding some subset of the cluster's partitions on its own disks. Partitions are spread across brokers so that a topic's traffic and storage are shared, and each partition has exactly one <strong>leader</strong> replica plus zero or more <strong>follower</strong> replicas on other brokers. All producer writes and, by default, all consumer reads go through the leader; followers do nothing but continuously fetch from the leader to stay caught up. They are not a read pool — the optional follower-fetching feature exists for cross-rack locality, but the mental model to carry into an interview is "leader serves, followers replicate".</p>
+    <p>Leadership is per partition, not per broker, so a healthy cluster has leadership spread evenly and every broker doing real work. When a broker dies, the controller elects new leaders for every partition it led from among the surviving in-sync replicas, and clients discover the change through metadata refresh — which is why producers and consumers only need <code>bootstrap.servers</code> to find one live broker, not a full list. Rebalancing leadership back after a broker returns (preferred leader election) matters operationally, because a cluster where one broker leads most partitions is a cluster with a hot node.</p>
+    <pre class="code-block" data-label="Shell"><code>$ kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic orders
+Topic: orders  PartitionCount: 6  ReplicationFactor: 3
+  Partition: 0  Leader: 1  Replicas: 1,2,3  Isr: 1,2,3   # fully replicated
+  Partition: 1  Leader: 2  Replicas: 2,3,1  Isr: 2,3     # broker 1 lagging
+  Partition: 2  Leader: 3  Replicas: 3,1,2  Isr: 3,1,2</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/basic-kafka-operations/" rel="noopener">Operations — Apache Kafka documentation (cluster operations, leadership balance)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/broker-configs/" rel="noopener">Broker configuration reference — Apache Kafka documentation</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/get-started/" rel="noopener">Apache Kafka Internal Architecture — Confluent Developer course</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/kafka-partitions/" rel="noopener">When you increase Kafka partitions — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LHvVH87Ny7E" rel="noopener">Brokers — Apache Kafka 101 (2025 Edition) — Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HUAa1Yg9NlI" rel="noopener">Apache Kafka Components &amp; Architecture Detailed Explanation — Java Techie</a></li>
+    </ul>
+
+    <h3>Replication, ISR, acks and min.insync.replicas: the durability contract</h3>
+    <p>The <strong>replication factor</strong> says how many copies of each partition exist. The <strong>in-sync replica set (ISR)</strong> says how many of them are currently caught up — a follower stays in the ISR while it keeps fetching within <code>replica.lag.time.max.ms</code>, and is ejected when it falls behind or its broker dies. A record is <em>committed</em>, and therefore visible to consumers, only once every member of the current ISR has it. That is the crucial subtlety: the ISR shrinks and grows dynamically, so "replicated" always means "replicated to whoever is in sync right now", not "replicated three times".</p>
+    <p>Durability is then the product of two settings that only make sense together. The producer's <code>acks</code> chooses what it waits for: <code>0</code> is fire-and-forget (fastest, loses data on any hiccup), <code>1</code> waits for the leader's local write only (a leader crash before replication loses the record), and <code>all</code>/<code>-1</code> waits for every in-sync replica. The topic's <code>min.insync.replicas</code> then sets the floor — with <code>acks=all</code>, if the ISR has fewer members than that floor the broker rejects the write with <code>NotEnoughReplicas</code> rather than silently accepting a poorly replicated record. Its default is <code>1</code>, which is why the standard production recipe is stated explicitly: replication factor 3, <code>min.insync.replicas=2</code>, <code>acks=all</code> — survives one broker loss with no data loss and no write outage, and fails fast rather than lying when two brokers are gone.</p>
+    <p>The escape hatch is <code>unclean.leader.election.enable</code>. Left at its default of <code>false</code>, a partition whose entire ISR is unavailable simply stops serving until an in-sync replica returns: you choose consistency over availability. Set it to <code>true</code> and Kafka will promote an out-of-sync replica, restoring availability at the cost of silently discarding whatever records the old leader had that the new one never received. Kafka 4.x adds Eligible Leader Replicas, which tracks replicas known to hold all committed data so recovery has more safe candidates before that trade-off is forced.</p>
+    <pre class="code-block" data-label="Properties"><code># Topic side: floor on how replicated a write must be
+replication.factor=3
+min.insync.replicas=2               # default is 1 -- set this deliberately
+unclean.leader.election.enable=false # prefer unavailable over silently lossy
+
+# Producer side: what the client waits for
+acks=all                            # every in-sync replica, not "all 3 replicas"
+enable.idempotence=true             # no duplicates from producer retries
+retries=2147483647
+max.in.flight.requests.per.connection=5   # safe ordering when idempotence is on</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#replication" rel="noopener">Replication — Apache Kafka design documentation (ISR, committed records, leader election)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/producer-configs/" rel="noopener">Producer configuration reference — Apache Kafka documentation (acks, idempotence)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/hands-free-kafka-replication-a-lesson-in-operational-simplicity/" rel="noopener">Hands-free Kafka Replication: a lesson in operational simplicity — Confluent blog</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/data-replication/" rel="noopener">Data Replication — Apache Kafka Internal Architecture, Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-acknowledgement-options" rel="noopener">Kafka Producer and Consumer Message Acknowledgement Options — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CWe52zSeGxU" rel="noopener">Replication — Apache Kafka 101 (2025 Edition) — Confluent Developer</a></li>
+    </ul>
+
+    <h3>KRaft: the controller quorum that replaced ZooKeeper — and its removal in Kafka 4.0</h3>
+    <p>Something has to hold cluster metadata: which topics exist, how many partitions they have, where every replica lives, which broker leads what. For a decade that job belonged to an external ZooKeeper ensemble, with a single elected Kafka controller reading from it and pushing updates to brokers. It worked, but it meant a second distributed system to install, secure, monitor and upgrade; controller failover required reloading all metadata from ZooKeeper, so recovery time grew with cluster size; and partition counts hit a practical ceiling in the tens of thousands.</p>
+    <p><strong>KRaft</strong> (KIP-500) removes that dependency by storing metadata in Kafka itself. A quorum of controller nodes runs a Raft implementation over an internal metadata topic, so the metadata log is replicated by the same mechanism as everything else. Brokers no longer query an external store — they <em>follow</em> the metadata log and keep a local cached copy, so a controller failover is a leader election on a log the followers already have, and it completes in a fraction of the old time. The result is fewer moving parts, faster metadata propagation, a much higher partition ceiling (millions rather than tens of thousands), and one security and configuration model instead of two.</p>
+    <p>Know the timeline, because interviewers date candidates by it: KRaft arrived as a preview in Kafka 2.8, became production-ready in 3.3, ZooKeeper mode was deprecated in 3.5, 3.9 was the last release that could run ZooKeeper or bridge a migration, and <strong>Kafka 4.0 (March 2025) removed ZooKeeper mode entirely</strong> — KRaft is now the only mode. Operationally, nodes take a <code>process.roles</code> of <code>broker</code>, <code>controller</code> or both (combined mode is for development; production separates them), the cluster is formatted once with a generated cluster id, and every node is told the controller quorum's voter list. Upgrading a pre-4.0 cluster means migrating to KRaft on 3.9 first; there is no direct ZooKeeper-to-4.x jump.</p>
+    <pre class="code-block" data-label="Properties"><code># Dedicated controller node (production separates roles)
+process.roles=controller
+node.id=1
+controller.quorum.voters=1@ctrl-1:9093,2@ctrl-2:9093,3@ctrl-3:9093
+controller.listener.names=CONTROLLER
+
+# Broker node in the same cluster
+process.roles=broker
+node.id=101
+controller.quorum.voters=1@ctrl-1:9093,2@ctrl-2:9093,3@ctrl-3:9093
+
+# One-time format; no ZooKeeper connect string exists any more in 4.x
+$ kafka-storage.sh format --cluster-id "$(kafka-storage.sh random-uuid)" \
+    --config config/server.properties</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/kraft/" rel="noopener">KRaft — Apache Kafka documentation (configuration, storage tool, quorum)</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-500%3A+Replace+ZooKeeper+with+a+Self-Managed+Metadata+Quorum" rel="noopener">KIP-500: Replace ZooKeeper with a Self-Managed Metadata Quorum — Apache Kafka wiki</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/blog/2025/03/18/apache-kafka-4.0.0-release-announcement/" rel="noopener">Apache Kafka 4.0.0 release announcement — the release that removed ZooKeeper</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2025/04/kafka-4-kraft-architecture/" rel="noopener">Kafka 4.0: KRaft Simplifies Architecture — InfoQ</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/learn/kraft/" rel="noopener">KRaft — Apache Kafka Without ZooKeeper — Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=k_JbBYjZ6G4" rel="noopener">Apache Kafka No Longer Requires ZooKeeper — KRaft Mode Explained — Java Techie</a></li>
+    </ul>
+
+    <h3>Log semantics vs queue semantics: when Kafka is the right tool</h3>
+    <p>In a classic queue broker the message is the unit of state. It is enqueued, dispatched to one consumer, acknowledged, and deleted; the broker tracks per-message delivery, redelivery and dead-lettering, and the queue is a work list that drains. In Kafka the <em>log</em> is the unit of state. A record is written once, read by any number of independent consumer groups, and deleted only by retention policy; the broker tracks almost nothing per consumer beyond a committed offset. Replay is not a feature bolted on — it is just seeking backwards in a file that was never erased.</p>
+    <p>That difference decides the tool. Kafka wins when you need high sustained throughput on a few topics, durable history you can re-read, multiple unrelated consumers of the same stream, strict per-key ordering, stream processing and joins over the data, or an audit trail of what happened. A queue broker wins when the work items are independent tasks with wildly varying durations, when you want many more workers than you have partitions, when you need per-message acknowledgement, per-message TTL, priorities or delayed delivery, or when flexible routing topologies (fanout, headers, per-consumer filtering) are the point. Be honest about the costs too: Kafka's parallelism is capped by partition count, one slow record blocks its partition behind it (head-of-line blocking), and it has historically had no notion of acknowledging one message out of order.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/getting-started/introduction/#what-can-i-use-event-streaming-for" rel="noopener">Use cases — Apache Kafka documentation (messaging, log aggregation, event sourcing)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#message-delivery-semantics" rel="noopener">Message Delivery Semantics — Apache Kafka documentation</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/learn/kafka-storage-and-processing/" rel="noopener">Kafka Storage and Processing Fundamentals — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kafka-fastest-messaging-system/" rel="noopener">Benchmarking Apache Kafka, Apache Pulsar and RabbitMQ — Confluent blog</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/compare/the-difference-between-rabbitmq-and-kafka/" rel="noopener">RabbitMQ vs Kafka — difference between message brokers, AWS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rl5PndGAq7s" rel="noopener">Kafka tutorial for beginners — Kafka vs ActiveMQ/RabbitMQ, interview questions — Code Decode</a></li>
+    </ul>
+
+    <h3>Share groups (KIP-932): queue semantics inside the log</h3>
+    <p>KIP-932 adds a second consumption model alongside the classic consumer group. A <strong>share group</strong> lets many consumers read the <em>same</em> partition cooperatively rather than dividing partitions exclusively between them, so the number of workers is no longer capped by the partition count — the single most quoted reason to reach for RabbitMQ instead of Kafka. Records are acquired individually under a time-limited lock, moving through Available, Acquired, Acknowledged and Archived states with a delivery count attached, and each one is acknowledged, released or rejected on its own. Delivery is at-least-once and ordering is explicitly not preserved, because that is exactly the trade a work queue wants.</p>
+    <p>The consumer API is a distinct <code>KafkaShareConsumer</code>, and a group is created with <code>group.type=share</code>; share-group state lives in an internal topic on the brokers, so nothing about the topic's own storage changes — the same topic can be read by a classic consumer group and a share group at once, one for the ordered stream and one for the work queue. Get the release history right: early access in Kafka 4.0, preview in 4.1, and completed in Kafka 4.2 (February 2026), which is when it became usable in earnest. This genuinely updates the old "use a queue broker for work queues" advice — if you already run Kafka, a share group may now remove the need for a second broker rather than merely approximate it. It does not make the older advice worthless: routing topologies, priorities, delayed delivery and per-message TTL are still AMQP's home ground.</p>
+    <pre class="code-block" data-label="Java"><code>// Queue-like consumption: more consumers than partitions is fine,
+// and each record is acknowledged on its own.
+var consumer = new KafkaShareConsumer&lt;String, String&gt;(props);
+consumer.subscribe(List.of("tasks"));
+
+for (var record : consumer.poll(Duration.ofSeconds(5))) {
+    try {
+        handler.process(record.value());
+        consumer.acknowledge(record, AcknowledgeType.ACCEPT);
+    } catch (TransientFailure e) {
+        consumer.acknowledge(record, AcknowledgeType.RELEASE); // redeliver
+    } catch (PoisonRecord e) {
+        consumer.acknowledge(record, AcknowledgeType.REJECT);  // never again
+    }
+}
+consumer.commitSync();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka" rel="noopener">KIP-932: Queues for Kafka — Apache Kafka wiki (the full design)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#the-share-consumer" rel="noopener">Share groups — Apache Kafka documentation</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/blog/2026/02/17/apache-kafka-4.2.0-release-announcement/" rel="noopener">Apache Kafka 4.2.0 release announcement — share groups completed</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kafka-queue-semantics-share-consumer-ga/" rel="noopener">Kafka queue semantics with the share consumer API — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.morling.dev/blog/kip-932-queues-for-kafka/" rel="noopener">Let's Take a Look at… KIP-932: Queues for Kafka — Gunnar Morling</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Wb0xyqgaIqw" rel="noopener">Queues for Kafka Explained (KIP-932) — Confluent Developer</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-messaging-fundamentals.html">← Messaging Fundamentals</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="03-kafka-clients.html">Kafka Producers and Consumers →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Kafka architecture is the highest-yield messaging round in Indian product and service-company interviews. Partition-and-ordering and ISR-and-acks come up in almost every one; the later questions are where senior candidates are separated:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a topic, a partition and an offset?</summary>
+      <div class="answer"><p>A topic is a named category of records. It is physically split into partitions, each an ordered, immutable, append-only log stored on a broker's disk. An offset is a record's position within one partition — a monotonically increasing integer, unique per partition, not across the topic. Consumers read by advancing an offset; producers only ever append.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Does Kafka guarantee message ordering?</summary>
+      <div class="answer"><p>Only within a single partition. Across partitions there is no ordering guarantee at all, because they are independent logs on possibly different brokers. To get ordering for a business entity, give related records the same key — the default partitioner hashes the key so all of that customer's or order's events land in one partition and are consumed in sequence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a broker, and what does the replication factor mean?</summary>
+      <div class="answer"><p>A broker is one Kafka server holding a subset of the cluster's partitions on its own disks. Replication factor is how many copies of each partition exist across different brokers — factor 3 means one leader and two followers. Producers write to the leader and followers replicate from it; if the leader's broker fails, one of the in-sync followers is elected leader.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is a message deleted after it is consumed?</summary>
+      <div class="answer"><p>No. Kafka deletes by retention policy — <code>retention.ms</code> (7 days by default) or <code>retention.bytes</code> — regardless of who has read what. Consumption only advances an offset. That is why many independent consumer groups can read the same records, and why replaying history after a bug fix is trivial. With <code>cleanup.policy=compact</code>, Kafka instead keeps the latest record per key indefinitely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the ISR, and when does a replica leave it?</summary>
+      <div class="answer"><p>The in-sync replica set is the subset of a partition's replicas — including the leader — that are currently caught up with the leader. A follower drops out when it has not fetched up to the leader's log end within <code>replica.lag.time.max.ms</code>, or when its broker dies, and rejoins once it catches up. A record counts as committed, and becomes visible to consumers, only after every current ISR member has it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain acks=0, acks=1 and acks=all.</summary>
+      <div class="answer"><p><code>acks=0</code>: the producer does not wait at all — highest throughput, records lost on any failure. <code>acks=1</code>: waits for the leader's local write only, so a leader crash before followers replicate loses the record. <code>acks=all</code> (or <code>-1</code>): waits until every in-sync replica has it. Note that "all" means all replicas currently in the ISR, not all configured replicas, which is exactly why it must be paired with <code>min.insync.replicas</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is acks=all alone not enough for durability?</summary>
+      <div class="answer"><p>Because the ISR can shrink. If two of three replicas fall behind, the ISR is just the leader, and <code>acks=all</code> is satisfied by that one copy — a leader crash then loses the record. Setting <code>min.insync.replicas=2</code> makes the broker reject the write with <code>NotEnoughReplicas</code> instead. The standard production recipe is replication factor 3, <code>min.insync.replicas=2</code>, <code>acks=all</code>: survives one broker loss with no data loss and no write outage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is unclean leader election and would you enable it?</summary>
+      <div class="answer"><p>It allows an out-of-sync replica to become leader when the whole ISR is unavailable. That restores availability but silently discards any records the old leader had which the new one never received. The default is <code>false</code> — the partition simply stops serving until an in-sync replica returns. Leave it false for anything financial or transactional; consider true only for streams where a gap is preferable to an outage, such as raw telemetry.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't you decrease the partition count, and what breaks when you increase it?</summary>
+      <div class="answer"><p>Decreasing would mean deleting or merging append-only logs and destroying their offsets, so Kafka simply does not support it. Increasing is allowed but changes the key-to-partition hash: new records for an existing key can be routed to a different partition from the one holding its history, so per-key ordering across the change is broken and any partition-local state is invalidated. Size partitions up front, or key by something you can re-partition safely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What replaced ZooKeeper, and in which release did ZooKeeper disappear?</summary>
+      <div class="answer"><p>KRaft (KIP-500) — a quorum of controller nodes running Raft over an internal metadata topic inside Kafka itself. KRaft was production-ready in 3.3, ZooKeeper mode was deprecated in 3.5, and 3.9 was the last release supporting it or a migration bridge. Kafka 4.0 (March 2025) removed ZooKeeper mode entirely, so 4.x runs KRaft only. Upgrading an old cluster means migrating to KRaft on 3.9 first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does KRaft actually improve, beyond removing a dependency?</summary>
+      <div class="answer"><p>Metadata becomes a replicated log that brokers follow and cache locally, rather than external state a new controller must reload. So controller failover is a log leader election measured in a fraction of the old time, metadata propagates as incremental deltas instead of full pushes, and the practical partition ceiling rises from tens of thousands to millions. Operationally it collapses two systems into one: one config model, one security model, one thing to monitor and upgrade.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Kafka is described as a log, not a queue. What follows from that in practice?</summary>
+      <div class="answer"><p>Records are retained after consumption, so many independent consumer groups can read the same stream and any of them can rewind and replay. The broker stores almost no per-consumer state beyond a committed offset, which is why it scales to enormous fan-out. But it also means no per-message acknowledgement in a classic consumer group, no per-message TTL or priority, ordering only within a partition, head-of-line blocking when one record is slow, and parallelism capped by partition count.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You need 200 workers on a topic with 12 partitions. What are your options in Kafka 4.x?</summary>
+      <div class="answer"><p>With a classic consumer group, 12 is the ceiling — the extra 188 consumers sit idle — so historically you would either raise the partition count or hand the work to a queue broker. Kafka 4.x offers a third answer: a share group (KIP-932), where many consumers cooperatively read the same partitions with per-record acquisition locks and individual acknowledgement, decoupling worker count from partition count. The trade is that ordering is not preserved and delivery is at-least-once, which is fine for independent work items.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Do share groups make RabbitMQ redundant?</summary>
+      <div class="answer"><p>Not redundant, but they narrow the gap considerably. Share groups give Kafka per-message acknowledge, release and reject, delivery counting for automatic poison handling, and scaling past the partition count — the main historical reasons to add a queue broker beside Kafka. What AMQP still does better is flexible routing (topic, fanout and header exchanges), priorities, delayed delivery, per-message TTL and per-consumer filtering. If you already run Kafka, evaluate share groups before adding a second broker; if you need rich routing, RabbitMQ is still the better fit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How is a partition laid out on disk, and why does that matter for performance?</summary>
+      <div class="answer"><p>Each partition is a directory of segment files plus offset and timestamp indexes. Writes are sequential appends into the active segment; retention and compaction delete or rewrite whole closed segments, never individual records. Sequential I/O plus the operating system's page cache means reads of recent data usually never touch disk, and Kafka can hand bytes to the network without copying them through user space. This is why the design's throughput comes from doing less work per record, not from clever indexing.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.ka.core — brokers, topics, partitions, offsets, segments and retention, replication, ISR with acks and min.insync.replicas, leader election, KRaft after the removal of ZooKeeper in Kafka 4.0</li>
+      <li>msg.ka.choose — log vs queue semantics, when Kafka beats a queue broker, share groups (KIP-932)</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

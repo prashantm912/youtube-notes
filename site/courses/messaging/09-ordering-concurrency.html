@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Ordering and concurrency module: per-key ordering instead of global ordering, Kafka partition keys and the parallelism ceiling, hot partitions and the rehash when partitions are added, RabbitMQ consistent-hash routing and single active consumer, retries and in-flight requests that silently reorder, and the mitigations that make it survivable — with verified resources and interview questions.">
+  <title>Ordering and Concurrency — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Ordering and Concurrency</h1>
+  <p class="standfirst">Ordering and parallelism pull in opposite directions. Every message system lets you have both, but only along an axis you choose in advance — and most production messaging bugs live in the gap between the ordering you were promised and the ordering your consumer actually preserved.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Ordering and Concurrency</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two forces are in permanent tension here. Strict ordering means one message is processed at a time, in sequence — which is a single-threaded system, however many machines you own. Parallelism means many messages in flight at once, which by definition means they can complete out of order. Nothing in Kafka 4.x or RabbitMQ 4.x resolves that tension; both simply give you a way to draw the boundary between the two, and the boundary is the entity key.</p>
+    <p>So this module starts by narrowing the requirement — global total ordering across a topic is almost never what the business actually needs — then covers how each broker delivers per-key ordering and what it costs. The second half is the hazards: retries that reorder, in-flight producer requests, consumer-side threading, and rebalances that redeliver. Those are where the interview questions and the production incidents both come from, so it ends with the mitigations and an honest verdict on what ordering is worth paying for.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Narrowing the requirement: per-entity ordering, not global ordering</h3>
+    <p>The first thing to do when someone says "the messages must be in order" is to ask <em>which</em> messages. A total order across an entire topic — every event from every producer sequenced against every other — is a genuinely expensive thing to ask for: it forces a single writer, a single log and a single consumer, and it caps your whole pipeline at what one thread can process. Almost no business rule needs it. What the business needs is that all events for order 12345 are applied in sequence (created, then paid, then shipped, then delivered), while order 67890 proceeds completely independently on another thread, another machine, another rack.</p>
+    <p>That reframing is the whole design. Once ordering is scoped to an entity, the entity id becomes the unit of serialisation and everything else becomes parallel: throughput scales with the number of distinct entities, not with the number of messages. Azure's architecture catalogue names this the <em>sequential convoy</em> — a stream of related messages that must stay in order, interleaved freely with other convoys. Get the interviewer to agree on the convoy key first; every subsequent answer about partitions, queues and consumers falls out of it.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/getting-started/introduction/" rel="noopener">Introduction — Apache Kafka 4.x documentation (topics, partitions and what order means in a log)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/queues" rel="noopener">Queues — RabbitMQ documentation (FIFO semantics and where they stop holding)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/patterns/event-stream/partitioned-parallelism/" rel="noopener">Partitioned Parallelism — Confluent Developer event streaming patterns</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/sequential-convoy" rel="noopener">Sequential Convoy pattern — Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ILEb5LsSf5w" rel="noopener">Message Ordering in Pub/Sub or Queue — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Kafka: the key picks the partition, the partition owns the order</h3>
+    <p>Kafka's guarantee is narrow and precise: messages sent by a producer to a particular topic partition are appended to that partition's log in the order they are sent, a consumer sees records in the order they are stored in the log, and <em>no ordering is promised between partitions at all</em>. There is no global sequence number across a topic. Everything you build on top of Kafka ordering is an application of that one sentence.</p>
+    <p>The bridge from "order within a partition" to "order per entity" is the record key. The default partitioner hashes the key (murmur2, modulo the partition count) and routes every record with the same key to the same partition, so choosing the entity id as the key buys per-key ordering for free. No key means round-robin or sticky batching, and therefore no ordering at all. Two consequences follow immediately: the key must be genuinely stable for the lifetime of the entity (customer id, order id, account number — never a timestamp or a request id), and one partition is only ever read by one consumer within a group, so per-key order survives all the way to your handler as long as the handler itself is sequential.</p>
+    <pre class="code-block" data-label="Java"><code>// The key is the ordering contract. Same key -> same partition -> same order.
+var record = new ProducerRecord&lt;&gt;("orders", order.id(), event);  // key = entity id
+producer.send(record);
+
+// No key = round-robin/sticky batching = no ordering guarantee whatsoever.
+producer.send(new ProducerRecord&lt;&gt;("orders", null, event));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/" rel="noopener">Design — Apache Kafka 4.x documentation (the ordering guarantee, stated exactly)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/learn/kafka-partition-key/" rel="noopener">Apache Kafka Partition Key: a comprehensive guide — Confluent</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/guarantees/" rel="noopener">How to Tune Kafka's Durability and Ordering Guarantees — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-ordering" rel="noopener">Ensuring Message Ordering in Kafka: Strategies and Configurations — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8L-1HSTf97E" rel="noopener">Partitions — Apache Kafka 101 (2025 Edition), Confluent Developer</a></li>
+    </ul>
+
+    <h3>What per-key ordering costs: parallelism ceilings, hot partitions, and the rehash</h3>
+    <p>Per-key ordering is not free, and the bill arrives in three instalments. First, the partition count is a hard ceiling on consumer parallelism: a consumer group can never usefully run more consumers than there are partitions, so a topic with six partitions gives you six concurrent processors and any extra pods sit idle. Second, keys are rarely uniform. One tenant, one merchant or one celebrity account can send a disproportionate share of traffic; because that key always hashes to the same partition, you get a hot partition whose consumer lags while the other five idle. The usual fixes are compound keys that add a bounded salt (accepting order only within the salted sub-key), a custom partitioner that spreads known-hot keys, or simply more partitions so the hash spreads further.</p>
+    <p>Third, and most commonly asked: adding partitions to an existing topic changes the modulo, so a key that used to hash to partition 2 may now hash to partition 5. Old messages do not move — Kafka never rewrites the log — so for a window of time the history of an entity is split across two partitions with no ordering relationship between them, and a consumer can process the entity's new event before its older one. Partition counts also cannot be reduced. The practical rules: over-provision partitions at topic creation rather than scaling later, and if you must add partitions to a keyed topic, do it during a quiet period after draining, or produce to a new topic and migrate consumers.</p>
+    <pre class="code-block" data-label="Bash"><code># Adding partitions rehashes keys. On a keyed topic this breaks per-key
+# ordering for entities that already have messages in the log.
+kafka-topics.sh --bootstrap-server broker:9092 \
+  --alter --topic orders --partitions 12
+
+# Partition counts only go up, never down.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/basic-kafka-operations/" rel="noopener">Basic Kafka Operations — Apache Kafka 4.x documentation (modifying topics and adding partitions)</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/kafka-partitions/" rel="noopener">When You Increase Kafka Partitions — Arpit Bhayani</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/" rel="noopener">How to Choose the Number of Topics and Partitions in a Kafka Cluster — Confluent Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-add-partitions-topic" rel="noopener">How to Add Partitions to an Existing Topic in Kafka — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yuUDgR1kSnc" rel="noopener">Kafka Consumer Partition Assignment — Confluent</a></li>
+    </ul>
+
+    <h3>RabbitMQ: competing consumers, consistent-hash routing and single active consumer</h3>
+    <p>A RabbitMQ queue is FIFO — messages leave it in the order they entered. That guarantee survives exactly as long as there is one consumer. Attach a second consumer to the same queue and you have the competing-consumers pattern: the broker round-robins deliveries, the two consumers run at different speeds, and message two can commit before message one. Requeues make it worse, because a negatively acknowledged message returns to the queue and is redelivered after messages that were behind it. So in AMQP the question is never "is the queue ordered?" but "how do I keep one consumer per entity?"</p>
+    <p>There are two production answers. The <strong>consistent hash exchange</strong> plugin (<code>x-consistent-hash</code>) is RabbitMQ's partitioning: it hashes the routing key, the message id or a chosen header and routes each message to exactly one bound queue, so all events for an entity land in the same queue and each queue gets a single consumer — a hand-rolled equivalent of Kafka partitions, with the same rehash caveat when you add or remove queues. Alternatively, <strong>single active consumer</strong> (the <code>x-single-active-consumer</code> queue argument, available on classic and quorum queues) lets you register many consumers on one queue while the broker delivers to only one of them at a time, promoting another automatically if the active one dies. That gives ordered processing plus hot-standby failover without the client-side coordination. Streams have their own single-active-consumer mode, and superstreams extend it to partitioned streams for the same reason Kafka partitions exist.</p>
+    <pre class="code-block" data-label="Java"><code>// One consumer at a time on this queue; others stand by for failover.
+channel.queueDeclare("orders.q", true, false, false,
+    Map.of("x-single-active-consumer", true,
+           "x-queue-type", "quorum"));
+
+// Or partition by entity: consistent-hash exchange fans one key to one queue.
+channel.exchangeDeclare("orders.x", "x-consistent-hash");
+channel.queueBind("orders.q0", "orders.x", "1");   // binding weight</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/consumers" rel="noopener">Consumers — RabbitMQ documentation (single active consumer, competing consumers, prefetch)</a></li>
+      <li>[Official] <a href="https://github.com/rabbitmq/rabbitmq-server/tree/main/deps/rabbitmq_consistent_hash_exchange" rel="noopener">Consistent Hashing Exchange Type — rabbitmq-server plugin documentation (GitHub)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/streams" rel="noopener">Streams and Superstreams — RabbitMQ documentation (partitioned streams, single active consumer for streams)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part1-rabbitmq-best-practice.html" rel="noopener">RabbitMQ Best Practice, part 1 — CloudAMQP (queue design, prefetch and consumer count)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yB-tu8wS4H8" rel="noopener">RabbitMQ Stream — Single Active Consumer — Ismail Anjrini</a></li>
+    </ul>
+
+    <h3>Producer-side hazards: retries, in-flight requests and idempotence</h3>
+    <p>Here is the reordering that surprises people most, because it happens before a consumer is even involved. Suppose the producer has several requests in flight to the same partition. Batch A fails with a retriable error and is scheduled for retry; batch B, sent immediately after, succeeds on its first attempt. The retried A now lands <em>after</em> B, and the log — the thing that defines the order — has them the wrong way round. Nothing downstream can detect this, because from Kafka's point of view the log is simply what it is.</p>
+    <p>The knob is <code>max.in.flight.requests.per.connection</code>. Setting it to 1 makes reordering impossible at a real throughput cost, since the producer cannot pipeline. The modern answer is better: turn on <code>enable.idempotence</code> (the default in Kafka 3.0 and later, including 4.x), which stamps each batch with a producer id and sequence number so the broker rejects duplicates and refuses out-of-sequence batches, preserving order with up to five in-flight requests. Idempotence requires <code>acks=all</code> and pairs naturally with a bounded <code>delivery.timeout.ms</code>. Note what this does <em>not</em> cover: application-level retries where your own code catches an exception and calls <code>send</code> again are just a new record, and they land wherever they land.</p>
+    <pre class="code-block" data-label="Properties"><code># Ordering-safe producer (defaults in Kafka 4.x, but state them explicitly)
+enable.idempotence=true
+acks=all
+max.in.flight.requests.per.connection=5   # safe only with idempotence on
+retries=2147483647
+delivery.timeout.ms=120000
+
+# Without idempotence, the only ordering-safe value is 1.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/producer-configs/" rel="noopener">Producer Configs — Apache Kafka 4.x documentation (enable.idempotence, max.in.flight.requests.per.connection, retries)</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/kafka/design/delivery-semantics.html" rel="noopener">Message Delivery Guarantees for Apache Kafka — Confluent documentation</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/" rel="noopener">Making retries safe with idempotent APIs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-delivery-multiple-partitions" rel="noopener">Understanding Message Delivery with Multiple Partitions — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ikeQxQJTHGM" rel="noopener">Beware of the message ordering in Apache Kafka — how default settings can ruin the guarantees (Alexander Sergeenko)</a></li>
+    </ul>
+
+    <h3>Consumer-side hazards: threads, async handoff and rebalance redelivery</h3>
+    <p>The broker can hand you a perfectly ordered stream and your application can still destroy it in three lines. The most common way is concurrency inside one consumer: a Spring Kafka listener container with a concurrency setting above one, or a handler that submits each record to a thread pool or an executor and returns immediately. The poll loop then races ahead, records from the same partition are processed simultaneously, and the ordering the partition gave you is gone — silently, because nothing throws. The same applies to any "process asynchronously after the poll" design, including reactive pipelines that subscribe without ordering operators and code that fires a <code>CompletableFuture</code> per record.</p>
+    <p>The second family is rebalancing and redelivery. When a consumer group rebalances — a pod restarts, a deploy rolls, a poll exceeds <code>max.poll.interval.ms</code> — partitions move to other consumers and anything processed but not committed is delivered again, possibly after newer records have already been handled elsewhere. At-least-once delivery therefore implies duplicates, and duplicates arriving late are functionally identical to reordering. On the RabbitMQ side, a <code>basic.nack</code> with requeue puts a message back behind messages that were originally after it. The mitigations are structural: keep processing sequential per partition (Kafka's own recommendation is one thread per partition, or a keyed executor that always maps a key to the same thread), keep handlers fast enough not to trip the poll interval, and commit only after the work is genuinely done.</p>
+    <pre class="code-block" data-label="Java"><code>// Destroys per-partition ordering: records race inside the pool.
+for (var record : records) pool.submit(() -&gt; handle(record));
+
+// Preserves it: same key always lands on the same single-threaded worker.
+for (var record : records) {
+    int slot = Math.floorMod(record.key().hashCode(), workers.length);
+    workers[slot].submit(() -&gt; handle(record));   // each worker is single-threaded
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/consumer-configs/" rel="noopener">Consumer Configs — Apache Kafka 4.x documentation (max.poll.records, max.poll.interval.ms, auto-commit)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/consumer-rebalance-protocol/" rel="noopener">Consumer Rebalance Protocol — Apache Kafka 4.x documentation (KIP-848 group protocol)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kafka-consumer-multi-threaded-messaging/" rel="noopener">Multi-Threaded Messaging with the Apache Kafka Consumer — Confluent Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/tradeoffs-event-driven-design/" rel="noopener">Scaling Java-Based Real-Time Systems: the Hidden Tradeoffs of Event-Driven Design — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xv6Ljbq6me8" rel="noopener">Competing Consumers Pattern for Scalability — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Mitigations, and the honest verdict on what ordering is worth</h3>
+    <p>Because perfect ordering is expensive and imperfect ordering is inevitable, the durable engineering answer is to make consumers tolerant of disorder rather than to chase a guarantee end to end. Four techniques cover most cases. Make handlers <strong>commutative</strong> where the domain allows it, so "add 10 credits" and "add 5 credits" give the same result in either order. Make them <strong>idempotent</strong>, keyed on an event id, so a redelivery is a no-op. Carry a monotonically increasing <strong>version or sequence number</strong> on the entity and drop any update whose version is not greater than the stored one — last-write-wins by version, which is exactly the discipline Kafka's own log compaction applies to keys. And model the entity as a <strong>state machine</strong> that rejects invalid transitions, so a "shipped" event arriving before "paid" is parked or replayed rather than silently applied.</p>
+    <p>The verdict worth stating out loud in a design review: ordering guarantees you do not need are throughput you are throwing away. A single partition gives you a perfect total order and a hard throughput ceiling of one consumer. Per-key ordering costs you nothing you were using and scales with your key cardinality. And where even per-key ordering is more than the domain requires, dropping it entirely — plus idempotent, version-guarded handlers — buys you unlimited parallelism. Newer options change the arithmetic rather than the tradeoff: the Confluent Parallel Consumer subdivides work below the partition into key-order or message-order units, and Kafka's share groups (queue semantics) deliberately give up ordering to remove the partition-count ceiling for work-queue style consumers.</p>
+    <pre class="code-block" data-label="SQL"><code>-- Version guard: a stale or duplicated event updates nothing.
+UPDATE orders
+   SET status = :status, version = :event_version
+ WHERE id = :order_id
+   AND version &lt; :event_version;
+-- 0 rows affected = event arrived late or twice. Log it, do not fail.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/topic-configs/" rel="noopener">Topic Configs — Apache Kafka 4.x documentation (cleanup.policy and compaction, the last-write-wins-per-key model)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/introducing-confluent-parallel-message-processing-client/" rel="noopener">Introducing Confluent's Parallel Consumer Message Processing Client — Confluent Blog</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kafka-queue-semantics-share-consumer-ga/" rel="noopener">Kafka Queue Semantics with the Share Consumer API — Confluent Blog (trading ordering for unbounded consumers)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kafka-fifo-queue" rel="noopener">Is It Possible for Kafka to Behave Like a FIFO Queue? — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Q7tU0B1bnSE" rel="noopener">Kafka Interview Questions and Answers for Experienced, Part 1 — Code Decode</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-dlq-retries.html">← Dead Letters and Retry Strategy</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="10-event-driven-architecture.html">Event-Driven Architecture →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Ordering is the highest-signal Kafka topic in Indian product and service-company rounds — the partition-key question is asked almost every time, and the follow-ups about adding partitions and about retries are what separate candidates who have operated a cluster from candidates who have read a blog post:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you guarantee message ordering in Kafka?</summary>
+      <div class="answer"><p>Kafka guarantees order only within a partition, never across partitions. So you guarantee ordering by making all messages that must be ordered together land in the same partition — set the record key to the entity id (order id, customer id, account number) and the default partitioner hashes it to a fixed partition. Because one partition is consumed by exactly one consumer in a group, that order survives to your handler, provided the handler processes records sequentially. Global ordering across a whole topic requires a single partition, which caps throughput at one consumer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens to ordering when you add partitions to an existing topic?</summary>
+      <div class="answer"><p>It breaks for entities that already have data. Adding partitions changes the modulo in the hash, so a key that used to map to partition 2 may now map to partition 5. Existing messages are never moved — Kafka does not rewrite the log — so an entity's history is split across two partitions with no ordering relationship between them, and a consumer can see a newer event before an older one. Partition counts also cannot be reduced. Over-provision at creation; if you must scale later, do it after draining during a quiet window, or produce to a new topic and migrate consumers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What happens if you send a Kafka message without a key?</summary>
+      <div class="answer"><p>The partitioner has nothing to hash, so records are spread across partitions by round-robin or sticky batching for throughput. You get maximum parallelism and zero ordering guarantee between those records. That is correct for independent events such as metrics or clickstream, and wrong for anything where a later event supersedes an earlier one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is a RabbitMQ queue ordered?</summary>
+      <div class="answer"><p>A queue is FIFO, but only with a single consumer. Attach several consumers and the broker round-robins deliveries; they process at different speeds and finish out of order — the competing-consumers pattern. Requeue on a negative acknowledgement also puts a message back behind messages that were originally after it. To keep order you need either one queue per entity, or the single-active-consumer flag.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How many consumers can read one topic in parallel, and why?</summary>
+      <div class="answer"><p>Within one consumer group, at most one consumer per partition — so the partition count is a hard ceiling on useful parallelism. Six partitions means six working consumers; a seventh pod is assigned nothing and idles. Different consumer groups read the same topic independently, so the limit is per group. This is the direct cost of the ordering model: the unit of ordering and the unit of parallelism are the same object.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> One tenant sends most of your traffic and its partition lags. What do you do?</summary>
+      <div class="answer"><p>That is a hot partition caused by skewed key distribution — the hash always sends that key to the same place. Options, in rough order of preference: use a compound key that appends a bounded salt for the hot key only, accepting ordering within the salted sub-key; write a custom partitioner that spreads known-hot tenants across several partitions; raise the partition count so the hash spreads further (with the rehash caveat); or isolate the noisy tenant onto its own topic with its own consumers. Whichever you pick, be explicit about what ordering guarantee you just gave up.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does single active consumer do in RabbitMQ, and when would you use it?</summary>
+      <div class="answer"><p>With <code>x-single-active-consumer</code> set on the queue, many consumers can register but the broker delivers to only one of them at a time; if that consumer dies or is cancelled, the broker promotes another automatically. It gives ordered, serialised processing plus hot-standby failover without any client-side leader election. It is available on classic and quorum queues, and streams have their own equivalent. Use it when a queue represents one entity or one ordered workflow; combine it with a consistent-hash exchange when you need many such queues.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the RabbitMQ equivalent of Kafka partition keys?</summary>
+      <div class="answer"><p>The consistent hash exchange plugin. Declare an exchange of type <code>x-consistent-hash</code>, bind several queues to it with weights, and the exchange hashes the routing key (or a message property or header) to route each message to exactly one queue. All events for one entity therefore share a queue, and one consumer per queue preserves order. The caveat mirrors Kafka's: adding or removing bound queues changes the hash ring and moves keys, so ordering is disturbed for entities in flight.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your Spring Kafka listener has concurrency set to five and ordering broke. Explain.</summary>
+      <div class="answer"><p>Concurrency spawns multiple listener containers, each with its own consumer, and partitions are split across them — that alone is fine, because each partition still goes to exactly one thread. Ordering breaks when concurrency exceeds the partition count in ways that cause repeated rebalances, or, far more commonly, when the handler hands work off asynchronously to an executor or a reactive pipeline so records from the same partition run concurrently. The rule is one sequential worker per partition or per key; parallelism above that must be keyed, not free.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How can a producer retry reorder messages, and what config prevents it?</summary>
+      <div class="answer"><p>With more than one request in flight to a partition, batch A can fail and be queued for retry while batch B succeeds immediately, so A is appended after B and the log is permanently wrong. Setting <code>max.in.flight.requests.per.connection=1</code> prevents it by disabling pipelining, at a real throughput cost. The better fix is <code>enable.idempotence=true</code> — the default since Kafka 3.0 and in 4.x — which stamps batches with a producer id and sequence number so the broker rejects duplicates and out-of-sequence batches, keeping order safe with up to five in-flight requests. It requires <code>acks=all</code>. It does not cover retries you perform yourself in application code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Message A fails and goes to a retry topic; message B for the same key succeeds. Now what?</summary>
+      <div class="answer"><p>You have reordered your own stream: B is applied before A, and if A was "address changed" and B was "order shipped", the shipment used the old address. Non-blocking retry topics buy throughput by explicitly giving up ordering. The choices are: block the partition until A succeeds (ordering preserved, head-of-line blocking, lag grows); route A to a retry topic and accept disorder, then make handlers version-guarded so a stale A is dropped; or park the whole key — stop processing that entity and send subsequent messages for it to the same parking area until A is resolved. Say which one you chose and why; interviewers are testing whether the candidate recognises that the tradeoff exists at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design an order-processing consumer that tolerates out-of-order and duplicate events.</summary>
+      <div class="answer"><p>Four layers. Idempotency: deduplicate on an event id, so a redelivery is a no-op. Versioning: every event carries a monotonically increasing entity version, and the write is conditional — update only where the stored version is lower — so stale events affect nothing. State machine: the entity rejects invalid transitions, so "shipped" before "paid" is parked rather than applied. Commutativity: prefer operations whose result does not depend on order, such as set-membership or additive counters. With those in place, ordering becomes an optimisation rather than a correctness requirement, which is precisely the position you want to be in during an incident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can you process a single partition in parallel and still keep per-key order?</summary>
+      <div class="answer"><p>Yes, if you shard below the partition. Map each record's key onto a fixed set of single-threaded workers — worker index equals the key hash modulo the worker count — so the same key always runs on the same thread while different keys run concurrently. Offsets must then be committed only up to the lowest continuously completed offset, not the highest, or a crash loses records. This is what the Confluent Parallel Consumer implements as key-order or message-order processing, and it is the standard answer when the partition count is fixed but you need more throughput, especially with slow input-output-bound handlers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you deliberately give up ordering entirely?</summary>
+      <div class="answer"><p>When the domain does not need it and the cost is real: independent work items, notifications, metrics, thumbnail generation, anything where each message stands alone. Ordering guarantees you do not need are throughput you are throwing away — they force a serialisation point, cap consumer count at the partition count, and create hot partitions from skewed keys. Kafka's share groups (queue semantics) exist precisely for this case, letting many consumers share a partition without an ordering promise. The discipline is to make the choice explicitly and write it down, rather than inheriting a keyed topic nobody can safely repartition three years later.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.ord.keys — Per-key ordering, partition and routing strategies, single-active consumer</li>
+      <li>msg.ord.hazards — Reordering hazards, retries breaking order, the concurrency vs ordering tradeoff</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RabbitMQ and the AMQP 0-9-1 model module: exchanges (direct, topic, fanout, headers), queues, bindings and routing keys, the default exchange, queue durability and message persistence, connections versus channels, consuming, publisher confirms, returns and alternate exchanges — with verified resources and interview questions.">
+  <title>RabbitMQ and the AMQP Model — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: RabbitMQ and the AMQP Model</h1>
+  <p class="standfirst">Kafka is a dumb broker with smart consumers. RabbitMQ is the mirror image — a smart broker that decides, at publish time, exactly which queues a message lands in. Learn the AMQP 0-9-1 routing model and RabbitMQ stops being mysterious.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → RabbitMQ and the AMQP Model</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>What you are really learning when you learn RabbitMQ is AMQP 0-9-1: a small protocol with six nouns — connection, channel, exchange, queue, binding, routing key — that together decide where every message goes. RabbitMQ 4.x is the current line and the reference implementation of that protocol; almost everything that confuses newcomers ("why did my message vanish?", "why does publishing to a queue name work?") is a gap in the routing model, not a bug in the broker.</p>
+    <p>This module walks the model precisely: the four exchange types and the matching rule each one applies, the default exchange and the illusion it creates, queue properties and what durability does and does not promise. Then the client half — connections versus channels, push consumption versus polling, publisher confirms as the only real delivery guarantee, and what happens to a message nothing wants.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The AMQP 0-9-1 model: producers publish to exchanges, never to queues</h3>
+    <p>The single sentence that unlocks RabbitMQ: <strong>a producer never publishes to a queue.</strong> It publishes to an <em>exchange</em>, attaching a <em>routing key</em> — a short string it chooses. The exchange holds no messages; it is a routing function. Queues are declared separately and connected to exchanges by <em>bindings</em>, each binding carrying a binding key (or, for headers exchanges, an arguments table). When a message arrives, the exchange compares the message's routing key against every binding using the rule implied by the exchange's <em>type</em>, and copies the message into each queue whose binding matched. Zero matches means zero copies, and the message is gone.</p>
+    <p>This is why RabbitMQ is called a smart broker with dumb consumers, and it is the real contrast with Kafka. In Kafka the broker appends to a partition and the consumer decides what to read and when; the intelligence sits in the client. In RabbitMQ the topology — which exchanges exist, of what type, bound to which queues with which keys — is the intelligence, and it lives in the broker. Change a binding and you change the flow of the whole system without touching a line of producer code. That power is also the failure mode: a mistyped binding key silently routes nothing, and nothing complains.</p>
+    <pre class="code-block" data-label="Java"><code>// The five declarations that define a RabbitMQ topology
+channel.exchangeDeclare("orders", "topic", true);      // name, type, durable
+channel.queueDeclare("orders.audit", true, false, false, null);
+channel.queueBind("orders.audit", "orders", "order.#"); // queue, exchange, binding key
+
+// Producers only ever do this — exchange + routing key, never a queue name
+channel.basicPublish("orders", "order.created.in", null, body);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/amqp-concepts" rel="noopener">AMQP 0-9-1 Model Explained — RabbitMQ documentation (the canonical description of exchanges, bindings and routing)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/exchanges" rel="noopener">Exchanges — RabbitMQ documentation (types, properties, pre-declared exchanges)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/amqp-0-9-1-reference" rel="noopener">AMQP 0-9-1 protocol reference — every class and method, including basic.publish and queue.bind</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part4-rabbitmq-for-beginners-exchanges-routing-keys-bindings.html" rel="noopener">Part 4: RabbitMQ Exchanges, routing keys and bindings — CloudAMQP</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IZXJujDy-CU" rel="noopener">Exchange, Queue, and Binding in RabbitMQ — Jstobigdata (AMQP tutorial series in Java)</a></li>
+    </ul>
+
+    <h3>Direct exchange, and the default exchange that fools everyone</h3>
+    <p>A <strong>direct</strong> exchange matches on exact string equality: the message reaches a queue if and only if the binding key equals the routing key, byte for byte. It is the workhorse for point-to-point and simple task routing. Worked example: bind <code>tasks.pdf</code> to exchange <code>jobs</code> with key <code>pdf</code>, and <code>tasks.thumbnail</code> with key <code>thumbnail</code>. Publishing to <code>jobs</code> with routing key <code>pdf</code> delivers to <code>tasks.pdf</code> only. Nothing stops you binding several queues with the <em>same</em> key — then all of them get a copy, so a direct exchange can fan out too, and interviewers like asking that.</p>
+    <p>Now the illusion. Every broker pre-declares a nameless direct exchange — the <strong>default exchange</strong>, addressed as the empty string <code>""</code> — and automatically binds every queue to it with a binding key equal to the queue's own name. So <code>basicPublish("", "orders.audit", ...)</code> looks like "publishing to a queue", but it is an ordinary direct-exchange match against an automatic binding you never created. That is the whole trick behind the "Hello World" tutorial. You cannot bind to the default exchange yourself, and you cannot unbind a queue from it, which makes it convenient for demos and a poor foundation for a real topology.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-four-java" rel="noopener">RabbitMQ tutorial 4 — Routing (direct exchanges, Java) — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-one-java" rel="noopener">RabbitMQ tutorial 1 — "Hello World" (Java): the default-exchange publish, up close</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-rabbitmq-exchanges-queues-bindings" rel="noopener">Exchanges, Queues, and Bindings in RabbitMQ — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LCtnvvDX8dw" rel="noopener">Direct Exchange in RabbitMQ — Jstobigdata</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KvPPCvOZvA8" rel="noopener">Default Exchange in RabbitMQ — Jstobigdata</a></li>
+    </ul>
+
+    <h3>Topic exchange: pattern matching with * and #</h3>
+    <p>A <strong>topic</strong> exchange treats the routing key as a dot-delimited list of words and matches it against binding <em>patterns</em>. Two wildcards, and the difference between them is the single most asked RabbitMQ question in interviews: <code>*</code> substitutes for exactly <em>one</em> word, <code>#</code> substitutes for <em>zero or more</em> words. Routing keys are capped at 255 bytes, and a pattern with no wildcards behaves exactly like a direct binding.</p>
+    <p>Worked example with routing key <code>order.created.mumbai</code>. Pattern <code>order.created.*</code> matches (one word in the last slot). Pattern <code>order.#</code> matches (zero-or-more words after <code>order</code>) — and it would also match the bare key <code>order</code>. Pattern <code>*.created.*</code> matches. Pattern <code>order.*</code> does <em>not</em> match, because <code>*</code> covers one word and there are two left. Pattern <code>#</code> matches everything, which turns the topic exchange into a fanout. Design the key as a hierarchy — <code>&lt;entity&gt;.&lt;event&gt;.&lt;region&gt;</code> — most significant word first, because that is the order the patterns read.</p>
+    <pre class="code-block" data-label="Text"><code>routing key:  order.created.mumbai
+
+order.created.*   matches     * = exactly one word
+order.#           matches     # = zero or more words
+*.created.*       matches
+order.*           NO MATCH    one word left over
+#                 matches     equivalent to a fanout
+payment.#         NO MATCH    first word differs</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-five-java" rel="noopener">RabbitMQ tutorial 5 — Topics (Java) — RabbitMQ documentation (the wildcard rules, worked)</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRouter.html" rel="noopener">Message Router — Enterprise Integration Patterns (Hohpe &amp; Woolf): the pattern an exchange implements</a></li>
+      <li>[Article] <a href="https://www.cogin.com/articles/rabbitmq/rabbitmq-exchanges-guide.php" rel="noopener">RabbitMQ exchanges guide — Cogin (all four types side by side with matching examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=p_gMfetK5r4" rel="noopener">Topic Exchange in RabbitMQ — Jstobigdata</a></li>
+    </ul>
+
+    <h3>Fanout and headers exchanges</h3>
+    <p>A <strong>fanout</strong> exchange ignores the routing key entirely and copies every message to every bound queue. That is publish-subscribe in its purest form: bind three queues to exchange <code>account.events</code>, publish once with any routing key you like (convention is the empty string), and the email service, the analytics service and the audit service each get their own independent copy on their own queue. Adding a fourth subscriber is one <code>queueBind</code> call and no producer change — the reason fanout is the default choice for broadcast notifications.</p>
+    <p>A <strong>headers</strong> exchange ignores the routing key too, and matches on the message's header table instead. The binding carries an arguments map plus the special key <code>x-match</code>: <code>all</code> (the default) requires every header in the binding to be present and equal — a logical AND; <code>any</code> requires just one — a logical OR. Worked example: bind with <code>{x-match: all, format: pdf, type: report}</code> and only messages carrying <em>both</em> headers arrive; switch to <code>x-match: any</code> and either header suffices. Use it when routing depends on several independent attributes that do not collapse into one hierarchical string. Use it sparingly: matching a header table is more work than comparing strings, so a headers exchange is typically the slowest of the four, and most problems people reach for it to solve are better modelled as a topic key.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-three-java" rel="noopener">RabbitMQ tutorial 3 — Publish/Subscribe (fanout exchanges, Java) — RabbitMQ documentation</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/PublishSubscribeChannel.html" rel="noopener">Publish-Subscribe Channel — Enterprise Integration Patterns</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/AMQP-RabbitMQ/" rel="noopener">Getting started with AMQP and RabbitMQ — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xrvzgesaWls" rel="noopener">Fanout Exchange in RabbitMQ — Jstobigdata</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=4vFUlBjFx3g" rel="noopener">Headers Exchange in RabbitMQ — Jstobigdata (x-match all vs any)</a></li>
+    </ul>
+
+    <h3>Queue properties and message persistence — the trap that loses data</h3>
+    <p>A queue is declared with four properties worth knowing by name. <code>durable</code> means the queue <em>definition</em> survives a broker restart. <code>exclusive</code> means only the declaring connection may use it and the broker deletes it when that connection closes — right for a reply queue, wrong for anything shared. <code>autoDelete</code> means the broker deletes the queue once its last consumer unsubscribes. The fourth is an arguments map for optional behaviour (<code>x-message-ttl</code>, <code>x-max-length</code>, <code>x-dead-letter-exchange</code>, and the queue-type selector). Redeclaring an existing queue with different properties fails with a <code>PRECONDITION_FAILED</code> channel error rather than silently reconfiguring it — a classic first-deploy surprise.</p>
+    <p>Now the trap, and be explicit about it in interviews. Durability of the queue and persistence of the message are <em>two separate settings</em>, and you need both. Persistence is a per-message property — <code>deliveryMode</code> 2 (persistent) versus 1 (transient) — set by the publisher. <strong>A durable queue holding non-persistent messages still loses every message on restart:</strong> the queue comes back, empty. The reverse fails too — persistent messages in a non-durable queue die with the queue. And even both together are not a guarantee on their own: a message accepted into a durable queue may still be sitting in the OS page cache, not yet fsynced, when the node dies. The guarantee comes from waiting for the publisher confirm, which the broker only sends after the message is safely stored.</p>
+    <pre class="code-block" data-label="Java"><code>// durable, not exclusive, not auto-delete, no extra arguments
+channel.queueDeclare("orders.audit", true, false, false, null);
+
+// persistent message: BOTH halves are required
+channel.basicPublish("orders", "order.created.in",
+        MessageProperties.PERSISTENT_TEXT_PLAIN,   // deliveryMode = 2
+        body);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/queues" rel="noopener">Queues — RabbitMQ documentation (durability, exclusivity, auto-delete, optional arguments)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/persistence-conf" rel="noopener">Persistence Configuration — RabbitMQ documentation (how and when messages reach disk)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/classic-queues" rel="noopener">Classic Queues — RabbitMQ documentation (the default queue type and its storage model)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-two-java" rel="noopener">RabbitMQ tutorial 2 — Work Queues (Java): durability and acknowledgement together</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part1-rabbitmq-for-beginners-what-is-rabbitmq.html" rel="noopener">Part 1: RabbitMQ for beginners — what is RabbitMQ? — CloudAMQP</a></li>
+    </ul>
+
+    <h3>Connections versus channels (and why channels are not thread-safe)</h3>
+    <p>A <strong>connection</strong> is a real TCP connection to the broker, and it is expensive: a socket, an optional TLS handshake, AMQP protocol negotiation, authentication, per-connection memory on the node, and heartbeat traffic for the rest of its life. You open a handful per application and keep them. A <strong>channel</strong> is a lightweight virtual session multiplexed over that one connection — every AMQP frame carries a channel number, so many logical conversations interleave down a single socket. Declaring, publishing, consuming and acknowledging all happen on a channel, never on the connection directly. The broker negotiates a per-connection ceiling (<code>channel_max</code>) with the client, so channels are cheap but not free.</p>
+    <p>The rule that causes real production bugs: <strong>a channel is not thread-safe.</strong> Two threads publishing on the same channel can interleave their frames and corrupt the protocol stream, and the shared state behind confirms and transactions is per-channel too. The correct pattern is one channel per thread (or a channel pool), on a shared connection. Equally, do not swing to the other extreme: opening a channel per message — "channel churn" — is a well-known anti-pattern that burns broker CPU. Long-lived connection, long-lived per-thread channels. Spring AMQP's <code>CachingConnectionFactory</code> implements exactly this, which is why you rarely write the pooling yourself.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/connections" rel="noopener">Connections — RabbitMQ documentation (lifecycle, negotiation, heartbeats, connection churn)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/channels" rel="noopener">Channels — RabbitMQ documentation (multiplexing, channel_max, error handling)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/client-libraries/java-api-guide" rel="noopener">Java Client API Guide — RabbitMQ documentation (the thread-safety rules, spelled out)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-rabbitmq-channels-connections" rel="noopener">Channels and Connections in RabbitMQ — Baeldung</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/the-relationship-between-connections-and-channels-in-rabbitmq.html" rel="noopener">The relationship between connections and channels in RabbitMQ — CloudAMQP</a></li>
+    </ul>
+
+    <h3>Consuming: basic.consume push versus basic.get polling</h3>
+    <p>There are two ways to take a message off a queue and they are not equivalent. <code>basic.consume</code> registers a consumer and the broker <em>pushes</em> deliveries down the channel as they arrive; the client library hands each one to your callback on a consumer thread. It is asynchronous, pipelined, and flow-controlled by the prefetch setting (basic.qos), which caps how many unacknowledged messages the broker will push to you at once. This is the mode essentially all production code uses, and Spring AMQP's <code>@RabbitListener</code> sits on top of it.</p>
+    <p><code>basic.get</code> is the opposite: a synchronous poll that fetches at most one message and costs a full round trip, returning null when the queue is empty. It is fine for a one-shot script or a test, and a mistake in a loop — polling an empty queue at high frequency burns broker CPU for nothing and adds latency instead of removing it. The other half of consuming is acknowledgement: with auto-ack the broker considers a message delivered the moment it hits the socket, so a consumer crash loses it; with manual ack you call <code>basicAck</code> after your work commits, and <code>basicNack</code>/<code>basicReject</code> with <code>requeue</code> to decide whether a failure goes back on the queue or moves on to dead-lettering. Manual ack plus a sane prefetch is the default posture for anything that matters.</p>
+    <pre class="code-block" data-label="Java"><code>channel.basicQos(20);                       // prefetch: at most 20 unacked per consumer
+channel.basicConsume("orders.audit", false, // false = manual acknowledgement
+    (tag, delivery) -&gt; {
+        handle(delivery.getBody());          // do the work first
+        channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+    },
+    tag -&gt; { });                             // cancel callback</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/consumers" rel="noopener">Consumers — RabbitMQ documentation (basic.consume vs basic.get, prefetch, acknowledgement modes)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part2-rabbitmq-for-beginners_example-and-sample-code.html" rel="noopener">Part 2: RabbitMQ for beginners — sample code — CloudAMQP</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rabbitmq-consumer-acknowledgments-publisher-confirmations" rel="noopener">Consumer Acknowledgments and Publisher Confirms with RabbitMQ — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o4qCdBR4gUM" rel="noopener">Spring Boot RabbitMQ — Publisher &amp; Subscriber Example (AMQP) — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nFxjaVmFj5E" rel="noopener">RabbitMQ Tutorial — Message Queues and Distributed Systems — Amigoscode</a></li>
+    </ul>
+
+    <h3>Publisher confirms, returned messages and alternate exchanges</h3>
+    <p>Plain <code>basic.publish</code> is fire-and-forget. The protocol defines no response to it at all, so a successful write to the socket tells you precisely nothing: the broker may have rejected it, the node may have died mid-flight, the message may have matched no binding. If your code publishes and moves on, you have no delivery guarantee whatsoever — say that plainly in an interview, because plenty of production code is built on the assumption that it does.</p>
+    <p><strong>Publisher confirms</strong> are the fix. Put the channel into confirm mode (<code>confirmSelect</code>) and the broker sends an asynchronous <code>basic.ack</code> back to the publisher carrying the delivery tag of the message it has taken responsibility for — after it has been routed and, for a persistent message on a durable queue, after it has been written to disk (and, for a quorum queue, replicated). A <code>basic.nack</code> means the broker could not take responsibility. Because confirms are asynchronous and support a <code>multiple</code> flag that acknowledges everything up to a tag, you keep publishing at full rate and reconcile in a listener — that is the whole design. The blocking helpers (<code>waitForConfirms</code>, <code>waitForConfirmsOrDie</code>) are simpler and much slower.</p>
+    <p>Confirms cover "did the broker take it", not "did it reach a queue" — a message that matches no binding is still confirmed, because the broker did its job. For that, set the <code>mandatory</code> flag on publish and the broker will hand an unroutable message back via <code>basic.return</code> before confirming it; register a <code>ReturnListener</code> and you actually find out. The server-side alternative is an <strong>alternate exchange</strong>: give an exchange the <code>alternate-exchange</code> argument and anything it cannot route is republished there instead of being dropped, so unroutable messages accumulate in a catch-all queue you can inspect. (The old <code>immediate</code> flag is long gone — removed in RabbitMQ 3.0 — so do not offer it as an answer.)</p>
+    <pre class="code-block" data-label="Java"><code>channel.confirmSelect();                              // enable confirms on this channel
+channel.addConfirmListener(
+    (tag, multiple) -&gt; outstanding.headMap(tag, true).clear(),   // ack: broker owns it
+    (tag, multiple) -&gt; retry(outstanding.get(tag)));             // nack: broker refused
+
+channel.addReturnListener(r -&gt; log.warn("unroutable: {}", r.getRoutingKey()));
+channel.basicPublish("orders", "order.created.in",
+        true,          // mandatory: return it instead of dropping it
+        MessageProperties.PERSISTENT_TEXT_PLAIN, body);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/publishers" rel="noopener">Publishers — RabbitMQ documentation (publisher confirms, unroutable messages, mandatory)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/confirms" rel="noopener">Consumer Acknowledgements and Publisher Confirms — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-seven-java" rel="noopener">RabbitMQ tutorial 7 — Reliable Publishing with Publisher Confirms (Java)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/ae" rel="noopener">Alternate Exchanges — RabbitMQ documentation</a></li>
+      <li>[Article] <a href="https://www.rabbitmq.com/blog/2011/02/10/introducing-publisher-confirms" rel="noopener">Introducing Publisher Confirms — RabbitMQ blog (why confirms exist and what they replaced)</a></li>
+    </ul>
+
+    <h3>Transactions versus confirms, and where AMQP 1.0 fits in RabbitMQ 4.x</h3>
+    <p>AMQP 0-9-1 does have transactions — <code>tx.select</code>, <code>tx.commit</code>, <code>tx.rollback</code> — and they are almost always the wrong tool. A transaction is synchronous: the publisher blocks on every commit for a full round trip to the broker and back, so throughput collapses to one batch per network round trip. The post that introduced publisher confirms measured the difference in the hundreds-of-times range, which is exactly why confirms were built. Confirms achieve the same "I know the broker has it" property while staying asynchronous and pipelined, so the publisher never stalls. Transactions also do not span the consumer side or your database, so they buy far less atomicity than the name suggests. Rule of thumb: use confirms; reach for transactions only in the rare case where you need several publishes on one channel to be all-or-nothing and can pay for it.</p>
+    <p>One version note for 2026 interviews. RabbitMQ 4.x supports <strong>AMQP 1.0</strong> natively as a core protocol rather than as a plugin, alongside 0-9-1, MQTT and STOMP — worth knowing that AMQP 1.0 is a genuinely different protocol, not "version 1.0 of the thing you already use", and that it has no exchange concept in the 0-9-1 sense. In practice the Java ecosystem — the RabbitMQ Java client, Spring AMQP, <code>@RabbitListener</code> — still speaks 0-9-1, so the exchange/binding/routing-key model in this module remains the one you are asked about and the one you will write.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/specification" rel="noopener">AMQP 0-9-1 specification and protocol extensions — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/amqp" rel="noopener">AMQP 1.0 support — RabbitMQ documentation (what changed for 4.x)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/reliability" rel="noopener">Reliability Guide — RabbitMQ documentation (publisher and consumer guarantees end to end)</a></li>
+      <li>[Article] <a href="https://www.rabbitmq.com/blog/2024/08/05/native-amqp" rel="noopener">Native AMQP 1.0 — RabbitMQ blog (the 4.0 protocol change and its rationale)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/when-to-use-rabbitmq-or-apache-kafka.html" rel="noopener">When to use RabbitMQ or Apache Kafka — CloudAMQP</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-spring-kafka.html">← Spring for Apache Kafka</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="07-rabbitmq-operations.html">RabbitMQ in Production →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>RabbitMQ questions in Indian product and service-company rounds cluster tightly: exchange types and routing rules early, durability and confirms in the middle, and "Kafka or RabbitMQ, and why?" as the design question at the end. These are the ones that actually come up:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Walk me through what happens when a producer publishes a message in RabbitMQ.</summary>
+      <div class="answer"><p>The producer publishes to an <em>exchange</em> with a routing key — never to a queue. The exchange compares that routing key against every binding attached to it, using the rule for its type (exact match for direct, pattern match for topic, everything for fanout, header match for headers). Each queue whose binding matches receives a copy. If no binding matches, the message is dropped unless the publish was marked mandatory or the exchange has an alternate exchange configured.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the four exchange types and the matching rule for each.</summary>
+      <div class="answer"><p>Direct — routing key must equal the binding key exactly. Topic — the dot-delimited routing key is matched against a binding pattern using <code>*</code> and <code>#</code> wildcards. Fanout — routing key ignored, every bound queue gets a copy. Headers — routing key ignored, matched against the message header table using the binding's <code>x-match</code> argument (<code>all</code> for AND, <code>any</code> for OR).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between <code>*</code> and <code>#</code> in a topic binding?</summary>
+      <div class="answer"><p><code>*</code> matches exactly one word; <code>#</code> matches zero or more words. So for the key <code>order.created.mumbai</code>: <code>order.created.*</code> matches, <code>order.#</code> matches, <code>order.*</code> does not (two words remain), and a bare <code>#</code> matches every message, making the topic exchange behave like a fanout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> My code publishes with a queue name and it works. Didn't you say producers can't publish to queues?</summary>
+      <div class="answer"><p>You are publishing to the default exchange — the nameless direct exchange addressed as <code>""</code>. RabbitMQ automatically binds every queue to it with a binding key equal to the queue's name, so a routing key that happens to equal a queue name matches that automatic binding. It is ordinary direct routing, not a special "publish to queue" path. You cannot create or remove bindings on it, so it is fine for demos and unsuitable for a real topology.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do <code>durable</code>, <code>exclusive</code> and <code>autoDelete</code> mean on a queue?</summary>
+      <div class="answer"><p>Durable: the queue definition survives a broker restart. Exclusive: only the declaring connection may use it, and the broker deletes it when that connection closes — right for temporary reply queues. Auto-delete: the broker deletes the queue after its last consumer unsubscribes. They are independent flags, and redeclaring an existing queue with different values fails with <code>PRECONDITION_FAILED</code> rather than silently changing it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> I declared a durable queue and I still lost messages on restart. Why?</summary>
+      <div class="answer"><p>Because queue durability and message persistence are separate settings and you need both. Durability only preserves the queue definition; the messages inside it must be published with <code>deliveryMode</code> 2 (persistent) or they are discarded on restart and the queue comes back empty. The inverse fails too — persistent messages in a non-durable queue die with the queue. And even both together are not a full guarantee: a message may still be in the OS page cache when the node dies, which is why you wait for a publisher confirm before considering it stored.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Connection vs channel — and how many of each should an application open?</summary>
+      <div class="answer"><p>A connection is a real TCP connection: socket, TLS handshake, protocol negotiation, authentication, heartbeats, per-connection memory on the broker — expensive, so you open a few and keep them for the application's lifetime. A channel is a lightweight virtual session multiplexed over that connection; every frame carries a channel number so many logical conversations share one socket. All real work — declare, publish, consume, ack — happens on a channel. Long-lived connection, long-lived channels; opening a channel per message (channel churn) is a documented anti-pattern.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Can two threads share one channel?</summary>
+      <div class="answer"><p>No. Channels are not thread-safe. Concurrent publishes can interleave frames on the wire and break the protocol stream, and per-channel state — confirm bookkeeping, transactions, prefetch — is not guarded either. Use one channel per thread or a channel pool over a shared connection. Spring AMQP's <code>CachingConnectionFactory</code> does this caching for you, which is why the problem mostly appears in hand-rolled clients.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> <code>basic.consume</code> or <code>basic.get</code> — which do you use, and why?</summary>
+      <div class="answer"><p><code>basic.consume</code>, essentially always. It registers a consumer and the broker pushes deliveries down the channel asynchronously, flow-controlled by prefetch, so there is no idle round trip and no polling latency. <code>basic.get</code> is a synchronous poll that fetches at most one message per round trip and returns null on an empty queue — acceptable for a script or a test, wasteful and slow in a loop.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does prefetch (<code>basic.qos</code>) actually control, and what happens if you leave it unlimited?</summary>
+      <div class="answer"><p>It caps how many unacknowledged messages the broker will push to a consumer at a time. Unlimited prefetch means the broker dumps the whole queue into one consumer's socket buffer: that consumer hogs the backlog while its peers idle, memory grows on the client, and every in-flight message is redelivered if it crashes. Too low (1) costs a round trip of latency per message. Tune it to roughly the number of messages a consumer can process within one network round trip.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What guarantee does a plain <code>basic.publish</code> give you, and how do publisher confirms change it?</summary>
+      <div class="answer"><p>None at all — the protocol defines no response to <code>basic.publish</code>, so writing to the socket tells you nothing about routing, storage, or whether the node is even alive. With <code>confirmSelect</code>, the broker sends an asynchronous <code>basic.ack</code> carrying the delivery tag once it has taken responsibility: routed, and for a persistent message on a durable queue, written to disk (and replicated, for a quorum queue). A <code>basic.nack</code> means it could not. Confirms stay asynchronous and support a <code>multiple</code> flag, so you keep publishing at full rate and reconcile in a listener; the blocking <code>waitForConfirms</code> helpers are simpler but far slower.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A message is published and confirmed, but no consumer ever sees it. What went wrong and how do you catch it?</summary>
+      <div class="answer"><p>It matched no binding, so it was routed to zero queues and dropped — and the broker still confirmed it, because a confirm means "I took responsibility", not "it reached a queue". Usually a typo in the routing key or a binding that was never declared. Two fixes: publish with the <code>mandatory</code> flag and register a <code>ReturnListener</code>, so the broker hands unroutable messages back via <code>basic.return</code>; or configure an <code>alternate-exchange</code> on the exchange so unroutable messages are republished to a catch-all queue you can monitor. The <code>immediate</code> flag is not an option — it was removed in RabbitMQ 3.0.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Transactions or publisher confirms for reliable publishing?</summary>
+      <div class="answer"><p>Confirms. AMQP transactions (<code>tx.select</code>/<code>tx.commit</code>) are synchronous — the publisher blocks a full round trip on every commit, so throughput drops to one batch per round trip; RabbitMQ's own announcement of confirms cited a difference in the hundreds of times, and that is why confirms exist. Transactions also cover only publishes on that one channel, not the consumer side or your database, so they give much weaker atomicity than the name implies. Use transactions only when several publishes on one channel genuinely must be all-or-nothing and you can afford the cost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> RabbitMQ vs Kafka — how do you choose?</summary>
+      <div class="answer"><p>Different shapes, not different speeds. RabbitMQ is a smart broker with dumb consumers: routing logic lives in exchanges and bindings, messages are removed once acknowledged, per-message routing and priorities and TTLs and dead-lettering are first class. It suits task distribution, RPC-style work queues, complex per-message routing, and moderate throughput with rich delivery semantics. Kafka is a dumb broker with smart consumers: an append-only partitioned log where the consumer tracks its own offset, messages are retained by policy rather than consumed away, and replay is free. It suits very high throughput, event streaming, stream processing, and multiple independent readers of the same history. Ask about replay, ordering scope, throughput and routing complexity; if the answer is "fan work out to workers with intricate routing", pick RabbitMQ, and if it is "durable event log many consumers re-read", pick Kafka.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the topology for an order service that must notify email, analytics and audit, where audit needs every event but email only wants cancellations in India.</summary>
+      <div class="answer"><p>One topic exchange <code>orders</code>, with keys shaped <code>&lt;entity&gt;.&lt;event&gt;.&lt;region&gt;</code>, most significant word first. Bind <code>orders.audit</code> with <code>order.#</code> so it receives everything. Bind <code>orders.analytics</code> with <code>order.#</code> too — separate queue, independent copy, its own consumer group and its own backlog. Bind <code>orders.email</code> with <code>order.cancelled.in</code>, which is an exact pattern and behaves like a direct binding. All queues durable, all messages persistent, publishers in confirm mode with mandatory set, and an alternate exchange on <code>orders</code> catching anything mistyped. Adding a fourth subscriber later is one <code>queueBind</code> call and no producer change — that is the payoff of routing in the broker.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> RabbitMQ 4.x supports AMQP 1.0. Does that change how you write Java clients?</summary>
+      <div class="answer"><p>Not for most teams. AMQP 1.0 is a different protocol from AMQP 0-9-1, not a newer revision of it — it has no exchange concept in the 0-9-1 sense — and RabbitMQ 4.x supports it natively as a core protocol rather than as a plugin, alongside 0-9-1, MQTT and STOMP. But the Java ecosystem you actually ship — the RabbitMQ Java client, Spring AMQP, <code>@RabbitListener</code> — still speaks 0-9-1, so exchanges, bindings and routing keys remain the model to know. Mention 1.0 as version awareness, then keep answering in 0-9-1 terms.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.ra.exchanges — exchanges (direct, topic, fanout, headers), queues, bindings, routing keys</li>
+      <li>msg.ra.publish — publishing and consuming, publisher confirms, connections vs channels</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

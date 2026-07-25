@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Spring for Apache Kafka module: KafkaTemplate and spring.kafka auto-configuration, transactions, @KafkaListener containers and concurrency, ack modes, JSON serialization and ErrorHandlingDeserializer, DefaultErrorHandler with dead-letter topics, non-blocking @RetryableTopic retries, and testing with EmbeddedKafka and Testcontainers — verified resources and interview questions.">
+  <title>Spring for Apache Kafka — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Spring for Apache Kafka</h1>
+  <p class="standfirst">Modules 02 to 04 taught you the broker and the raw client. This one is about the layer you will actually type at work — where a consumer loop becomes an annotated method, and where the interesting bugs move from the protocol into the framework's error handling.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Messaging and Event-Driven Systems</a> → Spring for Apache Kafka</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Spring for Apache Kafka does not replace the Apache client — it wraps it. Everything you learned about acks, idempotent producers, consumer groups, partition assignment and rebalancing is still exactly true underneath; the framework supplies a <code>KafkaTemplate</code> for sending, a listener container that owns the poll loop for you, and message conversion so your code deals in domain objects instead of byte arrays. Knowing which knob is a Spring knob and which is a plain client property is half of using it well.</p>
+    <p>The module walks the producer side (template, keys, async results, transactions), the consumer side (<code>@KafkaListener</code>, container factories, concurrency, acknowledgement modes, serialization), and then the half that interviewers actually probe: what happens when a record cannot be processed. Blocking retry, dead-letter topics, non-blocking retry topics, and finally how to test any of it. Targets Spring Boot 3.x/4.x with the current Spring for Apache Kafka release against a Kafka 4.x broker.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Auto-configuration: what spring.kafka actually builds for you</h3>
+    <p>Adding the <code>spring-kafka</code> dependency to a Boot application gives you a <code>ProducerFactory</code>, a <code>ConsumerFactory</code>, a <code>KafkaTemplate</code>, a <code>ConcurrentKafkaListenerContainerFactory</code> and a <code>KafkaAdmin</code>, all configured from the <code>spring.kafka.*</code> namespace. Boot maps the well-known settings to typed properties (<code>spring.kafka.producer.acks</code>, <code>spring.kafka.consumer.auto-offset-reset</code>, <code>spring.kafka.consumer.group-id</code>) and gives you an escape hatch — <code>spring.kafka.producer.properties.*</code> and <code>spring.kafka.consumer.properties.*</code> — for any raw client property Boot has not modelled. Anything you can set on a <code>KafkaProducer</code> you can still set here.</p>
+    <p>Why this matters in an interview: the framework changes the ergonomics, not the semantics. If a candidate says "Spring Kafka guarantees delivery", they have misunderstood the layering — durability still comes from <code>acks=all</code>, <code>min.insync.replicas</code> and the replication factor on the broker, exactly as in module 03. Also note that the <code>ProducerFactory</code> is shared and its producers are thread-safe and pooled, while each listener container creates its own consumers, because a Kafka consumer is emphatically not thread-safe.</p>
+    <pre class="code-block" data-label="YAML"><code>spring:
+  kafka:
+    bootstrap-servers: broker-a.internal,broker-b.internal
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true      # raw client property, passed straight through
+    consumer:
+      group-id: order-projector
+      auto-offset-reset: earliest
+      enable-auto-commit: false       # let the container own offset commits</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/index.html" rel="noopener">Spring for Apache Kafka — reference documentation (the whole manual, start here)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/kafka.html" rel="noopener">Apache Kafka Support — Spring Boot reference (every spring.kafka property and the auto-configured beans)</a></li>
+      <li>[Official] <a href="https://spring.io/projects/spring-kafka" rel="noopener">Spring for Apache Kafka — project page (release train, version compatibility matrix)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-kafka" rel="noopener">Intro to Apache Kafka with Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c7LPlWvxZcQ" rel="noopener">Apache Kafka Crash Course With Spring Boot 3.0.x — Java Techie</a></li>
+    </ul>
+
+    <h3>Producing: KafkaTemplate, keys, and the async result nobody checks</h3>
+    <p><code>KafkaTemplate.send(...)</code> is the Spring face of <code>Producer.send()</code> and it is asynchronous in exactly the same way: it serialises the record, drops it into the accumulator batch for its partition and returns immediately. Since Spring for Apache Kafka 3.0 it returns a <code>CompletableFuture&lt;SendResult&lt;K, V&gt;&gt;</code> rather than the old Spring <code>ListenableFuture</code> — a migration detail worth knowing because a lot of blog code you will find online still uses the removed type. Ignoring that future is the single most common Spring Kafka bug: a broker rejection, a serialization failure or a <code>TimeoutException</code> after <code>delivery.timeout.ms</code> then vanishes silently and the application believes it published something it never did.</p>
+    <p>The key argument is the other thing to get right. The key decides the partition through the default partitioner, so it decides ordering: same key, same partition, same order. Send with a null key and records are spread across partitions and any per-entity ordering you assumed is gone. Pick the key from the aggregate whose order matters — order id, customer id, account number — not from something incidental. If you need the send to be synchronous for a specific call site, join the future explicitly with a timeout rather than blocking forever.</p>
+    <pre class="code-block" data-label="Java"><code>// key = orderId, so all events for one order land on one partition, in order
+kafkaTemplate.send("orders", order.id(), event)
+    .whenComplete((result, ex) -&gt; {
+        if (ex != null) {
+            log.error("publish failed for order {}", order.id(), ex);   // never swallow this
+        } else {
+            var meta = result.getRecordMetadata();
+            log.debug("published to {}-{} at offset {}",
+                      meta.topic(), meta.partition(), meta.offset());
+        }
+    });</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/sending-messages.html" rel="noopener">Sending Messages — Spring for Apache Kafka reference (KafkaTemplate, ProducerFactory, routing template)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/get-started/spring-boot/" rel="noopener">Spring Boot: Apache Kafka Getting Started — Confluent Developer (runnable end-to-end walkthrough)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/apache-kafka-spring-boot-application/" rel="noopener">Getting Started with Apache Kafka and Spring Boot — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/kafka-tutorial-producer-consumer-using-spring-boot/" rel="noopener">Kafka Tutorial: Producer and Consumer using Spring Boot — SivaLabs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=wBGT7u_R-tw" rel="noopener">Simple Kafka Producer example with Spring Boot and Spring Kafka — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Transactions: KafkaTransactionManager and executeInTransaction</h3>
+    <p>Set <code>spring.kafka.producer.transaction-id-prefix</code> and Boot configures a transactional <code>ProducerFactory</code> plus a <code>KafkaTransactionManager</code>, which is an ordinary Spring <code>PlatformTransactionManager</code>. From then on <code>@Transactional</code> works over Kafka sends: every <code>KafkaTemplate</code> operation inside the transactional scope joins the same producer transaction and commits or aborts together. Give the listener container that transaction manager and it goes further — it opens a transaction before invoking your listener and calls <code>sendOffsetsToTransaction()</code> before committing, so the consumed offset and the produced records commit atomically. That read-process-write atomicity is what "exactly once" actually means in Kafka, and it only holds when downstream consumers set <code>isolation.level=read_committed</code>.</p>
+    <p>Two details that separate the confident answer from the vague one. First, <code>executeInTransaction(...)</code> exists for the case where you want a local producer transaction <em>without</em> joining any ambient Spring transaction — useful when a listener already runs inside a database transaction and you deliberately do not want the send enlisted in it. Second, chaining a database transaction manager with the Kafka one gives you a best-effort two-phase commit, not a real one: the window where the database has committed and the Kafka commit then fails still exists, so the consumer must remain idempotent. If a candidate claims Spring gives true distributed transactions across a database and Kafka, that is the follow-up question.</p>
+    <pre class="code-block" data-label="Java"><code>@Transactional                        // KafkaTransactionManager is the tx manager
+public void reprice(PriceChange change) {
+    kafkaTemplate.send("prices", change.sku(), change);
+    kafkaTemplate.send("audit",  change.sku(), Audit.of(change));
+    // both records become visible to read_committed consumers together, or neither does
+}
+
+// local producer transaction, deliberately NOT joining an outer transaction
+kafkaTemplate.executeInTransaction(t -&gt; t.send("prices", sku, change));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/transactions.html" rel="noopener">Transactions — Spring for Apache Kafka reference (transaction-id prefix, executeInTransaction, chained managers)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/exactly-once.html" rel="noopener">Exactly Once Semantics — Spring for Apache Kafka reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/api/org/springframework/kafka/transaction/KafkaTransactionManager.html" rel="noopener">KafkaTransactionManager — Spring for Apache Kafka API javadoc</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/transactions-apache-kafka/" rel="noopener">Transactions in Apache Kafka — Confluent blog (the design behind the API)</a></li>
+      <li>[Article] <a href="https://spring.io/blog/2023/09/27/introduction-to-transactions-in-spring-cloud-stream-kafka-applications/" rel="noopener">Introduction to Transactions in Spring Cloud Stream Kafka Applications — Spring Blog</a></li>
+    </ul>
+
+    <h3>@KafkaListener, the listener container, and what concurrency really means</h3>
+    <p>An annotated method replaces the poll loop, but the loop is still there — it lives in a <code>MessageListenerContainer</code> built by the <code>ConcurrentKafkaListenerContainerFactory</code>. The container polls, hands each record to your method, tracks offsets and commits them according to the configured acknowledgement mode, and it also owns rebalance handling and the lifecycle (you can start, stop and inspect any container by id through the <code>KafkaListenerEndpointRegistry</code>, which is how you build a pause/resume switch or a dynamically managed listener).</p>
+    <p>The <code>concurrency</code> setting is the classic trick question. It does <em>not</em> create threads that share partitions — it creates that many child containers, each with its own <code>KafkaConsumer</code>, all in the same consumer group. The group protocol therefore bounds them: with concurrency 10 on a topic with 3 partitions, 3 consumers get one partition each and 7 sit permanently idle. Concurrency is capped by partition count, always, and the only way to raise consumption parallelism beyond that is to add partitions. Note also that concurrency is per application instance, so 4 pods at concurrency 3 is 12 consumers competing for the partitions of that group.</p>
+    <pre class="code-block" data-label="Java"><code>@KafkaListener(id = "orderProjector", topics = "orders",
+               groupId = "order-projector", concurrency = "3")
+public void onOrder(OrderEvent event) { projector.apply(event); }
+
+// 3 child containers => 3 consumers in the group.
+// Topic has 3+ partitions -> all three work. Topic has 1 partition -> two idle forever.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages.html" rel="noopener">Receiving Messages — Spring for Apache Kafka reference</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html" rel="noopener">Message Listener Containers — Spring for Apache Kafka reference (concurrency, partition assignment, lifecycle)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/listener-annotation.html" rel="noopener">@KafkaListener Annotation — Spring for Apache Kafka reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-kafka-multiple-listeners-same-topic" rel="noopener">Configure Multiple Listeners on the Same Topic — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=80ngRl7RhCw" rel="noopener">Simple Kafka Consumer example with Spring Boot and Spring Kafka — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Parameter binding, batch listeners and acknowledgement modes</h3>
+    <p>The listener method signature is flexible and you should exploit it. Take the deserialised body with <code>@Payload</code>, individual headers with <code>@Header(KafkaHeaders.RECEIVED_KEY)</code> or <code>@Header(KafkaHeaders.RECEIVED_PARTITION)</code>, the whole envelope as a <code>ConsumerRecord&lt;K, V&gt;</code> when you need offsets and timestamps, or an <code>Acknowledgment</code> when you commit manually. Set <code>batch: true</code> on the factory and the same method takes a <code>List&lt;T&gt;</code> — one call per poll instead of one call per record, which is a large throughput win when your processing is a bulk database write, at the cost of coarser error granularity.</p>
+    <p>Acknowledgement mode is where correctness lives. <code>BATCH</code> (the default) commits the offsets of the whole poll after the batch is processed. <code>RECORD</code> commits after each record — safest, slowest. <code>MANUAL</code> queues your <code>ack()</code> and commits it at the end of the batch; <code>MANUAL_IMMEDIATE</code> commits it right away, which is what people usually mean when they say "manual commit". Whatever you choose, remember the guarantee is at-least-once: the process can die after handling a record and before the commit lands, so the record is redelivered. Idempotent handlers are not optional, they are the design.</p>
+    <pre class="code-block" data-label="Java"><code>@KafkaListener(topics = "orders", containerFactory = "manualAckFactory")
+public void onOrder(@Payload OrderEvent event,
+                    @Header(KafkaHeaders.RECEIVED_KEY) String key,
+                    ConsumerRecord&lt;String, OrderEvent&gt; record,
+                    Acknowledgment ack) {
+    projector.apply(event);           // must be idempotent: redelivery is normal
+    ack.acknowledge();                // AckMode.MANUAL_IMMEDIATE commits here and now
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/container-props.html" rel="noopener">Listener Container Properties — Spring for Apache Kafka reference (the full AckMode table)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listeners.html" rel="noopener">Message Listeners — Spring for Apache Kafka reference (the record, batch and acknowledging listener interfaces)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/ooo-commits.html" rel="noopener">Manually Committing Offsets and Out-of-Order Commits — Spring for Apache Kafka reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-kafkalistener-annotation-handle-messages-batch" rel="noopener">Consuming Messages in Batch with @KafkaListener — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tU_37niRh4U" rel="noopener">Apache Kafka Tutorial and Crash Course with Spring Boot — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>Serialization: JSON, type headers, trusted packages and the poison pill</h3>
+    <p>Spring's <code>JsonSerializer</code> and <code>JsonDeserializer</code> convert domain objects with Jackson. By default the serializer writes the fully qualified class name into a type header and the deserializer reads it back — convenient inside one codebase, brittle across teams, because renaming or moving a class breaks every consumer. The fix is <code>JsonSerializer.TYPE_MAPPINGS</code> on the producer, which publishes a stable logical name (<code>order:com.acme.orders.OrderEvent</code>) instead of a package path, so producer and consumer can hold the class in different packages. Alternatively, turn type headers off entirely and pin the target type on the consumer with <code>JsonDeserializer.VALUE_DEFAULT_TYPE</code> or a typed <code>JsonDeserializer&lt;&gt;(OrderEvent.class)</code>.</p>
+    <p>Trusted packages is the security control on the same mechanism: because the type header arrives from the network, an unrestricted deserializer would instantiate whatever class a publisher names, so Spring refuses anything outside <code>spring.json.trusted.packages</code>. Setting it to <code>*</code> to make an error go away is a real finding in a code review. The related failure is the poison pill — one record that cannot be deserialised at all. Deserialization happens inside the poll, before your listener and before any error handler, so an unguarded consumer throws, never advances the offset, and re-reads the same bad record forever. Wrapping the delegates in <code>ErrorHandlingDeserializer</code> is what turns that infinite loop into a normal failed record the error handler can route to a dead-letter topic.</p>
+    <pre class="code-block" data-label="Properties"><code>spring.kafka.consumer.key-deserializer=org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+spring.kafka.consumer.value-deserializer=org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+spring.kafka.consumer.properties.spring.deserializer.key.delegate.class=org.apache.kafka.common.serialization.StringDeserializer
+spring.kafka.consumer.properties.spring.deserializer.value.delegate.class=org.springframework.kafka.support.serializer.JsonDeserializer
+spring.kafka.consumer.properties.spring.json.trusted.packages=com.acme.orders.events
+# producer side: publish a stable logical type name, not a package path
+spring.kafka.producer.properties.spring.json.type.mapping=order:com.acme.orders.events.OrderEvent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/serdes.html" rel="noopener">Serialization, Deserialization and Message Conversion — Spring for Apache Kafka reference (JsonSerializer, type mapping, ErrorHandlingDeserializer)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-kafka-trusted-packages-feature" rel="noopener">Spring Kafka Trusted Packages Feature — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-kafka-deserialization-errors" rel="noopener">How to Catch Deserialization Errors in Spring Kafka — Baeldung</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/spring-kafka-can-your-kafka-consumers-handle-a-poison-pill/" rel="noopener">Spring Kafka: Can Your Consumers Handle a Poison Pill? — Confluent blog</a></li>
+    </ul>
+
+    <h3>DefaultErrorHandler, backoff, and the dead-letter topic</h3>
+    <p>When a listener throws, the container hands the failure to an error handler. The default is <code>DefaultErrorHandler</code>, which retries the failed record in place using a <code>BackOff</code> — <code>FixedBackOff</code> for a flat interval, <code>ExponentialBackOffWithMaxRetries</code> for a growing one — and, once attempts are exhausted, passes the record to a <em>recoverer</em>. The standard recoverer is <code>DeadLetterPublishingRecoverer</code>, which republishes the record to a dead-letter topic. By convention that topic is the original name plus a <code>.DLT</code> suffix, and the recoverer copies the original key, value and headers and adds diagnostic headers — original topic, partition, offset, timestamp, exception class and stack trace — so the DLT record is self-describing when someone has to triage it at two in the morning. Also configure the classification: <code>addNotRetryableExceptions</code> for deterministic failures such as validation errors, because retrying a record that will never parse is pure waste.</p>
+    <p>The thing to say out loud in an interview is why this is called <em>blocking</em> retry. The container retries on the same consumer thread, on the same partition, and it does not poll meanwhile — so every other record queued behind that one on that partition waits for the whole backoff sequence. A ten-second exponential backoff on one bad record stalls an entire partition for ten seconds, and if the total pause exceeds <code>max.poll.interval.ms</code> the broker declares the consumer dead and triggers a rebalance, which is a far worse outcome than the original error. Blocking retry is therefore correct only for short, genuinely transient faults; anything longer needs the non-blocking approach below.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+DefaultErrorHandler errorHandler(KafkaTemplate&lt;Object, Object&gt; template) {
+    // exhausted attempts -&gt; republish to "&lt;topic&gt;.DLT" on the same partition number
+    var recoverer = new DeadLetterPublishingRecoverer(template);
+    var handler = new DefaultErrorHandler(recoverer, new FixedBackOff(500L, 2L));
+    handler.addNotRetryableExceptions(ValidationException.class);  // deterministic: straight to DLT
+    return handler;
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html" rel="noopener">Handling Exceptions — Spring for Apache Kafka reference (DefaultErrorHandler, recoverers, dead-letter publishing)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-spring-dead-letter-queue" rel="noopener">Dead Letter Queue for Kafka With Spring — Baeldung</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/error-handling-patterns-in-kafka/" rel="noopener">Error Handling Patterns for Apache Kafka Applications — Confluent blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aNBSd7T-RGA" rel="noopener">Kafka Error Handling with Spring Boot: Retry Strategies and Dead Letter Topics — Java Techie</a></li>
+    </ul>
+
+    <h3>@RetryableTopic: non-blocking retry with separate delay topics</h3>
+    <p><code>@RetryableTopic</code> inverts the problem. Instead of holding the partition while it retries, the framework immediately forwards the failed record to a dedicated retry topic and commits the original offset, so the main partition keeps flowing. Each retry topic has its own listener and its own delay, and after the configured attempts the record lands in the DLT. Spring provides two topic strategies: a separate topic per attempt (<code>topic-retry-0</code>, <code>topic-retry-1</code>, …) which is the default, or a single retry topic reused for every attempt. Because the delay is implemented by pausing the retry topic's consumer until the record's timestamp plus the backoff has elapsed, the delays are approximate rather than exact — the reference documentation has a whole section on that precision tradeoff.</p>
+    <p>The cost of non-blocking retry is the one to name unprompted: you have given up ordering. A record that fails and is retried five seconds later is now processed after records that came behind it on the same key, so if your consumer maintains per-key state you have introduced a correctness bug in exchange for throughput. Use non-blocking retry for independent, order-insensitive work — sending an email, calling an external API, updating a cache — and stay with short blocking retry, or a parking-lot topic replayed in order, where per-key ordering is part of the contract. Module 08 covers the replay and parking-lot side of that decision.</p>
+    <pre class="code-block" data-label="Java"><code>@RetryableTopic(
+    attempts = "4",
+    backoff = @Backoff(delay = 1000, multiplier = 2.0),   // roughly 1s, 2s, 4s
+    exclude = { ValidationException.class },              // deterministic -&gt; straight to DLT
+    dltStrategy = DltStrategy.FAIL_ON_ERROR)
+@KafkaListener(topics = "orders", groupId = "order-notifier")
+public void notify(OrderEvent event) { mailer.send(event); }
+
+@DltHandler
+public void onDlt(OrderEvent event,
+                  @Header(KafkaHeaders.ORIGINAL_TOPIC) String origin) {
+    parkingLot.record(event, origin);   // alert on this: a DLT nobody watches is a data-loss bug
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic.html" rel="noopener">Non-Blocking Retries — Spring for Apache Kafka reference (@RetryableTopic, DLT handling)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/topic-naming.html" rel="noopener">Retry Topic Naming — Spring for Apache Kafka reference (multi-topic vs single-topic strategies)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/back-off-delay-precision.html" rel="noopener">Back Off Delay Precision — Spring for Apache Kafka reference (why the delays are approximate)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-retry-kafka-consumer" rel="noopener">Implementing Retry in Kafka Consumer — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mkl-IcWSRnw" rel="noopener">Live Coding: Retry, Dead Letter Topic and Non-Blocking Retries in Spring Kafka — AajKaPlan</a></li>
+    </ul>
+
+    <h3>Testing the listener: @EmbeddedKafka and EmbeddedKafkaBroker</h3>
+    <p><code>@EmbeddedKafka</code> starts an in-process broker for the test context and publishes its address into the environment, so <code>spring.kafka.bootstrap-servers</code> can be wired straight to it. You declare the partition count and the topics to create up front, inject the <code>EmbeddedKafkaBroker</code> when you need to build a raw consumer for assertions, and get a fast, dependency-free test that runs anywhere — including on a build agent with no Docker daemon.</p>
+    <p>Two practical warnings. Kafka consumption is asynchronous, so a test that publishes and then asserts immediately is flaky by construction: use a <code>CountDownLatch</code> in the listener, or Awaitility, rather than sleeping. And starting a broker per test class is slow, so keep the embedded broker on a shared, cached test context — changing broker properties between classes silently forks the context and multiplies your build time. The embedded broker is also not identical to a production broker; where behaviour under real replication, real transactions or a specific broker version matters, reach for a container instead.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/testing.html" rel="noopener">Testing Applications — Spring for Apache Kafka reference (@EmbeddedKafka, EmbeddedKafkaBroker, KafkaTestUtils)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-kafka-testing" rel="noopener">Testing Kafka and Spring Boot — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-test-reuse-embedded-broker" rel="noopener">Reuse an Embedded Kafka Broker Across Multiple Test Classes — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=UvTXArpgrtY" rel="noopener">Mastering Kafka End-to-End Integration Testing in Spring Boot — Java Techie</a></li>
+    </ul>
+
+    <h3>Testcontainers: a real broker in the test, for higher fidelity</h3>
+    <p>Testcontainers runs an actual Kafka image in Docker for the duration of the test. You test against the same broker build you deploy against, so KRaft behaviour, transaction semantics, compaction, real replication and version-specific quirks all show up in CI rather than in production. Spring Boot 3.1 and later make the wiring almost invisible: annotate the container bean with <code>@ServiceConnection</code> and Boot derives <code>spring.kafka.bootstrap-servers</code> from it automatically, with no <code>@DynamicPropertySource</code> block to maintain.</p>
+    <p>The tradeoff is startup cost and a hard dependency on a container runtime, so the sensible split is to use both: embedded Kafka for the fast, numerous listener and serialization tests, and Testcontainers for a smaller set of end-to-end tests covering the paths where broker fidelity genuinely matters. Reuse matters as much as choice — a singleton container, or Testcontainers reuse, keeps a suite that would otherwise spend minutes on container startup down to seconds.</p>
+    <pre class="code-block" data-label="Java"><code>@SpringBootTest
+@Testcontainers
+class OrderListenerIT {
+
+    @Container
+    @ServiceConnection                       // Boot derives bootstrap-servers from the container
+    static KafkaContainer kafka = new KafkaContainer(
+            DockerImageName.parse("apache/kafka-native"));
+
+    @Test void projectsOrder() { /* publish, then await the projection */ }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://testcontainers.com/modules/kafka/" rel="noopener">Kafka module — Testcontainers documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/testing/testcontainers.html" rel="noopener">Testcontainers support — Spring Boot reference (@ServiceConnection, dynamic properties)</a></li>
+      <li>[Official] <a href="https://testcontainers.com/guides/testing-spring-boot-kafka-listener-using-testcontainers/" rel="noopener">Testing a Spring Boot Kafka Listener using Testcontainers — Testcontainers guide</a></li>
+      <li>[Article] <a href="https://www.sivalabs.in/blog/spring-boot-integration-testing-using-testcontainers-starter/" rel="noopener">Spring Boot Integration Testing using the Testcontainers Starter — SivaLabs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9jZInwFtp44" rel="noopener">Java Testing Made Easy: Testing Kafka and RabbitMQ Messaging Workflows using Testcontainers — SivaLabs</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-kafka-advanced.html">← Kafka Advanced</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="06-rabbitmq-model.html">RabbitMQ and the AMQP Model →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Spring Kafka is the most commonly probed messaging topic in Indian product and service-company rounds, because almost every Java team runs it — the concurrency question and the retry/DLT question come up in nearly every interview:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does KafkaTemplate do, and is send() synchronous?</summary>
+      <div class="answer"><p>It is Spring's wrapper over the Apache <code>KafkaProducer</code>: it serialises the record, resolves the topic and partition, and hands it to the producer's batching accumulator. <code>send()</code> is asynchronous and returns a <code>CompletableFuture&lt;SendResult&gt;</code> (it returned Spring's <code>ListenableFuture</code> before version 3.0). To make it synchronous you join the future with a timeout — but always handle the failure case, because ignoring the future silently drops publish errors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you consume messages in Spring Boot, and what runs the poll loop?</summary>
+      <div class="answer"><p>Annotate a method with <code>@KafkaListener(topics = "...", groupId = "...")</code>. A <code>MessageListenerContainer</code> created by the <code>ConcurrentKafkaListenerContainerFactory</code> owns the <code>KafkaConsumer</code>, runs the poll loop, deserialises and converts each record, invokes your method and commits offsets according to the acknowledgement mode. You never write the while-poll loop yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the role of the message key when sending with KafkaTemplate?</summary>
+      <div class="answer"><p>The key feeds the partitioner, so it determines which partition the record lands on — same key, same partition, therefore ordering guaranteed per key. A null key spreads records across partitions and gives you no per-entity ordering. Choose the key from the aggregate whose order matters, such as order id or customer id.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a dead-letter topic in Spring Kafka and how is it named?</summary>
+      <div class="answer"><p>The topic a record is republished to after retries are exhausted, so the main flow can move on without losing the record. <code>DeadLetterPublishingRecoverer</code> does the republishing, and the default destination is the original topic name plus a <code>.DLT</code> suffix. It copies the key, value and headers and adds diagnostics — original topic, partition, offset, timestamp, exception class and stack trace.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You set concurrency to 10 but only 3 consumers do any work. Why?</summary>
+      <div class="answer"><p>Concurrency creates that many child containers, each with its own consumer in the same group — it does not multiplex threads over one consumer. Kafka assigns at most one consumer per partition within a group, so with 3 partitions only 3 consumers get an assignment and the other 7 idle. Concurrency is bounded by partition count; to increase parallelism you must add partitions. It is also per application instance, so replicas multiply the consumer count in the group.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the AckMode options and when you would use MANUAL_IMMEDIATE.</summary>
+      <div class="answer"><p><code>BATCH</code> (default) commits the offsets of the whole poll after the batch is handled. <code>RECORD</code> commits after each record — narrowest redelivery window, most commit traffic. <code>MANUAL</code> queues your <code>ack()</code> and commits at the end of the batch. <code>MANUAL_IMMEDIATE</code> commits as soon as you call <code>ack()</code>, which is what you want when a record represents an expensive, non-repeatable side effect and you want its offset durable the moment it succeeds. All modes are still at-least-once, so handlers must be idempotent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A single malformed JSON record makes your consumer loop forever. Diagnose and fix it.</summary>
+      <div class="answer"><p>That is the poison pill. Deserialization runs inside the poll, before the listener and before any error handler, so the exception escapes the container, the offset is never advanced, and the same record is re-read indefinitely. Fix it by configuring <code>ErrorHandlingDeserializer</code> as the key and value deserializer with the real deserializers as delegates — the failure is then converted into a normal failed record that <code>DefaultErrorHandler</code> can route to the dead-letter topic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are trusted packages, and why is setting them to a wildcard a bad idea?</summary>
+      <div class="answer"><p><code>JsonDeserializer</code> reads a type header supplied by the producer and instantiates that class. Since the header comes from the network, <code>spring.json.trusted.packages</code> restricts which packages may be deserialised. Setting it to <code>*</code> means any publisher on the topic can name any class on your classpath, which is a deserialization-attack surface. Restrict it to your event packages, and prefer stable logical type mappings over fully qualified class names so refactoring does not break consumers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you test a @KafkaListener without a running Kafka cluster?</summary>
+      <div class="answer"><p><code>@EmbeddedKafka</code> starts an in-process broker for the test context and exposes its address, with topics and partition counts declared on the annotation; inject <code>EmbeddedKafkaBroker</code> and use <code>KafkaTestUtils</code> to build a consumer for assertions. Because consumption is asynchronous, synchronise with a <code>CountDownLatch</code> or Awaitility rather than sleeping. For higher fidelity use Testcontainers with a real Kafka image, ideally with <code>@ServiceConnection</code> so Boot wires the bootstrap servers automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Blocking retry versus non-blocking retry topics — explain the tradeoff and pick one for a payment consumer.</summary>
+      <div class="answer"><p><code>DefaultErrorHandler</code> retries in place on the consumer thread: ordering is preserved, but the partition is stalled for the whole backoff and, if the pause exceeds <code>max.poll.interval.ms</code>, the consumer is evicted and the group rebalances. <code>@RetryableTopic</code> forwards the record to a delay topic and commits the original offset, so the partition keeps flowing — at the cost of losing ordering, since the retried record is processed after later records for the same key. For a payment consumer where per-account ordering and correctness dominate, use short blocking retry plus a dead-letter topic (or a parking lot replayed in order); use non-blocking retry for order-insensitive side effects such as notifications.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you get exactly-once semantics for a read-process-write flow in Spring Kafka?</summary>
+      <div class="answer"><p>Set <code>spring.kafka.producer.transaction-id-prefix</code> so Boot creates a transactional producer factory and a <code>KafkaTransactionManager</code>, then give that manager to the listener container. The container opens a transaction before the listener, any <code>KafkaTemplate</code> sends inside it join that transaction, and the container calls <code>sendOffsetsToTransaction()</code> so the consumed offset commits atomically with the produced records. Downstream consumers must set <code>isolation.level=read_committed</code> or they will see aborted records. This is exactly-once only within Kafka — a database write in the same listener is not covered.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your listener writes to a database and publishes an event. How do you keep the two consistent?</summary>
+      <div class="answer"><p>You cannot get a true two-phase commit across a database and Kafka; chaining <code>ChainedTransactionManager</code>-style managers only narrows the window, it does not close it. The robust answer is the transactional outbox: write the domain change and an outbox row in one local database transaction, then have a relay (a poller or change-data-capture such as Debezium) publish the outbox rows to Kafka. That gives at-least-once publication with no lost events, and consumers deduplicate on the event id. Alternatively invert the flow — consume the event first and derive the database write — so Kafka is the single source of truth.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Records are piling up in the DLT and nobody noticed for a week. What was missing?</summary>
+      <div class="answer"><p>Operational treatment of the DLT as a first-class queue. It needs a consumer or a <code>@DltHandler</code> that persists and classifies the record, a metric on DLT arrival rate with an alert on any non-zero rate, dashboards showing original topic and exception class, and a documented, tested replay path back to the main topic once the defect is fixed. Also review the retry classification — deterministic errors such as validation failures should go straight to the DLT via <code>addNotRetryableExceptions</code> or the <code>exclude</code> attribute rather than burning attempts first. An unwatched DLT is silent data loss.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your consumer group rebalances every few minutes under load and throughput collapses. How do you debug it in a Spring Kafka application?</summary>
+      <div class="answer"><p>The usual cause is that processing one poll's worth of records takes longer than <code>max.poll.interval.ms</code>, so the broker considers the member dead and revokes its partitions. Confirm it from the rebalance log lines the container emits, then fix the cause rather than the symptom: lower <code>max.poll.records</code> so each poll is smaller, move slow work off the listener thread, or raise the interval deliberately. Check that a blocking error handler's total backoff is not itself exceeding the interval, and make sure the group is on the cooperative-sticky assignor so a rebalance does not stop the world. Longer term, more partitions plus matching concurrency reduces per-consumer load.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.sk.listeners — KafkaTemplate, @KafkaListener, listener containers, concurrency, serialization</li>
+      <li>msg.sk.errors — error handlers, non-blocking retry topics, dead-letter topics, EmbeddedKafka and Testcontainers testing</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

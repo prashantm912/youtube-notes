@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Event-Driven Architecture module: the four distinct patterns hiding behind one phrase (event notification, event-carried state transfer, event sourcing, CQRS), event naming and granularity, schema compatibility and versioning strategies, a choreographed order flow case study, and an honest verdict on when events hurt — with verified resources and interview questions.">
+  <title>Event-Driven Architecture — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Event-Driven Architecture</h1>
+  <p class="standfirst">Nine modules of brokers, partitions, acknowledgements and retries all lead here. This closing module is about the architecture the machinery serves — and about the fact that "we're event-driven" is a sentence that means at least four incompatible things.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Event-Driven Architecture</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every previous module in this track was about mechanism: how a broker stores a message, how a consumer group rebalances, how a poison message ends up in a parking lot. This one is about intent. Two teams can both run Kafka, both call their system event-driven, and have built architectures with almost nothing in common — different coupling, different failure modes, different answers to "where does the truth live?".</p>
+    <p>We separate the patterns properly, then spend most of the module on the thing that actually decides whether an event system stays maintainable: <em>event design</em>. Names, granularity, identity, time, and schema evolution. We finish with a choreographed order flow read end to end, and an honest account of where choreography hurts and what to reach for instead — because the senior answer to "should this be an event?" is very often no.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>"Event-driven" means at least four different things</h3>
+    <p>Martin Fowler's central observation, first made in a 2017 GOTO talk and then written up, is that "event-driven" is a phrase people use to mean radically different architectures, and the confusion is expensive: a design review where one person means "we publish a notification on a topic" and another means "the event log is our database" produces agreement that evaporates in implementation. He separates four patterns — <strong>event notification</strong>, <strong>event-carried state transfer</strong>, <strong>event sourcing</strong> and <strong>CQRS</strong> — and the useful discipline is to name which one you mean, every time.</p>
+    <p>They are not a maturity ladder. You do not graduate from notification to event sourcing; they solve different problems, they can coexist in one estate, and picking the heaviest one because it sounds most advanced is the most common architectural mistake in this space. Two axes distinguish them: <em>how much state travels in the event</em>, and <em>whether the event stream is the system of record or a derivative of it</em>.</p>
+    <table>
+      <caption>Choosing between the four patterns</caption>
+      <thead>
+        <tr><th>Pattern</th><th>Event carries</th><th>System of record</th><th>Buys you</th><th>Costs you</th><th>Reach for it when</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Event notification</td><td>Ids and a fact ("this happened")</td><td>The producer's database</td><td>Lowest coupling to the producer's data shape</td><td>Chatty callbacks; runtime availability coupling; no single view of the flow</td><td>Consumers mostly do not need the detail, and the producer can serve reads</td></tr>
+        <tr><td>Event-carried state transfer</td><td>Enough state to act without calling back</td><td>The producer's database</td><td>Availability decoupling — consumers work while the producer is down</td><td>Data duplication, staleness, bigger payloads, a wider contract to version</td><td>The consumer needs producer data on a hot path, or must survive the producer's outage</td></tr>
+        <tr><td>Event sourcing</td><td>Every state change, in order, forever</td><td>The event log itself</td><td>Perfect audit, temporal queries, rebuildable projections</td><td>Versioning old events, snapshots, replay tooling, a steep team learning curve</td><td>History is the requirement: ledgers, trading, compliance, collaborative editing</td></tr>
+        <tr><td>CQRS</td><td>Nothing inherently — it is a model split</td><td>Either; often paired with event sourcing</td><td>Read and write models optimised independently</td><td>Two models to keep honest; eventual consistency visible to users</td><td>Read and write loads or shapes genuinely diverge</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/201701-event-driven.html" rel="noopener">What do you mean by "Event-Driven"? — Martin Fowler (the article that separates the four patterns)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/event-driven-architecture.html" rel="noopener">Pattern: Event-driven architecture — microservices.io (Chris Richardson)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven" rel="noopener">Event-driven architecture style — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/event-driven-architecture/" rel="noopener">What is an Event-Driven Architecture? — AWS</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=STKCRSUsyP0" rel="noopener">The Many Meanings of Event-Driven Architecture — Martin Fowler, GOTO 2017 (GOTO Conferences)</a></li>
+    </ul>
+
+    <h3>Event notification: the thin signal</h3>
+    <p>The producer publishes a small message saying something happened — typically a type, an entity id, a timestamp and very little else — and any consumer that needs detail calls back to the producer's API to fetch it. The customer service emits <code>CustomerAddressChanged</code> carrying a customer id; the insurance quoting service hears it, then issues an HTTP request for the new address. The producer never learns who is listening, which is the whole appeal: you can add a fifth consumer on Monday and the producing team need not be told.</p>
+    <p>The cost is subtle and it is the reason Fowler flags this pattern as the one that quietly rots. Because the event carries almost nothing, the real behaviour lives in the callbacks, so there is no single artefact — no code, no schema, no diagram — that tells you what happens when an address changes. You have decoupled the data shape but <em>not</em> the runtime: if the producer is down when the consumer calls back, the consumer is stuck holding an event it cannot process. And a notification fan-out of twenty consumers each calling back immediately is a self-inflicted thundering herd against the very service that just did work.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "eventId": "9f1c2b7e-3d54-4a11-8f0e-4b2d0c8e77a1",
+  "type": "CustomerAddressChanged",
+  "schemaVersion": 1,
+  "customerId": "CUST-88213",
+  "occurredAt": "2026-07-25T09:14:02.318Z"
+}
+// consumer must now GET /customers/CUST-88213 to learn the new address</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/EventCollaboration.html" rel="noopener">Event Collaboration — Martin Fowler (P of EAA development patterns)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber" rel="noopener">Publisher-Subscriber pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/EventMessage.html" rel="noopener">Event Message — Enterprise Integration Patterns (Hohpe &amp; Woolf)</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-what-is.html" rel="noopener">What is Amazon EventBridge? — AWS EventBridge User Guide (a notification bus in production form)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=iAA7PTqs4xY" rel="noopener">Event-Driven Architecture: I do not think it means what you think it means — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Event-carried state transfer: shipping the state with the news</h3>
+    <p>Here the event carries enough state that consumers never call back. <code>CustomerAddressChanged</code> ships the new address — and, in the fatter variants, the whole customer record. Consumers keep a local read-only replica of exactly the fields they care about and serve their own queries from it. The producer's availability stops being on your critical path: it can be down for an hour and the quoting service keeps quoting, because it already holds everything it needs.</p>
+    <p>You pay for that in three currencies. <em>Duplication</em>: the same customer data now lives in six services, and someone will eventually ask which copy is right. <em>Staleness</em>: local replicas are eventually consistent, so a consumer can act on an address that changed two seconds ago — usually fine for a quote, never fine for a fraud check. <em>Contract surface</em>: every field you put in the event is a field consumers will depend on and you must version forever, which is why "just publish the whole entity" is a trap. Publish the fields the business fact needs, not the row.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "eventId": "b3a70c46-1f8c-4c1a-9c0e-6d3e21ac54f2",
+  "type": "CustomerAddressChanged",
+  "schemaVersion": 2,
+  "customerId": "CUST-88213",
+  "address": { "line1": "14 MG Road", "city": "Bengaluru", "pin": "560001", "country": "IN" },
+  "previousPin": "560034",
+  "occurredAt": "2026-07-25T09:14:02.318Z",
+  "recordedAt": "2026-07-25T09:14:02.907Z"
+}
+// consumer updates its local replica; no callback, no coupling to producer uptime</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/DomainEvent.html" rel="noopener">Domain Event — Martin Fowler (the event as a record of something that happened)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/patterns/event/event/" rel="noopener">Event — Confluent Event Streaming Patterns (what belongs inside one)</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/event-driven-architecture.html" rel="noopener">Event-driven architecture — AWS Prescriptive Guidance (cloud design patterns)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U3o9Br6JsY8" rel="noopener">Introduction — Designing Event-Driven Microservices (Confluent)</a></li>
+    </ul>
+
+    <h3>Event sourcing and CQRS: when the log is the system of record</h3>
+    <p>Event sourcing inverts the relationship between state and events. In the previous two patterns the database is the truth and events are announcements about it; here the append-only sequence of events <em>is</em> the truth, and current state is a fold over that sequence. Nothing is updated in place and nothing is deleted — a cancelled order is an <code>OrderCancelled</code> event appended after <code>OrderPlaced</code>, not a row flipped to <code>status = 'CANCELLED'</code>. That gives you a complete audit trail for free, the ability to ask what the state was at any past instant, and the ability to build an entirely new projection of old data by replaying history through new code.</p>
+    <p>It is also the heaviest of the four by a distance. Rebuilding state from thousands of events needs snapshots; long-lived streams mean your code must still deserialise the event schema you wrote three years ago; and a bug in an event you already published cannot be edited away, only compensated. Note carefully that Kafka retention is not an event store — a compacted or time-retained topic loses history, and event sourcing needs the full stream plus optimistic concurrency on append. CQRS is a separate idea that often travels with it: split the write model from the read model so each is shaped for its job. This track's paired Microservices module goes deep on both, including aggregates, snapshots and projection rebuilds — see <a href="../microservices/10-cqrs-event-sourcing.html">CQRS and Event Sourcing</a>.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/eaaDev/EventSourcing.html" rel="noopener">Event Sourcing — Martin Fowler (note the eaaDev path, not the bliki)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/CQRS.html" rel="noopener">CQRS — Martin Fowler bliki (including the warning about where it does not belong)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/event-sourcing.html" rel="noopener">Pattern: Event sourcing — microservices.io</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" rel="noopener">Event Sourcing pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://event-driven.io/en/event_streaming_is_not_event_sourcing/" rel="noopener">Event streaming is not event sourcing — Oskar Dudycz (event-driven.io)</a></li>
+    </ul>
+
+    <h3>Designing the event: past tense, granularity, identity and time</h3>
+    <p>An event is a statement of fact about something that already happened, so name it in the past tense from the business vocabulary: <code>OrderPlaced</code>, <code>PaymentCaptured</code>, <code>ShipmentDispatched</code>. A message named <code>CreateOrder</code> is not an event at all — it is a <em>command</em>: addressed to one recipient, may be rejected, expresses intent about the future. Events are broadcast, cannot be rejected (they already happened), and may have zero consumers. Teams that blur the two end up with "events" that carry an implicit expectation that some specific consumer will act, which is choreography wearing a disguise and the source of most accidental coupling.</p>
+    <p>Granularity is the next judgement. Too fine (<code>OrderFieldUpdated</code> with a field name) and consumers must reassemble business meaning from fragments; too coarse (<code>OrderChanged</code> carrying the whole aggregate) and every consumer wakes for changes it does not care about and has to diff to find out what happened. Aim for one event per business fact. Every event should also carry: a globally unique <strong>event id</strong> so at-least-once delivery can be deduplicated by consumers, the <strong>entity id</strong> (which is usually also your partition key, per the ordering module), a <strong>schema version</strong>, a correlation or causation id for tracing, and two distinct times — <em>occurred-at</em>, when the fact happened in the business, and <em>recorded-at</em>, when the system wrote it. Those diverge during outages, backfills and replays, and reports built on the wrong one are quietly wrong.</p>
+    <p>The rule that outranks all of these: <strong>a published event is an API contract, and it has more consumers than you know about.</strong> Nobody rings you before subscribing. Treat the event schema with the same seriousness as a REST contract — review it, own it, and never assume you can enumerate who would break.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://developer.confluent.io/courses/event-design/intro/" rel="noopener">Designing Events and Event Streams — Confluent Developer course (Adam Bellemare)</a></li>
+      <li>[Official] <a href="https://microservices.io/patterns/data/domain-event.html" rel="noopener">Pattern: Domain event — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/PublishedInterface.html" rel="noopener">Published Interface — Martin Fowler bliki (why a published contract is not a public method)</a></li>
+      <li>[Article] <a href="https://event-driven.io/en/whats_the_difference_between_event_and_command/" rel="noopener">What is the difference between a command and an event? — Oskar Dudycz</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=sPjj8tVKy6M" rel="noopener">Path to Event-Driven Architecture: start capturing INTENT — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Schema evolution: additive changes and the compatibility modes</h3>
+    <p>The one change you are always allowed to make is an additive one: a new <em>optional</em> field with a default. Removing a field, renaming it, narrowing its type or changing its meaning are all breaking, and "changing its meaning" is the killer because no tool detects it — repurposing <code>amount</code> from rupees to paise passes every compatibility check and corrupts every consumer. Confluent Schema Registry enforces the mechanical half of this per subject, rejecting an incompatible schema at registration rather than at 3am in a consumer.</p>
+    <p>Know the four modes and, more importantly, what each one <em>permits you to do first</em>. <strong>BACKWARD</strong> (the default): new consumer code can read data written with the previous schema, so you upgrade consumers first — this is the mode for most Kafka topics, where consumers lag behind producers. <strong>FORWARD</strong>: old consumer code can read data written with the new schema, so you upgrade producers first — useful when you cannot coordinate a fleet of downstream readers. <strong>FULL</strong> is both, which in practice restricts you to adding and removing optional fields with defaults. <strong>NONE</strong> disables checking, and the transitive variants (<code>BACKWARD_TRANSITIVE</code> and friends) check against every previous version rather than only the last, which is what you actually want on a long-lived event stream. Pair whichever you choose with tolerant readers on the consumer side: ignore unknown fields rather than failing, so an additive producer change never becomes an incident.</p>
+    <pre class="code-block" data-label="Avro"><code>{
+  "type": "record", "name": "OrderPlaced", "namespace": "com.acme.orders.v1",
+  "fields": [
+    { "name": "eventId",  "type": "string" },
+    { "name": "orderId",  "type": "string" },
+    { "name": "customerId", "type": "string" },
+    { "name": "totalPaise", "type": "long" },
+    { "name": "channel", "type": ["null", "string"], "default": null }
+  ]
+}
+// additive + optional + default = BACKWARD compatible; consumers upgrade at leisure</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html" rel="noopener">Schema Evolution and Compatibility — Confluent Platform documentation (every mode, and what it allows)</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/index.html" rel="noopener">Schema Registry concepts: subjects, versions and IDs — Confluent Platform documentation</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TolerantReader.html" rel="noopener">Tolerant Reader — Martin Fowler bliki (be conservative in what you send, liberal in what you accept)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-apache-avro" rel="noopener">Guide to Apache Avro — Baeldung (schemas, resolution and generated classes)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=u0kRK-qbopk" rel="noopener">Spring Boot: Kafka Schema Registry and Avro with a practical example — Java Techie</a></li>
+    </ul>
+
+    <h3>Versioning strategies: upcasting, version fields and new topics</h3>
+    <p>Compatibility rules buy you time; eventually you need a genuinely breaking change. Four strategies, roughly in order of how often they are the right answer. <strong>Upcasting</strong> is the workhorse for event-sourced streams: keep the old events exactly as written, and run a transformation on read that lifts a v1 payload into the v2 shape before the domain code sees it. Your domain model then only ever knows the newest version, and the upcasters accumulate in one auditable place. <strong>A version field in the envelope</strong> (<code>schemaVersion</code>, or a fully-qualified type name that carries the version) lets a consumer branch explicitly — verbose, but honest, and it makes the compatibility question visible in code review.</p>
+    <p>The heavier options are <strong>a new topic per major version</strong> — <code>orders.placed.v1</code> and <code>orders.placed.v2</code> published in parallel while consumers migrate, then v1 retired on a published date — which is the cleanest migration path for integration events between teams and the most operationally expensive; and <strong>in-place migration of stored events</strong>, which is a rewrite of history and should be treated as a last resort, since it destroys the audit property you adopted event sourcing to get. Cutting across all four: standardising the <em>envelope</em> (CloudEvents gives you id, source, type, time and subject as interoperable attributes) means version negotiation happens in a place every consumer already parses, and consumer-driven contract tests tell you who actually breaks before you find out in production.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloudevents.io/" rel="noopener">CloudEvents — CNCF specification for a common event envelope</a></li>
+      <li>[Article] <a href="https://event-driven.io/en/how_to_do_event_versioning/" rel="noopener">How to (not) do the events versioning? — Oskar Dudycz (five strategies, and how to need fewer of them)</a></li>
+      <li>[Article] <a href="https://event-driven.io/en/simple_events_versioning_patterns/" rel="noopener">Simple patterns for events schema versioning — Oskar Dudycz</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/consumerDrivenContracts.html" rel="noopener">Consumer-Driven Contracts: a service evolution pattern — Martin Fowler (Ian Robinson)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6TCbJtPnits" rel="noopener">Change Is Inevitable: Versioning Event-Driven Systems — Laila Bougria (JetBrains)</a></li>
+    </ul>
+
+    <h3>Choreography case study: an order across four services</h3>
+    <p>Read the happy path as a sequence of facts, with no coordinator anywhere. The order service accepts a request, writes its own row and publishes <code>OrderPlaced</code>. The payment service consumes it, charges the card and publishes <code>PaymentCaptured</code> (or <code>PaymentFailed</code>). The inventory service consumes <code>PaymentCaptured</code>, reserves stock and publishes <code>StockReserved</code> or <code>StockUnavailable</code>. The shipping service consumes <code>StockReserved</code> and publishes <code>ShipmentDispatched</code>. The order service subscribes to all of them and advances its own view of order status. Nobody calls anybody. Each service can be deployed, scaled and restarted independently, and adding a loyalty-points service on Friday requires changing nothing that exists.</p>
+    <p>Now read the unhappy path, because that is what interviews probe. There is no rollback: <code>StockUnavailable</code> must trigger a <em>compensating</em> action — the payment service refunds, the order service cancels — which is exactly the choreographed saga. Every consumer must be idempotent, since at-least-once delivery means <code>PaymentCaptured</code> will be redelivered and you must not ship twice; the event id is what you deduplicate on. Each service publishes its event in the same local transaction as its state change or the two drift apart, which is what the transactional outbox pattern exists to solve. And ordering only holds per partition key, so key every event in the flow by order id.</p>
+    <pre class="code-block" data-label="Flow"><code>order-service      --OrderPlaced-->       payment-service
+payment-service    --PaymentCaptured-->   inventory-service
+inventory-service  --StockReserved-->     shipping-service
+shipping-service   --ShipmentDispatched-> order-service (status: DISPATCHED)
+
+failure branch:
+inventory-service  --StockUnavailable-->  payment-service (refund)
+                                       -> order-service (status: CANCELLED)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/choreography" rel="noopener">Choreography pattern — Azure Architecture Center</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/prescriptive-guidance/latest/modernization-integrating-microservices/event-driven-architecture.html" rel="noopener">Event-driven architecture for integrating microservices — AWS Prescriptive Guidance</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/eda-software-design" rel="noopener">Event-Driven Architecture — Baeldung on Computer Science</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/event-driven-banking-architecture/" rel="noopener">Event-Driven Patterns for Cloud-Native Banking: what works and what hurts — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=P5hq6iWn_p8" rel="noopener">My top patterns for event-driven architecture — CodeOpinion</a></li>
+    </ul>
+
+    <h3>When events hurt — and what to reach for instead</h3>
+    <p>The closing verdict of this track. Choreography's defining weakness is that <strong>no single place shows the business process</strong>. The order flow above exists only in the heads of the people who built it and in the union of four codebases; there is no file you can open to see it, no diagram the compiler keeps honest, and a new joiner reconstructs it by grepping for event names. Debugging follows: one customer complaint spans four services' logs, and without correlation ids propagated on every event and distributed tracing across the broker, you are reduced to timestamp archaeology. Cyclic event chains are the next hazard — service A publishes, B reacts and publishes, C reacts and republishes something A consumes — producing infinite loops that only reveal themselves under load. And accidental coupling creeps in through event <em>shape</em>: the moment a consumer depends on a field the producer added for its own reasons, you have a distributed monolith with worse latency and no compiler to warn you.</p>
+    <p>So the honest guidance. Do not use events when the caller genuinely needs the answer to continue — a synchronous call is simpler, traceable and consistent. Do not use events as a slow, lossy replication mechanism for CRUD screens; publishing <code>EntityUpdated</code> for every table write is a message bus doing a database's job with none of its guarantees. Do not use choreography for a long, branching, business-critical workflow with compensations and timeouts: that is a process, it deserves to be visible, and an <em>orchestrated</em> saga or a workflow engine gives you one place that owns the flow, a state machine you can query, and a timeout story. The rule of thumb worth carrying out of this track: <strong>choreograph facts, orchestrate processes</strong> — and if you cannot explain what business fact an event records, it is probably a command wearing an event's name.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/saga.html" rel="noopener">Pattern: Saga — microservices.io (choreography vs orchestration, and compensating transactions)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/events-workflow-automation/" rel="noopener">Events, Flows and Long-Running Services: a modern approach to workflow automation — InfoQ (Bernd Ruecker)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/event-driven-arch-challenges/" rel="noopener">Event-Based Architectures: the Hard Parts — InfoQ presentation</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/scalable-resilient-event-systems/" rel="noopener">Designing Resilient Event-Driven Systems at Scale — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tWyXNJ8EJTY" rel="noopener">Darkside of event-driven architecture — CodeOpinion</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="09-ordering-concurrency.html">← Ordering and Concurrency</a>
+    <a href="index.html">All Messaging modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Architecture-judgement questions dominate the final rounds at Indian product companies, and service companies increasingly ask them for senior and architect roles — the pattern below is that every question rewards naming a tradeoff rather than a technology:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is event-driven architecture, in one paragraph?</summary>
+      <div class="answer"><p>A style in which services communicate by publishing facts about things that have happened to a broker, and other services react to those facts, instead of calling each other directly. Producers do not know their consumers. It buys temporal decoupling and independent scaling, and costs you eventual consistency, duplicate delivery and harder debugging.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a command and an event?</summary>
+      <div class="answer"><p>A command expresses intent about the future, is addressed to exactly one recipient, and can be rejected: <code>CreateOrder</code>, <code>ReserveStock</code>. An event is a fact about the past, is broadcast to anyone interested, cannot be rejected because it already happened, and may have zero consumers: <code>OrderPlaced</code>, <code>StockReserved</code>. Name events in the past tense; if you find yourself expecting a particular consumer to act on an "event", you have really published a command.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name Fowler's four patterns and one sentence on each.</summary>
+      <div class="answer"><p>Event notification (a thin signal; consumers call back for detail), event-carried state transfer (the event carries the state so consumers need not call back), event sourcing (the append-only event log is the system of record), CQRS (separate models for reads and writes). They are different tools, not stages of maturity.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What fields should every event carry?</summary>
+      <div class="answer"><p>A unique event id (for consumer-side deduplication under at-least-once delivery), the event type, a schema version, the entity id that identifies the subject and usually serves as the partition key, correlation and causation ids for tracing, and both an occurred-at business time and a recorded-at system time. Then the business payload, and only the fields the fact needs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Event notification vs event-carried state transfer — how do you choose?</summary>
+      <div class="answer"><p>Ask what happens when the producer is down. With notification the consumer holds an event it cannot enrich, so producer availability is on your critical path; with state transfer the consumer already has what it needs and keeps working. Choose state transfer when consumers need producer data on a hot path or must survive its outage; accept in exchange data duplication, staleness and a much wider contract to version. Choose notification when consumers rarely need detail and you want the narrowest possible contract.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which schema changes are safe, and which quietly are not?</summary>
+      <div class="answer"><p>Safe: adding an optional field with a default. Breaking: removing or renaming a field, narrowing a type, making an optional field required, changing enum semantics. The dangerous one is redefining the meaning of an existing field — changing an amount from rupees to paise, or a status code's interpretation — because it passes every automated compatibility check and silently corrupts every consumer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain BACKWARD, FORWARD and FULL compatibility and who you upgrade first.</summary>
+      <div class="answer"><p>BACKWARD means new consumer code can read data produced with the old schema, so you upgrade consumers first — the Schema Registry default, and right for Kafka where consumers lag. FORWARD means old consumer code can read data produced with the new schema, so you upgrade producers first. FULL is both, which limits you to adding and removing optional fields with defaults. On long-lived streams prefer the transitive variants, which check against every earlier version rather than only the immediately preceding one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is upcasting and when do you use it instead of a new topic?</summary>
+      <div class="answer"><p>Upcasting transforms an old event payload into the current shape on read, so stored history is never rewritten and the domain code only knows the newest version. It is the standard answer inside an event-sourced stream, where you must keep old events forever. A new topic per major version is the better answer for integration events crossing team boundaries, where you want producers publishing both shapes in parallel and a published retirement date for the old one; it costs more operationally but gives consumers a clean, independent migration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do you need occurred-at and recorded-at, not just one timestamp?</summary>
+      <div class="answer"><p>Because they diverge exactly when it matters. Occurred-at is when the fact happened in the business; recorded-at is when the system wrote it. During an outage, a backfill, an offline mobile sync or a replay, the gap can be hours or days. Analytics and SLA reporting want occurred-at; deduplication, ordering diagnostics and operational dashboards want recorded-at. Systems that keep only one end up with reports that are quietly wrong after every incident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk me through a choreographed order flow, then tell me where it hurts.</summary>
+      <div class="answer"><p>OrderPlaced from the order service, PaymentCaptured from payments, StockReserved from inventory, ShipmentDispatched from shipping, with the order service subscribing to all of them to advance status. Where it hurts: no single artefact describes the process, so it lives only in four codebases; one customer complaint spans four log streams and needs correlation ids plus distributed tracing to reconstruct; failure paths need compensating actions rather than rollback; cyclic event chains can form and only surface under load; and consumers gradually couple to fields the producer added for itself, giving you a distributed monolith. For a long, branching, business-critical flow, an orchestrated saga or workflow engine is usually the better trade.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you argue against events in a design review?</summary>
+      <div class="answer"><p>When the caller needs the answer to proceed, a synchronous call is simpler and consistent. When the "events" are just CRUD writes republished as EntityUpdated, you have a message bus doing a database's job without its guarantees. When the process is long, branching and needs timeouts and compensations, orchestrate it so the flow is visible and queryable. And when the team has no schema registry, no tracing across the broker and no dead-letter discipline, adding asynchrony converts easy bugs into hard ones. Choreograph facts; orchestrate processes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is Kafka an event store? Justify your answer.</summary>
+      <div class="answer"><p>Not on its own. Event sourcing requires the complete history of a stream plus optimistic concurrency on append — read the current version of an aggregate's stream and append only if nobody else has. Kafka gives you an ordered, durable log, but retention and compaction discard history by design, per-key streams are not first-class, and there is no conditional append on expected version. It is superb for event streaming and integration; for event sourcing use a purpose-built store (or a relational table designed as one) and stream to Kafka from it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You need to remove a field that three known consumers use, on a topic with unknown subscribers. How do you proceed?</summary>
+      <div class="answer"><p>Treat the event as a published API contract. Publish a v2 schema or topic alongside v1 with the field removed, keep dual-publishing, and announce a retirement date. Instrument consumption of v1 so you learn who the unknown subscribers are before you break them, and pair that with consumer-driven contract tests for the consumers you do know. Only after v1 consumption reaches zero for a full business cycle do you retire it. Never remove a field in place on a live topic on the strength of "I checked and only three teams use it".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your consumer must be idempotent. How do you actually implement that in this flow?</summary>
+      <div class="answer"><p>Deduplicate on the event id, not on payload equality. Persist processed event ids in the same transaction as the business state change — a unique constraint on the event id in a processed-events table is the simplest correct implementation, since the insert fails on a duplicate and the whole transaction rolls back harmlessly. Alternatively make the effect naturally idempotent with a conditional update guarded by a version or state check ("dispatch only if status is RESERVED"). Pair it with the transactional outbox on the publish side so state change and publication cannot diverge, and keep the dedup window at least as long as your maximum redelivery and replay horizon.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you make the business process observable when it spans four services?</summary>
+      <div class="answer"><p>Propagate a correlation id created at the edge through every event envelope, plus a causation id naming the event that caused this one, so the graph can be reconstructed. Use distributed tracing that spans the broker (context propagated in message headers) so one trace covers producer, broker and consumer hops. Publish a per-stage state on the aggregate that owns the flow, so there is one queryable answer to "where is this order?". Alert on dead-letter arrival rate and consumer lag per topic, and consider a process-manager or workflow engine when the flow is important enough that someone must be able to see it.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.eda.styles — event notification vs event-carried state transfer vs event sourcing (and CQRS)</li>
+      <li>msg.eda.schema — event schema design and versioning, choreography case study, when events hurt</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

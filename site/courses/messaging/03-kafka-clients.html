@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kafka producers and consumers module: acks and durability, the idempotent producer, batching, linger and compression, partitioners and key ordering, consumer groups, eager vs cooperative rebalancing, KIP-848, poll-loop timeouts and offset commit strategies — with verified resources and interview questions.">
+  <title>Kafka Producers and Consumers — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Kafka Producers and Consumers</h1>
+  <p class="standfirst">The broker is not where Kafka correctness is decided — the clients are. A dozen configuration properties on the producer and the consumer decide whether your pipeline loses messages, duplicates them, reorders them, or quietly stops making progress.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Kafka Producers and Consumers</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 02 explained what the cluster does with your data. This module is about the two libraries you actually write code against, and it is where almost every real Kafka incident originates. A producer that ships with <code>acks=1</code> loses records on a leader failover. A producer with retries but without idempotence can silently reorder a partition. A consumer with auto-commit enabled can acknowledge records it never processed. None of these fail loudly in a dev environment; all of them fail in production under load.</p>
+    <p>We work through the producer send path — <code>acks</code>, idempotence, the record accumulator, batching, compression and partitioning — and then the consumer side: consumer groups, the group coordinator, rebalancing (including the broker-driven KIP-848 protocol that is the default in Apache Kafka 4.x), the two timeouts that get consumers evicted, and the offset commit strategies that decide whether you get at-least-once or at-most-once delivery. Configuration names and defaults throughout are those of Apache Kafka 4.x.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The producer send path: acks, retries and delivery.timeout.ms</h3>
+    <p><code>producer.send()</code> does not talk to a broker. It serialises the record, asks the partitioner for a partition, and appends the bytes to a per-partition batch in an in-memory <em>record accumulator</em> bounded by <code>buffer.memory</code>; a background I/O thread drains full or expired batches to the partition leaders. The call returns a <code>Future</code> immediately, which is why fire-and-forget producer code appears to work perfectly right up to the moment you check whether anything arrived. If the accumulator fills because the brokers cannot keep up, <code>send()</code> blocks for <code>max.block.ms</code> and then throws — back-pressure surfacing as an exception on a method most people believe is asynchronous.</p>
+    <p><code>acks</code> is the durability dial. <code>acks=0</code> means the producer never waits for a reply: highest throughput, and records vanish without a trace if the leader is down. <code>acks=1</code> waits for the leader's local write only, so a leader crash before the followers replicate loses the acknowledged record. <code>acks=all</code> (the default since Kafka 3.0, alongside idempotence) waits for every in-sync replica, and only combined with a broker-side <code>min.insync.replicas=2</code> does it actually guarantee anything — with <code>min.insync.replicas=1</code>, <code>acks=all</code> degrades to <code>acks=1</code> the moment followers fall out of the ISR. Retry behaviour is governed by <code>delivery.timeout.ms</code> (default two minutes), the total budget covering batching, all retries and all in-flight time; <code>retries</code> defaults to <code>Integer.MAX_VALUE</code> and the timeout, not the count, is what ends the attempt.</p>
+    <pre class="code-block" data-label="Properties"><code>acks=all                       # default in 4.x; needs min.insync.replicas=2 on the topic
+retries=2147483647             # bounded by the delivery timeout, not by this count
+delivery.timeout.ms=120000     # total budget: batching + retries + in-flight
+request.timeout.ms=30000       # per network round trip
+max.block.ms=60000             # how long send() may block when the accumulator is full</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/producer-configs/" rel="noopener">Producer Configs — Apache Kafka documentation (every property, with defaults)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#message-delivery-semantics" rel="noopener">Message Delivery Semantics — Apache Kafka documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-acknowledgement-options" rel="noopener">Kafka Producer and Consumer Message Acknowledgement Options — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-producer-retries" rel="noopener">Retries With Kafka Producer — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=abzdPZlIf88" rel="noopener">Producers — Apache Kafka 101, 2025 Edition (Confluent Developer)</a></li>
+    </ul>
+
+    <h3>The idempotent producer: producer ids, sequence numbers and in-flight ordering</h3>
+    <p>Retries create duplicates. The producer sends a batch, the broker writes it, the acknowledgement is lost on the way back, the producer retries, and the same record is appended twice. The idempotent producer fixes this at the protocol level: on initialisation the client is issued a <em>producer id</em> (PID), and every batch carries that PID, the partition, and a monotonically increasing <em>sequence number</em>. The partition leader remembers the last sequence number it accepted per PID, so a replayed batch is recognised and dropped with a duplicate acknowledgement, and a batch that arrives with a gap is rejected outright as out-of-sequence. <code>enable.idempotence=true</code> has been the default since Kafka 3.0 and it costs essentially nothing.</p>
+    <p>The subtler benefit is ordering. With <code>max.in.flight.requests.per.connection</code> greater than one, several batches for the same partition are on the wire at once; if batch 1 fails and is retried while batch 2 has already been written, the partition ends up with the records in the wrong order — a silent reordering that no error message ever tells you about. Before idempotence, the only safe fix was <code>max.in.flight.requests.per.connection=1</code>, which throttles throughput badly. With idempotence on, the broker uses the sequence numbers to enforce order and to refuse out-of-order batches, so up to five in-flight requests per connection remain both ordered and duplicate-free. Note the scope carefully for interviews: this guarantees exactly-once <em>writes for one producer session to one partition</em>. Cross-partition atomicity and read-process-write atomicity need transactions, which module 04 covers.</p>
+    <pre class="code-block" data-label="Properties"><code>enable.idempotence=true                     # default since 3.0
+max.in.flight.requests.per.connection=5     # safe up to 5 WHEN idempotence is on
+# without idempotence, anything above 1 can reorder a partition after a retry</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#message-delivery-semantics" rel="noopener">Idempotent producer design — Apache Kafka documentation</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging" rel="noopener">KIP-98: Exactly Once Delivery and Transactional Messaging — Apache Kafka wiki (the PID and sequence-number design)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/" rel="noopener">Exactly-Once Semantics Are Possible: Here's How Kafka Does It — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-kafka-idempotence-performance" rel="noopener">Effect of Idempotence on the Performance of a Kafka Producer — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-message-ordering" rel="noopener">Ensuring Message Ordering in Kafka: Strategies and Configurations — Baeldung</a></li>
+    </ul>
+
+    <h3>Batching, linger.ms and compression: the throughput-versus-latency dial</h3>
+    <p>Kafka's throughput comes from amortising per-request overhead across many records, and the two knobs that control it are <code>batch.size</code> (bytes per partition batch, default 16 KB) and <code>linger.ms</code> (how long the accumulator waits for more records before sending, default 0 in older releases and a small non-zero value in recent ones). With <code>linger.ms=0</code> the sender ships whatever is buffered as soon as it is free, so batches stay small under light load and the producer makes many tiny requests. Raising <code>linger.ms</code> to 5–20 trades a few milliseconds of added latency for dramatically larger batches, better compression ratios and lower broker CPU. This is a genuine tradeoff, not a free win: state which side you are optimising before you touch either value.</p>
+    <p>Compression is configured with <code>compression.type</code> and — this is the part interviewers probe — it happens on the <em>producer</em>, per batch, not per record. The compressed batch is stored compressed on the broker and shipped compressed to consumers, so one setting reduces network transfer, disk footprint and page-cache pressure simultaneously, and the broker normally does not recompress (it will if the topic's <code>compression.type</code> differs from the producer's, which costs real CPU — keep them aligned). Codec choice is a CPU-versus-ratio decision: <code>lz4</code> and <code>snappy</code> are fast with modest ratios, <code>zstd</code> compresses considerably harder for more CPU and is usually the best default on modern hardware, and <code>gzip</code> is the slow legacy option. Because compression is per batch, bigger batches compress better — which is why <code>linger.ms</code> and <code>compression.type</code> are tuned together.</p>
+    <pre class="code-block" data-label="Properties"><code>batch.size=65536          # bytes per partition batch; larger = better compression
+linger.ms=10              # wait briefly to fill batches; the latency you pay
+compression.type=zstd     # lz4 / snappy = cheap CPU; zstd = best ratio
+buffer.memory=33554432    # total accumulator size before send() blocks</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html" rel="noopener">KafkaProducer — Apache Kafka 4.0 Javadoc (send path, buffering, thread safety)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/tutorials/optimize-producer-throughput/confluent.html" rel="noopener">How to optimize a Kafka producer for throughput — Confluent Developer tutorial</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/apache-kafka-message-compression/" rel="noopener">Message Compression in Apache Kafka — Confluent blog (codec benchmarks)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/configure-kafka-to-minimize-latency/" rel="noopener">99th Percentile Latency at Scale with Apache Kafka — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/apache-kafka-best-practices-to-optimize-your-deployment/" rel="noopener">Apache Kafka: Ten Best Practices to Optimize Your Deployment — InfoQ</a></li>
+    </ul>
+
+    <h3>Partitioning: key hashing, the sticky partitioner and custom partitioners</h3>
+    <p>Kafka orders records within a partition and nowhere else, so the partitioner is the component that decides what your ordering guarantee actually means. If a record has a key, the default partitioner takes <code>murmur2(keyBytes) % numPartitions</code>, which means every record with the same key lands on the same partition and is therefore consumed in the order it was produced. That is how you get per-entity ordering — key by <code>orderId</code>, <code>accountId</code> or <code>customerId</code> and every event for that entity is a totally ordered stream, while different entities are processed in parallel. Two consequences to have ready: this hash is computed over the partition count, so adding partitions to a live topic re-maps keys and breaks ordering for existing keys, and a hot key (one huge tenant) puts all of its traffic on one partition regardless of how many you have.</p>
+    <p>For records with no key, older clients round-robined every record, which scattered a burst across all partitions and produced many small batches. The <em>sticky partitioner</em> instead fills one partition's batch, sends it, then picks a new partition — same uniform distribution over time, far fewer and larger requests, measurably lower latency and CPU. Modern clients go further with a built-in uniform sticky strategy that also prefers partitions whose brokers are keeping up. When neither keyed nor sticky behaviour fits, implement <code>org.apache.kafka.clients.producer.Partitioner</code> and set <code>partitioner.class</code> — legitimate reasons include routing a whale tenant to dedicated partitions, or pinning records to a partition whose consumer holds the relevant local state. You can also override per record by passing an explicit partition number to <code>send()</code>.</p>
+    <pre class="code-block" data-label="Java"><code>// keyed: same key -> same partition -> ordered per key
+producer.send(new ProducerRecord&lt;&gt;("orders", order.customerId(), payload));
+
+// no key: sticky partitioner batches to one partition, then rotates
+producer.send(new ProducerRecord&lt;&gt;("clickstream", payload));
+
+// explicit override beats any partitioner
+producer.send(new ProducerRecord&lt;&gt;("orders", 3, order.customerId(), payload));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/producer/Partitioner.html" rel="noopener">Partitioner interface — Apache Kafka 4.0 Javadoc</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/courses/apache-kafka/producers/" rel="noopener">Producers — Apache Kafka 101 course, Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/apache-kafka-producer-improvements-sticky-partitioner/" rel="noopener">Apache Kafka Producer Improvements: Sticky Partitioner — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.confluent.io/learn/kafka-partition-strategy/" rel="noopener">Kafka Partition Strategy — Confluent Learn</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/5-things-every-kafka-developer-should-know/" rel="noopener">Top 5 Things Every Apache Kafka Developer Should Know — Confluent blog</a></li>
+    </ul>
+
+    <h3>Consumer groups, the group coordinator and the partition-per-consumer rule</h3>
+    <p>A consumer group is identified by <code>group.id</code>, and its members divide the partitions of the subscribed topics between them: each partition is assigned to exactly one member of the group at a time. That single rule explains most consumer-scaling questions. Scaling out a group beyond the partition count does nothing — a topic with six partitions and ten consumers in one group leaves four consumers permanently idle, so partition count is the hard ceiling on consumer parallelism, chosen at topic-design time. Two <em>different</em> groups reading the same topic each get a full copy of the stream, which is how Kafka does pub/sub without duplicating storage.</p>
+    <p>Each group is managed by a <em>group coordinator</em>, a broker chosen by hashing the <code>group.id</code> onto a partition of the internal <code>__consumer_offsets</code> topic; that broker owns the group's membership, its committed offsets and its rebalance state. Members find the coordinator with <code>FindCoordinator</code>, join, and then heartbeat to it for the rest of their lives. Because partition count caps parallelism and cannot be reduced, the usual advice is to over-provision partitions modestly at design time rather than plan to add them later: adding partitions changes key-to-partition mapping and therefore breaks per-key ordering for keys already in flight.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#the-consumer" rel="noopener">The Consumer — Apache Kafka design documentation (groups, coordinator, assignment)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/courses/architecture/consumer-group-protocol/" rel="noopener">Consumer Group Protocol — Kafka Internal Architecture course, Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-manage-consumer-groups" rel="noopener">Manage Kafka Consumer Groups — Baeldung</a></li>
+      <li>[Article] <a href="https://arpitbhayani.me/blogs/kafka-partitions/" rel="noopener">When You Increase Kafka Partitions — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mHaVGVLyfB4" rel="noopener">Consumers — Apache Kafka 101, 2025 Edition (Confluent Developer)</a></li>
+    </ul>
+
+    <h3>Rebalancing: eager, cooperative-sticky and static membership</h3>
+    <p>Whenever membership or subscription changes — a consumer joins, leaves, crashes, or the topic gains partitions — the group must reassign partitions. The classic protocol is <em>eager</em>: every member revokes <em>all</em> its partitions, rejoins, and waits for the leader (one elected consumer) to compute a new assignment and distribute it through <code>SyncGroup</code>. For the duration, the entire group processes nothing. That is the stop-the-world rebalance, and its cost scales with group size, so a rolling restart of a fifty-pod deployment can trigger fifty consecutive full pauses. The built-in eager assignors are <code>RangeAssignor</code> (per topic, partitions dealt in contiguous ranges — skews load when partition counts are not multiples of the member count) and <code>RoundRobinAssignor</code> (even, but reshuffles everything on every change).</p>
+    <p>The first real fix was <em>incremental cooperative rebalancing</em> (KIP-429): with <code>partition.assignment.strategy=CooperativeStickyAssignor</code>, members keep the partitions they are not losing and only the partitions that actually move are revoked, across two lightweight rounds. Throughput dips instead of stopping. Migrating an existing group to it requires the documented two-rolling-restart procedure, which is a favourite senior-level follow-up. The second fix targets a different cause: <em>static group membership</em> (KIP-345). Give each consumer a stable <code>group.instance.id</code> and the coordinator remembers its identity across a restart, holding its assignment for up to <code>session.timeout.ms</code> instead of rebalancing. On Kubernetes, where pods restart routinely, static membership plus a StatefulSet-derived instance id eliminates the majority of pointless rebalances.</p>
+    <pre class="code-block" data-label="Properties"><code>partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+group.instance.id=orders-worker-3   # static membership: survives a restart, no rebalance</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/CooperativeStickyAssignor.html" rel="noopener">CooperativeStickyAssignor — Apache Kafka 4.0 Javadoc (including the upgrade path)</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol" rel="noopener">KIP-429: Kafka Consumer Incremental Rebalance Protocol — Apache Kafka wiki</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Introduce+static+membership+protocol+to+reduce+consumer+rebalances" rel="noopener">KIP-345: Static membership protocol to reduce consumer rebalances — Apache Kafka wiki</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/cooperative-rebalancing-in-kafka-streams-consumer-ksqldb/" rel="noopener">From Eager to Smarter: Cooperative Rebalancing in the Kafka Consumer, Streams and ksqlDB — Confluent blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ovdSOIXSyzI" rel="noopener">Apache Kafka Consumers and Consumer Group Protocol — Confluent</a></li>
+    </ul>
+
+    <h3>KIP-848: the new consumer group protocol in Kafka 4.x</h3>
+    <p>KIP-848 replaces the whole join/sync dance rather than optimising it. In the old protocol the assignment logic lived in a client — the elected group leader — and every membership change forced a global synchronisation barrier that all members had to pass through together. In the new protocol the <em>broker-side group coordinator</em> computes the assignment and drives reconciliation, and members do nothing but send a <code>ConsumerGroupHeartbeat</code> carrying their current state and receive their target state in the reply. There is no group leader, no <code>JoinGroup</code>/<code>SyncGroup</code> round trip, and no global barrier: each member converges to its new assignment independently and asynchronously, so members whose partitions did not move simply keep processing.</p>
+    <p>Practical consequences worth knowing: rebalances become incremental by construction rather than by choosing the right assignor; <code>session.timeout.ms</code> and <code>heartbeat.interval.ms</code> move to the broker side as group configuration, so consumer-side tuning of those values goes away; and groups scale to far larger member counts than the old protocol tolerated. The protocol is generally available and enabled on the broker by default in Apache Kafka 4.x, with clients opting in via <code>group.protocol=consumer</code> (the legacy behaviour remains available as <code>group.protocol=classic</code>). Because the two protocols can coexist in one group during migration, the sane rollout is to upgrade brokers first, then flip clients group by group.</p>
+    <pre class="code-block" data-label="Properties"><code>group.protocol=consumer   # new KIP-848 protocol (broker-driven, incremental)
+# group.protocol=classic  # legacy JoinGroup/SyncGroup protocol, still supported
+group.id=orders-service</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-848%3A+The+Next+Generation+of+the+Consumer+Rebalance+Protocol" rel="noopener">KIP-848: The Next Generation of the Consumer Rebalance Protocol — Apache Kafka wiki</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/blog/2025/03/18/apache-kafka-4.0.0-release-announcement/" rel="noopener">Notable changes in Kafka 4.0 — Apache Kafka upgrade documentation</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kip-848-consumer-rebalance-protocol/" rel="noopener">KIP-848: A New Consumer Rebalance Protocol for Apache Kafka 4.0 — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2025/04/kafka-4-kraft-architecture/" rel="noopener">Kafka 4.0: KRaft Simplifies Architecture — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yVXtWzAbcmY" rel="noopener">Apache Kafka's Next-Gen Rebalance Protocol: Towards More Stable and Scalable Consumer Groups — Confluent</a></li>
+    </ul>
+
+    <h3>Poll-loop liveness: max.poll.interval.ms versus session.timeout.ms</h3>
+    <p>Two independent timeouts decide whether the coordinator considers a consumer alive, and confusing them causes the single most common Kafka support ticket. <code>session.timeout.ms</code> (default 45 seconds) is about the <em>heartbeat thread</em>: a background thread sends a heartbeat every <code>heartbeat.interval.ms</code> (keep it around a third of the session timeout), and if the coordinator hears nothing for a full session timeout it declares the member dead. That detects crashed processes, network partitions and long stop-the-world garbage collections. <code>max.poll.interval.ms</code> (default 5 minutes) is about the <em>application thread</em>: it is the maximum gap allowed between successive calls to <code>poll()</code>, and it exists precisely because the heartbeat thread keeps beating happily while your business logic is stuck.</p>
+    <p>Hence the classic bug: a consumer fetches 500 records, each taking a second to process, exceeds the poll interval, and is evicted from the group mid-batch. The group rebalances, another member picks up the same partition, the evicted consumer finally calls <code>poll()</code> and its commit fails with a <code>CommitFailedException</code> — so the batch is reprocessed, the new owner also runs slowly, and the group thrashes in a rebalance loop while lag climbs. The fixes, in order of preference: reduce <code>max.poll.records</code> so a batch fits comfortably inside the interval; move genuinely slow work off the poll thread onto a worker pool (pausing the partitions so you do not simply move the problem); and only then raise <code>max.poll.interval.ms</code>, accepting that a truly hung consumer now takes that much longer to detect.</p>
+    <pre class="code-block" data-label="Properties"><code>max.poll.records=100          # cap the batch so processing fits inside the interval
+max.poll.interval.ms=300000   # app-thread liveness: max gap between poll() calls
+session.timeout.ms=45000      # heartbeat-thread liveness (broker-side in KIP-848)
+heartbeat.interval.ms=15000   # roughly one third of the session timeout</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/consumer-configs/" rel="noopener">Consumer Configs — Apache Kafka documentation (every timeout, with defaults)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html" rel="noopener">KafkaConsumer — Apache Kafka 4.0 Javadoc (poll loop, liveness, pause/resume)</a></li>
+      <li>[Official] <a href="https://developer.confluent.io/courses/apache-kafka/consumers/" rel="noopener">Consumers — Apache Kafka 101 course, Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c7LPlWvxZcQ" rel="noopener">Apache Kafka Crash Course with Spring Boot 3 — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e0XpKUVCMpk" rel="noopener">Top 50 Kafka Interview Questions and Answers — Code Decode</a></li>
+    </ul>
+
+    <h3>Offset commits: auto-commit, sync versus async, and committing after processing</h3>
+    <p>A consumer's position is not broker state pushed at it; it is an offset the consumer itself commits to the <code>__consumer_offsets</code> topic, and the committed value is where a <em>new</em> owner of the partition resumes. Because of that, the commit point relative to your processing is the whole delivery guarantee. Commit after processing and a crash replays the last batch — at-least-once, duplicates possible, which is what almost every system should choose and then make its handlers idempotent. Commit before processing and a crash skips those records — at-most-once, data loss, correct only for genuinely disposable telemetry.</p>
+    <p><code>enable.auto.commit=true</code> (the default) commits the offsets returned by the previous <code>poll()</code> on a timer, during a later <code>poll()</code> call — meaning it can commit records that are still in your processing loop. If the process dies after that commit, those records are lost; if it dies just before, they are redelivered. Auto-commit therefore gives you neither guarantee reliably, which is why production consumers usually set it to false and commit explicitly. <code>commitSync()</code> blocks, retries retriable errors, and surfaces failures — use it at safe points and in the <code>finally</code> block on shutdown. <code>commitAsync()</code> does not block and does not retry (a retry could overwrite a newer offset with an older one), so the standard idiom is async commits in the hot loop for throughput plus one final synchronous commit on close. When you need precision, pass an explicit map of partition to offset — remembering that the offset you commit is <em>the next record to read</em>, so it is the last processed offset plus one — and use a <code>ConsumerRebalanceListener</code> to commit in <code>onPartitionsRevoked</code> before losing a partition.</p>
+    <pre class="code-block" data-label="Java"><code>props.put("enable.auto.commit", "false");
+try {
+    while (running) {
+        var records = consumer.poll(Duration.ofMillis(500));
+        for (var record : records) handle(record);   // process FIRST
+        consumer.commitAsync();                      // then commit: at-least-once
+    }
+} finally {
+    consumer.commitSync();                           // blocking commit on shutdown
+    consumer.close();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/40/javadoc/org/apache/kafka/clients/consumer/ConsumerRebalanceListener.html" rel="noopener">ConsumerRebalanceListener — Apache Kafka 4.0 Javadoc (committing on revoke)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/basic-kafka-operations/#managing-consumer-groups" rel="noopener">Managing Consumer Groups — Apache Kafka operations documentation (inspecting and resetting offsets)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-consumer-offset" rel="noopener">Understanding Kafka Consumer Offset — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-commit-offsets" rel="noopener">Commit Offsets in Kafka — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=udJ0ZJf97w8" rel="noopener">Offset Commit, Rebalancing and Consumer Groups: Key Concepts in Kafka — Hello Byte</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-kafka-architecture.html">← Kafka Architecture</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="04-kafka-advanced.html">Kafka Advanced →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Client configuration is the most heavily mined Kafka topic in Indian product and service-company rounds — consumer-group rebalancing and offset commits come up in almost every interview that mentions Kafka at all:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What do acks=0, acks=1 and acks=all mean?</summary>
+      <div class="answer"><p>They set how much acknowledgement the producer waits for. <code>acks=0</code>: no wait at all, fastest, records lost silently if the broker is down. <code>acks=1</code>: the leader has written it locally, so a leader crash before replication loses the record. <code>acks=all</code>: every in-sync replica has it — the durable option and the default in recent Kafka. Add that <code>acks=all</code> only guarantees durability with <code>min.insync.replicas</code> set to at least 2 on the topic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a consumer group, and what happens if you run more consumers than partitions?</summary>
+      <div class="answer"><p>A consumer group is a set of consumers sharing a <code>group.id</code> that divide the topic's partitions among themselves, each partition owned by exactly one member. Extra consumers beyond the partition count sit idle — partition count is the hard ceiling on parallelism within a group. Different groups reading the same topic each receive the full stream independently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does Kafka decide which partition a record goes to?</summary>
+      <div class="answer"><p>If you pass an explicit partition, that wins. Otherwise, with a key, the default partitioner hashes the key (murmur2) modulo the partition count, so equal keys always go to the same partition. With no key, the sticky partitioner fills one partition's batch, sends it, and rotates to another — uniform over time but with far bigger batches than round-robin per record.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where are consumer offsets stored, and what does a committed offset actually mean?</summary>
+      <div class="answer"><p>In the internal compacted topic <code>__consumer_offsets</code>, keyed by group, topic and partition, managed by the group coordinator. The committed value is the offset of the <em>next</em> record to read — last processed offset plus one — and it is the position a new owner of that partition resumes from after a rebalance or restart.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does enable.idempotence actually prevent, and how?</summary>
+      <div class="answer"><p>Duplicate writes caused by producer retries. The producer gets a producer id at start-up and stamps every batch with that id plus a per-partition monotonic sequence number. The partition leader tracks the highest sequence it has accepted per producer id, so a replayed batch is recognised and dropped, and a batch with a gap is rejected. It is per producer session and per partition — cross-partition atomicity needs transactions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How can retries reorder messages, and what stops it?</summary>
+      <div class="answer"><p>With <code>max.in.flight.requests.per.connection</code> above 1, batch 2 can be written while batch 1 is being retried, so the partition ends up out of order — silently. Historically the only fix was setting in-flight requests to 1, which hurts throughput. With idempotence enabled the broker enforces sequence-number ordering and rejects out-of-order batches, so up to 5 in-flight requests stay both ordered and duplicate-free.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain batch.size and linger.ms, and the tradeoff between them.</summary>
+      <div class="answer"><p><code>batch.size</code> is the byte cap on a per-partition batch; <code>linger.ms</code> is how long the accumulator waits for more records before sending an unfilled batch. Raising <code>linger.ms</code> adds a few milliseconds of latency but yields larger batches, fewer requests, better compression ratios and lower broker CPU — the throughput-versus-latency dial. Low-latency services keep it near zero; high-volume pipelines raise it deliberately.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where does compression happen in Kafka, and which codec would you pick?</summary>
+      <div class="answer"><p>On the producer, per batch, via <code>compression.type</code>. The batch stays compressed on the broker's disk and is delivered compressed to consumers, so one setting cuts network, disk and page-cache pressure at once; the broker only recompresses if the topic codec differs from the producer's, so keep them aligned. <code>lz4</code> and <code>snappy</code> are the cheap-CPU choices, <code>zstd</code> gives the best ratio for more CPU and is the usual modern default, <code>gzip</code> is legacy. Bigger batches compress better, so tune it with <code>linger.ms</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is auto-commit risky, and what do you do instead?</summary>
+      <div class="answer"><p><code>enable.auto.commit=true</code> commits the previous poll's offsets on a timer during a later <code>poll()</code>, with no knowledge of whether you finished processing. Crash after that commit and the in-flight records are lost; crash before and they are redelivered — so it guarantees neither at-most-once nor at-least-once cleanly. Production consumers set it false, process first, then commit — <code>commitAsync()</code> in the loop for throughput and a <code>commitSync()</code> in <code>finally</code> on shutdown.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> commitSync versus commitAsync — when do you use each?</summary>
+      <div class="answer"><p><code>commitSync()</code> blocks until the broker responds, retries retriable errors, and throws on failure — correct at checkpoints and mandatory in the shutdown path. <code>commitAsync()</code> returns immediately and deliberately does not retry, because a retried stale commit could overwrite a newer offset and cause reprocessing. The standard idiom is async in the hot loop plus one final sync commit on close or on partition revoke.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your consumers keep getting kicked out of the group and lag keeps growing. Diagnose it.</summary>
+      <div class="answer"><p>Almost certainly <code>max.poll.interval.ms</code> exceeded, not a heartbeat problem: the background heartbeat thread is fine while the application thread is stuck processing a large batch, so the coordinator evicts the member for not polling. The partition moves, the evicted consumer's commit fails with <code>CommitFailedException</code>, the batch is reprocessed by the new owner, and the group thrashes. Fix by lowering <code>max.poll.records</code>, moving slow work to a worker pool with the partitions paused, and only as a last resort raising <code>max.poll.interval.ms</code> — which lengthens genuine failure detection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Difference between max.poll.interval.ms and session.timeout.ms?</summary>
+      <div class="answer"><p><code>session.timeout.ms</code> (default 45s) is heartbeat-thread liveness: no heartbeat for that long and the coordinator declares the member dead — it catches crashes, network partitions and long garbage-collection pauses. <code>max.poll.interval.ms</code> (default 5 minutes) is application-thread liveness: the maximum gap between <code>poll()</code> calls, which catches a consumer that is alive but not making progress. Under KIP-848 the session timeout becomes broker-side group configuration rather than a client property.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a stop-the-world rebalance, and how does cooperative-sticky assignment help?</summary>
+      <div class="answer"><p>In the eager protocol every member revokes all its partitions, rejoins, and waits for the leader's new assignment through <code>SyncGroup</code>; the whole group processes nothing for the duration, and the cost grows with group size, so a rolling restart triggers one pause per pod. <code>CooperativeStickyAssignor</code> (KIP-429) revokes only the partitions that actually change hands, in two light rounds, so unaffected members keep consuming — throughput dips rather than stopping. Migrating a live group to it needs the documented two-rolling-restart upgrade path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your pods restart constantly on Kubernetes and every restart rebalances the group. What would you change?</summary>
+      <div class="answer"><p>Enable static group membership (KIP-345): give each consumer a stable <code>group.instance.id</code> — derived from the StatefulSet ordinal, not randomly generated — so the coordinator recognises the returning member and holds its assignment instead of rebalancing, as long as it returns within the session timeout. Combine with cooperative-sticky assignment, or move the group to the KIP-848 protocol where reconciliation is incremental by design.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What changes with the KIP-848 consumer group protocol, and why does it matter?</summary>
+      <div class="answer"><p>Assignment moves from an elected client leader to the broker-side group coordinator, and the <code>JoinGroup</code>/<code>SyncGroup</code> barrier is replaced by a <code>ConsumerGroupHeartbeat</code> exchange that reconciles each member's assignment independently and asynchronously. There is no global synchronisation point, so members whose partitions did not move never pause, rebalances are incremental without picking a special assignor, groups scale to far more members, and heartbeat/session tuning becomes broker-side group configuration. It is enabled by default on Kafka 4.x brokers; clients opt in with <code>group.protocol=consumer</code>, and <code>classic</code> remains for the legacy path during migration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You need strict ordering per customer but also high throughput. How do you design it?</summary>
+      <div class="answer"><p>Key by <code>customerId</code> so all events for one customer hash to one partition and are consumed in order, and get parallelism across customers by having many partitions and many consumers. Enable idempotence so retries cannot reorder within a partition. Size partitions for peak parallelism up front, because adding partitions later re-maps keys and breaks ordering for existing ones, and watch for hot keys — one whale customer can saturate a single partition no matter how many you have, which is when a custom partitioner routing that tenant to dedicated partitions earns its keep.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.kb.producer — Producer acks, idempotence, batching, compression, partitioners, ordering guarantees</li>
+      <li>msg.kb.consumer — Consumer groups, rebalancing and the new protocol (KIP-848), offset commit strategies</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

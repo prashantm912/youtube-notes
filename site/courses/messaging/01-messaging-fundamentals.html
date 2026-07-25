@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Messaging fundamentals module: why brokers exist (temporal decoupling, load levelling, fan-out) and what they cost, point-to-point queues versus publish-subscribe, log versus queue brokers, delivery guarantees from at-most-once to the exactly-once myth, idempotent consumers and poison messages — with verified resources and interview questions.">
+  <title>Messaging Fundamentals — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Messaging Fundamentals</h1>
+  <p class="standfirst">A message broker is not a faster way to call a service — it is a different contract. You trade an immediate answer for the freedom to send when the receiver is not listening, and everything else in this track follows from that trade.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Messaging Fundamentals</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module frames the whole track. It starts with the question an interviewer will eventually ask you to justify — why put a broker between two services at all — and answers it with the three properties a synchronous HTTP call cannot give you: temporal decoupling, load levelling and fan-out. It then names the price you pay for them, because a candidate who lists only the benefits has not run one in production.</p>
+    <p>From there it covers the two topologies every broker is built out of — point-to-point queues with competing consumers, and publish-subscribe with independent subscribers — and the log-versus-queue distinction that separates Kafka from RabbitMQ. The second half is delivery guarantees: at-most-once, at-least-once and exactly-once, why end-to-end exactly-once <em>delivery</em> is provably impossible, what real systems build instead (at-least-once delivery plus idempotent processing), and what happens to the one message that can never be processed at all.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why put a broker in the middle: temporal decoupling, load levelling, fan-out</h3>
+    <p>A synchronous call binds two services together in time: the caller and the callee must both be healthy, at the same instant, for the work to happen. Introduce a broker and that binding breaks. <strong>Temporal decoupling</strong> means the producer can publish while the consumer is deploying, restarting or entirely down — the message waits, and the producer's own request succeeds. <strong>Load levelling</strong> means the queue absorbs a spike: a flash sale delivering ten thousand orders a second into a service that can process two thousand does not knock it over, it just grows the backlog and drains it afterwards, so the queue acts as a shock absorber between an unpredictable arrival rate and a fixed processing rate. <strong>Fan-out</strong> means one event can feed many independent consumers — billing, search indexing, the recommendation model, the audit log — without the producer knowing any of them exist, so adding the fourth consumer requires no change to the publisher.</p>
+    <p>None of this is free, and the honest version of the answer names the bill. You have added a distributed system to operate, monitor, secure, upgrade and capacity-plan. You have accepted <em>eventual</em> consistency: the moment the producer commits, the rest of the world is stale for an unbounded interval, and the user interface has to be designed around "your order is being processed" rather than a final answer. Debugging becomes harder, because a request no longer has one stack trace — it has a trail across processes that only correlation ids and distributed tracing can reassemble. And a broker converts a loud failure into a quiet one: instead of a 500 the caller can see, you get a growing backlog nobody is watching. The rule of thumb interviewers like: use a broker when the caller does not need the answer to continue; keep the synchronous call when it does.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/communication-style/messaging.html" rel="noopener">Pattern: Messaging — microservices.io (Chris Richardson: benefits, drawbacks, when to use it)</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/Messaging.html" rel="noopener">Messaging — Enterprise Integration Patterns (Hohpe &amp; Woolf, the root pattern)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/queue-based-load-leveling" rel="noopener">Queue-Based Load Leveling pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://builder.aws.com/content/3EuRcgkTP1MI0c7zM8W6HL3WIqA/avoiding-insurmountable-queue-backlogs" rel="noopener">Avoiding insurmountable queue backlogs — Amazon Builders' Library (the cost side, from operators)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ewUw0sUxHI4" rel="noopener">Synchronous and Asynchronous Communication between Microservices — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Point-to-point queues and competing consumers</h3>
+    <p>A queue is a channel with exactly one logical receiver per message. The producer sends, the broker holds, and when several consumer instances are attached the broker hands each message to exactly one of them. That is the <em>competing consumers</em> pattern, and it is how you scale processing: add pods, each takes a share of the queue, throughput rises roughly linearly until the downstream database becomes the limit. It also gives you automatic failover — if a consumer dies mid-message and never acknowledges, the broker redelivers to a sibling.</p>
+    <p>Two consequences follow that candidates routinely miss. First, competing consumers destroy global ordering: with five consumers pulling concurrently, message 7 can commit before message 5, so any ordering requirement has to be re-established by routing related messages to the same consumer (module 09 covers this). Second, the acknowledgement is the unit of reliability. A consumer that acknowledges on receipt and then crashes has lost the message; a consumer that acknowledges only after the work commits will get a redelivery instead — which is the at-least-once behaviour discussed below, and the reason idempotency is not optional.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/PointToPointChannel.html" rel="noopener">Point-to-Point Channel — Enterprise Integration Patterns</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/CompetingConsumers.html" rel="noopener">Competing Consumers — Enterprise Integration Patterns</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-two-python" rel="noopener">Work Queues — RabbitMQ tutorial two (round-robin dispatch, manual ack, prefetch)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/competing-consumers" rel="noopener">Competing Consumers pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/message-queues" rel="noopener">Introduction to Message Queues — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=oUJbuFMyBDk" rel="noopener">What is a MESSAGE QUEUE and where is it used? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>Publish-subscribe: one message, every interested subscriber</h3>
+    <p>Publish-subscribe inverts the delivery rule: one published message is delivered to <em>every</em> subscriber, each of which gets its own copy and its own progress. The publisher addresses a topic, not a recipient, so it neither knows nor cares how many subscribers exist — which is what makes "add an analytics consumer" a zero-change deployment on the producer side. Inside one subscriber you still typically run competing consumers, so real systems are pub-sub between teams and point-to-point within a team.</p>
+    <p>The detail worth learning early is <em>durability</em> of the subscription. A non-durable subscriber only receives messages published while it is connected; anything sent during its downtime is gone. A durable subscription tells the broker to retain messages for that subscriber while it is away — which is what makes pub-sub safe for business events rather than just live notifications. RabbitMQ expresses this by binding a durable queue to a fanout or topic exchange, so each subscriber owns a queue; Kafka expresses it as a consumer group with committed offsets against a retained log. Same pattern, very different machinery.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/PublishSubscribeChannel.html" rel="noopener">Publish-Subscribe Channel — Enterprise Integration Patterns</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/DurableSubscription.html" rel="noopener">Durable Subscriber — Enterprise Integration Patterns (the offline-subscriber problem)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/tutorial-three-python" rel="noopener">Publish/Subscribe — RabbitMQ tutorial three (fanout exchange, temporary queues)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber" rel="noopener">Publisher-Subscriber pattern — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/publisher-subscriber-model" rel="noopener">Publisher-Subscriber Model — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FMhbR_kQeHw" rel="noopener">What is the Publisher Subscriber Model? — Gaurav Sen</a></li>
+    </ul>
+
+    <h3>The broker's job, and the log-versus-queue split</h3>
+    <p>The broker is the piece of infrastructure that accepts a message, durably stores it, decides who should get it, and tracks whether they got it. Everything else — routing rules, retries, ordering, security, backpressure — hangs off those four responsibilities. But there are two fundamentally different implementations of "durably stores it", and knowing which one you are talking about is the single most useful distinction in this track.</p>
+    <p>A <strong>queue broker</strong> (RabbitMQ, ActiveMQ, SQS) treats a message as a work item: it is stored until someone acknowledges it, and then it is deleted. Consumption is destructive, the broker holds per-message state, and its strength is rich routing plus per-message operations like TTL, priority and dead-lettering. A <strong>log broker</strong> (Kafka, Pulsar, Redpanda) treats a message as an append to an immutable, ordered, replayable file: consumption is a read at an <em>offset</em>, nothing is deleted on read, and messages disappear only when the retention policy says so. That is why Kafka can support a new consumer replaying six months of history and a queue broker cannot, and why Kafka's ordering guarantee is per partition rather than per queue. The practical selection rule: reach for a queue broker when you need complex routing and per-message control over discrete tasks; reach for a log when you need replay, high sustained throughput, stream processing, or many independent consumers reading the same stream at their own pace.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/intro" rel="noopener">Introduction — Apache Kafka documentation (the log abstraction, topics, partitions, offsets)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/tutorials/amqp-concepts" rel="noopener">AMQP 0-9-1 Model Explained — RabbitMQ (exchanges, bindings, queues, acknowledgements)</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageBroker.html" rel="noopener">Message Broker — Enterprise Integration Patterns</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/okay-store-data-apache-kafka/" rel="noopener">It's Okay to Store Data in Apache Kafka — Confluent blog (why a log is not just a queue)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/write-ahead-log.html" rel="noopener">Write-Ahead Log — Patterns of Distributed Systems, martinfowler.com</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=x4k1XEjNzYQ" rel="noopener">Kafka vs. RabbitMQ vs. Messaging Middleware vs. Pulsar — ByteByteGo</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GMmRtSFQ5Z0" rel="noopener">RabbitMQ vs Kafka — trade-offs to choose one over the other — Tech Primers</a></li>
+    </ul>
+
+    <h3>The bill for asynchrony: eventual consistency and harder debugging</h3>
+    <p>Once a write is acknowledged before its consequences have happened, your system is eventually consistent by construction. The order exists but the invoice does not yet; the user's profile is updated but search still returns the old name. This is a design constraint, not a bug — it forces you to expose intermediate states honestly, to make every consumer tolerant of arriving before or after its siblings, and to give up the read-your-own-writes guarantee a single database handed you for free. When the interviewer asks "what did you lose by going event-driven", this is the answer they are waiting for.</p>
+    <p>Operationally, the second cost is observability. A synchronous failure surfaces as an error to the caller; an asynchronous one surfaces as a metric nobody alerted on. The non-negotiable minimum is: propagate a correlation or trace id in message headers so a request can be reconstructed end to end, alert on <em>consumer lag</em> or queue depth rather than only on error rate (a stalled consumer throws no exceptions), and monitor the dead-letter destination as a first-class signal. Also note the shape of asynchronous request-reply — when the caller genuinely needs an answer, the honest pattern is a status endpoint or a reply queue with a correlation id, not a synchronous call disguised as messaging.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/event-driven-architecture.html" rel="noopener">Pattern: Event-driven architecture — microservices.io</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/201701-event-driven.html" rel="noopener">What do you mean by "Event-Driven"? — Martin Fowler (four distinct patterns people conflate)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven" rel="noopener">Event-Driven Architecture style — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/asynchronous-request-reply" rel="noopener">Asynchronous Request-Reply pattern — Azure Architecture Center</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kyNL7yCvQQc" rel="noopener">Not Just Events: Developing Asynchronous Microservices — Chris Richardson, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>Delivery guarantees: at-most-once, at-least-once, exactly-once</h3>
+    <p>Every messaging system makes a promise about how many times a message can be processed, and the whole promise reduces to <em>when you acknowledge</em>. <strong>At-most-once</strong> acknowledges before doing the work (or does not acknowledge at all): zero or one processing, never a duplicate, but a crash between the ack and the commit loses the message silently. It is correct only where loss is cheap — metrics samples, telemetry, cache-warming hints, a click-tracking beacon. <strong>At-least-once</strong> acknowledges after the work commits: nothing is lost, but any crash, timeout or rebalance between commit and ack causes redelivery, so duplicates are guaranteed to happen eventually. This is the practical default of Kafka, RabbitMQ, SQS and every serious broker, and it is what you should assume unless told otherwise.</p>
+    <p><strong>Exactly-once</strong> is the promise that each message affects the system precisely once. Vendors sell it, and within a closed boundary it is real: Kafka's transactional producer plus a read-process-write consumer with <code>isolation.level=read_committed</code> genuinely gives exactly-once <em>processing</em> for Kafka-to-Kafka pipelines, because the offset commit and the output write land in one atomic transaction. The moment an external side effect is involved — an email, a payment gateway, a third-party API — the guarantee evaporates, because the broker cannot make its transaction span a system it does not control. Being able to state that boundary precisely is what separates a strong answer from a memorised one.</p>
+    <pre class="code-block" data-label="Java"><code>// At-most-once: ack first. Crash on the next line and the message is gone.
+ack.acknowledge();
+handler.process(message);
+
+// At-least-once: commit the work, then ack. Crash between them and it is redelivered.
+handler.process(message);   // must be idempotent — it may run twice
+ack.acknowledge();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#message-delivery-semantics" rel="noopener">Message Delivery Semantics — Apache Kafka documentation (the three guarantees, from the source)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/reliability" rel="noopener">Reliability Guide — RabbitMQ documentation (acknowledgements, confirms, what can be lost)</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/GuaranteedMessaging.html" rel="noopener">Guaranteed Delivery — Enterprise Integration Patterns</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/" rel="noopener">Exactly-Once Semantics Are Possible: Here's How Kafka Does It — Confluent blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-exactly-once" rel="noopener">Exactly Once Processing in Kafka with Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ki2D2o9aVl8" rel="noopener">Apache Kafka Transactions: Message Delivery and Exactly-Once Semantics — Confluent</a></li>
+    </ul>
+
+    <h3>Why exactly-once <em>delivery</em> is impossible, and what "effectively-once" means</h3>
+    <p>Strip the vendor language away and the argument is short. Sender and receiver communicate over a network that can drop, delay or duplicate any packet. The sender delivers a message and waits for an acknowledgement. If no ack arrives, the sender cannot distinguish "the message was lost" from "the message arrived and the ack was lost". Resend and you risk a duplicate; do not resend and you risk a loss. There is no third option, and no number of extra acknowledgements fixes it — each new ack has the same problem, which is exactly the <em>Two Generals' Problem</em>: no protocol over an unreliable channel can give both parties certainty in a bounded number of messages. Exactly-once delivery is therefore not hard, it is impossible, and an interviewer asking "is exactly-once possible?" is usually probing for exactly that awareness.</p>
+    <p>What real systems build instead is <strong>at-least-once delivery plus idempotent processing</strong>, which the industry calls <em>effectively-once</em> or exactly-once <em>semantics</em>. The message may arrive five times; the observable effect happens once. Kafka's transactions achieve this inside Kafka by making the produce and the offset commit atomic; the transactional outbox pattern achieves it across a database and a broker by writing the business row and the outbox row in one local transaction and relaying afterwards. In both cases the duplicate still travels — it is simply absorbed on arrival. If someone claims exactly-once delivery end to end across arbitrary systems, ask them where the deduplication actually lives; there is always one.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/data/transactional-outbox.html" rel="noopener">Pattern: Transactional outbox — microservices.io (atomic write plus publish, without 2PC)</a></li>
+      <li>[Official] <a href="https://en.wikipedia.org/wiki/Two_Generals%27_Problem" rel="noopener">Two Generals' Problem — the impossibility result behind all of this</a></li>
+      <li>[Article] <a href="https://bravenewgeek.com/you-cannot-have-exactly-once-delivery/" rel="noopener">You Cannot Have Exactly-Once Delivery — Tyler Treat, Brave New Geek</a></li>
+      <li>[Article] <a href="https://builder.aws.com/content/3F08f7GPFiZMCgXD8gny6OjxR0Z/challenges-with-distributed-systems" rel="noopener">Challenges with distributed systems — Amazon Builders' Library (the ambiguous-timeout problem)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/transactions-apache-kafka/" rel="noopener">Transactions in Apache Kafka — Confluent blog (what the guarantee does and does not span)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DnOlqghKJMY" rel="noopener">Unsolvable Distributed Consensus and The Two Generals' Problem — Arpit Bhayani</a></li>
+    </ul>
+
+    <h3>Idempotent consumers: making the duplicate harmless</h3>
+    <p>An idempotent consumer produces the same end state whether it processes a message once or ten times. There are three routes to it, and a good answer names all three. <strong>Natural idempotency</strong> is the cheapest: the operation is already safe to repeat, because it sets an absolute value rather than applying a delta. "Set status to SHIPPED" is naturally idempotent; "add 100 to the balance" is not — turning the second into the first, by carrying the resulting balance or a transaction id instead of a delta, is often the whole fix and costs nothing at runtime.</p>
+    <p><strong>Deduplication by message id</strong> is the general mechanism: the producer stamps every message with a stable business key or UUID, and the consumer records processed ids in a table with a unique constraint, inserting the id in the <em>same local transaction</em> as the business write. If the insert violates the constraint, the message is a duplicate and is acknowledged without reprocessing. Do the two writes in separate transactions and you have merely moved the race. Give the dedup table a retention window too, or it grows forever. <strong>Upsert semantics</strong> is the database-native version of the same idea — <code>INSERT ... ON CONFLICT DO UPDATE</code> keyed on the business identifier, or a conditional update guarded by a version or event timestamp so an out-of-order redelivery cannot overwrite newer state. Note that Kafka's producer-side <code>enable.idempotence</code> only removes duplicates caused by broker-side producer retries; it does nothing about a consumer that reprocesses after a rebalance, so consumer idempotency remains your job.</p>
+    <pre class="code-block" data-label="SQL"><code>-- One local transaction: the business write and the dedup marker commit together.
+BEGIN;
+  INSERT INTO processed_messages (message_id, consumer, processed_at)
+  VALUES (:messageId, 'billing', now());     -- unique(message_id, consumer) -> duplicate fails here
+
+  INSERT INTO invoice (order_id, amount, status)
+  VALUES (:orderId, :amount, 'ISSUED')
+  ON CONFLICT (order_id) DO NOTHING;         -- upsert as a second line of defence
+COMMIT;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html" rel="noopener">Pattern: Idempotent Consumer — microservices.io</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/IdempotentReceiver.html" rel="noopener">Idempotent Receiver — Enterprise Integration Patterns</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/patterns-of-distributed-systems/idempotent-receiver.html" rel="noopener">Idempotent Receiver — Patterns of Distributed Systems, martinfowler.com</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/" rel="noopener">Making retries safe with idempotent APIs — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/idempotent-operations" rel="noopener">What Is an Idempotent Operation? — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m6DtqSb1BDM" rel="noopener">Build a robust Payments service using Idempotency Keys — Arpit Bhayani</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bpaA3EiUsZE" rel="noopener">Why Kafka Processes the Same Message Twice — Kafka idempotency example — Java Techie</a></li>
+    </ul>
+
+    <h3>Poison messages, the redelivery loop, and dead-lettering</h3>
+    <p>A poison message is one that fails every single time it is processed — a malformed payload, a reference to a row that was deleted, a schema the consumer cannot parse, a bug triggered only by this input. Under at-least-once semantics that is a trap, not an inconvenience: the consumer fails, does not acknowledge, the broker redelivers, the consumer fails again. On a queue broker the message spins at the head of the queue burning CPU and blocking nothing else; on Kafka it is worse, because the consumer cannot commit past that offset, so the <em>entire partition</em> stalls behind one bad record while lag climbs and every well-formed message behind it waits. Teams discover this at three in the morning.</p>
+    <p>The escape hatch is <strong>dead-lettering</strong>: after a bounded number of attempts, stop retrying and move the message to a separate destination — a dead-letter queue, exchange or topic — along with the failure reason, the attempt count and the original headers. The main flow continues; the bad message is preserved for a human. Two rules make this work. Distinguish the failure types first: a transient failure (downstream timeout, deadlock) deserves retry with backoff, while a permanent failure (validation error, unparseable body) should go straight to the dead letter, because retrying it is pure waste. And treat a non-empty dead-letter destination as an alertable condition — an unmonitored DLQ is just a slower way to lose data. Module 08 covers the full retry and replay strategy that builds on this.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/DeadLetterChannel.html" rel="noopener">Dead Letter Channel — Enterprise Integration Patterns</a></li>
+      <li>[Official] <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/InvalidMessageChannel.html" rel="noopener">Invalid Message Channel — Enterprise Integration Patterns (bad content vs. bad delivery)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/dlx" rel="noopener">Dead Letter Exchanges — RabbitMQ documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=xAYthoT7Sk0" rel="noopener">Deep dive into Dead-Letter Queues — Software Developer Diaries</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aNBSd7T-RGA" rel="noopener">Kafka Error Handling with Spring Boot: retry strategies and dead-letter topics — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WQDbX0agk-I" rel="noopener">Handling Message Errors and Dead Letter Queues in Apache Kafka — Confluent</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All Messaging modules</a>
+    <a href="02-kafka-architecture.html">Kafka Architecture →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Messaging fundamentals open almost every backend round in Indian product and service companies — the delivery-guarantee questions in particular are asked at every level from two-year experience upward, and the follow-ups punish memorised answers:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a message broker, and why would you add one instead of calling the service directly?</summary>
+      <div class="answer"><p>A broker is middleware that accepts a message, stores it durably, routes it to the right consumers and tracks acknowledgement. You add one when the caller does not need the result to continue, and you want three things a synchronous call cannot give: temporal decoupling (the consumer can be down and the producer still succeeds), load levelling (the queue absorbs a spike the consumer cannot process at arrival rate), and fan-out (one event feeds many independent consumers without the producer knowing them).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Queue versus publish-subscribe — what is the actual difference?</summary>
+      <div class="answer"><p>Delivery cardinality. In a queue (point-to-point) each message is delivered to exactly one consumer, so multiple consumer instances compete and share the load. In publish-subscribe each message is delivered to every subscriber, each with its own independent copy and progress. Real systems combine them: pub-sub between services, competing consumers inside each service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the three delivery guarantees and give a use case for each.</summary>
+      <div class="answer"><p>At-most-once: acknowledge before processing; zero or one delivery, may lose — fine for metrics, telemetry, cache-warming. At-least-once: acknowledge after processing commits; never loses, may duplicate — the practical default for orders, payments, notifications, backed by idempotent consumers. Exactly-once: each message affects the system once; achievable as exactly-once <em>processing</em> inside a closed transactional boundary such as Kafka read-process-write, not as end-to-end delivery.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an idempotent consumer?</summary>
+      <div class="answer"><p>One whose end state is identical whether it handles a message once or many times. It is the counterpart to at-least-once delivery: since duplicates are guaranteed to occur, the consumer must absorb them. Achieved through naturally idempotent operations (set an absolute value), deduplication on a message id, or upsert/conditional-update semantics in the database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a dead-letter queue and when does a message land in one?</summary>
+      <div class="answer"><p>A separate destination for messages that could not be processed after a bounded number of attempts, or that failed validation outright. It exists so one bad message cannot block the main flow indefinitely. The dead letter should carry the failure reason, attempt count and original headers, and its depth must be alerted on — an unmonitored dead-letter queue is silent data loss.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is exactly-once delivery possible? Explain your answer.</summary>
+      <div class="answer"><p>No — not end to end over an unreliable network. When the sender gets no acknowledgement it cannot distinguish a lost message from a lost ack; resending risks a duplicate, not resending risks a loss, and adding more acknowledgements just recreates the same ambiguity. That is the Two Generals' Problem. What real systems achieve is at-least-once delivery plus idempotent processing, marketed as exactly-once semantics or effectively-once. Kafka's transactions do give genuine exactly-once <em>processing</em> for Kafka-to-Kafka read-process-write pipelines, because the output write and the offset commit are one atomic transaction — but the guarantee stops at the first external side effect, such as an email or a third-party payment API.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Kafka versus RabbitMQ — how do you choose?</summary>
+      <div class="answer"><p>They are different data structures. RabbitMQ is a queue broker: consumption is destructive, the broker holds per-message state, and it gives you rich routing (direct, topic, fanout, headers), per-message TTL, priority and dead-letter exchanges. Kafka is a distributed log: messages are appended and retained, consumers read at an offset, nothing is deleted on read, so replay and many independent consumers on one stream are natural, and throughput is very high. Choose RabbitMQ for complex routing over discrete tasks and per-message control; choose Kafka for replay, event sourcing, stream processing and high sustained volume.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A message is processed successfully but the consumer crashes before acknowledging. What happens, and what must the consumer guarantee?</summary>
+      <div class="answer"><p>The broker sees no acknowledgement, assumes failure and redelivers to the same or another consumer — so the work runs twice. This is the normal, unavoidable at-least-once case, and it is exactly why the consumer must be idempotent. The correct handling is to make the business write and the deduplication marker commit in one local transaction, so a redelivery is detected and discarded rather than reapplied.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you implement deduplication concretely?</summary>
+      <div class="answer"><p>Producer stamps every message with a stable id — a business key such as an order id, or a UUID generated once and preserved across retries (never regenerated per attempt). The consumer keeps a processed-messages table with a unique constraint on (message id, consumer), and inserts the id in the same transaction as the business write; a constraint violation means duplicate, so acknowledge and skip. Alternatives are an upsert keyed on the business identifier, or a conditional update guarded by a version or event timestamp so a late redelivery cannot overwrite newer state. Add a retention window to the dedup table or it grows without bound.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a poison message, and what does it do to a Kafka consumer specifically?</summary>
+      <div class="answer"><p>A message that fails on every attempt — malformed payload, unparseable schema, missing referenced data, or a bug triggered only by that input. On a queue broker it loops through redelivery indefinitely. On Kafka it is worse: the consumer cannot commit past that offset, so the whole partition stalls behind one record and lag grows for every message queued behind it. The fix is a bounded retry policy followed by dead-lettering, so the consumer can move the offset forward.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You added a broker and now the UI shows stale data. What happened, and how do you design around it?</summary>
+      <div class="answer"><p>You bought temporal decoupling and paid with eventual consistency — the write is acknowledged before its consequences have propagated, so read-your-own-writes is gone. Design around it rather than hiding it: expose the intermediate state honestly ("order received, being processed"), return the optimistic result from the command side where safe, use a status endpoint or asynchronous request-reply with a correlation id when the caller genuinely needs an answer, and make every consumer tolerant of arriving out of order relative to its siblings.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You need to publish an event only if a database transaction commits. How do you do it without a distributed transaction?</summary>
+      <div class="answer"><p>The transactional outbox. Write the business row and an outbox row in the same local database transaction, so both commit or neither does. A separate relay — a poller or a change-data-capture stream reading the write-ahead log — publishes outbox rows to the broker afterwards and marks them sent. The relay is at-least-once, so consumers must still be idempotent, but the failure mode is a duplicate rather than the far worse "row written, event never published" or "event published, row rolled back" that a naive publish-inside-the-transaction produces.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Kafka's producer has enable.idempotence. Does that mean your consumer no longer needs to handle duplicates?</summary>
+      <div class="answer"><p>No. Producer idempotence uses a producer id and per-partition sequence numbers so the broker discards duplicates created by the producer's own network retries — it deduplicates one producer session writing to the log. It does nothing about a consumer that processes a record, crashes before committing its offset and reprocesses after a rebalance, and nothing about an application-level republish. Consumer-side idempotency is a separate, still-mandatory concern.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your consumers scale out to eight instances and downstream state starts going wrong. What is the likely cause?</summary>
+      <div class="answer"><p>Competing consumers destroyed the ordering the logic silently depended on — two updates for the same entity are now processed concurrently on different instances, so an older event can commit after a newer one. Fixes: partition by entity key so all messages for one key land on the same consumer (per-key ordering rather than global), make handlers commutative, or guard writes with a version or event timestamp so a stale update is rejected. Global ordering across a scaled-out consumer group is not something a broker can give you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A queue's depth is growing steadily and never drains. How do you diagnose and what do you do?</summary>
+      <div class="answer"><p>Arrival rate now exceeds service rate, so the backlog is unbounded — a queue only smooths bursts, it does not add capacity. Diagnose by separating the causes: a poison message stalling a partition, a slow downstream dependency raising per-message latency, a consumer stuck in a redelivery loop, or genuine sustained overload. Then act accordingly — dead-letter the poison, scale consumers or partitions (on Kafka, consumer parallelism is capped by partition count, so adding pods beyond that does nothing), shed or throttle at the producer, and if the backlog is already old, consider whether stale messages still have business value or should be expired. Alert on lag and age-of-oldest-message, not just queue depth.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you argue against introducing a broker at all?</summary>
+      <div class="answer"><p>When the caller needs the answer to proceed — a synchronous read, an authorisation check, a price quote — because wrapping a request-reply in a queue adds latency and complexity for nothing. Also when the team has no operational capacity for another distributed system, when strong consistency is a hard business requirement, or when the coupling being removed is trivially cheap. A broker is justified by temporal decoupling, load levelling or fan-out; if none of the three applies, an HTTP call plus a retry policy is the simpler and more debuggable design.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.fun.models — queues vs publish-subscribe, brokers, why asynchronous messaging decouples services</li>
+      <li>msg.fun.delivery — delivery guarantees (at-most-once, at-least-once, exactly-once), idempotent consumers, poison messages</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

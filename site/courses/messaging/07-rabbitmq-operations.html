@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="RabbitMQ in production module: consumer acknowledgements and prefetch, TTL, queue length limits and overflow, dead-letter exchanges and delayed retry, priority queues, quorum queues as the default, RabbitMQ Streams and super streams, clustering, and Spring AMQP — with verified resources and interview questions.">
+  <title>RabbitMQ in Production — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: RabbitMQ in Production</h1>
+  <p class="standfirst">A RabbitMQ cluster that works on a laptop and a RabbitMQ cluster that survives a bad Friday differ by about a dozen settings. This module is those settings — acknowledgements, prefetch, expiry, dead-lettering, and the replicated queue types that keep data alive when a node dies.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → RabbitMQ in Production</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The previous module gave you the AMQP model: exchanges, bindings, routing keys, queues. That model is broker-side vocabulary. This module is the operational half — the consumer-side and queue-side configuration that decides whether messages are lost on a consumer crash, whether one greedy worker starves the rest of the pool, what happens to a message nobody can process, and whether a queue survives losing the node it lives on.</p>
+    <p>Everything here is against RabbitMQ 4.x, where the landscape changed materially: classic queue mirroring was removed outright, quorum queues became the default answer for durable replicated work, and streams gave RabbitMQ a Kafka-shaped append-only log of its own. The module closes on Spring AMQP, since that is how most JVM teams actually touch any of it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Consumer acknowledgements: manual ack, autoack, and the at-most-once trap</h3>
+    <p>A consumer subscribes with <code>basic.consume</code>, and the single most consequential flag on that call is <code>no-ack</code>. Set it, and you are in <em>automatic acknowledgement</em> mode: the broker considers a message delivered the moment it has written it to the socket, forgets it, and moves on. If your process crashes, the TCP connection drops mid-flight, or your handler throws after the bytes arrived, the message is simply gone. Autoack is therefore <strong>at-most-once</strong> delivery, and it is the correct choice only for data you are genuinely happy to lose — metrics samples, cache-warming hints, log lines. For anything with business meaning, use manual acknowledgement and ack <em>after</em> the work is done and committed, which gives you at-least-once and obliges the consumer to be idempotent.</p>
+    <p>In manual mode you have three verbs. <code>basic.ack</code> confirms a delivery tag (with a <code>multiple</code> flag to confirm everything up to that tag in one round trip). <code>basic.reject</code> discards one message, with a <code>requeue</code> flag deciding whether it goes back on the queue or gets dead-lettered. <code>basic.nack</code> is RabbitMQ's extension that does the same thing but supports <code>multiple</code>. The rule that trips people up: <code>requeue=true</code> on a message that fails deterministically produces an infinite hot loop — the message returns to the queue head, is redelivered instantly, fails again, forever, pinning a CPU. Use <code>requeue=false</code> plus a dead-letter exchange for anything that is not a transient fault, and read the <code>redelivered</code> flag on the delivery, which tells you the broker has handed this message out before (it is a hint, not a reliable counter). Finally, remember that unacknowledged messages accumulate: the broker keeps every unacked delivery pending until you ack, reject, or drop the channel, so a consumer that forgets to ack quietly grows the broker's memory footprint until the delivery-acknowledgement timeout (30 minutes by default) closes the channel and requeues everything.</p>
+    <pre class="code-block" data-label="Java"><code>channel.basicConsume(queue, false, (tag, delivery) -&gt; {   // false = manual ack
+    try {
+        handle(delivery.getBody());                       // do the work first
+        channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+    } catch (TransientException e) {
+        channel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, true);  // requeue
+    } catch (PoisonException e) {
+        channel.basicNack(delivery.getEnvelope().getDeliveryTag(), false, false); // to the DLX
+    }
+}, tag -&gt; {});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/confirms" rel="noopener">Consumer Acknowledgements and Publisher Confirms — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/consumers" rel="noopener">Consumers — RabbitMQ documentation (delivery tags, redelivered, cancellation)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/nack" rel="noopener">Negative Acknowledgements — RabbitMQ documentation (basic.nack semantics)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rabbitmq-consumer-acknowledgments-publisher-confirmations" rel="noopener">Consumer Acknowledgments and Publisher Confirms with RabbitMQ — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=M7Mg7izbi7w" rel="noopener">Alternate Exchanges, Dead Letter Exchanges, Message Acks and Queue Options — jumpstartCS</a></li>
+    </ul>
+
+    <h3>Prefetch (basic.qos): the one setting that decides your load balancing</h3>
+    <p>By default a channel has no prefetch limit, and RabbitMQ will push messages to a consumer as fast as the socket accepts them. With ten thousand messages queued and three workers, the first worker to connect can end up buffering nearly all of them client-side while the other two sit idle — round-robin dispatch happens at delivery time, not at processing time, so the broker considers its work fairly distributed while your throughput is that of a single worker. Worse, those buffered messages are unacked: if that worker dies, all of them are requeued at once. <code>basic.qos(prefetchCount)</code> fixes this by capping how many unacknowledged deliveries a consumer may hold. Set it to 1 and you get strict fair dispatch — nobody gets a second message until the first is acked.</p>
+    <p>Two details worth knowing precisely. First, <strong>prefetch only exists in manual-ack mode</strong>; in autoack mode there is no such thing as an unacknowledged message, so the limit is ignored and you are back to unbounded push. Second, the <code>global</code> flag: RabbitMQ interprets <code>global=false</code> (the usual case) as per-consumer and <code>global=true</code> as shared across the whole channel — and quorum queues reject the channel-wide form outright, so per-consumer prefetch is the portable choice. For sizing, the honest answer is that it is a latency-versus-fairness dial: long, uneven processing times want a small prefetch (1 to about 10) so no worker hoards; short, uniform tasks at high message rates want a larger one (in the low hundreds) so the consumer is never idle waiting for a network round trip. Start from round-trip time divided by processing time, then measure — an over-large prefetch shows up as idle consumers next to a busy one, and an over-small one shows up as consumers blocked on the network.</p>
+    <pre class="code-block" data-label="Java"><code>channel.basicQos(20);              // per-consumer: at most 20 unacked deliveries
+// channel.basicQos(0, 20, true);  // channel-wide form: rejected by quorum queues
+
+// Spring Boot equivalent
+// spring.rabbitmq.listener.simple.prefetch=20
+// spring.rabbitmq.listener.simple.acknowledge-mode=auto   # container acks after the listener returns</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/consumer-prefetch" rel="noopener">Consumer Prefetch — RabbitMQ documentation (QoS, global flag, per-consumer limits)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/client-libraries/java-api-guide" rel="noopener">Java Client API Guide — RabbitMQ documentation (basicQos and consumer setup)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/containerAttributes.html" rel="noopener">Message Listener Container Configuration — Spring AMQP reference (prefetchCount, acknowledgeMode, concurrency)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/how-to-optimize-the-rabbitmq-prefetch-count.html" rel="noopener">How to Optimize the RabbitMQ Prefetch Count — CloudAMQP</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part2-rabbitmq-best-practice-for-high-performance.html" rel="noopener">RabbitMQ Best Practice for High Performance — CloudAMQP (part 2)</a></li>
+    </ul>
+
+    <h3>TTL, queue length limits and overflow behaviour</h3>
+    <p>Messages that nobody consumes are not free — they occupy memory and disk, and a queue that grows without bound eventually triggers flow control and stalls your publishers. RabbitMQ gives you two independent brakes. <em>Time to live</em> expires messages by age: <code>x-message-ttl</code> as a queue argument or policy applies to everything in the queue, while the per-message <code>expiration</code> property (a string of milliseconds) sets it per publish. A separate <code>x-expires</code> argument deletes an entire queue that has gone unused for a period — useful for per-session or per-request reply queues that would otherwise leak. Note the classic-queue subtlety with per-message TTL: expiry is evaluated at the head of the queue, so a long-lived message sitting in front of a short-lived one delays the latter's expiry.</p>
+    <p><em>Length limits</em> bound the queue instead: <code>x-max-length</code> in messages, <code>x-max-length-bytes</code> in payload bytes. What happens when the limit is hit is decided by <code>x-overflow</code>, and choosing it is a real design decision. <code>drop-head</code> (the default) throws away the oldest messages, which is right for telemetry where fresh data supersedes stale data. <code>reject-publish</code> refuses new publishes and negatively acknowledges them to the publisher, which is right when losing data silently is unacceptable and you would rather push back on the producer. <code>reject-publish-dlx</code> does the same but dead-letters the rejected message so you keep it. Set these as policies rather than client-side queue arguments where you can — policies can be changed on a running system, whereas an argument baked into a queue declaration requires deleting and recreating the queue.</p>
+    <pre class="code-block" data-label="Shell"><code>rabbitmqctl set_policy work-limits "^work\." \
+  '{"message-ttl":600000,"max-length":100000,"overflow":"reject-publish-dlx","dead-letter-exchange":"dlx"}' \
+  --apply-to queues</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/ttl" rel="noopener">Time-To-Live and Expiration — RabbitMQ documentation (message TTL, queue TTL)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/maxlength" rel="noopener">Queue Length Limit — RabbitMQ documentation (max-length, max-length-bytes, overflow)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/parameters" rel="noopener">Parameters and Policies — RabbitMQ documentation (why policies beat queue arguments)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part1-rabbitmq-best-practice.html" rel="noopener">RabbitMQ Best Practices — CloudAMQP (part 1: queue sizing, TTL, limits)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part4-rabbitmq-13-common-errors.html" rel="noopener">13 Common RabbitMQ Mistakes and How to Avoid Them — CloudAMQP</a></li>
+    </ul>
+
+    <h3>Dead-letter exchanges: where failed messages actually go</h3>
+    <p>A dead-letter exchange is an ordinary exchange that the broker republishes to when a message can no longer stay in its queue. Exactly four things cause dead-lettering: the consumer rejects it with <code>basic.reject</code> or <code>basic.nack</code> and <code>requeue=false</code>; its TTL expires; the queue is over its length limit and the overflow policy drops or rejects it; or, on a quorum queue, the delivery limit is exceeded. Configure it with the <code>x-dead-letter-exchange</code> argument (plus an optional <code>x-dead-letter-routing-key</code> to override the original routing key), and RabbitMQ stamps an <code>x-death</code> header on the message recording the reason, the originating queue and exchange, and a count — which is your forensic trail and, historically, the way people implemented a redelivery counter on classic queues.</p>
+    <p>The classic delayed-retry trick falls straight out of these two features: declare a "wait" queue with no consumers, give it an <code>x-message-ttl</code> and an <code>x-dead-letter-exchange</code> that points <em>back</em> at the work exchange. Reject a failed message into the wait queue; it sits there until the TTL fires, gets dead-lettered back to the work queue, and is retried. Chain several wait queues with increasing TTLs and you have exponential backoff without a scheduler. Two warnings: because expiry is head-of-line on classic queues, mixing different per-message TTLs in one wait queue does not give you independent timers — use one wait queue per delay tier. And know that dead-lettering is at-most-once by default, so a broker failure at the wrong moment can lose the dead-lettered copy; quorum queues offer <code>dead-letter-strategy: at-least-once</code> (requiring <code>overflow: reject-publish</code>) when that matters. Module 08 develops the full retry and parking-lot strategy; this is the mechanism it is built on.</p>
+    <pre class="code-block" data-label="Java"><code>// work queue: failures go to the retry exchange
+Map&lt;String, Object&gt; work = Map.of("x-dead-letter-exchange", "retry.ex");
+
+// wait queue: no consumers, expires after 10s, dead-letters BACK to the work exchange
+Map&lt;String, Object&gt; wait = Map.of(
+    "x-message-ttl", 10000,
+    "x-dead-letter-exchange", "work.ex",
+    "x-dead-letter-routing-key", "orders");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/dlx" rel="noopener">Dead Letter Exchanges — RabbitMQ documentation (causes, x-death header, strategies)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/when-and-how-to-use-the-rabbitmq-dead-letter-exchange.html" rel="noopener">When and How to Use the RabbitMQ Dead Letter Exchange — CloudAMQP</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-amqp-error-handling" rel="noopener">Error Handling with Spring AMQP — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-amqp-exponential-backoff" rel="noopener">Exponential Backoff With Spring AMQP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=L8OGw7bK3eU" rel="noopener">RabbitMQ Deadletter Handling in a Java program — Mike Møller Nielsen</a></li>
+    </ul>
+
+    <h3>Priority queues, and an honest note on what they cost</h3>
+    <p>Declare a classic queue with <code>x-max-priority</code> (an integer, 1 to 255) and publishers can set a <code>priority</code> message property; higher priorities are delivered first. It is genuinely useful for a work queue that mixes interactive requests with bulk backfill. But be honest about the limits, because interviewers probe here. Each priority level costs resources on the broker — the practical advice from the RabbitMQ community is to use no more than about five levels, and never 255 "just in case". Priority is only meaningful when a backlog exists: an empty queue delivers whatever arrives, and messages already pushed into a consumer's prefetch buffer are never reordered, so a large prefetch quietly defeats prioritisation. Combine priorities with a length limit and <code>drop-head</code> and you can lose your <em>most</em> important message, because drop-head discards from the head of the queue.</p>
+    <p>Quorum queues changed the picture in RabbitMQ 4.x: they always support priorities and ignore <code>x-max-priority</code> entirely, but the implementation is deliberately coarser than the classic one — messages are sorted into a normal and a high band with a fixed delivery ratio that favours high priority while still guaranteeing normal messages make progress, so there is no starvation. If you need genuinely fine-grained scheduling, the standard advice remains the same as it has always been: use separate queues per class of work and separate consumer pools, which gives you independent capacity control as well as ordering.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/priority" rel="noopener">Priority Queue Support — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/queues" rel="noopener">Queues — RabbitMQ documentation (properties, optional arguments, queue types)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/message-priority-in-rabbitmq.html" rel="noopener">Message Priority in RabbitMQ — CloudAMQP</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/rabbitmq-queue-types.html" rel="noopener">RabbitMQ Queue Types Explained — CloudAMQP</a></li>
+    </ul>
+
+    <h3>Quorum queues: the default for anything durable</h3>
+    <p>A quorum queue is a durable, replicated FIFO queue implemented with the Raft consensus algorithm. Every queue has a leader and followers on other cluster nodes; a publish is confirmed once a majority of replicas has written it, and if the leader's node dies a new leader is elected from the remaining replicas with no data loss for confirmed messages. Say the next part plainly, because it is the single most-asked RabbitMQ-4 interview fact: <strong>classic queue mirroring was removed in RabbitMQ 4.0</strong>. It was deprecated back in the 3.9 era and the HA policies that configured it no longer do anything. Quorum queues (and streams) are the only replicated options now, and new durable workloads should declare <code>x-queue-type: quorum</code> — or better, set the virtual host's default queue type so nobody has to remember.</p>
+    <p>Quorum queues also solve poison-message handling properly. Classic queues had no server-side redelivery counter, so teams hand-rolled one from the <code>x-death</code> header. Quorum queues track deliveries per message and enforce <code>delivery-limit</code>: exceed it and the message is dropped or, far better, dead-lettered. Since RabbitMQ 4.0 that limit defaults to 20, which is a behaviour change worth knowing — an endlessly requeued message that used to loop forever now eventually leaves the queue. What they do <em>not</em> support: non-durable (transient) queues, exclusive queues, server-named queues, and channel-wide (global) QoS prefetch, which returns a channel error. They also cost more than a classic queue — every message is replicated and written to disk on a majority of nodes — so a queue that is genuinely disposable is still a legitimate use for a classic queue. And ignore any tutorial that tells you to set <code>x-queue-mode=lazy</code>: that setting has been a no-op since RabbitMQ 3.12, when classic queues moved to a single version-2 storage implementation that always keeps messages on disk.</p>
+    <pre class="code-block" data-label="Java"><code>// Spring AMQP: declare a quorum queue with a delivery limit and a DLX
+@Bean
+Queue orders() {
+    return QueueBuilder.durable("orders")
+            .quorum()                            // x-queue-type = quorum
+            .deliveryLimit(5)                    // poison messages leave after 5 tries
+            .deadLetterExchange("orders.dlx")
+            .build();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/quorum-queues" rel="noopener">Quorum Queues — RabbitMQ documentation (Raft, delivery-limit, unsupported features)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/blog/2024/08/28/quorum-queues-in-4.0" rel="noopener">RabbitMQ 4.0: New Quorum Queue Features — RabbitMQ blog</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/classic-queues" rel="noopener">Classic Queues — RabbitMQ documentation (what remains after mirroring was removed)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/rabbitmq-quorum-queues.html" rel="noopener">RabbitMQ Quorum Queues — CloudAMQP</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ALO_GQFkbiw" rel="noopener">The Power of RabbitMQ Quorum Queues — Software Developer Diaries</a></li>
+    </ul>
+
+    <h3>RabbitMQ Streams and super streams</h3>
+    <p>A stream is a replicated, append-only log inside RabbitMQ — the same shape as a Kafka topic partition, and added for the same reasons. Consumption is <em>non-destructive</em>: reading does not remove data, many independent consumers can read the same stream, and each tracks its own offset. You attach at an offset (<code>first</code>, <code>last</code>, <code>next</code>, an absolute offset, or a timestamp) and replay history — something a queue can never do, because a queue delivers a message once and forgets it. Retention is size- or age-based (<code>max-length-bytes</code>, <code>max-age</code>) rather than consumption-based, which is the mental switch to make: you keep a window of time, not a backlog of unprocessed work.</p>
+    <p>Streams are reachable two ways. Over ordinary AMQP 0-9-1 they look like a queue with an <code>x-stream-offset</code> consumer argument, which requires manual acks and a prefetch limit — convenient, since your existing client works unchanged. The dedicated stream protocol (a separate plugin and port) is far faster and is what the stream-specific clients use, and it is the one to reach for at high throughput. <em>Super streams</em> are the partitioning layer on top: a logical stream composed of several individual streams, with publishing routed by a key so related messages land on the same partition, and single-active-consumer semantics per partition so ordering holds while the group scales horizontally. If you have found yourself wanting Kafka's consumer groups and replay without running Kafka, this is the feature to read about — but be clear-eyed that RabbitMQ's queues and streams answer different questions, and most systems end up using both.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/streams" rel="noopener">Streams — RabbitMQ documentation (offsets, retention, super streams, single active consumer)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/stream-core-plugin-comparison" rel="noopener">Stream Plugin vs AMQP 0-9-1 Access — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/blog/2022/07/13/rabbitmq-3-11-feature-preview-super-streams" rel="noopener">Feature Preview: Super Streams — RabbitMQ blog (partitioning and routing strategies)</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/rabbitmq-streams-and-replay-features-part-1-when-to-use-rabbitmq-streams.html" rel="noopener">When to Use RabbitMQ Streams — CloudAMQP</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=i3zB5VDMMV8" rel="noopener">Streams: past, present, and future — Arnaud Cogoluègnes &amp; Karl Nilsson, RabbitMQ Summit (Code Sync)</a></li>
+    </ul>
+
+    <h3>Clustering, replica sizing, and migrating off mirrored queues</h3>
+    <p>A RabbitMQ cluster is a set of nodes sharing users, virtual hosts, exchanges, bindings and policies. Client connections can land on any node and the broker routes internally, but a queue's data lives on specific nodes — that is the distinction to keep straight. Classic queues live on exactly one node; quorum queues and streams replicate across an explicitly chosen replica set. Size that replica set with an <strong>odd</strong> number of nodes, normally three (tolerates one failure) or five (tolerates two), because Raft needs a strict majority to elect a leader and to confirm a write. Two replicas are worse than useless: losing either one loses the majority. Cluster sizes should likewise be odd, and a partition-handling strategy such as <code>pause_minority</code> keeps a split cluster from accepting divergent writes on both sides.</p>
+    <p>The migration question comes up constantly for teams still on 3.x. Queue type is fixed at declaration, so you cannot convert a mirrored classic queue into a quorum queue in place — you declare a new quorum queue, move consumers, drain and repoint publishers, then delete the old one. Plan the incompatibilities before you start: transient and exclusive queues, server-named queues, global QoS, and any code depending on classic-queue-only behaviour all need changes. Watch memory and disk too, since replication multiplies both. The official migration guide and the RabbitMQ team's own retrospectives are the right reading, not blog posts written before 4.0 landed.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/clustering" rel="noopener">Clustering Guide — RabbitMQ documentation (node roles, partitions, data locality)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/cluster-formation" rel="noopener">Cluster Formation and Peer Discovery — RabbitMQ documentation</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/blog/2023/03/02/quorum-queues-migration" rel="noopener">Migrating from Mirrored Classic Queues to Quorum Queues — RabbitMQ blog</a></li>
+      <li>[Article] <a href="https://www.cloudamqp.com/blog/part3-rabbitmq-best-practice-for-high-availability.html" rel="noopener">RabbitMQ Best Practice for High Availability — CloudAMQP (part 3)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2024/07/quorum-queues-amazon-rabbitmq/" rel="noopener">Support for Quorum Queues in Amazon MQ for RabbitMQ — InfoQ</a></li>
+    </ul>
+
+    <h3>Spring AMQP: RabbitTemplate, @RabbitListener and AmqpAdmin</h3>
+    <p>Spring AMQP is the JVM abstraction over the RabbitMQ Java client, and Spring Boot's <code>spring-boot-starter-amqp</code> auto-configures a <code>ConnectionFactory</code>, a <code>RabbitTemplate</code> and a listener container factory from <code>spring.rabbitmq.*</code> properties. <code>RabbitTemplate</code> is the publishing side: <code>convertAndSend(exchange, routingKey, payload)</code> for fire-and-forget, <code>convertSendAndReceive</code> for request-reply over a temporary reply queue, plus <code>ConfirmCallback</code> and <code>ReturnsCallback</code> hooks for publisher confirms and returned (unroutable) messages — set <code>mandatory</code> if you want to hear about messages that matched no binding rather than losing them silently.</p>
+    <p>On the consuming side, <code>@RabbitListener(queues = "orders")</code> registers a method with a listener container; the container's <code>acknowledgeMode</code> (<code>AUTO</code> means the container acks after your method returns normally and rejects when it throws — not the broker's autoack), <code>prefetchCount</code> and <code>concurrency</code> are where the settings from earlier in this module actually get applied. Topology is declarative: define <code>Queue</code>, <code>Exchange</code> and <code>Binding</code> beans and <code>RabbitAdmin</code> (the <code>AmqpAdmin</code> implementation) declares them on the broker at startup and re-declares them after a connection is re-established. That auto-declaration is a convenience in development and a hazard in production, where mismatched arguments between your bean and an existing queue cause a channel-level error — many teams manage topology with policies and definitions files and keep declarations out of the application entirely.</p>
+    <pre class="code-block" data-label="Java"><code>@RabbitListener(queues = "orders", concurrency = "3-10")
+public void onOrder(OrderEvent event) {          // converted by the message converter
+    orderService.process(event);                 // throw -&gt; container rejects, DLX takes it
+}
+
+@Bean Binding binding(Queue orders, TopicExchange work) {
+    return BindingBuilder.bind(orders).to(work).with("order.created");
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/" rel="noopener">Spring AMQP — reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/receiving-messages/async-annotation-driven.html" rel="noopener">Annotation-driven Listener Endpoints — Spring AMQP reference (@RabbitListener)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/broker-configuration.html" rel="noopener">Configuring the Broker — Spring AMQP reference (AmqpAdmin, Queue/Exchange/Binding beans)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-amqp" rel="noopener">Messaging Using Spring AMQP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o4qCdBR4gUM" rel="noopener">Spring Boot RabbitMQ — Publisher &amp; Subscriber Example — Java Techie</a></li>
+    </ul>
+
+    <h3>Message converters, retries and RepublishMessageRecoverer</h3>
+    <p>By default Spring AMQP's <code>SimpleMessageConverter</code> handles strings and byte arrays and falls back to Java serialization for other objects — which you should not ship, both for the security exposure and because it couples producer and consumer to the same classes. Register a JSON converter instead (<code>JacksonJsonMessageConverter</code> in Spring AMQP 4.x, <code>Jackson2JsonMessageConverter</code> in the 3.x line) on both the template and the listener container factory, and it will set the <code>content_type</code> and type headers so the consumer can deserialize into a target class. Be deliberate about the type mapping: shipping fully-qualified class names in headers makes a producer refactor break every consumer, so map types explicitly for anything crossing team boundaries.</p>
+    <p>For failure handling, Spring's stateless retry interceptor wraps the listener and retries in-process with backoff — cheap for a transient database blip, but note that the message stays unacked and the consumer thread is blocked while it waits, so keep the total budget short. When retries are exhausted a <code>MessageRecoverer</code> decides the message's fate. The default merely logs and acks, which silently swallows the message. <code>RejectAndDontRequeueRecoverer</code> rejects without requeue so the broker's DLX takes over. <code>RepublishMessageRecoverer</code> is usually the best of the three: it publishes the failed message to an exchange and routing key you choose, adding headers with the exception message, the stack trace, and the original exchange and routing key — so your parking-lot queue contains not just the payload but the reason it failed, which is exactly what you want at three in the morning.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+RetryOperationsInterceptor retryInterceptor(RabbitTemplate template) {
+    return RetryInterceptorBuilder.stateless()
+            .maxAttempts(4)
+            .backOffOptions(500, 2.0, 8000)     // initial, multiplier, max
+            .recoverer(new RepublishMessageRecoverer(template, "parking.ex", "orders.failed"))
+            .build();
+}
+// spring.rabbitmq.listener.simple.retry.enabled=true is the properties-only equivalent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/message-converters.html" rel="noopener">Message Converters — Spring AMQP reference (JSON converters and type mapping)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/resilience-recovering-from-errors-and-broker-failures.html" rel="noopener">Recovering from Errors and Broker Failures — Spring AMQP reference (MessageRecoverer options)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/messaging/amqp.html" rel="noopener">AMQP — Spring Boot reference documentation (auto-configuration and properties)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/rabbitmq-spring-amqp" rel="noopener">RabbitMQ Message Dispatching with Spring AMQP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5kxLeR_YuIk" rel="noopener">Implementing RabbitMQ in Spring Boot — Producer/Consumer — Daily Code Buffer</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-rabbitmq-model.html">← RabbitMQ and the AMQP Model</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="08-dlq-retries.html">Dead Letters and Retry Strategy →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>RabbitMQ operations is a favourite of Indian product and service-company rounds — prefetch, acknowledgement modes and dead-letter exchanges come up in almost every round that mentions RabbitMQ on the JD, and the quorum-queue questions separate candidates who have worked on 4.x from candidates who learned RabbitMQ five years ago:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between automatic and manual acknowledgement?</summary>
+      <div class="answer"><p>With automatic acknowledgement (the <code>no-ack</code> flag on <code>basic.consume</code>) the broker considers a message delivered as soon as it writes it to the socket and immediately forgets it — a consumer crash loses the message, so this is at-most-once delivery. With manual acknowledgement the broker keeps the message until the consumer sends <code>basic.ack</code>, and requeues it if the channel or connection drops — at-least-once delivery, which obliges the consumer to be idempotent. Ack after the work is committed, never before.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does prefetch (basic.qos) do, and what happens if you never set it?</summary>
+      <div class="answer"><p>It caps how many unacknowledged messages the broker will push to a consumer at once. With no limit the broker pushes as fast as the socket accepts, so the first consumer to connect can buffer the entire backlog client-side while other consumers sit idle — round-robin dispatch is done at delivery time, so the broker thinks it is balancing while your effective throughput is that of one worker. A small prefetch restores fair dispatch; it also bounds how many messages are requeued if that consumer dies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a dead-letter exchange, and what causes a message to be dead-lettered?</summary>
+      <div class="answer"><p>An ordinary exchange named in a queue's <code>x-dead-letter-exchange</code> argument, to which the broker republishes messages that can no longer stay in the queue. Four causes: rejection with <code>basic.reject</code> or <code>basic.nack</code> with <code>requeue=false</code>; TTL expiry; the queue exceeding its length limit under a dropping or rejecting overflow policy; and, on quorum queues, exceeding the delivery limit. The republished message carries an <code>x-death</code> header recording the reason, source queue and count.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set a TTL on messages, and what is the difference between the two ways?</summary>
+      <div class="answer"><p>Queue-level via the <code>x-message-ttl</code> argument or a policy — it applies uniformly to everything in the queue. Message-level via the <code>expiration</code> property on the publish, expressed as a string of milliseconds. There is also <code>x-expires</code>, which deletes an unused queue rather than expiring messages. Prefer policies for queue-level TTL so you can change it without recreating the queue.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A message keeps failing and your consumer nacks it with requeue=true. What happens?</summary>
+      <div class="answer"><p>An infinite hot loop: the message goes back to the head of the queue, is redelivered almost immediately, fails again, and repeats — burning CPU and blocking the rest of the queue. Requeue only for genuinely transient faults. For deterministic failures use <code>requeue=false</code> with a dead-letter exchange, and on quorum queues set a <code>delivery-limit</code> so the broker enforces a bound even if the consumer misbehaves.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you implement delayed retry with backoff using only core RabbitMQ features?</summary>
+      <div class="answer"><p>Use a TTL queue whose dead-letter exchange points back at the work exchange. Reject the failed message into a consumer-less "wait" queue that has an <code>x-message-ttl</code>; when the TTL fires the broker dead-letters it back to the work queue and it is retried. Chain wait queues with increasing TTLs for exponential backoff. Use one wait queue per delay tier rather than per-message TTLs in a single queue, because classic-queue expiry is evaluated at the head — a long-lived message in front delays the ones behind it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you size prefetch, and what is the interaction with acknowledgement mode?</summary>
+      <div class="answer"><p>Prefetch only has meaning in manual-ack mode; in autoack mode there are no unacknowledged messages, so the limit is ignored and delivery is unbounded again. Sizing is a fairness-versus-latency dial: long or highly variable processing times want a small prefetch (1 to about 10) so no consumer hoards work; short uniform tasks at high rates want a larger one (low hundreds) so consumers are not idle on network round trips. Start near round-trip-time divided by processing time and then measure — idle consumers next to one busy consumer means it is too large.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are the overflow behaviours on a length-limited queue, and when would you pick each?</summary>
+      <div class="answer"><p><code>drop-head</code> (default) discards the oldest messages — right for telemetry and live metrics where new data supersedes old. <code>reject-publish</code> refuses new publishes and nacks the publisher — right when data loss is unacceptable and you want backpressure on producers. <code>reject-publish-dlx</code> rejects but dead-letters the message so it is retained for inspection or replay. Note the trap: combining <code>drop-head</code> with a priority queue can discard your highest-priority messages, since they sit at the head.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are quorum queues and why should new durable queues use them?</summary>
+      <div class="answer"><p>Durable replicated FIFO queues built on Raft: a leader plus followers, with publishes confirmed once a majority of replicas has persisted the message, and automatic leader election on node failure without losing confirmed data. They are the recommended default because classic queue mirroring was removed in RabbitMQ 4.0 — HA policies no longer replicate anything — so quorum queues and streams are the only replicated options left. They also add server-side poison-message handling via <code>delivery-limit</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Compare a RabbitMQ stream with a queue. When would you choose a stream?</summary>
+      <div class="answer"><p>A queue delivers each message to one consumer and deletes it on ack; a stream is a replicated append-only log where consumption is non-destructive, many consumers read independently, and each tracks an offset. Streams let you attach at an offset or a timestamp and replay history, and retain by size or age rather than by consumption. Choose a stream for fan-out to many independent readers, for replay and reprocessing, and for very high throughput ingestion; choose a queue for competing-consumer work distribution where a message should be handled once and then gone.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What do quorum queues not support, and when is a classic queue still the right choice?</summary>
+      <div class="answer"><p>They cannot be non-durable (transient), exclusive, or server-named, and they reject channel-wide (global) QoS prefetch with a channel error. They also cost more — every message is replicated and written to disk on a majority of nodes — so replication multiplies memory, disk and network. A classic queue remains reasonable for genuinely disposable data, for short-lived per-connection reply queues (which need exclusivity anyway), and for very high-churn temporary topology. Also: <code>x-queue-mode=lazy</code> is not a tuning option any more, it has been a no-op since 3.12.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How many nodes should a quorum queue be replicated across, and why must it be odd?</summary>
+      <div class="answer"><p>Three for most workloads (tolerates one failure), five where you must survive two. Raft requires a strict majority to elect a leader and to confirm a write, so an odd count maximises fault tolerance per node: with three, quorum is two; adding a fourth still needs three, giving no extra tolerance for extra cost. Two replicas are actively harmful — losing either loses the majority and the queue becomes unavailable. Pair this with an odd cluster size and a partition-handling strategy such as <code>pause_minority</code> so a split cluster does not accept divergent writes on both sides.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You inherit a 3.x cluster using mirrored classic queues. Plan the migration.</summary>
+      <div class="answer"><p>Queue type is fixed at declaration, so there is no in-place conversion: declare parallel quorum queues, bind them, move consumers over, repoint publishers, drain the old queues, then delete them and remove the HA policies. Audit incompatibilities first — transient, exclusive and server-named queues, global QoS, and any logic relying on the <code>x-death</code> header as a homemade delivery counter (use <code>delivery-limit</code> instead, and remember the new default of 20 changes behaviour for endlessly requeued messages). Capacity-plan for replication multiplying disk and memory, and follow the official migration guide rather than pre-4.0 blog posts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> In Spring AMQP, what is the difference between the container's AUTO acknowledge mode and RabbitMQ's autoack?</summary>
+      <div class="answer"><p>They sound identical and are opposites in effect. RabbitMQ's autoack (<code>no-ack=true</code>) is broker-side: delivery is considered complete when written to the socket, giving at-most-once. Spring's <code>AcknowledgeMode.AUTO</code> uses manual acknowledgement on the wire and has the container ack after your listener returns normally, or reject when it throws — that is at-least-once with the container doing the bookkeeping. <code>AcknowledgeMode.NONE</code> is the one that maps to the broker's autoack; <code>MANUAL</code> hands you the channel and delivery tag to ack yourself.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Retries are exhausted for a message in a Spring AMQP listener. What are the recovery options and which do you pick?</summary>
+      <div class="answer"><p>The default <code>MessageRecoverer</code> logs a warning and acks — it silently destroys the message, so avoid it. <code>RejectAndDontRequeueRecoverer</code> rejects without requeue and lets the queue's dead-letter exchange take over. <code>RepublishMessageRecoverer</code> publishes to an exchange and routing key you choose while adding headers containing the exception message, stack trace and original exchange and routing key — usually the best choice, because the parking-lot queue then holds the failure reason alongside the payload. Keep in-process retry budgets short, since the message stays unacked and the consumer thread is blocked throughout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A priority queue is not prioritising in production. Give the likely causes.</summary>
+      <div class="answer"><p>Most often prefetch: messages already pushed into consumers' buffers are never reordered, so a large prefetch drains the backlog into clients where priority no longer applies — drop it to a small value. Second, priority only matters when a backlog exists; on a queue that is keeping up, whatever arrives is delivered. Third, publishers may not be setting the <code>priority</code> property at all, or are setting values above the declared <code>x-max-priority</code>. And on a quorum queue, <code>x-max-priority</code> is ignored entirely — priorities are always on but coarser, banding messages rather than honouring a fine-grained scale.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.rb.reliability — Acknowledgements, prefetch, TTL, dead-letter exchanges, priority queues</li>
+      <li>msg.rb.quorum — Quorum queues as the default, RabbitMQ Streams and super streams, clustering, Spring AMQP</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

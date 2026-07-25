@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Dead letters and retry strategy module: classifying transient versus permanent failures, exponential backoff and jitter, blocking versus non-blocking retry in Kafka and RabbitMQ, the parking-lot pattern, failure metadata, replaying dead letters and alerting on DLQ depth — with verified resources and interview questions.">
+  <title>Dead Letters and Retry Strategy — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Dead Letters and Retry Strategy</h1>
+  <p class="standfirst">A consumer that always succeeds is a consumer nobody has run in production. This module is about the other path: what you do with the message that will not process, how many times you try, where it goes when you stop trying, and who finds out.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Dead Letters and Retry Strategy</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every asynchronous system eventually holds a message it cannot process. Sometimes the cause is temporary — a downstream service timed out, a database was failing over, a connection pool was momentarily empty — and simply trying again in a few seconds works. Sometimes the cause is permanent: the payload does not deserialise, a required field is missing, a business rule rejects it. Retrying that second kind forever is pure waste, and worse, it usually blocks everything queued behind it.</p>
+    <p>This module covers the failure-handling toolkit that spans brokers: classifying the error, retry timing (immediate, fixed delay, exponential backoff, and the jitter that stops synchronised retry storms), the blocking-versus-non-blocking distinction that decides whether one bad record stalls a whole Kafka partition, the parking lot where messages finally land with their failure metadata attached, replaying those messages once the bug is fixed, and the alerting that keeps a dead-letter queue from becoming a silent data-loss bucket. Illustrated throughout in both Kafka 4.x and RabbitMQ 4.x, with Spring Boot 3.x/4.x as the client.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Transient or permanent? The classification everything else follows from</h3>
+    <p>Before you configure a single retry, decide what class of failure you are looking at. A <em>transient</em> failure is one where the same input, tried later, will probably succeed: a socket timeout, an HTTP 503, a broker leader election, a deadlock in the database, a rate limit. A <em>permanent</em> failure is one where the same input will fail identically forever: a message that will not deserialise, a null customer id, an order for a product that was deleted, a business rule that says no. Retrying a permanent failure does not fix anything — it burns throughput, fills your logs, and in a partitioned log it holds up every well-formed message behind it.</p>
+    <p>This is a design decision, not a configuration knob, and it is the first thing a good interviewer probes. In Spring Kafka you express it on the error handler with <code>addNotRetryableExceptions</code> and <code>addRetryableExceptions</code> — a <code>DeserializationException</code> should go straight to the dead-letter topic without a single retry, while a <code>TimeoutException</code> deserves several. The default is "retry everything", and that default is wrong for most real listeners. A useful test when you are unsure: if a human would need to change code or data before this message could succeed, it is permanent, and it belongs in the parking lot now rather than in ten minutes.</p>
+    <pre class="code-block" data-label="Java"><code>DefaultErrorHandler handler = new DefaultErrorHandler(
+        new DeadLetterPublishingRecoverer(kafkaTemplate),   // terminal stop: &lt;topic&gt;.DLT
+        new ExponentialBackOffWithMaxRetries(3));           // NOTE: blocking, see below
+
+handler.addNotRetryableExceptions(                          // permanent: park immediately
+        DeserializationException.class,                     //   payload will never parse
+        MethodArgumentNotValidException.class);             //   business rule says no
+handler.addRetryableExceptions(                             // transient: worth another go
+        org.apache.kafka.common.errors.TimeoutException.class,
+        org.springframework.dao.CannotAcquireLockException.class);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html" rel="noopener">Handling Exceptions — Spring for Apache Kafka reference (DefaultErrorHandler, exception classifier, DeadLetterPublishingRecoverer)</a></li>
+      <li>[Official] <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/retry" rel="noopener">Retry pattern — Azure Architecture Center (the retry / retry-with-delay / cancel decision tree)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/error-handling-patterns-in-kafka/" rel="noopener">Error Handling Patterns for Apache Kafka Applications — Confluent blog</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/patterns/event-processing/dead-letter-stream/" rel="noopener">Dead Letter Stream — Confluent Developer event-processing patterns</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tSfEB-HTnDQ" rel="noopener">Error Handling via Dead Letter Queue in Apache Kafka — Kai Waehner</a></li>
+    </ul>
+
+    <h3>Retry timing: immediate, fixed delay, exponential backoff — and why jitter is not optional</h3>
+    <p>Four strategies, in increasing order of politeness. <strong>Immediate retry</strong> re-executes at once and is only sensible for faults that clear instantly — an optimistic-locking conflict, a single dropped packet. <strong>Fixed delay</strong> waits a constant interval; it is easy to reason about but it hammers a struggling dependency at a steady rate for as long as it is sick. <strong>Exponential backoff</strong> multiplies the wait after each attempt (one second, three, nine, twenty-seven, capped at some <code>maxDelay</code>), so a dependency that needs a minute to recover gets a minute of quiet instead of hundreds of doomed calls. Always cap both the delay and the attempt count: unbounded backoff is how a message ends up retried once a day for a fortnight.</p>
+    <p>Backoff alone is still not enough, and this is the part candidates miss. If a downstream service falls over, a thousand consumer instances fail at roughly the same instant, and they all wait exactly one second, then exactly three, then exactly nine. The retry traffic arrives as synchronised waves — a thundering herd — and each wave knocks the recovering service back down just as it comes up. <em>Jitter</em> is a random factor applied to every individual wait, so the same thousand retries are smeared evenly across the interval and arrive as a flat trickle. Backoff spreads attempts across time; jitter spreads them across callers. You need both. In Spring's <code>@Backoff</code> that is one attribute: <code>random = true</code>.</p>
+    <pre class="code-block" data-label="Java"><code>@Backoff(delay = 1000,        // first wait, milliseconds
+         multiplier = 3.0,    // ~1s, ~3s, ~9s, ~27s ...
+         maxDelay = 60000,    // ceiling: never wait longer than a minute
+         random = true)       // JITTER: randomise each wait, kill the thundering herd</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/back-off-delay-precision.html" rel="noopener">Back Off Delay Precision — Spring for Apache Kafka reference</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/ttl" rel="noopener">Time-To-Live and Expiration — RabbitMQ documentation (per-queue and per-message TTL, the basis of delayed retry)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" rel="noopener">Timeouts, retries and backoff with jitter — Amazon Builders' Library</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/" rel="noopener">Exponential Backoff And Jitter — AWS Architecture Blog (the simulation that settled the argument)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Gh1k4tIDkDE" rel="noopener">How to do Retries on Errors in Kafka? — Wix Engineering Tech Talks</a></li>
+    </ul>
+
+    <h3>Blocking retry: why retrying in place stalls an entire Kafka partition</h3>
+    <p>A Kafka partition is an ordered log read by exactly one consumer in the group, and progress is recorded as a single committed offset. There is no way to acknowledge record 184392 while leaving 184391 unacknowledged — the offset is one number. So when your listener catches an exception on record 184391 and sleeps for nine seconds before trying again, it is not just that record that waits. Every later record in that partition waits too, because the consumer thread is parked inside your listener and the offset cannot move past the failure. This is head-of-line blocking, and it is the single most important thing to understand about Kafka error handling.</p>
+    <p>The consequences compound. Three attempts with exponential backoff can hold a partition for half a minute; a poison message with generous retry settings can hold it for hours, and the lag on that partition climbs while its siblings run clean. Worse, if the listener blocks longer than <code>max.poll.interval.ms</code>, the broker decides the consumer is dead, kicks it out of the group and triggers a rebalance — the retry itself causes an outage. Blocking retry is still the right tool for very short waits (a couple of hundred milliseconds for a lock conflict), but the moment your backoff is measured in seconds, you need the non-blocking pattern. RabbitMQ has the mirror-image problem in a milder form: a message that is repeatedly rejected with <code>requeue=true</code> goes back to the head of the queue and is redelivered immediately, spinning the consumer in a hot loop at full CPU.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/documentation/" rel="noopener">Apache Kafka documentation — consumer position, offset commits and max.poll.interval.ms</a></li>
+      <li>[Article] <a href="https://www.confluent.io/learn/kafka-dead-letter-queue/" rel="noopener">Apache Kafka Dead Letter Queue: a comprehensive guide — Confluent</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2026/02/uber-uforwarder-kafka-push-proxy/" rel="noopener">Uforwarder: Uber's Kafka consumer proxy — InfoQ (head-of-line blocking mitigation at scale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=K4cmLrrIUUY" rel="noopener">How Uber builds reliable redeliveries and dead letter queues with Apache Kafka — Mingmin Chen (Devoxx)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2fXWjv1lsAA" rel="noopener">Spring Cloud Stream Kafka: the right way to handle retries and dead letter queues — Bayonne Sensei</a></li>
+    </ul>
+
+    <h3>Non-blocking retry in practice: retry topics in Kafka, TTL plus DLX in RabbitMQ</h3>
+    <p>The non-blocking pattern is the same idea on both brokers: get the failing message <em>out of the way</em> immediately, park it somewhere that enforces the delay, and let the main consumer carry on. In Kafka this means routing the failed record to a separate delay topic per retry tier. Spring Kafka's <code>@RetryableTopic</code> does the whole thing for you — it auto-creates <code>orders-retry-0</code>, <code>orders-retry-1</code>, <code>orders-retry-2</code> and finally <code>orders-dlt</code>, publishes the failed record to the next tier, commits the original offset straight away so the partition keeps moving, and runs a consumer on each retry topic that waits out the tier's backoff before re-attempting. The cost you accept is explicit: the retried message has left the original partition, so its ordering relative to its siblings is gone.</p>
+    <p>RabbitMQ builds the equivalent from two primitives it already has. Give the work queue a dead-letter exchange. Give the delay queue a message TTL and a dead-letter exchange pointing <em>back</em> at the work exchange. A rejected message dead-letters into the delay queue, sits there until its TTL expires, and is then dead-lettered back to the work queue for another attempt — a delay loop assembled from configuration, no plugin required. One caveat worth stating in an interview: a classic queue expires messages only from the head, so a long TTL on a message at the front holds up shorter-TTL messages behind it; use one queue per delay tier rather than per-message TTL, or use the delayed-message-exchange plugin. RabbitMQ also tracks redelivery with the <code>x-death</code> header array, which is how you count attempts without inventing your own counter.</p>
+    <pre class="code-block" data-label="Java"><code>@RetryableTopic(
+    attempts = "4",                                   // 1 original + 3 retries
+    backoff = @Backoff(delay = 2000, multiplier = 3.0, maxDelay = 60000, random = true),
+    dltStrategy = DltStrategy.FAIL_ON_ERROR,
+    autoCreateTopics = "true")                        // orders-retry-0/-1/-2, then orders-dlt
+@KafkaListener(topics = "orders", groupId = "order-projector")
+public void onOrder(OrderEvent event) { projector.apply(event); }
+
+@DltHandler                                            // the parking-lot consumer
+public void parked(OrderEvent event,
+                   @Header(KafkaHeaders.DLT_ORIGINAL_TOPIC) String topic,
+                   @Header(KafkaHeaders.DLT_EXCEPTION_MESSAGE) String cause) {
+    log.error("parked from {} because {}", topic, cause);
+}</code></pre>
+    <pre class="code-block" data-label="RabbitMQ arguments"><code># work queue - failures dead-letter into the retry tier
+orders                x-dead-letter-exchange = retry.ex
+                      x-dead-letter-routing-key = orders.t10
+
+# delay queue - no consumer; the TTL IS the delay, then it dead-letters BACK
+orders.retry.t10      x-message-ttl = 10000
+                      x-dead-letter-exchange = work.ex
+                      x-dead-letter-routing-key = orders
+
+# terminal parking lot - no TTL, no dead-letter target, a human looks at it
+orders.parking-lot    (durable, quorum, alerted on)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic.html" rel="noopener">Non-Blocking Retries — Spring for Apache Kafka reference (@RetryableTopic, retry topics, DLT)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/dlx" rel="noopener">Dead Letter Exchanges — RabbitMQ documentation (dead-letter causes, the x-death header, routing rules)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-retry-kafka-consumer" rel="noopener">Implementing Retry in Kafka Consumer — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-amqp-exponential-backoff" rel="noopener">Exponential Backoff With Spring AMQP — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aNBSd7T-RGA" rel="noopener">Kafka Error Handling with Spring Boot: Retry Strategies and Dead Letter Topics — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QrsemOiRaOI" rel="noopener">Spring Boot + RabbitMQ Retry Example for Error/Exception — JavaInUse</a></li>
+    </ul>
+
+    <h3>The parking lot: the terminal queue, and the metadata that makes it usable</h3>
+    <p>After N attempts the message stops moving. Where it stops is the dead-letter topic, dead-letter queue or — the name that describes its purpose best — the <em>parking lot</em>: a durable destination with no automatic consumer, whose only job is to hold failed messages until a human decides what happens next. The parking lot is not a retry tier. Nothing drains it on a timer. It exists so that a broken message is preserved rather than dropped, and so that the healthy pipeline can carry on without it.</p>
+    <p>A parking lot that holds only the payload is nearly useless — an engineer opening it three days later has a blob of JSON and no idea why it is there. Preserve the original payload byte-for-byte (never a re-serialised version, or you lose the evidence of what actually arrived) and attach the failure context as headers: the exception class and message, the stack trace, the attempt count, the original topic or queue, partition and offset, the original consumer group, and both the original produce timestamp and the parking timestamp. Spring Kafka's <code>DeadLetterPublishingRecoverer</code> populates a standard set of <code>kafka_dlt-*</code> headers for exactly this; on RabbitMQ the <code>x-death</code> array gives you the queue, reason and count, and Spring AMQP's <code>RepublishMessageRecoverer</code> adds the exception and stack trace. Design the parking-lot record as the ticket a human will read, because that is what it is.</p>
+    <pre class="code-block" data-label="Headers on a parked record"><code>kafka_dlt-original-topic             orders
+kafka_dlt-original-partition        7
+kafka_dlt-original-offset           184391
+kafka_dlt-original-timestamp        1753400012345
+kafka_dlt-original-consumer-group   order-projector
+kafka_dlt-exception-fqcn            com.acme.order.PriceMismatchException
+kafka_dlt-exception-message         expected 4999 paise, received 4990
+kafka_dlt-exception-stacktrace      com.acme.order.PriceMismatchException: ...
+# value: the ORIGINAL bytes, untouched - the evidence of what actually arrived</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/dlt-strategies.html" rel="noopener">DLT Strategies — Spring for Apache Kafka reference (@DltHandler, FAIL_ON_ERROR, ALWAYS_RETRY_ON_ERROR, NO_DLT)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-amqp/reference/amqp/resilience-recovering-from-errors-and-broker-failures.html" rel="noopener">Recovering from Errors and Broker Failures — Spring AMQP reference (RepublishMessageRecoverer and its failure headers)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html" rel="noopener">Amazon SQS dead-letter queues — AWS documentation (the same pattern stated broker-agnostically)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-spring-dead-letter-queue" rel="noopener">Dead Letter Queue for Kafka With Spring — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ypkRf8ISc4E" rel="noopener">Handling Message Errors using Dead Letter Queues in Apache Kafka — Knowledge Amplifier</a></li>
+    </ul>
+
+    <h3>Replay: fixing the bug, then re-injecting what was parked</h3>
+    <p>A parking lot only pays for itself if messages can come back out. The normal sequence is: alert fires, an engineer inspects a sample of parked records, identifies the cause (a schema change, a missing reference record, a genuine code bug), ships the fix, verifies the fix against the parked payloads, and only then replays. Mechanically, replay means reading the parking lot and re-publishing each message to the original topic or exchange — a small admin tool, a Kafka Streams job, an SQS redrive, or a temporary consumer you enable via a feature flag. Spring Kafka gives you <code>@DltHandler</code> as the hook, and <code>DltStrategy.ALWAYS_RETRY_ON_ERROR</code> if you want the DLT consumer to loop rather than give up.</p>
+    <p>Replay is where teams get hurt, so know the hazards. <strong>Ordering</strong> — replayed messages re-enter behind everything produced since they were parked, so a stale "address updated" event can overwrite a newer one; either make consumers idempotent and version-aware, or replay to a compaction-friendly key. <strong>Duplicates</strong> — a replay tool that crashes halfway and is re-run will publish some messages twice, so the consuming side must dedupe on an event id. <strong>Re-poisoning</strong> — replaying before the fix is deployed, or replaying a batch where only some records were affected, simply refills the parking lot and burns another cycle; replay a handful first, confirm they clear, then release the rest. <strong>Rate</strong> — dumping fifty thousand parked messages into a live topic at once is a self-inflicted load test; throttle the replay. And decide a retention policy: parked messages are not immortal, and a topic with a seven-day retention will quietly delete evidence you meant to keep.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/features.html" rel="noopener">Features — Spring for Apache Kafka non-blocking retries (DLT handler, retry headers, single-topic fixed delay)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-kafka/reference/retrytopic/topic-naming.html" rel="noopener">Topic Naming — Spring for Apache Kafka (how retry and DLT topic names are derived, and how to override them)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/kafka-connect-deep-dive-error-handling-dead-letter-queues/" rel="noopener">Kafka Connect Deep Dive: Error Handling and Dead Letter Queues — Confluent blog (inspecting and re-processing a DLQ)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2023/06/aws-sqs-dlq-redrive/" rel="noopener">Amazon SQS supports reprocessing messages from a dead-letter queue — InfoQ (redrive as a first-class operation)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WQDbX0agk-I" rel="noopener">Handling Message Errors and Dead Letter Queues in Apache Kafka, ft. Jason Bell — Confluent</a></li>
+    </ul>
+
+    <h3>Operating it: alert on rate and age, not on absolute depth</h3>
+    <p>The failure mode nobody plans for is the quiet one: the parking lot works perfectly, messages land in it for six weeks, and nobody looks. That is not error handling, it is data loss with extra steps. So the operational contract matters as much as the code. Alert on the <em>arrival rate</em> into the dead-letter destination — any sustained non-zero rate is worth waking someone for — and on the <em>age of the oldest unhandled message</em>, which catches the slow trickle that never trips a depth threshold. Absolute depth is the weakest of the three signals: forty parked messages might be a triaged backlog from last Tuesday or a live incident, and the number alone cannot tell you which.</p>
+    <p>Pair the DLQ signals with consumer lag, which is the companion metric that tells you whether the pipeline itself is healthy. Lag climbing on one partition while its siblings are flat is the classic fingerprint of blocking retry on a poison message; lag climbing everywhere is a capacity or downstream problem. On RabbitMQ, <code>rabbitmq_queue_messages_ready</code> on the parking-lot queue plus the management API give you the same picture, and resource alarms tell you when the broker itself is the constraint. Put both on one dashboard alongside retry-tier throughput, and write the runbook to go with it: who owns triage, the expected time to first inspection, how a sample is pulled, who authorises a replay, and what evidence is captured before anything is deleted. An on-call engineer paged at two in the morning should not have to invent the procedure.</p>
+    <pre class="code-block" data-label="Alerting"><code># WEAK: depth alone says nothing about age or trend
+kafka_log_log_size{topic="orders-dlt"} &gt; 100
+
+# BETTER: something is being parked right now
+sum(rate(kafka_server_brokertopicmetrics_messagesin_total{topic="orders-dlt"}[5m])) &gt; 0
+
+# BETTER: the parking lot has gone unattended
+rabbitmq_queue_messages_ready{queue="orders.parking-lot"} &gt; 0  for 30m
+
+# COMPANION: lag on one partition only = blocking retry on a poison message
+max by (partition) (kafka_consumergroup_lag{group="order-projector"}) &gt; 50000</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/monitoring" rel="noopener">Monitoring — RabbitMQ documentation (queue depth, Prometheus metrics, what to alert on)</a></li>
+      <li>[Official] <a href="https://www.rabbitmq.com/docs/alarms" rel="noopener">Resource Alarms — RabbitMQ documentation (memory and disk alarms that block publishers)</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/monitor/monitor-consumer-lag.html" rel="noopener">Monitor Consumer Lag — Confluent Platform documentation</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/kafka-connect/error-handling-and-dead-letter-queues/" rel="noopener">Errors and Dead Letter Queues — Kafka Connect 101, Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=GWBk9LIzy-A" rel="noopener">Errors and Dead Letter Queues — Kafka Connect 101 — Confluent</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-rabbitmq-operations.html">← RabbitMQ in Production</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="09-ordering-concurrency.html">Ordering and Concurrency →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Dead-letter handling is where Indian product and service-company interviews separate candidates who have run a consumer in production from candidates who have only written one — expect the poison-message question in almost every messaging round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a dead letter queue, and why would a system need one?</summary>
+      <div class="answer"><p>A separate durable destination where messages go after they have failed processing a set number of times. It exists so a broken message is preserved rather than dropped or retried forever, and so the healthy pipeline is not held up by it. Kafka calls it a dead-letter topic (DLT), RabbitMQ routes to it through a dead-letter exchange, SQS attaches one to the source queue. The key point: it is a terminal destination for human inspection, not another retry tier.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Transient versus permanent failure — give an example of each and how you treat them differently.</summary>
+      <div class="answer"><p>Transient: a downstream timeout, an HTTP 503, a broker leader election, a database deadlock — the same message will probably succeed later, so retry with backoff. Permanent: a payload that will not deserialise, a missing mandatory field, a business rule rejection — the same message will fail identically forever, so park it on the first failure and do not retry at all. Classifying the exception is the design decision; everything else is configuration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a poison message, and how do you handle one?</summary>
+      <div class="answer"><p>A message that always fails processing — malformed payload, unsupported schema version, a reference to data that no longer exists. Handling it: detect it fast (classify the exception as non-retryable), stop retrying immediately, publish it to the parking lot with the original bytes plus failure metadata, commit or acknowledge the offset so the consumer moves on, and alert. The wrong answer is "retry until it succeeds" — that stalls the partition or spins the consumer in a hot loop, and it never succeeds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the retry timing strategies and when each is appropriate.</summary>
+      <div class="answer"><p>Immediate retry for faults that clear instantly (an optimistic lock conflict). Fixed delay when the recovery time is known and short. Exponential backoff when a dependency needs progressively more breathing room — the default for remote calls. Add a maximum delay and a maximum attempt count to every one of them, and add jitter to any strategy used by more than one consumer instance.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does retrying in place block the whole partition in Kafka?</summary>
+      <div class="answer"><p>Because a partition is a single ordered log with a single committed offset per consumer group, and it is consumed by exactly one member of the group. There is no way to acknowledge a later record while an earlier one is still failing — the offset is one number. So while your listener sleeps between attempts, the consumer thread is parked inside your code and the offset cannot advance, which means every later record in that partition waits too. That is head-of-line blocking. If the retries take longer than max.poll.interval.ms the broker also evicts the consumer and triggers a rebalance, turning a retry into an outage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Backoff already spreads retries out. Why do you still need jitter?</summary>
+      <div class="answer"><p>Backoff spreads attempts across time but keeps every client synchronised. If a downstream dies, a thousand consumers fail at the same instant, all wait exactly one second, then exactly three — so the retry load arrives as synchronised waves that knock the recovering service down again each time. That is the thundering herd. Jitter randomises each individual wait so the same thousand retries are smeared across the interval and arrive as a flat trickle. Backoff spreads across time; jitter spreads across callers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does non-blocking retry work in Spring Kafka?</summary>
+      <div class="answer"><p>@RetryableTopic publishes the failed record to a separate retry topic per tier (orders-retry-0, orders-retry-1, ...) and commits the original offset immediately, so the main partition keeps moving. A dedicated consumer on each retry topic waits out that tier's backoff before re-attempting. After the configured attempts the record goes to orders-dlt, where a @DltHandler method can inspect it. The tradeoff you accept explicitly: the retried record has left its original partition, so its ordering relative to sibling records is lost.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you build the same delayed-retry loop in RabbitMQ?</summary>
+      <div class="answer"><p>With TTL plus a dead-letter exchange. The work queue dead-letters to a retry exchange; the retry queue has a message TTL and its own dead-letter exchange pointing back at the work exchange. A rejected message lands in the retry queue, sits there until the TTL expires, and is then dead-lettered back for another attempt. Use one queue per delay tier rather than per-message TTL, because a classic queue expires only from the head — a long-TTL message at the front blocks shorter ones behind it. The alternative is the delayed-message-exchange plugin.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What metadata do you put on a parked message, and why?</summary>
+      <div class="answer"><p>The original payload byte-for-byte, plus: exception class and message, stack trace, attempt count, original topic or queue, partition and offset, original consumer group, and both the original produce timestamp and the parking timestamp. Reason: the person opening the parking lot days later needs to know what arrived, what broke, where it came from and whether it can be replayed — without that context the record is an unidentifiable blob. Spring Kafka's DeadLetterPublishingRecoverer writes the kafka_dlt-* headers for this; RabbitMQ's x-death array carries queue, reason and count.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where should the retry live — in the consumer, or in the producer that publishes the retry topic?</summary>
+      <div class="answer"><p>Producer-side retries (acks, delivery.timeout.ms, retries) handle broker-side transient errors and are largely handled for you; enable idempotence so they cannot reorder or duplicate. Consumer-side retries handle business processing failures and are the ones this module is about. Do not conflate them: a producer retry re-sends the same record to the broker, a consumer retry re-executes your business logic, and only the second one can create duplicate side effects downstream.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through replaying a dead-letter queue after a bug fix. What can go wrong?</summary>
+      <div class="answer"><p>Sequence: alert, sample and inspect, identify the cause, ship and verify the fix, then re-publish parked messages to the original destination. Hazards: ordering — replayed events re-enter behind everything produced since, so a stale update can overwrite a newer one unless consumers are idempotent and version-aware; duplicates — a replay tool that crashes and is re-run publishes some records twice, so dedupe on an event id; re-poisoning — replaying before the fix is fully deployed just refills the parking lot, so replay a handful first and confirm they clear; rate — dumping the whole backlog into a live topic is a self-inflicted load test, so throttle it. Also check retention: a DLT with seven-day retention silently deletes the evidence.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What would you alert on for a dead-letter queue, and why is absolute depth a poor signal?</summary>
+      <div class="answer"><p>Alert on arrival rate — any sustained non-zero rate into the DLQ means something is actively breaking — and on the age of the oldest unhandled message, which catches a slow trickle that never crosses a depth threshold. Depth alone is ambiguous: forty parked messages could be a triaged backlog from last week or a live incident starting now, and the number cannot distinguish them. Pair both with consumer lag: lag climbing on one partition while its siblings are flat is the fingerprint of blocking retry on a poison message.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your parking lot has held twelve thousand messages for a month and nobody noticed. What went wrong and how do you fix the design?</summary>
+      <div class="answer"><p>The DLQ became a silent data-loss bucket — the technical mechanism worked and the operational contract did not exist. Fix it on three fronts. Signals: alert on arrival rate and oldest-message age, not just depth, and route the alert to a team that owns it. Ownership: name a triage owner, a time-to-first-inspection expectation, and a runbook covering how to sample, who authorises replay and what evidence is kept. Product: decide what the business wants for each message class — some failures deserve a customer-facing error or a compensating action rather than silent parking, and a message that has been parked for a month is often no longer worth replaying at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Non-blocking retry breaks ordering. When is that unacceptable, and what do you do instead?</summary>
+      <div class="answer"><p>It is unacceptable whenever per-key ordering carries meaning — a sequence of updates to one account, a state machine per order id, anything where applying events out of order produces a wrong final state. Options: keep blocking retry but make it very short and bounded, so the partition stalls for milliseconds rather than minutes; park the key rather than the message, buffering subsequent events for that key until the failure is resolved; make consumers order-tolerant with version numbers or last-write-wins on a monotonic field so a late replay is discarded; or accept the stall deliberately and alert on the lag. Say the tradeoff out loud — availability of the partition against correctness of the key — because that is what the question is testing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you choose the number of retry attempts and the total retry budget?</summary>
+      <div class="answer"><p>Work backwards from the recovery time of the dependency and the freshness requirement of the data. If a downstream typically recovers within two minutes, a budget that spans roughly five minutes is right; beyond that you are holding stale work, not retrying. Cap the delay so exponential growth does not run away, and make sure the total budget fits inside any enclosing deadline — a consumer that must produce a result within thirty seconds cannot afford three attempts at twenty seconds each. Then make attempt count observable per tier, so you can see whether tier two ever actually succeeds; if it never does, those attempts are pure cost and the message should be parked sooner.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.dl.backoff — Retry strategies, exponential backoff and jitter, blocking vs non-blocking retry</li>
+      <li>msg.dl.parking — Parking-lot pattern, replaying dead letters, alerting and monitoring on DLQ depth</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

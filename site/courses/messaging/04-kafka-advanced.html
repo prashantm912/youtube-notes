@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="Kafka Advanced module: transactions and the real scope of exactly-once semantics, log compaction and tombstones, retention and tiered storage, the schema registry with Avro and Protobuf, compatibility modes, plus a Kafka Connect and Kafka Streams survey — with verified resources and interview questions.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kafka Advanced — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-arch lesson-page">
+<header class="page-header">
+  <h1>Module: Kafka Advanced</h1>
+  <p class="standfirst">Producing and consuming is the easy half. This module is the other half — the transaction protocol, the cleaner, the retention policy and the ecosystem around the broker — which is where the difference shows between an engineer who has used Kafka and one who has run it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Messaging and Event-Driven Systems → Kafka Advanced</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two blocks. The first is the machinery that makes a Kafka log more than an append-only pipe: transactions and the exactly-once semantics built on them, log compaction and tombstones, and the retention model — now including tiered storage, which unhooks how long you keep data from how much disk your brokers have.</p>
+    <p>The second is the ecosystem that grew around a broker which deliberately stores nothing but bytes: the schema registry that supplies the missing contract, Kafka Connect for moving data in and out without writing client code, and Kafka Streams for processing it in place. The ecosystem half is a survey — enough to choose the right tool and answer for it in an interview, with the depth deferred to the linked material. Everything below assumes Apache Kafka 4.x and a current Confluent Schema Registry.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Transactions: transactional.id, atomic writes across partitions and topics</h3>
+    <p>An idempotent producer (the default since Kafka 3.0) deduplicates retries within one producer session on one partition. Transactions are the larger guarantee: a set of writes spanning several partitions <em>and several topics</em> becomes all-or-nothing. You switch it on by setting <code>transactional.id</code> on the producer — a stable identifier that must be unique per logical producer and must survive restarts, because it is what lets the broker fence the previous instance. On <code>initTransactions()</code> the coordinator bumps the producer epoch, and any older process still writing under that id is rejected as a zombie. That fencing, not the atomicity, is the part candidates forget.</p>
+    <p>The lifecycle is <code>initTransactions()</code> once at startup, then <code>beginTransaction()</code>, any number of <code>send()</code> calls, and <code>commitTransaction()</code> or <code>abortTransaction()</code>. Under the hood the broker writes the records to their partitions as normal and then appends a commit or abort <em>control marker</em>; the transaction coordinator keeps its own state in the internal <code>__transaction_state</code> topic. Nothing is buffered anywhere clever — the data is already in the log, and the marker decides whether readers are allowed to see it. That is why <code>transaction.timeout.ms</code> matters: a producer that dies mid-transaction leaves the affected partitions blocked for readers in read-committed mode until the coordinator aborts it.</p>
+    <pre class="code-block" data-label="Java"><code>Properties p = new Properties();
+p.put("transactional.id", "order-enricher-1");   // stable, unique, survives restarts
+p.put("enable.idempotence", true);               // implied, on by default since 3.0
+KafkaProducer&lt;String, String&gt; producer = new KafkaProducer&lt;&gt;(p);
+
+producer.initTransactions();                     // fences any older epoch of this id
+try {
+    producer.beginTransaction();
+    producer.send(new ProducerRecord&lt;&gt;("orders-enriched", key, enriched));
+    producer.send(new ProducerRecord&lt;&gt;("audit", key, auditEntry));   // different topic, same transaction
+    producer.commitTransaction();                // one commit marker per partition touched
+} catch (KafkaException e) {
+    producer.abortTransaction();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#message-delivery-semantics" rel="noopener">Message Delivery Semantics and Using Transactions — Apache Kafka design documentation</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/transaction-protocol/" rel="noopener">Transaction protocol — Apache Kafka operations documentation</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging" rel="noopener">KIP-98: Exactly Once Delivery and Transactional Messaging — Apache Kafka wiki (the original design)</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/transactions-apache-kafka/" rel="noopener">Transactions in Apache Kafka — Confluent blog (markers, coordinator, zombie fencing)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ki2D2o9aVl8" rel="noopener">Apache Kafka Transactions: Message Delivery and Exactly-Once Semantics — Confluent</a></li>
+    </ul>
+
+    <h3>Exactly-once semantics: the consume-transform-produce loop, and the honest scope</h3>
+    <p>The pattern transactions were built for is consume-transform-produce: read from a topic, compute something, write the result. The subtlety is the offset commit. If you commit offsets through the consumer, the output write and the offset move are two independent facts and a crash between them duplicates or loses work. Instead you call <code>producer.sendOffsetsToTransaction(offsets, consumerGroupMetadata)</code>, which routes the offset commit into the same transaction as the output records: the results and the consumer's progress commit together or not at all. On the reading side, set <code>isolation.level=read_committed</code> — the default is <code>read_uncommitted</code>, so a consumer that has not been changed will happily read aborted records. A read-committed consumer never reads past the last stable offset, which is why an abandoned transaction stalls a partition rather than corrupting it.</p>
+    <p>Now the scope statement, which is the interview answer that separates people. Kafka's exactly-once is exactly-once <em>processing within Kafka</em>: Kafka in, Kafka out, offsets included. It is not exactly-once delivery to anything outside Kafka. The moment your sink is a database, a payment gateway or an email provider, the transaction cannot cover it, and you are back to at-least-once with an idempotent write on the far side — an upsert on a natural key, a unique idempotency key, a conditional update guarded by a version. It is also not free: transactions add coordinator round-trips and marker writes, and read-committed consumers see records only after the commit lands, so latency rises. Kafka Streams packages the whole loop behind <code>processing.guarantee=exactly_once_v2</code> (the older <code>exactly_once</code> and <code>exactly_once_beta</code> values were removed in Kafka 4.0), which is the sane way to use it if your topology is Kafka-to-Kafka.</p>
+    <pre class="code-block" data-label="Java"><code>consumer.subscribe(List.of("orders"));            // isolation.level=read_committed
+producer.initTransactions();
+
+while (running) {
+    var records = consumer.poll(Duration.ofMillis(500));
+    producer.beginTransaction();
+    Map&lt;TopicPartition, OffsetAndMetadata&gt; offsets = new HashMap&lt;&gt;();
+    for (var r : records) {
+        producer.send(new ProducerRecord&lt;&gt;("orders-enriched", r.key(), transform(r.value())));
+        offsets.put(new TopicPartition(r.topic(), r.partition()),
+                    new OffsetAndMetadata(r.offset() + 1));
+    }
+    // offsets ride inside the transaction — never consumer.commitSync() here
+    producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+    producer.commitTransaction();
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.confluent.io/kafka/design/delivery-semantics.html" rel="noopener">Message Delivery Guarantees for Apache Kafka — Confluent documentation</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/exactly-once-semantics-are-possible-heres-how-apache-kafka-does-it/" rel="noopener">Exactly-once Semantics is Possible: Here's How Apache Kafka Does it — Confluent blog</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/transactions/" rel="noopener">Kafka Transactional Support: How It Enables Exactly-Once Semantics — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/kafka-exactly-once" rel="noopener">Exactly Once Processing in Kafka with Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nKLjz1INBMA" rel="noopener">Kafka Transactions — Exactly Once Processing? — Jordan has no life (distributed systems deep dive)</a></li>
+    </ul>
+
+    <h3>Log compaction: the latest value per key, and tombstones</h3>
+    <p>Time-based retention throws away old records regardless of what they said. Compaction asks a different question: for each key, keep the most recent value forever and discard the superseded ones. Set <code>cleanup.policy=compact</code> and a background log cleaner periodically rewrites the closed segments at the tail of the log, keeping one record per key. The head of the log — the active segment and anything newer than <code>min.compaction.lag.ms</code> — is never touched, so a consumer reading from the head still sees every individual update. Compaction never reorders records and never changes an offset; it only creates gaps, so consumers must tolerate non-consecutive offsets (they already must, because of transaction markers).</p>
+    <p>Deleting a key requires a <em>tombstone</em>: a record with that key and a <code>null</code> value. The cleaner treats it as "remove every earlier record for this key", then retains the tombstone itself for <code>delete.retention.ms</code> so that slow or restarting consumers still observe the delete before it vanishes. The guarantee compaction gives you is precisely this: a consumer that reads the whole topic from the beginning ends up with the correct final state of every key — which is why compacted topics are the substrate for changelogs and state snapshots. Kafka itself uses them for <code>__consumer_offsets</code>, for Kafka Streams state-store changelogs and for Connect's configuration topic. The tuning knobs worth knowing are <code>min.cleanable.dirty.ratio</code> (how dirty before the cleaner bothers), <code>max.compaction.lag.ms</code> (an upper bound on how long an obsolete record may linger, useful for deletion-request compliance) and <code>segment.ms</code> (nothing is compacted until the segment closes — the usual cause of "my tombstone did nothing").</p>
+    <pre class="code-block" data-label="Shell"><code>kafka-topics.sh --bootstrap-server localhost:9092 --create \
+  --topic customer-profiles --partitions 6 \
+  --config cleanup.policy=compact \
+  --config min.cleanable.dirty.ratio=0.1 \
+  --config delete.retention.ms=86400000 \
+  --config segment.ms=3600000
+
+# a delete is a record with a key and a null value (a tombstone)
+kafka-console-producer.sh --bootstrap-server localhost:9092 \
+  --topic customer-profiles --property parse.key=true --property key.separator=,
+&gt; cust-42,          # empty value = tombstone = delete this key</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/design/design/#log-compaction" rel="noopener">Log Compaction — Apache Kafka design documentation (basics, guarantees, the cleaner)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/configuration/topic-configs/" rel="noopener">Topic-level configuration reference — Apache Kafka (cleanup.policy and every compaction knob)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/compaction/" rel="noopener">Key-Based Retention Using Topic Compaction — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kafka-topics-compaction" rel="noopener">Compaction in Kafka Topics — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=VAkhYxu1qII" rel="noopener">Apache Kafka Topic Compaction — Confluent</a></li>
+    </ul>
+
+    <h3>Retention, segments, and tiered storage</h3>
+    <p>A partition is not one file; it is a sequence of segments, each a log file plus offset and time indexes. Writes always land in the active segment, which rolls when it hits <code>segment.bytes</code> (1 GiB by default) or ages past <code>segment.ms</code>. Retention only ever deletes whole closed segments, which is why the answer to "I set retention to one hour and the data is still there" is usually "the segment has not rolled yet". The policy itself is <code>retention.ms</code> (seven days by default) and <code>retention.bytes</code> (unlimited by default, and applied <em>per partition</em>, not per topic — a distinction that has caused real capacity incidents). Whichever limit is hit first wins, and setting <code>cleanup.policy=compact,delete</code> applies both compaction and a time bound, which is what you want for a changelog you do not intend to keep forever.</p>
+    <p>Historically retention was bounded by broker disk: keeping ninety days meant provisioning ninety days of SSD on every replica. Tiered storage (KIP-405, production-ready since 3.9 and standard in 4.x) breaks that link. Enable it on the cluster and then per topic with <code>remote.storage.enable=true</code>, and closed segments are uploaded to object storage — S3, GCS, Azure Blob — through a pluggable <code>RemoteStorageManager</code>, with segment metadata tracked by a <code>RemoteLogMetadataManager</code> (the default implementation uses an internal topic). <code>local.retention.ms</code> and <code>local.retention.bytes</code> then govern how much stays on broker disk, while <code>retention.ms</code> governs the total. Consumers reading recent data are unaffected; a consumer replaying from the beginning is served transparently from the remote tier, a little slower. The operational payoff is not only cost — brokers hold far less local data, so partition reassignment and broker replacement get dramatically faster. Two caveats worth remembering for interviews: tiered storage does not apply to compacted topics, and your object store's availability now sits on the read path for historical data.</p>
+    <pre class="code-block" data-label="Properties"><code># broker
+remote.log.storage.system.enable=true
+
+# topic: keep 90 days in total, but only 12 hours on local disk
+retention.ms=7776000000
+local.retention.ms=43200000
+remote.storage.enable=true
+segment.bytes=1073741824          # retention deletes whole closed segments only</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/operations/tiered-storage/" rel="noopener">Tiered Storage — Apache Kafka operations documentation (configuration, limitations, plugins)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/implementation/log/" rel="noopener">Log implementation — Apache Kafka (segments, indexes, on-disk format)</a></li>
+      <li>[Official] <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-405:+Kafka+Tiered+Storage" rel="noopener">KIP-405: Kafka Tiered Storage — Apache Kafka wiki (the design and its rationale)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/architecture/tiered-storage/" rel="noopener">Scalability and Elasticity in Apache Kafka with Tiered Storage — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/architecting-cloud-native-kafka/" rel="noopener">Architecting Cloud-Native Kafka: from Tiered Storage towards a Diskless Future — InfoQ</a></li>
+    </ul>
+
+    <h3>The schema registry: a contract for a broker that only stores bytes</h3>
+    <p>Kafka brokers are deliberately ignorant of your payloads: a record value is an opaque byte array. That is a large part of why Kafka scales, and it is also why the first serious production problem in most estates is a producer team adding or renaming a field and silently breaking three consumer teams. A schema registry restores the missing contract without putting validation in the broker's hot path. Producers register a schema, the registry returns a globally unique schema id, and the serializer prepends a small header — a magic byte plus the four-byte id — to each record. Consumers read the id, fetch and cache the schema, and deserialize. The bytes on the wire stay compact because the schema itself is never shipped with the message.</p>
+    <p>Three formats are supported. <strong>Avro</strong> is the default choice in the Kafka world: compact binary encoding, an explicit and well-specified evolution model built on field defaults and aliases, and no code generation required if you use <code>GenericRecord</code>. <strong>Protobuf</strong> is the pragmatic pick when the same types already flow over gRPC — field numbers rather than names make evolution rules easy to reason about, and tooling is excellent. <strong>JSON Schema</strong> is human-readable and easy to adopt when consumers are heterogeneous, at the cost of much larger payloads and weaker evolution guarantees. Schemas live under <em>subjects</em>, and the subject naming strategy decides how a schema is scoped: the default <code>TopicNameStrategy</code> gives <code>&lt;topic&gt;-key</code> and <code>&lt;topic&gt;-value</code> (one schema per topic), <code>RecordNameStrategy</code> scopes by record type so one topic can carry several event types, and <code>TopicRecordNameStrategy</code> combines both. Choose deliberately — a topic carrying an event union needs one of the record-name strategies, and switching later is painful.</p>
+    <pre class="code-block" data-label="Properties"><code>value.serializer=io.confluent.kafka.serializers.KafkaAvroSerializer
+schema.registry.url=http://schema-registry:8081
+auto.register.schemas=false        # register via CI, not from production apps
+use.latest.version=true
+value.subject.name.strategy=io.confluent.kafka.serializers.subject.TopicRecordNameStrategy
+
+# consumer side
+value.deserializer=io.confluent.kafka.serializers.KafkaAvroDeserializer
+specific.avro.reader=true</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/index.html" rel="noopener">Schema Registry Overview — Confluent documentation</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/serdes-develop/index.html" rel="noopener">Serializers, deserializers and subject name strategies — Confluent documentation</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/serdes-develop/serdes-protobuf.html" rel="noopener">Protobuf serializer and deserializer — Confluent documentation</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/best-practices-for-confluent-schema-registry/" rel="noopener">Schema Registry Best Practices — Confluent blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=u0kRK-qbopk" rel="noopener">Spring Boot: Kafka Schema Registry and Avro with a practical example — Java Techie</a></li>
+    </ul>
+
+    <h3>Compatibility modes: what backward, forward and full actually permit</h3>
+    <p>The registry's real value is the compatibility check it runs before accepting a new schema version. <strong>BACKWARD</strong> — the default — means a consumer on the <em>new</em> schema can read data written with the previous one. Concretely: you may add a field that has a default, and you may delete a field. Because old data must remain readable, this is the mode that lets you rewind a consumer to the start of a topic, and it dictates the rollout order: <em>upgrade consumers first</em>, then producers. <strong>FORWARD</strong> is the mirror image — a consumer on the <em>old</em> schema can read data written with the new one, so you may add a field and delete a field that had a default, and you must <em>upgrade producers first</em>. <strong>FULL</strong> is both at once, which in practice restricts you to adding and removing fields that carry defaults. Each has a <code>_TRANSITIVE</code> variant that checks the candidate against every previous version rather than only the latest — the plain modes only compare with the last one, which is how a topic can drift out of compatibility with its own history in three "compatible" steps. <strong>NONE</strong> disables checking, which is occasionally right during an intentional breaking migration and never right as a standing setting.</p>
+    <p>Practical guidance for real systems: default to BACKWARD (or BACKWARD_TRANSITIVE for event topics you intend to replay), always give new fields a default, treat field removal as a breaking change even when the registry permits it, and never repurpose a field's meaning — the registry checks structure, not semantics, and a field that quietly changes from paise to rupees passes every check while corrupting every downstream. Run the compatibility check in CI with the Maven or Gradle plugin so a bad schema fails the build rather than the deployment. When a genuinely breaking change is unavoidable, the standard escape is a new topic (or a new record type under a record-name subject strategy) and a dual-write period, not a compatibility downgrade.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html" rel="noopener">Schema Evolution and Compatibility Types — Confluent documentation (every mode and its upgrade order)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/patterns/event-stream/schema-compatibility/" rel="noopener">Schema Compatibility — Confluent Developer event streaming patterns</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/schema-registry/schema-compatibility/" rel="noopener">Schema Registry 101: Testing Schema Compatibility — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-cloud-stream-kafka-avro-confluent" rel="noopener">Guide to Spring Cloud Stream with Kafka, Apache Avro and Confluent Schema Registry — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rT5gwljkjWM" rel="noopener">Avro, Protobuf, Spring Boot, Kafka Streams and Confluent Cloud — Confluent</a></li>
+    </ul>
+
+    <h3>Kafka Connect: moving data in and out without writing a client</h3>
+    <p>A large share of the client code teams write is the same code: pull rows from a database into a topic, push records from a topic into Elasticsearch or S3. Kafka Connect is the framework that makes that configuration instead of code. A <em>source connector</em> reads an external system and produces to Kafka; a <em>sink connector</em> consumes from Kafka and writes outward. Each connector is split into <em>tasks</em> for parallelism, and tasks are distributed across a cluster of <em>workers</em>. Connect's own concerns — offsets for source connectors, connector configuration, task status — live in three internal Kafka topics, which is why a distributed Connect cluster has no database of its own and why those topics must be created with the right replication factor.</p>
+    <p>Two pluggable pieces do the shaping. <em>Converters</em> (<code>key.converter</code>, <code>value.converter</code>) translate between Connect's internal data model and the bytes on the topic — this is where <code>AvroConverter</code> plus the schema registry, or <code>JsonConverter</code>, plugs in, and mismatched converters between a source and a sink are the single most common Connect failure. <em>Single Message Transforms</em> are lightweight per-record edits applied in a chain — mask a field, extract a key, insert a timestamp, route to a different topic — deliberately limited to one record at a time so anything needing joins or aggregation is pushed to a real stream processor. For production, run distributed mode (even for a single worker: you get the REST API, rebalancing and durable offsets), configure a dead-letter queue for sink connectors with <code>errors.tolerance=all</code> and <code>errors.deadletterqueue.topic.name</code> so one poison record does not stop the task, and be precise about guarantees: source connectors can opt into exactly-once, while a sink connector's guarantee is bounded by whether the target system supports idempotent writes.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "name": "orders-to-elasticsearch",
+  "config": {
+    "connector.class": "io.confluent.connect.elasticsearch.ElasticsearchSinkConnector",
+    "topics": "orders-enriched",
+    "tasks.max": "3",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "transforms": "maskPan",
+    "transforms.maskPan.type": "org.apache.kafka.connect.transforms.MaskField$Value",
+    "transforms.maskPan.fields": "cardNumber",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "orders-es-dlq",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/43/kafka-connect/overview/" rel="noopener">Kafka Connect overview — Apache Kafka documentation</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/43/kafka-connect/user-guide/" rel="noopener">Kafka Connect user guide — Apache Kafka (standalone vs distributed, REST API, error handling)</a></li>
+      <li>[Official] <a href="https://docs.confluent.io/kafka-connectors/transforms/current/overview.html" rel="noopener">Single Message Transforms reference — Confluent documentation</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/kafka-connect/how-connectors-work/" rel="noopener">Connectors, Configuration, Converters and Transforms — Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MjJABMOywFM" rel="noopener">Kafka Connect — Apache Kafka 101 — Confluent Developer</a></li>
+    </ul>
+
+    <h3>Kafka Streams: the stream-table duality, state stores and windows</h3>
+    <p>Kafka Streams is a Java library, not a cluster. You add a dependency, build a topology, and run your application the way you already run a Spring Boot service — scaling means starting more instances, which join a consumer group and split the partitions between them. That deployment model is the main reason it wins inside a microservice estate: no extra runtime to operate, no job submission, ordinary observability.</p>
+    <p>Its central idea is the stream-table duality. A <code>KStream</code> is an unbounded sequence of independent facts, where each record is an insert into an append-only ledger. A <code>KTable</code> is the same data read as a changelog: each record is an upsert for its key, and a null value is a delete, so the table is the accumulated latest state — exactly the semantics of a compacted topic, which is not a coincidence. A stream aggregated by key becomes a table; a table's change feed becomes a stream. Stateful operations (<code>count</code>, <code>aggregate</code>, <code>reduce</code>, joins) keep their state in local <em>state stores</em> (RocksDB by default) which are themselves backed by compacted changelog topics, so a failed instance's state is rebuilt from Kafka rather than lost — and standby replicas shorten that rebuild. Windowing groups records per key into tumbling, hopping, sliding or session windows, with a grace period defining how long a late record is still accepted; be aware that re-keying an operation inserts a repartition topic, which is where unexplained extra topics and latency usually come from. Turn the whole topology exactly-once by setting <code>processing.guarantee</code> to <code>exactly_once_v2</code>.</p>
+    <pre class="code-block" data-label="Java"><code>StreamsBuilder builder = new StreamsBuilder();
+
+KStream&lt;String, Order&gt; orders = builder.stream("orders");          // facts: insert semantics
+KTable&lt;String, Customer&gt; customers = builder.table("customers");    // changelog: upsert semantics
+
+orders.selectKey((k, o) -&gt; o.customerId())                          // re-key: adds a repartition topic
+      .join(customers, (order, customer) -&gt; enrich(order, customer))
+      .groupByKey()
+      .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(5), Duration.ofMinutes(1)))
+      .count(Materialized.as("orders-per-customer"))                // state store + compacted changelog
+      .toStream()
+      .to("order-counts");</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kafka.apache.org/documentation/streams/core-concepts" rel="noopener">Kafka Streams core concepts — Apache Kafka (duality, time, processing guarantees)</a></li>
+      <li>[Official] <a href="https://kafka.apache.org/documentation/streams/developer-guide/dsl-api/" rel="noopener">Streams DSL developer guide — Apache Kafka (KStream, KTable, joins, windowing)</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/courses/kafka-streams/stateful-operations/" rel="noopener">How to Use Stateful Operations in Kafka Streams — Confluent Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-kafka-streams" rel="noopener">Introduction to KafkaStreams in Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=C9aXtOy5pPc" rel="noopener">Kafka Streams 101: KTable — Confluent</a></li>
+    </ul>
+
+    <h3>When to reach for ksqlDB or Flink instead</h3>
+    <p>Kafka Streams is the right default when the processing belongs to a service your team already owns, the logic is expressed comfortably in Java, and the input and output are both Kafka. It stops being the right default in three situations. When the transformation is genuinely a query — filter, project, aggregate, join two topics — <strong>ksqlDB</strong> expresses it in SQL over the same engine, so analysts and platform teams can ship a stream without a Java build pipeline. When you need a shared processing platform rather than per-service libraries — many jobs, centrally deployed, with savepoints, backfills and richer event-time handling — <strong>Apache Flink</strong> is the mature answer, and Flink SQL now covers most of what ksqlDB was reached for, which is the direction Confluent's own managed stream processing has taken.</p>
+    <p>The trade is honest: Flink adds a cluster to operate (or a managed bill to pay) and a second failure domain, but it brings complex event processing, connectors far beyond Kafka, and far better ergonomics for large stateful jobs and reprocessing. Kafka Streams keeps the operational surface at zero extra components but ties each job to a deployed application and to Kafka at both ends. A reasonable rule for interviews: per-service, Kafka-to-Kafka logic that belongs with the service goes to Kafka Streams; declarative, ad-hoc or multi-source analytics goes to SQL — ksqlDB if you are staying inside the Kafka toolchain, Flink if the workload deserves a real processing platform.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.confluent.io/platform/current/ksqldb/index.html" rel="noopener">ksqlDB — Confluent documentation</a></li>
+      <li>[Official] <a href="https://nightlies.apache.org/flink/flink-docs-stable/docs/learn-flink/overview/" rel="noopener">Learn Flink: overview — Apache Flink documentation</a></li>
+      <li>[Article] <a href="https://www.confluent.io/blog/apache-flink-apache-kafka-streams-comparison-guideline-users/" rel="noopener">Flink vs Kafka Streams: A Complete Comparison — Confluent blog</a></li>
+      <li>[Article] <a href="https://developer.confluent.io/learn-more/podcasts/flink-vs-kafka-streams-ksqldb-comparing-stream-processing-tools/" rel="noopener">Flink vs Kafka Streams and ksqlDB: comparing stream processing tools — Confluent Developer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DPGn-j7yD68" rel="noopener">Streams and Tables in ksqlDB — Confluent</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-kafka-clients.html">← Kafka Producers and Consumers</a>
+    <a href="index.html">All Messaging modules</a>
+    <a href="05-spring-kafka.html">Spring for Apache Kafka →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Advanced Kafka is where service-company rounds separate from product-company rounds in India: the first will ask you to define compaction and list the transaction API calls, the second will push on what exactly-once does <em>not</em> cover and on the rollout order implied by a compatibility mode.</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is log compaction and how does it differ from retention?</summary>
+      <div class="answer"><p>Time or size retention deletes old records regardless of content. Compaction (<code>cleanup.policy=compact</code>) instead keeps the most recent record for every key and discards superseded ones, so the topic converges on the latest state per key rather than the last N days of events. A topic can use both (<code>compact,delete</code>) when you want the latest state per key but also an absolute time bound.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a tombstone in Kafka?</summary>
+      <div class="answer"><p>A record with a key and a null value on a compacted topic. The log cleaner reads it as "delete every earlier record for this key", and then keeps the tombstone itself for <code>delete.retention.ms</code> so consumers that are behind or restarting still see the deletion before it disappears. A null value is required — an empty string is not a tombstone.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why does Kafka need a schema registry when the broker already stores whatever you send?</summary>
+      <div class="answer"><p>Precisely because the broker stores whatever you send. Values are opaque bytes, so nothing stops a producer from changing the payload shape and breaking every consumer. The registry holds the schema out of band, gives each version a global id that the serializer stamps into the record header, and rejects a new version that violates the configured compatibility mode — the contract enforcement the broker deliberately does not do.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between Kafka Connect source and sink connectors?</summary>
+      <div class="answer"><p>A source connector reads an external system (database, file, API) and produces records into Kafka. A sink connector consumes from Kafka topics and writes into an external system (Elasticsearch, S3, a warehouse). Both are configuration rather than code, split into tasks for parallelism, and run on a cluster of workers that keep offsets, configuration and status in internal Kafka topics.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> KStream vs KTable — what is the difference?</summary>
+      <div class="answer"><p>A KStream is a stream of independent facts; each record is an insert into an append-only ledger, and two records with the same key are two separate events. A KTable is a changelog view; each record is an upsert for its key and a null value is a delete, so it represents the current state per key. The two are convertible — aggregating a stream by key produces a table, and a table's change feed is a stream — which is the stream-table duality.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk through the Kafka transaction API calls in order.</summary>
+      <div class="answer"><p>Set <code>transactional.id</code> on the producer, then call <code>initTransactions()</code> once at startup — this registers with the transaction coordinator and bumps the producer epoch, fencing any older instance using the same id. Then per unit of work: <code>beginTransaction()</code>, one or more <code>send()</code> calls across any partitions and topics, optionally <code>sendOffsetsToTransaction(offsets, consumerGroupMetadata)</code> for a consume-transform-produce loop, and finally <code>commitTransaction()</code> or <code>abortTransaction()</code> on failure. The broker writes a control marker per touched partition to record the outcome.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must a consumer set isolation.level to read_committed, and what happens if it does not?</summary>
+      <div class="answer"><p>The default is <code>read_uncommitted</code>, which returns records from transactions that are still open or that were aborted — so the producer side may be perfectly transactional while the consumer still sees rolled-back data. A read-committed consumer only reads up to the last stable offset and filters out aborted records and control markers. The cost is latency (records become visible only at commit) and the risk that an abandoned transaction blocks the partition until <code>transaction.timeout.ms</code> expires.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> BACKWARD vs FORWARD compatibility — what does each allow, and who upgrades first?</summary>
+      <div class="answer"><p>BACKWARD (the default) means a consumer using the new schema can read data written with the old one: you may add fields that have defaults and delete fields, and you upgrade <em>consumers first</em>. FORWARD means a consumer using the old schema can read data written with the new one: you may add fields and delete fields that had defaults, and you upgrade <em>producers first</em>. FULL is both, which effectively limits you to adding and removing fields with defaults. The <code>_TRANSITIVE</code> variants check the candidate against all previous versions instead of only the latest.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Avro, Protobuf or JSON Schema — how would you choose?</summary>
+      <div class="answer"><p>Avro for most Kafka-native work: compact binary, a precise evolution model based on field defaults and aliases, first-class tooling. Protobuf when the same message types already travel over gRPC or across polyglot services — field numbers make evolution rules simple and the code generation is excellent. JSON Schema when readability and low adoption friction matter more than size, accepting much larger payloads and weaker evolution guarantees. All three are supported by the registry with the same compatibility machinery.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is tiered storage and what problem does it solve?</summary>
+      <div class="answer"><p>KIP-405, production-ready since 3.9. Closed log segments are offloaded from broker disk to object storage through a pluggable RemoteStorageManager, with metadata tracked separately; <code>local.retention.ms</code> controls what stays local while <code>retention.ms</code> controls the total. It decouples retention from broker disk, so keeping ninety days no longer means provisioning ninety days of SSD on every replica. The secondary benefit is operational: brokers hold far less local data, so reassignment and broker replacement are much faster. It does not apply to compacted topics, and historical reads now depend on the object store.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> A tombstone was produced but the old records are still readable. Why?</summary>
+      <div class="answer"><p>Almost always because compaction has not run on that data yet. The cleaner only rewrites closed segments, so nothing happens until the active segment rolls (<code>segment.ms</code> / <code>segment.bytes</code>); records newer than <code>min.compaction.lag.ms</code> are exempt; and the cleaner only bothers with a log whose dirty ratio exceeds <code>min.cleanable.dirty.ratio</code>. Also check the topic really has <code>cleanup.policy=compact</code>, and that the "tombstone" has a genuinely null value rather than an empty payload.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What does Kafka's exactly-once actually guarantee — and what does it not?</summary>
+      <div class="answer"><p>It guarantees exactly-once <em>processing within Kafka</em>: for a read-process-write loop, the output records and the consumer offset commit are one atomic transaction, and the idempotent producer plus epoch fencing prevent duplicates and zombie writers. It does not guarantee exactly-once delivery to anything outside Kafka. As soon as the sink is a database, a payment API or an email service, that write is outside the transaction, so the effective guarantee is at-least-once and the far side must be idempotent — an upsert on a natural key, a deduplication table keyed by an idempotency key, or a conditional update. It also costs latency: coordinator round-trips, marker writes, and read-committed consumers waiting for the commit.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why must transactional.id be stable across restarts, and what breaks if two instances share one?</summary>
+      <div class="answer"><p>The id is the identity the transaction coordinator fences on. When a producer calls <code>initTransactions()</code>, the coordinator bumps the epoch for that id and aborts any in-flight transaction from the previous epoch, so a restarted instance cleanly supersedes the old one and a hung predecessor cannot write. If the id is regenerated on every restart, no fencing happens and a stalled old process can still commit — you lose zombie protection. If two live instances share one id, they fence each other in a loop: each <code>initTransactions()</code> invalidates the other, and both fail with producer-fenced errors. The id must therefore be stable and unique per logical partition of work.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> You need to remove a field from an event schema on a BACKWARD-compatible topic. Walk through it.</summary>
+      <div class="answer"><p>BACKWARD does permit deleting a field, but "the registry allows it" is not the same as "it is safe": any consumer still reading that field breaks. The sequence is to first make the field optional with a default and stop populating it, deploy that, then confirm through consumer-side telemetry or code search that no consumer reads it, then register the version without the field, upgrading consumers before producers as BACKWARD requires. If replay from the beginning matters, use BACKWARD_TRANSITIVE so the check runs against the whole history, not just the previous version. When the change is genuinely breaking — a type change or a changed meaning — do not downgrade compatibility; publish a new topic or a new record type and dual-write during migration.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> When would you choose a compacted topic over an external key-value store?</summary>
+      <div class="answer"><p>When the state <em>is</em> the stream: a changelog you already publish, where consumers need both the current value per key and the ability to rebuild from scratch by replaying the topic. That is precisely how Kafka Streams state stores, Connect's configuration topic and <code>__consumer_offsets</code> work. It suits reference and lookup data — customer profiles, product catalogues, feature flags — that must be materialised into many services. It is the wrong choice when you need random point reads at low latency, secondary indexes, range queries or transactional multi-key updates; a compacted topic gives you a rebuildable log, not a database, and a full replay to reach current state can be slow for large key spaces.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Kafka Streams or Flink for a new stream-processing workload?</summary>
+      <div class="answer"><p>Kafka Streams when the logic belongs to a service the team already owns, input and output are both Kafka, and you do not want another cluster: it is a library, scaling is just more instances of your application, and state lives in local stores backed by compacted changelogs. Flink when you need a shared processing platform — many jobs, central deployment, savepoints for backfill and reprocessing, complex event processing, richer event-time and windowing semantics, and sources beyond Kafka. The honest trade is one extra runtime and failure domain against far better ergonomics for large stateful jobs. ksqlDB sits between them: SQL over the Kafka Streams engine, good for declarative transformations without a Java build, though Flink SQL now covers much of that ground.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Messaging and Event-Driven Systems checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>msg.kc.eos</li>
+      <li>msg.kc.ecosystem</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Messaging and Event-Driven Systems track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
