@@ -179,7 +179,13 @@
 
   // Scroll-reveal for sections, callouts, tables
   if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches && "IntersectionObserver" in window) {
-    var targets = document.querySelectorAll("main section, main aside, main table");
+    // Skip anything inside a realm: a hidden realm is display:none, so its
+    // sections never intersect and would stay stuck at opacity:0 even after
+    // the realm is shown. The index needs no entrance animation anyway.
+    var targets = Array.prototype.filter.call(
+      document.querySelectorAll("main section, main aside, main table"),
+      function (t) { return !t.closest(".realm"); }
+    );
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
         if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
