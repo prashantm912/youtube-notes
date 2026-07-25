@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="Angular Component Testing Deep module: setting signal inputs with componentRef.setInput, asserting emitted outputs, dispatching real DOM events, querying with By.css, the host-component wrapper for projected content, CDK component harnesses and Angular Testing Library — with verified official docs, articles and videos, plus the interview questions they power.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Angular Component Testing Deep — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Component Testing Deep</h1>
+  <p class="standfirst">A component test is only worth writing if it drives the component the way a user does — set an input, click a real button, read the rendered text. This module is the craft of doing that in Angular without welding your tests to the component's private internals.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → Component Testing Deep</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 03 got you a <code>ComponentFixture</code>. This one is about what you do with it: pushing values through the <em>input pipeline</em> with <code>fixture.componentRef.setInput()</code> instead of assigning fields, capturing emitted outputs by subscribing, firing genuine DOM events rather than calling handler methods, querying the rendered tree with <code>By.css</code>, and wrapping the component in a small host component so you can test it through the public template API — including anything projected into <code>ng-content</code>.</p>
+    <p>The second half raises the abstraction. Angular CDK <em>component harnesses</em> give you a typed, DOM-agnostic API over a component (the PageObject pattern, shipped as a framework feature) so your tests survive markup refactors — indispensable with Angular Material. <em>Angular Testing Library</em> attacks the same brittleness from the other direction, with accessibility-first queries and a user-event model. Both are legitimate; this module orients you on when each fits. Stack assumed throughout: Angular v20+ with signal inputs and outputs, running under Vitest.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Setting inputs the right way, and asserting on outputs</h3>
+    <p>With signal inputs (<code>input()</code>, <code>input.required()</code>) the component's field is a read-only signal — there is nothing to assign. The supported way to feed one from a test is <code>fixture.componentRef.setInput('name', value)</code>, which drives the same pipeline Angular uses for a real template binding: it records the change, marks an <code>OnPush</code> component dirty, and lets <code>ngOnChanges</code> and any <code>computed</code>/<code>effect</code> derived from the input react. Direct assignment to the instance field — the reflex carried over from decorator-era <code>@Input()</code> — either fails to compile or silently skips all of that, which is why an <code>OnPush</code> component "doesn't update" in a test that looks correct. After setting, await <code>fixture.whenStable()</code> (or call <code>detectChanges()</code> in a zone-based setup) before asserting.</p>
+    <p>Outputs are the mirror image. An <code>output()</code> returns an <code>OutputEmitterRef</code> with <code>subscribe()</code> and <code>emit()</code>; a test subscribes before acting and collects what arrives, then asserts on the payload. Prefer capturing real emissions over spying on the emitter — a spy proves a method was called, a subscription proves the component actually notified its parent with the right value. Assert on payload contents, not just call counts, or the test passes while the data is wrong.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const fixture = TestBed.createComponent(RatingComponent);
+fixture.componentRef.setInput('score', 4);   // goes through the input pipeline
+await fixture.whenStable();
+
+const emitted: number[] = [];
+fixture.componentInstance.scoreChange.subscribe(v =&gt; emitted.push(v));
+// ...act on the DOM...
+expect(emitted).toEqual([5]);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/components-scenarios" rel="noopener">Component testing scenarios — Angular (setInput, output subscription, the test host recipe)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/ComponentRef" rel="noopener">ComponentRef — Angular API reference (setInput: marks OnPush dirty, runs ngOnChanges)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/OutputEmitterRef" rel="noopener">OutputEmitterRef — Angular API reference (emit and subscribe on signal-based outputs)</a></li>
+      <li>[Article] <a href="https://www.rainerhahnekamp.com/en/how-do-i-test-signal-model-inputs/" rel="noopener">How do I test Signal &amp; Model Inputs? — Rainer Hahnekamp</a></li>
+    </ul>
+
+    <h3>Dispatching real DOM events and querying with By.css</h3>
+    <p>The single biggest quality jump in a component test is acting through the DOM instead of calling the component's methods. <code>element.click()</code> on the native element fires a genuine click that goes through the template binding, the host listener and any parent handler; calling <code>component.onClick()</code> proves only that a method you already wrote does what you wrote. For form fields the two-step idiom matters: set <code>nativeElement.value</code>, then <code>dispatchEvent(new Event('input'))</code> so Angular's value accessor notices — setting the value alone updates nothing, which is the classic "my form control stays pristine" puzzle.</p>
+    <p>To find those elements, <code>fixture.debugElement.query(By.css(...))</code> returns a <code>DebugElement</code> (Angular's wrapper, with <code>nativeElement</code>, injector and listener metadata) and <code>queryAll</code> returns every match; <code>By.directive()</code> finds elements by the directive or component instance on them. Select on things a user or the accessibility tree can see — roles, labels, text, or an explicit <code>data-testid</code> — rather than on structural CSS classes, which change every time a designer touches the stylesheet.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const qty = fixture.debugElement.query(By.css('[data-testid="qty"]')).nativeElement;
+qty.value = '3';
+qty.dispatchEvent(new Event('input'));       // without this, Angular never sees it
+
+fixture.debugElement.query(By.css('button.add')).nativeElement.click();
+await fixture.whenStable();
+expect(fixture.nativeElement.textContent).toContain('3 items');</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/components-basics" rel="noopener">Basics of testing components — Angular (fixture, nativeElement vs debugElement, first DOM assertions)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/utility-apis" rel="noopener">Testing utility APIs — Angular (DebugElement, By.css, By.directive, triggerEventHandler)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-testing-vitest/" rel="noopener">Modern Angular Testing with Vitest: The Fundamentals — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V322hFii-H8" rel="noopener">Angular Unit Testing Crash Course — Make Your Project Bullet Proof — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>The host-component wrapper and testing projected content</h3>
+    <p>Some behaviour only exists when a component is used <em>by someone else</em>: two-way bindings, outputs wired to a parent handler, and anything the caller projects into <code>ng-content</code>. You cannot express that with a bare <code>createComponent</code> of the component under test, so you declare a tiny host component in the spec file whose template uses the real component exactly as an application would, and create a fixture of the <em>host</em>. Now inputs arrive as template bindings, emitted outputs land in host fields you can assert on, and projected markup genuinely renders inside the component's slots.</p>
+    <p>This is the only reliable way to test content projection — a component that renders <code>&lt;ng-content select="[actions]"&gt;</code> shows nothing at all when instantiated directly, because nobody supplied content. It also keeps the test honest about ownership: projected nodes belong to the host's view and are change-detected with it, so querying them through the host fixture mirrors the real runtime. Keep the host minimal (one template, a couple of fields) so it stays readable evidence of how the component is meant to be consumed.</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Component({
+  standalone: true, imports: [CardComponent],
+  template: `&lt;app-card [title]="t" (dismissed)="closed = true"&gt;
+               &lt;button actions&gt;Save&lt;/button&gt;   &lt;!-- projected --&gt;
+             &lt;/app-card&gt;`,
+})
+class HostComponent { t = 'Invoice'; closed = false; }</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://testing-angular.com/testing-components-with-children/" rel="noopener">Testing Components with children (host/wrapper components, shallow vs deep rendering) — Testing Angular</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/getting-the-most-value-out-of-your-angular-component-tests" rel="noopener">Getting the most value out of your Angular component tests — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=21647S7oAik" rel="noopener">Angular Interview Question — Unit Testing (Complete) — Kumar Programming</a></li>
+    </ul>
+
+    <h3>CDK component harnesses: a typed API instead of selectors</h3>
+    <p>A <em>component harness</em> is a class that exposes a component's behaviour as methods — <code>getValue()</code>, <code>check()</code>, <code>openMenu()</code> — and hides how that behaviour maps onto the DOM. It is the PageObject pattern promoted to a framework feature: your test says what the user does, the harness owns the selectors. When the component's internal markup changes, the harness is updated once by its author and every test that uses it keeps passing. That is the whole argument, and it is why Angular Material ships a harness for every component: a Material version bump that reshuffles class names breaks a suite full of <code>By.css('.mat-mdc-form-field-infix input')</code> and leaves a harness-based suite untouched.</p>
+    <p>The wiring is small. <code>TestbedHarnessEnvironment.loader(fixture)</code> yields a <code>HarnessLoader</code>; <code>loader.getHarness(MatSelectHarness)</code> or <code>getAllHarnesses</code> fetch instances, optionally filtered (<code>MatButtonHarness.with({ text: 'Save' })</code>). Every harness method is async and awaits stability for you, so <code>await</code> replaces most manual change-detection calls. Use <code>getChildLoader</code> or <code>documentRootLoader</code> to reach into sub-regions and into overlays (dialogs, menus, snackbars) that render outside the fixture's element. You can also write harnesses for your <em>own</em> components by extending <code>ComponentHarness</code> with a static <code>hostSelector</code> and locator factories — worth doing for any shared design-system component.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const loader = TestbedHarnessEnvironment.loader(fixture);
+const save = await loader.getHarness(MatButtonHarness.with({ text: 'Save' }));
+await save.click();                       // awaits stability internally
+
+const status = await loader.getHarness(MatSelectHarness);
+await status.open();
+await status.clickOptions({ text: 'Approved' });</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/using-component-harnesses" rel="noopener">Using component harnesses in tests — Angular (loaders, filters, harnesses for overlays)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/component-harnesses-overview" rel="noopener">Component harnesses overview — Angular (what a harness is and why it survives DOM refactors)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/creating-component-harnesses" rel="noopener">Creating component harnesses for your components — Angular (ComponentHarness, HarnessPredicate)</a></li>
+      <li>[Article] <a href="https://angularexperts.io/blog/angular-material-component-harness/" rel="noopener">Angular Material component harnesses — Angular Experts</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=I2Ne70BtsRU" rel="noopener">Tidy up your tests using component test harnesses (ng-Keralam Angular Conf) — Alisa Duncan, OktaDev</a></li>
+    </ul>
+
+    <h3>Angular Testing Library: the user-centric alternative style</h3>
+    <p><code>@testing-library/angular</code> is a thin layer over TestBed built on one rule: the more your test resembles how the software is used, the more confidence it gives. <code>render(CardComponent, { inputs: { title: 'Invoice' }, on: { dismissed: spy } })</code> replaces the fixture ceremony — it can even take a template string, giving you the host-component pattern for free. You then query through <code>screen</code> using accessibility-first selectors — <code>getByRole('button', { name: /save/i })</code>, <code>getByLabelText</code>, <code>getByText</code> — and act with <code>userEvent</code>, which simulates a real interaction sequence (focus, keydown, input, change) instead of a single synthetic event. Because the queries mirror the accessibility tree, a component that is unreachable by keyboard or screen reader is often literally untestable, so accessibility bugs surface as test failures.</p>
+    <p>Honest comparison. CDK harnesses win when you consume a component library: Material's harnesses already exist, they encapsulate genuinely gnarly DOM (overlays, virtual scroll), and they are typed against the component's real API — and the two styles compose, since you can pull a harness out of an Angular Testing Library render. Angular Testing Library wins for your own feature components: no harness to author, queries that double as accessibility assertions, and a vocabulary shared with React and Vue teams. Plain TestBed with <code>By.css</code> is still fine for small, private components. What is <em>not</em> fine is a suite that reaches into component internals — spying on private methods, asserting on class fields — because that is the code that breaks on every refactor while catching nothing.</p>
+    <pre class="code-block" data-label="TypeScript"><code>await render(CardComponent, {
+  inputs: { title: 'Invoice' },
+  on: { dismissed: vi.fn() },
+});
+await userEvent.click(screen.getByRole('button', { name: /dismiss/i }));
+expect(screen.getByRole('heading', { name: /invoice/i })).toBeInTheDocument();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://testing-library.com/docs/angular-testing-library/intro/" rel="noopener">Angular Testing Library — introduction and setup (Testing Library docs)</a></li>
+      <li>[Official] <a href="https://testing-library.com/docs/angular-testing-library/examples/" rel="noopener">Angular Testing Library — worked examples with render, screen and userEvent</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/good-testing-practices-with-angular-testing-library" rel="noopener">Good testing practices with Angular Testing Library — Tim Deschryver (its maintainer)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/using-angular-testing-library-with-test-harnesses" rel="noopener">Using Angular Testing Library with Test Harnesses — Tim Deschryver (combining both styles)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lbiOP-VLKGI" rel="noopener">Beyond Unit Tests: Modern Testing in Angular — Rainer Hahnekamp</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-testbed.html">← TestBed and Fixtures</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="05-service-http-testing.html">Service and HTTP Testing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Component testing is where Angular interviews in India get practical — service-company rounds probe the mechanics, product-company rounds probe why your tests do not break on every refactor:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set an input on a component under test?</summary>
+      <div class="answer"><p><code>fixture.componentRef.setInput('name', value)</code>, then await <code>fixture.whenStable()</code> (or call <code>fixture.detectChanges()</code>) before asserting. This routes the value through Angular's input pipeline exactly as a parent template binding would.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why can't you just assign to the component instance field any more?</summary>
+      <div class="answer"><p>A signal input is a read-only signal, so there is nothing to assign. Even with a decorator <code>@Input()</code>, plain assignment skips the input pipeline: no change record, no <code>ngOnChanges</code>, and no dirty marking for an <code>OnPush</code> component — so the view may never update and the test fails for the wrong reason.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you assert that a component emitted an output?</summary>
+      <div class="answer"><p>Subscribe before acting and collect the values: <code>component.saved.subscribe(v =&gt; received.push(v))</code>, act through the DOM, then assert on <code>received</code>. With signal outputs the emitter is an <code>OutputEmitterRef</code>, which exposes <code>subscribe</code> and <code>emit</code>. Alternatively, bind the output in a host component and assert on the host's field.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does By.css do, and what does query return?</summary>
+      <div class="answer"><p><code>fixture.debugElement.query(By.css(selector))</code> finds the first matching node in the component's rendered tree and returns a <code>DebugElement</code> — an Angular wrapper exposing <code>nativeElement</code>, the injector and event listeners. <code>queryAll</code> returns all matches; <code>By.directive(Type)</code> matches elements carrying a given directive or component.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why click the DOM element instead of calling the component's handler method?</summary>
+      <div class="answer"><p>Calling the method tests only the method. A real <code>click()</code> exercises the template binding, the host listener, any <code>disabled</code> guard and the event path — so it catches a handler that was never wired up, a button hidden behind <code>@if</code>, or a disabled state that should have blocked the action.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You set an input's value on a text field but the form control stays empty. Why?</summary>
+      <div class="answer"><p>Setting <code>nativeElement.value</code> only changes the DOM property; no event fires, so Angular's value accessor never learns about it. You must dispatch the event too: <code>el.dispatchEvent(new Event('input'))</code> (and <code>'change'</code> for selects and checkboxes), after which the control value, validity and dirty flag update.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a host (test wrapper) component and when do you need one?</summary>
+      <div class="answer"><p>A small component declared in the spec whose template uses the component under test the way an application would. You need it when the behaviour only exists in that relationship: two-way bindings, outputs handled by a parent, and — critically — content projected into <code>ng-content</code>, which renders nothing when the component is created directly because no caller supplied it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which view owns projected content, and why does the test care?</summary>
+      <div class="answer"><p>Projected nodes belong to the caller's (host's) view and are change-detected with it, not with the component they visually sit inside. So the host fixture is what you drive and assert through, and DI or lifecycle expectations that follow the visual nesting will be wrong — the same rule that makes <code>contentChild</code>, not <code>viewChild</code>, the query for projected nodes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a CDK component harness and what problem does it solve?</summary>
+      <div class="answer"><p>A class exposing a component's behaviour as async methods while hiding its DOM structure — the PageObject pattern as a framework feature. It decouples tests from markup, so an internal refactor or a Material version upgrade that renames classes breaks the harness in one place instead of breaking every spec that hard-coded selectors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you obtain a harness in a unit test?</summary>
+      <div class="answer"><p>Create the fixture, then <code>const loader = TestbedHarnessEnvironment.loader(fixture)</code> and <code>await loader.getHarness(MatSelectHarness)</code>. Use <code>getAllHarnesses</code> for lists, <code>Harness.with({...})</code> to filter by text or attributes, <code>getChildLoader</code> to scope to a region, and <code>documentRootLoader</code> for overlay content such as dialogs and menus that renders outside the fixture element.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does Angular Testing Library change about how you write component tests?</summary>
+      <div class="answer"><p><code>render()</code> replaces the TestBed and fixture ceremony (and accepts a template string, giving you a host component for free), <code>screen</code> queries by role, label and text instead of CSS, and <code>userEvent</code> simulates full interaction sequences. The effect is tests written in the user's vocabulary, which also means accessibility problems show up as failing queries.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> CDK harnesses vs Angular Testing Library — how do you choose?</summary>
+      <div class="answer"><p>They are complementary, not rivals. Harnesses are the better fit when consuming a component library — Material ships them, they encapsulate overlays and virtual scroll, and they are typed against the component's own API; they also work in end-to-end environments, not just TestBed. Angular Testing Library is the better fit for your own feature components: nothing to author, accessibility-first queries, realistic user events. You can use both in one spec by loading a harness from an Angular Testing Library render.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you keep component tests from breaking on every UI refactor?</summary>
+      <div class="answer"><p>Assert on observable behaviour, never internals: no spying on private methods, no reading class fields. Select by role, label or an explicit <code>data-testid</code> rather than structural CSS classes. Push shared components behind harnesses so selector knowledge lives in one place. Drive the component through inputs and DOM events and verify through rendered output and emitted outputs — the public contract, which is exactly what should break a test when it changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you write a harness for your own design-system component?</summary>
+      <div class="answer"><p>Extend <code>ComponentHarness</code>, declare a static <code>hostSelector</code> matching the component's element, and build locators with <code>this.locatorFor(...)</code> / <code>locatorForOptional</code> / <code>locatorForAll</code>. Expose async methods in the domain's language (<code>await chip.remove()</code>, <code>await table.getRowTexts()</code>) and add a static <code>with()</code> predicate for filtering. Ship it beside the component so every consuming team's tests inherit the refactor protection.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.cmp.dom — DOM interaction, inputs/outputs, host components, projected content</li>
+      <li>fet.cmp.harness — CDK component harnesses, Angular Testing Library as an alternative style</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

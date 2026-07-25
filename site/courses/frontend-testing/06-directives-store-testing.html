@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Directives, Router and Store Testing module: testing pipes as plain classes, attribute and structural directives via host components, functional guards and resolvers with TestBed.runInInjectionContext, provideRouter and RouterTestingHarness, and NgRx testing with provideMockStore, selector projectors, provideMockActions and RxJS marble diagrams — with verified official docs, community guides and videos, plus interview questions.">
+  <title>Directives, Router and Store Testing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Directives, Router and Store Testing</h1>
+  <p class="standfirst">Everything in an Angular app that is neither a component nor a service still has to be proven: the one-method pipe, the directive with no template of its own, the guard that only exists inside an injection context, and the store that turns user intent into state.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Frontend Testing</a> → Directives, Router and Store Testing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Components and services are the easy half of an Angular suite. This module handles the rest: pipes (often testable with plain <code>new</code> and a method call), attribute and structural directives (which need a host component to attach to), functional guards and resolvers (which must run inside an injection context), routed navigation with <code>provideRouter</code> and <code>RouterTestingHarness</code>, and the whole NgRx surface — reducers, selectors, mock stores and effects with marble diagrams.</p>
+    <p>The stack assumed throughout is Angular v20+ with the Vitest runner, standalone APIs and functional guards. Depth for every topic lives in the linked official documentation and the community writing beside it.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Testing pipes — usually just a class and a method</h3>
+    <p>A pipe is a class with one public method, <code>transform</code>. For a <em>pure</em> pipe with no injected dependencies that means the whole test is arithmetic: construct the pipe with <code>new</code>, call <code>transform</code> with an input, assert on the output. No <code>TestBed</code>, no fixture, no change detection — and consequently no reason for the test to be slow or flaky. Angular's own guide leads with exactly this technique, and edge-case coverage (null, undefined, empty string, boundary values, extra arguments) is where the real value sits.</p>
+    <p>The exceptions matter for interviews. A pipe that injects something (a <code>LOCALE_ID</code>, a translation service, an <code>HttpClient</code>) needs either constructor-injected fakes or a <code>TestBed</code> so DI can resolve it. An <em>impure</em> pipe (<code>pure: false</code>) re-runs on every change-detection cycle, so its behaviour only shows up when rendered in a host template. And async pipes over observables need <code>fakeAsync</code>/<code>tick</code> or a fixture whose change detection you drive. Knowing which of the three cases you are in is the whole skill.</p>
+    <pre class="code-block" data-label="TypeScript"><code>describe('TruncatePipe', () =&gt; {
+  const pipe = new TruncatePipe();          // no TestBed needed
+
+  it('shortens long text', () =&gt; {
+    expect(pipe.transform('abcdefghij', 4)).toBe('abcd…');
+  });
+
+  it('leaves short text alone', () =&gt; {
+    expect(pipe.transform('abc', 4)).toBe('abc');
+  });
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/pipes" rel="noopener">Testing pipes — Angular docs (the "no testing utilities required" approach)</a></li>
+      <li>[Article] <a href="https://testing-angular.com/testing-pipes/" rel="noopener">Testing Pipes — Testing Angular (the free book by Mathias Schäfer)</a></li>
+      <li>[Article] <a href="https://www.scaler.com/topics/angular/testing-a-directive-and-pipe-in-angular/" rel="noopener">Testing a Directive and Pipe in Angular — Scaler Topics</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bv9z_UfSqgM" rel="noopener">Angular Unit Testing Course — All That You Need to Know About Testing — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Directives need a host component to attach to</h3>
+    <p>A directive has no template of its own — it only exists once applied to an element. So the standard pattern is a small <em>test host component</em> declared inside the spec that renders every way the directive can be used (bound input, no input, applied to different element types), then assertions against the resulting DOM via <code>fixture.debugElement.queryAll(By.directive(MyDirective))</code> or <code>By.css</code>. Testing the directive class in isolation is possible for trivial cases, but the host approach is what Angular's guide recommends because it exercises the binding and host-listener plumbing you actually shipped.</p>
+    <p>Structural directives (the <code>*</code> ones) add and remove DOM through <code>TemplateRef</code> and <code>ViewContainerRef</code>, so their tests read as "set the input, run change detection, count the rendered nodes". Attribute directives that react to events use <code>@HostListener</code>, so you dispatch a real event (or call <code>triggerEventHandler</code>) and assert the host element's changed class, style or attribute. Interviewers like this topic precisely because a candidate who has never written a host component gets stuck immediately.</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Component({
+  standalone: true, imports: [HighlightDirective],
+  template: `&lt;p appHighlight="yellow"&gt;host element&lt;/p&gt;`,
+})
+class HostComponent {}
+
+const el = fixture.debugElement.query(By.directive(HighlightDirective));
+el.triggerEventHandler('mouseenter');
+fixture.detectChanges();
+expect(el.nativeElement.style.backgroundColor).toBe('yellow');</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/attribute-directives" rel="noopener">Testing attribute directives — Angular docs (the artificial test-host pattern)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/directives/structural-directives" rel="noopener">Structural directives — Angular docs (TemplateRef and ViewContainerRef mechanics)</a></li>
+      <li>[Article] <a href="https://testing-angular.com/testing-directives/" rel="noopener">Testing Directives — Testing Angular (attribute vs structural, with host components)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V322hFii-H8" rel="noopener">Angular Unit Testing Crash Course — Make Your Project Bullet Proof — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Functional guards and resolvers: run them in an injection context</h3>
+    <p>Since Angular 15 the idiomatic guard is a plain function — <code>const authGuard: CanActivateFn = (route, state) =&gt; inject(AuthService).isLoggedIn()</code> — and the same is true of <code>ResolveFn</code>, <code>CanDeactivateFn</code> and <code>CanMatchFn</code>. That function calls <code>inject()</code>, which only works inside an injection context. Calling it directly from a spec throws <code>NG0203</code>. The fix is one line: configure a <code>TestBed</code> with the providers (real or faked) and invoke the guard through <code>TestBed.runInInjectionContext(() =&gt; authGuard(route, state))</code>.</p>
+    <p>From there it is ordinary unit testing: build an <code>ActivatedRouteSnapshot</code>-shaped object and a <code>RouterStateSnapshot</code>-shaped object (usually a cast literal with only the fields the guard reads), swap the collaborator for a fake, and assert the return — <code>true</code>, <code>false</code>, or a <code>UrlTree</code> for a redirect. Async guards return a promise or observable, so unwrap accordingly. Resolvers are identical in shape; assert on the resolved value and on the service call arguments taken from route params.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  providers: [{ provide: AuthService, useValue: { isLoggedIn: () =&gt; false } }],
+});
+
+const result = TestBed.runInInjectionContext(() =&gt;
+  authGuard({} as ActivatedRouteSnapshot, { url: '/admin' } as RouterStateSnapshot));
+
+expect(result).toEqual(new Router().parseUrl('/login')); // redirect UrlTree</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/routing/route-guards" rel="noopener">Control route access with guards — Angular docs</a></li>
+      <li>[Official] <a href="https://angular.dev/api/router/CanActivateFn" rel="noopener">CanActivateFn — Angular API reference (signature and return semantics)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/router/ResolveFn" rel="noopener">ResolveFn — Angular API reference (functional resolvers)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/testing/TestBed" rel="noopener">TestBed — Angular API reference (runInInjectionContext and friends)</a></li>
+      <li>[Article] <a href="https://www.stefanos-lignos.dev/posts/testing-functional-guards-and-resolvers" rel="noopener">Testing functional resolvers and guards in Angular — Stefanos Lignos</a></li>
+    </ul>
+
+    <h3>Router testing with provideRouter and RouterTestingHarness</h3>
+    <p>The old habit was to stub the <code>Router</code> and assert that <code>navigate</code> was called — a test that passes even when the route configuration is wrong. The modern approach uses the real router over a fake location: provide <code>provideRouter(testRoutes)</code> plus <code>provideLocationMocks()</code> in the testing module, then drive navigation through <code>RouterTestingHarness</code>. <code>harness.navigateByUrl('/heroes/5', HeroComponent)</code> navigates, waits for the navigation to settle, activates the outlet and hands you back the typed component instance — the boilerplate of a wrapper host component disappears.</p>
+    <p>This is the sharpest tool for testing guards and resolvers <em>in situ</em>: point a test route at a component, attach the guard, navigate, and assert either that the component activated or that <code>harness.routeDebugElement</code> is null and the URL is the redirect target. Resolver output arrives through <code>ActivatedRoute.data</code>, so a resolved-data assertion is a genuine integration test of route config plus resolver plus component. Named outlets and a few exotic cases still want a hand-written host component; the harness docs say so explicitly.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  providers: [
+    provideRouter([{ path: 'admin', component: AdminComponent, canActivate: [authGuard] }]),
+    provideLocationMocks(),
+  ],
+});
+
+const harness = await RouterTestingHarness.create();
+await harness.navigateByUrl('/admin');
+expect(harness.routeDebugElement).toBeNull();          // guard blocked activation
+expect(TestBed.inject(Router).url).toBe('/login');</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/routing/testing" rel="noopener">Testing routing and navigation — Angular docs</a></li>
+      <li>[Official] <a href="https://angular.dev/api/router/testing/RouterTestingHarness" rel="noopener">RouterTestingHarness — Angular API reference</a></li>
+      <li>[Official] <a href="https://angular.dev/api/router/provideRouter" rel="noopener">provideRouter — Angular API reference (standalone router setup)</a></li>
+      <li>[Article] <a href="https://www.rainerhahnekamp.com/en/how-do-i-test-using-the-routertestingharness/" rel="noopener">How do I test using the RouterTestingHarness? — Rainer Hahnekamp</a></li>
+      <li>[Article] <a href="https://dev.to/this-is-angular/testing-angular-routing-components-with-routertestingharness-providelocationmocks-and-providerouter-oi8" rel="noopener">Testing Angular routing components with RouterTestingHarness, provideLocationMocks and provideRouter — This is Angular (DEV)</a></li>
+    </ul>
+
+    <h3>NgRx reducers and selectors: pure functions, plain tests</h3>
+    <p>A reducer is <code>(state, action) =&gt; newState</code> with no dependencies, so its test needs no framework at all: build a known state, call the reducer with an action creator's result, assert the returned state. Because NgRx state is immutable, also assert that the input object was not mutated — a returned-the-same-reference bug is a classic. Cover the "unknown action returns the current state" case too; it is the reducer's contract and a favourite interview follow-up.</p>
+    <p>Selectors split into two kinds. A feature/property selector that just reaches into the state tree is thin enough that many teams skip testing it and let TypeScript do the work. A <em>composed</em> selector with real derivation logic is worth testing through its <code>projector</code>: <code>selectVisibleTodos.projector(todos, filter)</code> calls only the final transformation with inputs you supply, so you never have to build the entire state tree. Where you do want the tree, <code>selector.projector</code>'s counterpart is calling the selector with a state object directly.</p>
+    <pre class="code-block" data-label="TypeScript"><code>it('adds a todo', () =&gt; {
+  const state = { items: [] as Todo[] };
+  const next = todosReducer(state, TodoActions.added({ title: 'write tests' }));
+  expect(next.items.length).toBe(1);
+  expect(state.items.length).toBe(0);             // original untouched
+});
+
+// composed selector: test the projector, not the whole state tree
+expect(selectVisibleTodos.projector(allTodos, 'done')).toEqual([doneTodo]);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/testing" rel="noopener">Testing — NgRx Store guide (reducers, selectors, MockStore)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/reducers" rel="noopener">Reducers — NgRx Store guide (why they must stay pure)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/selectors" rel="noopener">Selectors — NgRx Store guide (createSelector, memoization, projector)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/how-i-test-my-ngrx-selectors" rel="noopener">How I test my NgRx selectors — Tim Deschryver</a></li>
+      <li>[Article] <a href="https://ultimatecourses.com/blog/ngrx-store-testing-reducers" rel="noopener">Testing Reducers in NgRx Store — Ultimate Courses</a></li>
+    </ul>
+
+    <h3>provideMockStore and overrideSelector in component tests</h3>
+    <p>A component that talks to the store should not drag the whole state machine into its spec. <code>provideMockStore({ initialState })</code> from <code>@ngrx/store/testing</code> swaps in a fake store whose state you set directly and whose <code>dispatch</code> is a spy — so a component test becomes "given this slice of state, does the template render it, and does clicking this button dispatch that action?". Assert dispatches with <code>expect(store.dispatch).toHaveBeenCalledWith(SomeActions.loaded({ id }))</code>.</p>
+    <p>For selector-driven components, <code>store.overrideSelector(selectUser, fakeUser)</code> pins a selector's emission regardless of state. Two gotchas that come up constantly: overrides do not re-emit by themselves, so after changing one you call <code>store.refreshState()</code> and then <code>fixture.detectChanges()</code>; and mock selectors leak between specs, so <code>store.resetSelectors()</code> belongs in <code>afterEach</code>. Tim Deschryver's write-up is the reference text on where mocking the store helps and where it quietly removes the coverage you thought you had.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  providers: [provideMockStore({ initialState: { user: null } })],
+});
+const store = TestBed.inject(MockStore);
+
+store.overrideSelector(selectUser, { name: 'Asha' });
+store.refreshState();
+fixture.detectChanges();
+expect(el.textContent).toContain('Asha');
+
+afterEach(() =&gt; store.resetSelectors());</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://timdeschryver.dev/blog/testing-an-ngrx-project" rel="noopener">Testing an NgRx project — Tim Deschryver (the standard reference for the whole surface)</a></li>
+      <li>[Article] <a href="https://christianlydemann.com/the-complete-guide-to-ngrx-testing/" rel="noopener">The Complete Guide to NgRx Testing — Christian Lüdemann</a></li>
+      <li>[Article] <a href="https://dev.to/nickraphael/mocking-your-ngrx-store-in-a-unit-test-3em3" rel="noopener">Mocking your NgRx store in a unit test — Nick Raphael (DEV)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-ngrx-store-and-effects-crash-course/" rel="noopener">NgRx Store — An Architecture Guide — Angular University (context for what you are mocking)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NOT-nJLDnyg" rel="noopener">Easy Angular Unit Testing in NgRx — JavaScript Marathon (This Dot Media)</a></li>
+    </ul>
+
+    <h3>Effects: provideMockActions and marble diagrams</h3>
+    <p>An effect listens to an action stream, does something impure, and emits another action. Tests therefore need a controllable actions stream: <code>provideMockActions(() =&gt; actions$)</code> supplies one, and the effect's dependencies are faked as usual. Push an action in, assert the action that comes out. Many teams (Tim Deschryver among them) push a plain observable of one action and subscribe to the effect, which keeps the test readable and focused on the flow rather than on timing.</p>
+    <p>Timing is where marble tests earn their place: debounced search, retries, <code>switchMap</code> cancellation, <code>concatMap</code> ordering. RxJS's <code>TestScheduler</code> with <code>run()</code> gives you virtual time — <code>cold('-a|')</code> and <code>hot('-a')</code> build input streams, <code>expectObservable(effect$).toBe('-b')</code> asserts the output, and one frame of virtual time stands for whatever the operator asked for. The syntax is the barrier, not the concept: <code>-</code> is a frame, a letter is an emission, <code>|</code> completes, <code>#</code> errors, and <code>()</code> groups emissions into the same frame. Learn to read a diagram before you try to write one.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const scheduler = new TestScheduler((actual, expected) =&gt;
+  expect(actual).toEqual(expected));
+
+scheduler.run(({ hot, cold, expectObservable }) =&gt; {
+  actions$ = hot('-a', { a: SearchActions.query({ term: 'ng' }) });
+  api.search.mockReturnValue(cold('--r|', { r: [hit] }));
+  expectObservable(effects.search$).toBe('---s', { s: SearchActions.success({ hits: [hit] }) });
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/effects/testing" rel="noopener">Testing — NgRx Effects guide (provideMockActions, marble helpers)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/guide/testing/marble-testing" rel="noopener">Testing RxJS Code with Marble Diagrams — RxJS docs</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/testing/TestScheduler" rel="noopener">TestScheduler — RxJS API reference (run, createColdObservable, expectObservable)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=m6jkzIHMEdg" rel="noopener">How to Read RxJS Marble Diagrams — Zach Gollwitzer</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AYBHKoiozhg" rel="noopener">Testing NgRx with Jest and Marbles — Brian Love (Angular Meetup Zurich)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-service-http-testing.html">← Service and HTTP Testing</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="07-e2e-playwright.html">End-to-End with Playwright →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Angular testing rounds in Indian product and service companies move quickly from "how do you test a component" to these — pipes and guards in screening, NgRx and marbles for senior roles:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you unit test an Angular pipe?</summary>
+      <div class="answer"><p>For a pure pipe with no dependencies, instantiate it directly — <code>const pipe = new MyPipe()</code> — and assert on <code>pipe.transform(input, args)</code>. No TestBed, no fixture, no change detection. Cover edge cases: null, undefined, empty values and boundary arguments. Only pipes that inject dependencies or are impure need TestBed or a host component.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Why can't you test a directive the way you test a component?</summary>
+      <div class="answer"><p>A directive has no template of its own — it only takes effect once applied to a host element. So you declare a small test host component inside the spec whose template applies the directive in every supported way, create a fixture for that host, and assert on the resulting DOM through <code>By.directive(...)</code> or <code>By.css(...)</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is a test host component and why is it used?</summary>
+      <div class="answer"><p>A throwaway component declared in the spec file purely to render the thing under test in a realistic template — used for directives, for pipes that must be rendered, for content projection, and for components whose inputs and outputs you want bound through real template syntax rather than set on the instance.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> How do you test a reducer?</summary>
+      <div class="answer"><p>Call it as a plain function: <code>const next = reducer(initialState, action)</code>, then assert on <code>next</code>. Also assert that the original state object was not mutated, and check the default branch — an unrecognised action must return the current state reference unchanged. No TestBed, no store, no mocks.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Your functional guard test throws NG0203 "inject() must be called from an injection context". Why, and how do you fix it?</summary>
+      <div class="answer"><p>A functional guard calls <code>inject()</code> in its body, which is only legal inside an injection context. Calling the guard directly from a spec is outside one. Configure a TestBed with the required providers and invoke the guard through <code>TestBed.runInInjectionContext(() =&gt; myGuard(route, state))</code>. The same applies to functional resolvers and functional interceptors.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What does RouterTestingHarness give you over stubbing the Router?</summary>
+      <div class="answer"><p>A stubbed Router only proves that your component called <code>navigate</code>; it cannot catch a wrong route path, a guard that blocks activation or a resolver that fails. The harness runs the real Router over test routes provided by <code>provideRouter</code> plus <code>provideLocationMocks</code>: <code>navigateByUrl</code> performs a real navigation, waits for it to settle, activates the outlet and returns the typed routed component. You test route configuration and component together.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test a resolver?</summary>
+      <div class="answer"><p>Two levels. Unit: run the <code>ResolveFn</code> through <code>TestBed.runInInjectionContext</code> with a fake data service and a route snapshot carrying the params it reads, then assert the resolved value (unwrapping the observable or promise). Integration: attach it to a test route, navigate with <code>RouterTestingHarness</code> and assert on what the routed component received via <code>ActivatedRoute.data</code>.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is provideMockStore and when do you prefer it to the real store?</summary>
+      <div class="answer"><p><code>provideMockStore({ initialState })</code> from <code>@ngrx/store/testing</code> supplies a store whose state you set directly and whose <code>dispatch</code> is a spy. Prefer it for component specs — you want to assert "renders this state" and "dispatches that action" without wiring reducers, effects and the full state tree. Prefer the real store when the point of the test is the reducer-plus-selector integration.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test an NgRx selector without building the entire state tree?</summary>
+      <div class="answer"><p>Use its <code>projector</code>. <code>selectVisibleTodos.projector(todos, filter)</code> invokes only the final projection function with the inputs you pass, skipping the parent selectors and the state shape entirely. Thin property selectors that only read a slice are usually left untested — TypeScript already guards the shape.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> After overrideSelector, your component still shows the old value. What is missing?</summary>
+      <div class="answer"><p>Overriding a mock selector does not push a new emission on its own. Call <code>store.refreshState()</code> to make MockStore re-emit, then <code>fixture.detectChanges()</code> to render it. And because mock selectors persist across specs, call <code>store.resetSelectors()</code> in <code>afterEach</code> or later tests inherit the override.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How do you test an effect, and what does provideMockActions do?</summary>
+      <div class="answer"><p><code>provideMockActions(() =&gt; actions$)</code> supplies the <code>Actions</code> stream the effect subscribes to, so the spec controls exactly which actions arrive. Fake the effect's collaborators, push an action into <code>actions$</code>, subscribe to the effect and assert the emitted action — including the failure path, where the service errors and the effect must emit a failure action rather than killing the stream. Many teams skip TestBed here and construct the effects class directly for speed.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Explain marble testing: hot vs cold, and when is it worth the syntax?</summary>
+      <div class="answer"><p><code>TestScheduler.run()</code> gives virtual time, so time-dependent operators resolve instantly and deterministically. A <em>cold</em> observable starts emitting when subscribed (a typical HTTP call); a <em>hot</em> one emits on a shared timeline regardless of subscribers (the actions stream, a subject). In the diagram, <code>-</code> is one frame, a letter is an emission, <code>|</code> completes, <code>#</code> errors and <code>()</code> groups emissions into one frame. Worth it for debounce, retry, cancellation and ordering; overkill for a straightforward request-to-action mapping, where a plain subscribe assertion reads better.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> How would you test that a search effect debounces and cancels stale requests?</summary>
+      <div class="answer"><p>Marble test. Emit two query actions a few frames apart on a hot actions stream, return a cold response for each from the faked API, and assert with <code>expectObservable</code> that only the second produces a success action — proving <code>debounceTime</code> swallowed the first and <code>switchMap</code> cancelled the in-flight request. Add <code>expectSubscriptions</code> on the inner observable to prove the unsubscribe actually happened.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What is the risk of mocking the store in every component test?</summary>
+      <div class="answer"><p>You end up asserting against a state shape you invented rather than one your reducers can actually produce, so a reducer or selector change breaks production while every spec stays green. Mitigation: keep reducer and selector tests real and thorough, derive mock state from the same factories the reducers use, and keep a thin layer of integration tests using the real store so the pieces are proven to fit.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A guard-protected route test passes but production still lets unauthorised users in. What kind of test was missing?</summary>
+      <div class="answer"><p>The suite almost certainly tested the guard function in isolation and never tested the route configuration — the guard was never attached to the route, or was attached with <code>canMatch</code> where <code>canActivate</code> was expected, or the redirect target route did not exist. The fix is a navigation-level test: real <code>provideRouter</code> with the production route array, <code>RouterTestingHarness.navigateByUrl</code>, and assertions that the outlet stayed empty and the URL became the redirect target.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.dir.pipe — testing directives, pipes, functional guards and resolvers, RouterTestingHarness</li>
+      <li>fet.dir.ngrx — NgRx testing: provideMockStore, reducer and selector tests, effects marble tests</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

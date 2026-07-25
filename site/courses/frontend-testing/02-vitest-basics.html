@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Vitest Fundamentals module: describe/it/expect and the matcher families, vi.fn spies, vi.spyOn and vi.mock, the four lifecycle hooks, fake timers and async assertions, plus the Karma-and-Jasmine to Vitest migration — verified official docs, articles and videos, with the interview questions they power.">
+  <title>Vitest Fundamentals — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Vitest Fundamentals</h1>
+  <p class="standfirst">Learn the runner before the framework. Everything here — matchers, spies, hooks, fake timers — is plain Vitest that would work in a React or Node project, and it is the layer every Angular test sits on now that Karma has been retired.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → Vitest Fundamentals</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Vitest is the Vite-native test runner that Angular now ships as its default, replacing the Karma browser launcher and the Jasmine assertion library in one move. This module deliberately ignores Angular: it orients you on the runner's own surface — the shape of a test file, the matcher families behind <code>expect</code>, the <code>vi</code> mocking utilities, the four lifecycle hooks, timer faking and async assertions — and closes with what actually changes when a Jasmine codebase moves across. TestBed, fixtures and component rendering arrive in the next module.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Anatomy of a Vitest test — describe, it, expect, spies and hooks</h3>
+    <p>A Vitest file is an ordinary TypeScript module ending in <code>.spec.ts</code> or <code>.test.ts</code>. <code>describe</code> groups related cases and can nest; <code>it</code> (or its exact alias <code>test</code>) declares one case; <code>expect</code> states what must be true. Unlike Jasmine, none of these are magic globals — you import them from <code>vitest</code> unless the project turns on the <code>globals</code> option, which the Angular schematics do so that files carried over from Jasmine keep compiling. Variants you will meet immediately: <code>it.only</code> and <code>describe.only</code> to focus a run, <code>it.skip</code> and <code>it.todo</code> to park one, and <code>it.each</code> for table-driven cases.</p>
+    <p>The <code>expect</code> API is Jest-compatible, and its matchers fall into families worth memorising as families rather than as a flat list. <strong>Equality:</strong> <code>toBe</code> compares with <code>Object.is</code> (reference identity for objects), <code>toEqual</code> walks structurally and treats an <code>undefined</code> property as absent, and <code>toStrictEqual</code> is the pedantic version that also compares class prototypes and refuses to ignore <code>undefined</code> keys. <strong>Truthiness:</strong> <code>toBeTruthy</code>, <code>toBeFalsy</code>, <code>toBeNull</code>, <code>toBeUndefined</code>, <code>toBeDefined</code>. <strong>Numbers:</strong> <code>toBeGreaterThan</code>, <code>toBeLessThanOrEqual</code>, and <code>toBeCloseTo</code> for floating point, because binary arithmetic makes <code>toBe</code> a trap. <strong>Strings:</strong> <code>toMatch</code> with a regular expression or substring. <strong>Arrays and iterables:</strong> <code>toContain</code> (identity), <code>toContainEqual</code> (structural), <code>toHaveLength</code>, and the asymmetric <code>expect.arrayContaining</code>. <strong>Exceptions:</strong> <code>toThrow</code>, which needs the call wrapped in a function so the matcher can invoke it. <strong>Snapshots:</strong> <code>toMatchSnapshot</code> and <code>toMatchInlineSnapshot</code>, which record a value on first run and compare thereafter. Every matcher inverts through <code>.not</code>.</p>
+    <pre class="code-block" data-label="TypeScript"><code>import { describe, it, expect } from 'vitest';
+
+describe('priceFormatter', () =&gt; {
+  it('formats rupees with two decimals', () =&gt; {
+    expect(format(1234.5)).toBe('1,234.50');
+  });
+
+  it('rejects negatives', () =&gt; {
+    expect(() =&gt; format(-1)).toThrow(/negative/);
+  });
+});</code></pre>
+    <p>Test doubles come from the <code>vi</code> namespace and there are three tools, not one. <code>vi.fn()</code> creates a standalone spy function that records every invocation in <code>fn.mock.calls</code> and <code>fn.mock.results</code>; program its answer with <code>mockReturnValue</code>, <code>mockResolvedValue</code> (or <code>mockRejectedValue</code>) for promise-returning collaborators, or <code>mockImplementation</code> for real logic, each with a <code>...Once</code> variant that applies to a single call so you can script a sequence. <code>vi.spyOn(obj, 'method')</code> wraps an <em>existing</em> method: by default it still calls through, so you can observe without changing behaviour, and chaining <code>.mockReturnValue(...)</code> turns observation into replacement; <code>mockRestore</code> puts the original back. <code>vi.mock('./module')</code> replaces a whole module for the file — note that Vitest hoists these calls above the imports, so a factory cannot close over variables declared later unless you wrap them in <code>vi.hoisted</code>. Assert on any of them with <code>toHaveBeenCalled</code>, <code>toHaveBeenCalledTimes</code>, <code>toHaveBeenCalledWith</code> and <code>toHaveBeenNthCalledWith</code>.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const load = vi.fn().mockResolvedValue([{ id: 7 }]);   // programmed spy
+const spy  = vi.spyOn(logger, 'warn');                  // observe, still calls through
+vi.mock('./analytics');                                 // whole module auto-mocked
+
+await service.refresh(load);
+expect(load).toHaveBeenCalledTimes(1);
+expect(spy).toHaveBeenCalledWith(expect.stringContaining('stale'));</code></pre>
+    <p>Finally the four lifecycle hooks, which exist so that no test inherits another test's state. <code>beforeAll</code> and <code>afterAll</code> run once around the enclosing block — the place for genuinely expensive one-time setup — while <code>beforeEach</code> and <code>afterEach</code> run around every single case and are where fresh fixtures belong. They are scoped to the <code>describe</code> they sit in, outer <code>beforeEach</code> hooks run before inner ones and <code>afterEach</code> hooks unwind in the opposite order, all four accept async functions, and a <code>beforeEach</code> may return a cleanup function instead of writing a separate <code>afterEach</code>. Pair them with <code>vi.clearAllMocks</code>, <code>vi.resetAllMocks</code> or <code>vi.restoreAllMocks</code> (or the equivalent config flags) so spy history never leaks between cases — leaked state is the single most common cause of a suite that passes alone and fails in a full run.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://vitest.dev/api/" rel="noopener">Test API Reference — Vitest (describe, test/it, the modifiers and the lifecycle hooks)</a></li>
+      <li>[Official] <a href="https://vitest.dev/api/expect.html" rel="noopener">expect — Vitest API (the complete matcher reference, family by family)</a></li>
+      <li>[Official] <a href="https://vitest.dev/api/mock.html" rel="noopener">Mock Functions — Vitest API (what vi.fn and vi.spyOn return: mockReturnValue, mockResolvedValue, mock.calls)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-testing-vitest/" rel="noopener">Modern Angular Testing with Vitest: The Fundamentals — Angular University (spying, mocking and test isolation)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=cM_AeQHzlGg" rel="noopener">Testing with Vitest — free course — Mehul Mohan (codedamn)</a></li>
+    </ul>
+
+    <h3>Async assertions, fake timers, and migrating off Jasmine and Karma</h3>
+    <p>Asynchrony is where test suites quietly stop asserting anything. The rule is simple: an async test must <em>return</em> or <em>await</em> its promise, because a test function that finishes before the promise settles is reported as passing whatever happens next. For promises you can assert on the settled state directly with <code>expect(p).resolves.toEqual(...)</code> and <code>expect(p).rejects.toThrow(...)</code> — both must themselves be awaited. When a code path is supposed to fail, <code>expect.assertions(n)</code> guards against the silent case where the expected rejection never happened and the <code>catch</code> block simply never ran.</p>
+    <p>Time is the other trap. Anything built on <code>setTimeout</code>, <code>setInterval</code> or <code>Date</code> — debounce, throttle, polling, retry backoff, token expiry — should never be tested by actually waiting. <code>vi.useFakeTimers()</code> swaps the timer functions and the clock for controllable fakes (backed by the sinon fake-timers library), after which <code>vi.advanceTimersByTime(ms)</code> jumps the virtual clock, <code>vi.runAllTimers()</code> drains the queue, <code>vi.runOnlyPendingTimers()</code> fires what is currently scheduled without chasing timers that reschedule themselves, and <code>vi.setSystemTime()</code> pins <code>Date.now</code> for date-sensitive logic. Always restore with <code>vi.useRealTimers()</code> in <code>afterEach</code>, and reach for the <code>...Async</code> variants such as <code>advanceTimersByTimeAsync</code> when the timer callback returns a promise that must also flush. For the cases you cannot drive deterministically, <code>vi.waitFor()</code> re-runs a callback until it stops throwing (or the timeout expires) and <code>vi.waitUntil()</code> polls for a truthy value.</p>
+    <pre class="code-block" data-label="TypeScript"><code>beforeEach(() =&gt; vi.useFakeTimers());
+afterEach(()  =&gt; vi.useRealTimers());
+
+it('debounces the search call', () =&gt; {
+  const search = vi.fn();
+  const debounced = debounce(search, 300);
+  debounced('a'); debounced('ab');
+  vi.advanceTimersByTime(299);
+  expect(search).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  expect(search).toHaveBeenCalledExactlyOnceWith('ab');
+});
+
+it('surfaces a failed load', async () =&gt; {
+  await expect(api.load('missing')).rejects.toThrow('404');
+});</code></pre>
+    <p>Now the migration story, because it is the part interviewers ask about right now. For roughly a decade the Angular default was Jasmine (the assertion and spy library) driven by Karma (the browser launcher). Karma was deprecated by its own maintainers and Angular followed: v20 shipped experimental Vitest support, and v21 promoted it to stable and made it the default for new applications through the <code>@angular/build:unit-test</code> builder, so <code>ng test</code> runs Vitest with no <code>karma.conf.js</code> in sight. Existing Karma projects still work and are still supported — this is a migration, not a forced march — and the CLI ships a <code>refactor-jasmine-vitest</code> schematic that mechanically rewrites most of a suite.</p>
+    <p>What actually changes is narrower than people expect, because Vitest's API is Jest-compatible and Jest borrowed its shape from Jasmine. <code>describe</code>, <code>it</code>, <code>expect</code> and all four hooks keep their names. The spy vocabulary is what moves: <code>jasmine.createSpy()</code> becomes <code>vi.fn()</code>; <code>jasmine.createSpyObj('Api', ['get'])</code> becomes a plain object of <code>vi.fn()</code>s; <code>spyOn(obj, 'm').and.returnValue(x)</code> becomes <code>vi.spyOn(obj, 'm').mockReturnValue(x)</code>, with <code>.and.callFake</code> mapping to <code>mockImplementation</code> and <code>.and.callThrough</code> simply being the Vitest default; <code>jasmine.any</code> and <code>jasmine.objectContaining</code> become <code>expect.any</code> and <code>expect.objectContaining</code>; <code>jasmine.clock()</code> becomes <code>vi.useFakeTimers()</code>. The <code>done</code> callback style disappears in favour of async functions returning promises, which is a genuine improvement — a forgotten <code>done()</code> used to mean a timeout instead of a failure message.</p>
+    <p>One clarification worth carrying into an interview: <code>fakeAsync</code>, <code>tick</code>, <code>flush</code> and <code>waitForAsync</code> are <em>not</em> Jasmine APIs and are not replaced by <code>vi.useFakeTimers</code>. They come from <code>@angular/core/testing</code>, they work by draining zone.js task queues inside a TestBed test, and they remain fully valid under Vitest. Vitest's fake timers are the right tool for framework-free code; the Angular utilities are the right tool inside a fixture — and in a zoneless application you increasingly replace both with <code>await fixture.whenStable()</code>.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// Jasmine                              ->  Vitest
+// jasmine.createSpy('save')            ->  vi.fn()
+// spyOn(api, 'get').and.returnValue(r) ->  vi.spyOn(api, 'get').mockReturnValue(r)
+// spyOn(api, 'get').and.callFake(fn)   ->  vi.spyOn(api, 'get').mockImplementation(fn)
+// jasmine.objectContaining({ id: 1 })  ->  expect.objectContaining({ id: 1 })
+// jasmine.clock().install()            ->  vi.useFakeTimers()
+// it('x', (done) =&gt; { ... done(); })    ->  it('x', async () =&gt; { await ... })</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://vitest.dev/guide/mocking/timers" rel="noopener">Mocking timers — Vitest guide (useFakeTimers, advanceTimersByTime, runAllTimers, setSystemTime)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/migrating-to-vitest" rel="noopener">Migrating from Karma to Vitest — Angular (the builder switch and the refactor schematic)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/zone-js-testing-utilities" rel="noopener">Zone.js testing utilities — Angular (fakeAsync, tick, flush: the utilities that survive the migration)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/migrate-from-karma-to-vitest/" rel="noopener">Migrate from Karma to Vitest — ANGULARarchitects (why Karma was retired, option-by-option mapping)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=oMzVtCKsLRc" rel="noopener">Vitest — New Default Testing Framework for Angular — Decoded Frontend</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-testing-philosophy.html">← Testing Philosophy for SPAs</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="03-testbed.html">TestBed and Fixtures →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Frontend testing has moved from a nice-to-have to a standard round in Indian product and services interviews — and since the runner changed recently, the Jasmine-to-Vitest questions are the ones candidates fumble:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Vitest, and why did Angular move to it?</summary>
+      <div class="answer"><p>Vitest is a Vite-native test runner with a Jest-compatible API: it reuses the project's Vite pipeline, so it is TypeScript- and ESM-first, starts almost instantly and supports watch mode with hot reloading. Angular moved because Karma — the browser launcher behind the old stack — was deprecated, and because Vitest gives one integrated tool (runner, assertions, mocking, coverage) instead of Karma plus Jasmine plus separate plugins. It became the default runner in Angular v21 via the <code>@angular/build:unit-test</code> builder.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do describe, it and expect each do — and is test different from it?</summary>
+      <div class="answer"><p><code>describe</code> groups related cases (and can nest, which also scopes hooks); <code>it</code> declares one test case with a human-readable name and a body; <code>expect</code> creates an assertion on a value. <code>test</code> is an exact alias of <code>it</code> — pick one and stay consistent. In Vitest these are imported from <code>vitest</code> unless the <code>globals</code> option is enabled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> toBe vs toEqual vs toStrictEqual?</summary>
+      <div class="answer"><p><code>toBe</code> is <code>Object.is</code> — identity, so two structurally identical objects fail. <code>toEqual</code> compares recursively by value and treats a property explicitly set to <code>undefined</code> as if it were absent. <code>toStrictEqual</code> is <code>toEqual</code> plus two extra checks: <code>undefined</code> properties must match, and the objects must share the same class/prototype. Use <code>toBe</code> for primitives and identity, <code>toEqual</code> for plain data, <code>toStrictEqual</code> when the exact shape matters.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the four lifecycle hooks and say when each runs.</summary>
+      <div class="answer"><p><code>beforeAll</code> once before every test in its block, <code>beforeEach</code> before each test, <code>afterEach</code> after each test, <code>afterAll</code> once at the end. They are scoped to the enclosing <code>describe</code>: outer <code>beforeEach</code> hooks run before inner ones, and <code>afterEach</code> hooks unwind inside-out. Per-test fixtures go in <code>beforeEach</code>; only genuinely expensive, immutable setup belongs in <code>beforeAll</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you assert that a function throws?</summary>
+      <div class="answer"><p>Wrap the call in a function so the matcher can invoke it: <code>expect(() =&gt; parse('bad')).toThrow(TypeError)</code>. Passing <code>parse('bad')</code> directly would throw before <code>expect</code> ever ran. <code>toThrow</code> accepts a constructor, a substring or a regular expression to match the message. For a rejected promise, use <code>await expect(p).rejects.toThrow(...)</code> instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> vi.fn, vi.spyOn and vi.mock — when do you use each?</summary>
+      <div class="answer"><p><code>vi.fn()</code> creates a brand-new spy function you inject as a collaborator or pass as a callback. <code>vi.spyOn(obj, 'method')</code> wraps an existing method on a real object so you can assert on it while it still calls through, or override it by chaining a mock implementation. <code>vi.mock('./path')</code> replaces an entire module for the whole file — the heaviest tool, for cutting off a hard dependency such as an HTTP client or an analytics SDK. Prefer the smallest one that answers the question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> mockReturnValue vs mockResolvedValue vs mockImplementation, and what do the Once variants add?</summary>
+      <div class="answer"><p><code>mockReturnValue(v)</code> makes the spy return <code>v</code> synchronously. <code>mockResolvedValue(v)</code> is shorthand for returning <code>Promise.resolve(v)</code> (with <code>mockRejectedValue</code> for the failure path). <code>mockImplementation(fn)</code> substitutes real logic when the answer must depend on the arguments. Each has a <code>...Once</code> form that applies to the next call only, so you can script a sequence — for example, fail once and then succeed, to test retry logic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is vi.mock hoisted, and what commonly breaks because of it?</summary>
+      <div class="answer"><p>ES module imports are evaluated before any statement in the file, so to intercept a module the mock registration must be applied first — Vitest hoists <code>vi.mock</code> calls to the top of the file. The consequence is that a mock factory cannot reference variables declared above it in source order, because at run time they do not exist yet. The fix is <code>vi.hoisted()</code>, which lifts the variable definition alongside the mock, or declaring the value inside the factory.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test a debounce or a polling interval without slowing the suite?</summary>
+      <div class="answer"><p>Fake the clock. Call <code>vi.useFakeTimers()</code> in <code>beforeEach</code>, trigger the behaviour, then move virtual time with <code>vi.advanceTimersByTime(ms)</code> and assert either side of the boundary — nothing called at 299 ms, called once at 300 ms. <code>vi.runOnlyPendingTimers()</code> is the safe drain for self-rescheduling intervals, since <code>runAllTimers</code> would loop forever. Restore with <code>vi.useRealTimers()</code> in <code>afterEach</code> so later tests are not affected.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> An async test passes but the assertion inside it never ran. What went wrong?</summary>
+      <div class="answer"><p>The promise was not returned or awaited, so the test function completed before the assertion executed. Always <code>await</code> the call (or return the promise), use <code>await expect(p).resolves/.rejects</code> for settled-state assertions, and add <code>expect.assertions(n)</code> when testing a failure path so the runner fails if the expected number of assertions did not fire.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> clearAllMocks vs resetAllMocks vs restoreAllMocks?</summary>
+      <div class="answer"><p><code>clearAllMocks</code> wipes recorded calls and results but keeps the programmed implementation. <code>resetAllMocks</code> also drops the implementation, returning the spy to a bare <code>vi.fn()</code>. <code>restoreAllMocks</code> additionally undoes <code>vi.spyOn</code> wrapping, putting the original methods back — which is why it is the one that matters for spies on shared or global objects. The same three exist as <code>clearMocks</code>, <code>mockReset</code> and <code>restoreMocks</code> config flags.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Translate the common Jasmine spy idioms into Vitest.</summary>
+      <div class="answer"><p><code>jasmine.createSpy()</code> becomes <code>vi.fn()</code>; <code>jasmine.createSpyObj('Api', ['get','put'])</code> becomes an object literal of <code>vi.fn()</code>s; <code>spyOn(o,'m').and.returnValue(x)</code> becomes <code>vi.spyOn(o,'m').mockReturnValue(x)</code>; <code>.and.callFake(fn)</code> becomes <code>mockImplementation(fn)</code>; <code>.and.callThrough()</code> is unnecessary because calling through is Vitest's default for <code>spyOn</code>; <code>jasmine.any</code> and <code>jasmine.objectContaining</code> become <code>expect.any</code> and <code>expect.objectContaining</code>; <code>jasmine.clock()</code> becomes <code>vi.useFakeTimers()</code>. The <code>done</code>-callback style is replaced by async test functions. The CLI's <code>refactor-jasmine-vitest</code> schematic performs most of this rewrite automatically.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Do fakeAsync and tick still work under Vitest, and how do they differ from vi.useFakeTimers?</summary>
+      <div class="answer"><p>Yes — they are Angular TestBed utilities from <code>@angular/core/testing</code>, not Jasmine ones, so the migration does not touch them. They work by intercepting zone.js macro- and micro-task queues inside a fixture, which is why <code>tick()</code> also flushes pending promises. <code>vi.useFakeTimers</code> patches the global timer functions instead and knows nothing about Angular's change detection. Rule of thumb: Vitest fake timers for framework-free code, <code>fakeAsync</code>/<code>tick</code> inside TestBed tests, and <code>await fixture.whenStable()</code> as the preferred idiom in zoneless applications.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When is a snapshot assertion the right tool, and how does it go wrong?</summary>
+      <div class="answer"><p>Snapshots earn their place for large, stable, mostly-inert output where writing explicit assertions would be noise — a serialised configuration object, an error report, a rendered markup fragment that rarely changes. They go wrong when the snapshot covers volatile data (dates, ids, ordering), when the file is large enough that reviewers rubber-stamp the diff, or when failures are habitually fixed by re-recording. Prefer <code>toMatchInlineSnapshot</code> so the expected value sits next to the test, keep them small, and never use them as a substitute for asserting the behaviour you actually care about.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A test suite passes locally but fails intermittently in CI. Which runner-level habits cause that?</summary>
+      <div class="answer"><p>Shared mutable state that a hook never resets — module-level variables, spies whose call history carries over, a <code>beforeAll</code> fixture mutated by one test and read by another. Real timers and real network calls, whose latency differs on a loaded CI machine. Reliance on test execution order, which breaks as soon as files are sharded across workers running in parallel. Unawaited promises leaking work into the next test. The fixes are mechanical: build fixtures in <code>beforeEach</code>, enable <code>restoreMocks</code>, fake the clock, stub the network, and never let one test depend on another having run.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.vit.api</li>
+      <li>fet.vit.async</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

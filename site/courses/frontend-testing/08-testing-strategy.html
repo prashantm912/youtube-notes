@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Test Strategy and CI module: network-layer mocking with MSW compared to HttpTestingController and page.route, test data builders, the flake taxonomy and its fixes, honest coverage targets, and wiring Vitest and Playwright into GitHub Actions with sharding, artifacts and pipeline placement — verified resources plus interview questions.">
+  <title>Test Strategy and CI — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Test Strategy and CI</h1>
+  <p class="standfirst">Every technique in the previous seven modules is worthless if the suite is slow, flaky or ignored. This closing module is about the difference between a suite people trust and one they learn to skip.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → Test Strategy and CI</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>A test suite is a product with its own users — the developers who run it. This module pulls the track together around the two things that decide whether they keep using it: <strong>determinism</strong> (mocking the network in one place with MSW, building test data instead of copy-pasting it, and hunting flake by cause) and <strong>the pipeline</strong> (coverage targets that mean something, GitHub Actions wiring for Vitest and Playwright, headless browsers, sharding across machines, artifacts you can debug from, and which suite runs at which gate).</p>
+    <p>Stack assumed throughout: Angular v20+ with Vitest as the unit runner, Playwright for end-to-end, and GitHub Actions as the CI host. The principles port to any runner; the commands do not.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Mock Service Worker: one set of handlers for every layer</h3>
+    <p>MSW intercepts requests at the <em>network</em> layer rather than patching your code. In the browser it registers a Service Worker that answers matching requests; in Node it swaps the request interceptors under <code>fetch</code>/<code>XMLHttpRequest</code>. The consequence is the whole point: the same <code>http.get('/api/orders', …)</code> handler file serves your Vitest component tests, your Playwright end-to-end run, <em>and</em> <code>ng serve</code> while the backend team is still building the endpoint. One definition of "what the API returns", not three that drift apart.</p>
+    <p>Why it matters: the usual alternative is a mock stubbed per test file, which means your test asserts against a fiction only that file believes in. Because MSW sits below your application code, nothing in the component or service knows it is being tested — you exercise the real <code>HttpClient</code>, the real interceptors, the real error mapping. It is also the standard answer to "how do you develop a feature when the API does not exist yet?", a question that comes up constantly in service-company interviews where teams are split across vendors.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// src/mocks/handlers.ts — shared by unit tests, e2e and the dev server
+import { http, HttpResponse } from 'msw';
+
+export const handlers = [
+  http.get('/api/orders', () =&gt; HttpResponse.json([{ id: 1, total: 250 }])),
+  http.post('/api/orders', async ({ request }) =&gt; {
+    const body = await request.json();
+    return HttpResponse.json({ id: 2, ...body }, { status: 201 });
+  }),
+];</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://mswjs.io/docs/" rel="noopener">Introduction — Mock Service Worker docs (why network-layer interception beats stubbing your own modules)</a></li>
+      <li>[Official] <a href="https://mswjs.io/docs/quick-start" rel="noopener">Quick start — Mock Service Worker (handlers, worker and server in a few minutes)</a></li>
+      <li>[Official] <a href="https://mswjs.io/docs/integrations/node" rel="noopener">Node.js integration — Mock Service Worker (setupServer for Vitest and other Node runners)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/using-msw-in-an-angular-project" rel="noopener">Using MSW (Mock Service Worker) in an Angular project — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V-CKjACOfmc" rel="noopener">Mock Service Worker Tutorial: How to Mock Network Requests — Redhwan Nacef</a></li>
+    </ul>
+
+    <h3>Three places to fake a response: MSW, HttpTestingController, page.route</h3>
+    <p>These are not competitors so much as three different altitudes, and choosing the wrong one is a common design mistake. <code>HttpTestingController</code> (from <code>provideHttpClientTesting</code>) works at the <em>framework</em> level: it replaces Angular's HTTP backend, so it can assert that exactly one request was issued to a URL with given headers, then flush a response synchronously. That precision is exactly right for testing a service or an interceptor — and useless for anything that bypasses <code>HttpClient</code>. Playwright's <code>page.route</code> works at the <em>browser</em> level: it intercepts real network traffic in a real page, including requests from third-party scripts and images, which is what you want when stubbing a payment gateway or blocking analytics to speed a run up. MSW sits in the middle, at the <em>application network</em> layer, and is the only one of the three whose handlers can be reused across all your suites and your dev server.</p>
+    <p>A practical rule: use <code>HttpTestingController</code> when the request itself is the thing under test; use MSW when the request is background scenery for a component or page test; use <code>page.route</code> when you need to control traffic the application does not own. Interviewers like this question because a candidate who reaches for one tool everywhere has not thought about layers.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/testing" rel="noopener">HTTP client testing — angular.dev (provideHttpClientTesting, expectOne, flush, verify)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/mock" rel="noopener">Mock APIs — Playwright (page.route, fulfilling and modifying real network traffic)</a></li>
+      <li>[Official] <a href="https://mswjs.io/docs/integrations/browser" rel="noopener">Browser integration — Mock Service Worker (setupWorker for the dev server and browser-run tests)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-http-testing-httptestingcontroller/" rel="noopener">Angular Mocking With HttpTestingController: Complete Guide — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kvGszYAYQ6M" rel="noopener">How to test dynamic content in Playwright with API mocking — Playwright (official channel)</a></li>
+    </ul>
+
+    <h3>Test data builders instead of copy-pasted fixture literals</h3>
+    <p>The commonest rot in a mature suite is the fixture literal: a fully-populated <code>const user = { … }</code> pasted into forty test files. When the model gains a required field, forty files break; worse, a reader cannot tell which of the twenty properties actually matters to the assertion below it. A <em>builder</em> (or Object Mother, Martin Fowler's older name for a factory of well-known example objects) fixes both: it supplies sane defaults centrally and lets each test override only the one field it cares about — so the test reads as "an order that is already cancelled" rather than as a wall of JSON.</p>
+    <p>Apply the same discipline to MSW handlers. Keep a default happy-path handler set, then override per test with <code>server.use(…)</code> for the error and empty cases, and reset between tests so no override leaks. Builders and handler overrides together are what let a test state its scenario in one line, and that readability is what makes people willing to maintain the suite.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const anOrder = (over: Partial&lt;Order&gt; = {}): Order =&gt; ({
+  id: 1, status: 'PLACED', total: 250, items: [anItem()], ...over,
+});
+
+// the test states only what differs — the rest is noise it does not own
+it('hides the cancel button once cancelled', () =&gt; {
+  render(anOrder({ status: 'CANCELLED' }));
+});</code></pre>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/bliki/ObjectMother.html" rel="noopener">Object Mother — Martin Fowler (the canonical name for a test-data factory)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TestDouble.html" rel="noopener">Test Double — Martin Fowler (dummy, fake, stub, spy, mock — the vocabulary interviewers use)</a></li>
+      <li>[Official] <a href="https://mswjs.io/docs/best-practices/structuring-handlers" rel="noopener">Structuring handlers — Mock Service Worker (defaults plus per-test overrides without duplication)</a></li>
+      <li>[Official] <a href="https://mswjs.io/docs/api/http" rel="noopener">http namespace — Mock Service Worker API reference (path matching and response resolvers)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/getting-the-most-value-out-of-your-angular-component-tests" rel="noopener">Getting the most value out of your Angular Component Tests — Tim Deschryver</a></li>
+    </ul>
+
+    <h3>The flake taxonomy: six causes and their fixes</h3>
+    <p>A flaky test is one that passes and fails against unchanged code. It is worse than a missing test, because it teaches the team to re-run the build instead of reading the failure — and once that habit forms, real regressions get re-run away too. Flake is not mysterious; it comes from a short list of non-determinism sources, and each has a mechanical fix. <strong>Time</strong>: freeze the clock (<code>vi.useFakeTimers</code> in Vitest, <code>page.clock</code> in Playwright) so "expires tomorrow" does not depend on the day the build runs. <strong>Randomness</strong>: seed it, or inject the generator, so a shuffled array or a random id is reproducible. <strong>Network</strong>: stub it — a test that talks to a staging API inherits that API's uptime. <strong>Animation</strong>: disable transitions in the test environment, or the assertion races the fade-in.</p>
+    <p>The two subtler causes: <strong>test-order coupling</strong>, where test B only passes because test A left state behind — reset stores, local storage and MSW handlers in a global <code>afterEach</code>, and prove independence by randomising execution order rather than by hoping. And <strong>race conditions</strong>, the biggest source of e2e flake: never assert after a fixed sleep, assert on a <em>condition</em>. Playwright's web-first assertions retry until the expectation holds or the timeout expires, which is exactly the sleep-free pattern you want. Retries in CI are a diagnostic, not a cure: mark the test, look at the trace, fix the cause. Quarantining a flaky test is acceptable; leaving it retried and green forever is not.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/articles/nonDeterminism.html" rel="noopener">Eradicating Non-Determinism in Tests — Martin Fowler (the definitive taxonomy of flake causes)</a></li>
+      <li>[Article] <a href="https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html" rel="noopener">Flaky Tests at Google and How We Mitigate Them — Google Testing Blog</a></li>
+      <li>[Official] <a href="https://vitest.dev/api/vi.html" rel="noopener">Vi utility API — Vitest (useFakeTimers, advanceTimersByTime, setSystemTime, resetting mocks)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/clock" rel="noopener">Clock — Playwright (freezing and advancing browser time in end-to-end tests)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-retries" rel="noopener">Retries — Playwright (retry configuration, and why a retried test is still a bug report)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3GSS1pTbq5U" rel="noopener">Mocking API responses with MSW — Pentacode</a></li>
+    </ul>
+
+    <h3>Coverage: a useful signal, a terrible target</h3>
+    <p>Line and branch coverage measure exactly one thing — which lines executed while the tests ran. They say nothing about whether an assertion checked the result. A test that renders a component and asserts nothing produces the same coverage as one that verifies every output, which is why a coverage <em>target</em> reliably produces tests written to move the number. Chasing 100% is the extreme case: the last stretch is defensive branches, framework glue and untestable error paths, and the tests you write to reach it are exactly the brittle ones that will break on your next refactor.</p>
+    <p>What works in practice: treat coverage as a leak detector, not a grade. Set a floor rather than a goal — somewhere around 70 to 80 percent for a typical Angular app is honest — and enforce it with a ratchet so it can never drop. Then apply the stricter rule where it actually pays: require high coverage on <em>changed lines</em> in a pull request, which catches the new untested code without demanding an archaeology project on legacy files. Vitest exposes v8 and istanbul providers with per-metric thresholds; Angular's CLI wires the same reporters through <code>ng test --coverage</code>. If you want a stronger signal than coverage, that is what mutation testing is for.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://vitest.dev/guide/coverage" rel="noopener">Coverage — Vitest guide (v8 vs istanbul providers, thresholds, reporters, include and exclude)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/code-coverage" rel="noopener">Find out how much code you are testing — angular.dev (coverage reports and enforcing a minimum)</a></li>
+      <li>[Official] <a href="https://angular.dev/cli/test" rel="noopener">ng test — Angular CLI reference (coverage, watch, browsers and reporter flags)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TestCoverage.html" rel="noopener">Test Coverage — Martin Fowler (coverage finds untested code; it does not measure test quality)</a></li>
+      <li>[Article] <a href="https://testing.googleblog.com/2020/08/code-coverage-best-practices.html" rel="noopener">Code Coverage Best Practices — Google Testing Blog (why changed-lines coverage is the useful gate)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-testing-vitest/" rel="noopener">Modern Angular Testing with Vitest: The Fundamentals — Angular University</a></li>
+    </ul>
+
+    <h3>Wiring the suites into GitHub Actions</h3>
+    <p>A CI job is just your local commands run on a clean machine, so most CI pain is really environment pain. Unit tests are easy: check out, set up Node with a dependency cache, <code>npm ci</code>, then <code>ng test</code> (Vitest) in a non-watch, headless run. End-to-end is where teams get stuck — Playwright needs actual browser binaries plus their OS libraries, so a bare Ubuntu runner fails until you run <code>npx playwright install --with-deps</code>, or skip the problem entirely by running the job inside Microsoft's official <code>mcr.microsoft.com/playwright</code> container image, which ships the browsers and dependencies preinstalled and pinned to your Playwright version.</p>
+    <p>The other half is evidence. A red e2e job with only a stack trace is nearly undebuggable; a red job with the HTML report, the failure screenshots and a Playwright trace is a two-minute fix. Configure traces and video on first retry, then upload <code>playwright-report</code> and <code>test-results</code> as workflow artifacts with <code>if: always()</code> so they survive a failing step. Add <code>webServer</code> to the Playwright config so CI starts and waits for your app itself, instead of a hand-rolled sleep-and-hope script.</p>
+    <pre class="code-block" data-label="YAML"><code>- run: npx playwright install --with-deps
+- run: npx playwright test
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: playwright-report
+    path: playwright-report/
+    retention-days: 7</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/ci-intro" rel="noopener">Setting up CI — Playwright (the generated GitHub Actions workflow, step by step)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/ci" rel="noopener">Continuous Integration — Playwright (providers, headless defaults, workers on CI, caching browsers)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/docker" rel="noopener">Docker — Playwright (the official container image with browsers and OS dependencies baked in)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/trace-viewer" rel="noopener">Trace viewer — Playwright (the artifact that makes a CI-only failure debuggable locally)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/workflows-and-actions/workflows" rel="noopener">Workflows — GitHub Actions docs (triggers, jobs, steps and the workflow file model)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/store-and-share-data" rel="noopener">Store and share data with workflow artifacts — GitHub Actions docs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eU97jYluRPA" rel="noopener">How to Run Playwright Automation Tests Using GitHub Actions CI/CD — Testers Talk</a></li>
+    </ul>
+
+    <h3>Parallelism, sharding, and where each suite belongs in the pipeline</h3>
+    <p>Two different knobs get confused constantly. <strong>Workers</strong> parallelise within one machine: Playwright runs test files in parallel worker processes (Vitest does the same with its thread pool), so a four-core runner does roughly four files at once. Tests inside a single file run serially unless you opt in with <code>test.describe.configure({ mode: 'parallel' })</code>. <strong>Sharding</strong> parallelises <em>across</em> machines: <code>npx playwright test --shard=2/4</code> runs one deterministic quarter of the suite, so a CI matrix of four jobs quarters the wall-clock time. Vitest offers the same <code>--shard</code> flag. Afterwards you merge the per-shard blob reports into one HTML report, otherwise you get four partial reports and no overall picture.</p>
+    <p>Then the strategy question interviewers actually care about: not every suite belongs at every gate. Unit and component tests are fast and deterministic, so they run on every push and every pull request — that is your fast feedback loop and it should stay under a few minutes. The full end-to-end suite is slow and comparatively fragile, so run a smoke subset (tagged <code>@smoke</code>, the critical login-to-checkout paths) on pull requests, and the complete matrix on merge to main and on a nightly cron. Anything expensive — cross-browser, visual regression, mobile viewports — goes nightly. The governing principle is the continuous-integration one: keep the commit gate fast enough that nobody is tempted to bypass it, and put everything else where a slow answer is still a useful answer.</p>
+    <pre class="code-block" data-label="YAML"><code>strategy:
+  fail-fast: false
+  matrix:
+    shard: [1, 2, 3, 4]
+steps:
+  - run: npx playwright test --shard=${{ matrix.shard }}/4</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/test-parallel" rel="noopener">Parallelism — Playwright (workers, parallel mode inside a file, and limiting concurrency)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-sharding" rel="noopener">Sharding — Playwright (splitting a suite across CI machines and merging the blob reports)</a></li>
+      <li>[Official] <a href="https://vitest.dev/guide/cli" rel="noopener">Command line interface — Vitest (run, shard, reporters and the flags CI actually needs)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations" rel="noopener">Running variations of jobs in a workflow — GitHub Actions matrix strategy docs</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/continuousIntegration.html" rel="noopener">Continuous Integration — Martin Fowler (why the commit build must stay fast, and staged builds)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=w1u0Pe9aJa0" rel="noopener">What is Sharding in Playwright? Run Tests Faster Using GitHub Actions CI/CD — Script and Execute</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=PyMpeDttMas" rel="noopener">Run Tests in Parallel on Multiple Machines in Playwright with Sharding — Execute Automation</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-e2e-playwright.html">← End-to-End with Playwright</a>
+    <a href="index.html">All Frontend Testing modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Strategy questions dominate the senior rounds at Indian product and service companies — panels want to hear judgement about pipelines and flake, not just API recall:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is MSW and why use it instead of mocking your service?</summary>
+      <div class="answer"><p>Mock Service Worker intercepts requests at the network layer — a Service Worker in the browser, request interceptors in Node — so your application code runs unchanged and unaware. Mocking your own service replaces the code under test; MSW leaves <code>HttpClient</code>, interceptors and error mapping in the picture, and the same handlers work in unit tests, end-to-end runs and the dev server.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes a test flaky, and why is a flaky test worse than no test?</summary>
+      <div class="answer"><p>Flaky means it passes and fails against unchanged code — from time, randomness, network, animation, leftover state or races. It is worse than no test because it trains the team to re-run the build instead of reading failures, so genuine regressions get re-run away too. Trust in the suite is the asset you are protecting.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does line coverage actually measure?</summary>
+      <div class="answer"><p>Which lines executed while the tests ran — nothing more. It cannot tell whether anything was asserted, so a test that renders a component and asserts nothing scores identically to one that verifies every output. Useful for finding untested code; useless as a measure of test quality.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why do Playwright tests fail on a fresh CI runner but pass locally?</summary>
+      <div class="answer"><p>Almost always missing browser binaries or their OS libraries. Fix with <code>npx playwright install --with-deps</code> in the workflow, or run the job inside the official <code>mcr.microsoft.com/playwright</code> image which ships browsers and dependencies preinstalled. Second-most-common cause: no server running, solved by the <code>webServer</code> config block.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> MSW, HttpTestingController and page.route — when do you use each?</summary>
+      <div class="answer"><p>Three altitudes. <code>HttpTestingController</code> is framework level: it replaces Angular's HTTP backend and lets you assert the exact request and flush a reply — right when the request itself is under test, such as a service or interceptor. MSW is application-network level: use it when HTTP is background scenery for a component or page test, and reuse the handlers everywhere. <code>page.route</code> is browser level: use it for traffic your app does not own — third-party scripts, payment gateways, analytics you want blocked.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a test data builder and what problem does it solve?</summary>
+      <div class="answer"><p>A factory returning a valid default object with per-test overrides — Fowler's Object Mother pattern. It removes copy-pasted fixture literals, so a new required field is one edit instead of forty, and it makes intent readable: <code>anOrder({ status: 'CANCELLED' })</code> states the scenario, while a twenty-property literal hides which property the assertion depends on.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Difference between parallelism and sharding, and when do you need each?</summary>
+      <div class="answer"><p>Parallelism is within a machine: worker processes run test files concurrently, sized to available cores. Sharding is across machines: <code>--shard=2/4</code> gives each CI job a deterministic slice of the suite, so four jobs quarter the wall clock. Use workers first because they are free; add sharding when a single runner is saturated and the suite is still too slow. With sharding you must merge the per-shard reports afterwards.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Our e2e suite takes forty minutes and blocks every pull request. What do you change?</summary>
+      <div class="answer"><p>Split by gate, not by shrinking coverage. Fast unit and component tests on every push; a tagged smoke subset of critical journeys on pull requests; the full suite on merge to main plus a nightly cron; cross-browser, visual and mobile-viewport runs nightly only. In parallel, shard the full run across a CI matrix and check for tests that are slow because they sleep rather than because they do work.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is an explicit wait or sleep an anti-pattern in end-to-end tests?</summary>
+      <div class="answer"><p>A fixed sleep is a bet on machine speed: too short and it flakes on a loaded CI runner, too long and it wastes time on every run forever. Assert on a condition instead — Playwright's web-first assertions and locators retry until the expectation holds or the timeout expires, which is both faster on a fast machine and stable on a slow one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you make a test that depends on the current date deterministic?</summary>
+      <div class="answer"><p>Freeze the clock rather than computing around it: <code>vi.useFakeTimers()</code> with <code>vi.setSystemTime(...)</code> in Vitest, <code>page.clock</code> in Playwright, and restore in teardown. The same discipline applies to randomness — seed the generator or inject it — and to time zones, which should be pinned in the test environment so a build behaves the same in Bengaluru and on a UTC runner.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Management wants a 100% coverage gate. What do you argue?</summary>
+      <div class="answer"><p>That it optimises the wrong number. Coverage records execution, not verification, so a hard gate produces assertion-free tests written to satisfy it, and the final stretch is defensive branches and framework glue whose tests are the most brittle in the suite. Counter-proposal: a floor around 70 to 80 percent with a ratchet so it cannot fall, a stricter threshold on changed lines in each pull request, and mutation testing on the genuinely critical modules if a real quality signal is wanted.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A test passes alone but fails in the full run. How do you diagnose it?</summary>
+      <div class="answer"><p>That is test-order coupling: shared state surviving between tests. Bisect by running subsets to find the polluting predecessor, then look for the usual carriers — module-level singletons, a store never reset, local or session storage, an MSW <code>server.use</code> override not reset, a stubbed global left patched. Fix by resetting in a global teardown, then defend the fix by randomising execution order so the coupling cannot come back silently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is turning on CI retries a fix for flaky tests?</summary>
+      <div class="answer"><p>No — it is instrumentation. Retries stop one bad test blocking a release, but a retried-and-passed test is a bug report you have chosen not to read, and the underlying non-determinism will eventually hide a real regression. Use retries to keep the pipeline moving while tracking every flaky-pass in a dashboard, quarantine repeat offenders out of the blocking suite with an owner and a deadline, and fix the cause using the trace from the failed attempt.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You are joining a team whose suite everyone skips. What is your first month?</summary>
+      <div class="answer"><p>Measure before changing: which tests fail intermittently, what the commit build costs in minutes, where coverage is genuinely absent. Then attack trust first — quarantine or fix the flakiest handful, because a red-by-default pipeline makes every other improvement invisible. Next attack speed: shard the slow suite, move the expensive runs to nightly, and get the pull-request gate under a few minutes. Only then add coverage, and add it as changed-lines enforcement on new code rather than a retrospective campaign on legacy files.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.str.data</li>
+      <li>fet.str.ci</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

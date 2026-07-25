@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="End-to-End with Playwright module: project setup and playwright.config.ts, the role-based locator model, auto-waiting and web-first assertions, fixtures, page.route network stubbing, trace viewer and UI mode, storageState auth reuse, parallelism and a fair Cypress comparison — with verified official docs, articles and videos plus interview questions.">
+  <title>End-to-End with Playwright — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: End-to-End with Playwright</h1>
+  <p class="standfirst">A real browser, the real Angular bundle, a real HTTP round trip — end-to-end tests catch the wiring mistakes no unit test can see, and charge you minutes of CI time for every one you write. This module is about spending that budget well.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → End-to-End with Playwright</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Every test you have written so far in this track runs the component in isolation with a stubbed world. An end-to-end test does the opposite: it boots the actual Angular application, drives a genuine Chromium, Firefox or WebKit browser, and asserts on what a user would see. That fidelity is the whole point — and the whole cost. An e2e suite is orders of magnitude slower than a Vitest run, needs a server, and fails for reasons that have nothing to do with your code.</p>
+    <p>The practical rule is <em>budget by journey, not by feature</em>: cover sign-in, checkout, the one screen that loses money when it breaks. Everything else belongs lower in the pyramid. This module orients you on Playwright — setup and configuration, the locator model, auto-waiting and web-first assertions, fixtures — and then on the advanced half that separates a demo suite from a production one: network interception, the trace viewer, authentication reuse, parallelism, and an honest look at where Cypress still fits.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Setting Playwright up against an Angular app</h3>
+    <p><code>npm init playwright@latest</code> scaffolds everything in one step: the <code>@playwright/test</code> dependency, a <code>playwright.config.ts</code>, an example spec, and the downloaded browser binaries. Playwright ships its own test runner — you do not bolt it onto Vitest or Karma. Point <code>testDir</code> at a folder outside your unit tests (<code>./e2e</code> is the usual choice in an Angular workspace) so <code>ng test</code> and <code>npx playwright test</code> never collide.</p>
+    <p>Two config keys carry most of the weight. <strong>Projects</strong> are named run configurations — the generated file gives you one per browser engine, so a single command exercises Chromium, Firefox and WebKit; projects are also how you model mobile viewports and, later, a setup step that logs in before everything else. <strong><code>webServer</code></strong> tells Playwright to start your Angular dev server itself and wait for it to answer before the first test runs, so a fresh clone and a CI machine behave identically. Add <code>baseURL</code> and your specs can call <code>page.goto('/checkout')</code> instead of hard-coding a host.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export default defineConfig({
+  testDir: './e2e',
+  use: { baseURL: 'http://localhost:4200', trace: 'on-first-retry' },
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'webkit',   use: { ...devices['Desktop Safari'] } },
+  ],
+  webServer: {
+    command: 'npm start',              // ng serve
+    url: 'http://localhost:4200',
+    reuseExistingServer: !process.env.CI,
+  },
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/intro" rel="noopener">Installation — Playwright docs (what npm init playwright generates)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-configuration" rel="noopener">Test configuration — Playwright docs</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-projects" rel="noopener">Projects — Playwright docs (multi-browser and setup projects)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-webserver" rel="noopener">Web server — Playwright docs (booting the dev server for the run)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/writing-your-first-playwright-test" rel="noopener">Writing your first Playwright test — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WvsLGZnHmzw" rel="noopener">Get Started with Playwright and VS Code (2025 edition) — Playwright (official channel)</a></li>
+    </ul>
+
+    <h3>The locator model: getByRole first, getByTestId last</h3>
+    <p>A locator is not an element — it is a <em>recipe</em> for finding one, re-evaluated every time you act on it. That laziness is why a locator survives Angular re-rendering the DOM underneath it, and why <code>page.$()</code>-style element handles are legacy. Locators are also <em>strict</em>: if the recipe matches two nodes, the action throws instead of silently picking the first, which turns an ambiguous selector into a loud failure at authoring time rather than a flake six weeks later.</p>
+    <p>Playwright's recommended default is <code>getByRole(role, { name })</code> — it queries the accessibility tree, so the test asserts what a screen reader and a sighted user both perceive, and it breaks when you break accessibility. <code>getByLabel</code> is the idiomatic way into form fields, with <code>getByText</code>, <code>getByPlaceholder</code> and <code>getByTitle</code> filling the gaps. <code>getByTestId</code> (mapped to <code>data-testid</code> by default) is the deliberate escape hatch for elements with no user-visible handle. CSS and XPath selectors still work, but they bind your test to markup structure — exactly the coupling that makes e2e suites expensive to own. Chain with <code>.filter()</code>, <code>.nth()</code> and nested <code>locator()</code> calls rather than writing longer CSS.</p>
+    <pre class="code-block" data-label="TypeScript"><code>await page.getByRole('button', { name: 'Add to cart' }).click();
+await page.getByLabel('Email address').fill('asha@example.com');
+
+// scope first, then narrow — safer than one long CSS selector
+const row = page.getByRole('row').filter({ hasText: 'ORD-4417' });
+await row.getByRole('button', { name: 'Cancel' }).click();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/locators" rel="noopener">Locators — Playwright docs (the full built-in locator set and chaining)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/best-practices" rel="noopener">Best Practices — Playwright docs (test user-visible behaviour, locator priority)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/other-locators" rel="noopener">Other locators — Playwright docs (CSS/XPath, and why they are a last resort)</a></li>
+      <li>[Article] <a href="https://testing-library.com/docs/queries/about/" rel="noopener">About Queries — the priority order role &gt; label &gt; text &gt; test id (Testing Library)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KsxWkXcRKGI" rel="noopener">Playwright Tutorial #7 — Locators in Playwright — Software Testing Mentor</a></li>
+    </ul>
+
+    <h3>Auto-waiting and web-first assertions</h3>
+    <p>Before every action Playwright runs a list of <em>actionability</em> checks against the located element — attached to the DOM, visible, stable (not mid-animation), able to receive events (not covered by an overlay), and enabled; <code>fill</code> additionally requires editable. It retries those checks until they all pass or the timeout expires. So <code>click()</code> already contains the wait, and the usual reasons an Angular app is "not ready yet" — a pending HTTP call, a running route transition, a CSS transition on a modal — are absorbed without you writing anything.</p>
+    <p>Assertions work the same way. <code>await expect(locator).toBeVisible()</code> is a <em>web-first assertion</em>: it polls the page until the condition holds or the assertion times out. That is fundamentally different from <code>expect(await locator.isVisible()).toBe(true)</code>, which samples once and fails on the first render that has not caught up. The anti-pattern to unlearn is <code>page.waitForTimeout(...)</code> — a fixed sleep is simultaneously too short on a loaded CI runner and pure wasted time everywhere else. Playwright's own docs describe it as discouraged outside debugging. If a wait genuinely needs expressing, express the <em>condition</em>: assert on the element, or await <code>page.waitForResponse()</code>.</p>
+    <pre class="code-block" data-label="TypeScript"><code>await expect(page.getByTestId('cart-count')).toHaveText('1'); // polls until true
+await expect(page.getByRole('alert')).toBeVisible();
+await expect(page).toHaveURL(/\/checkout$/);
+
+await page.waitForTimeout(2000);   // anti-pattern: flaky and slow at the same time</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/actionability" rel="noopener">Auto-waiting — Playwright docs (the actionability checks, action by action)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-assertions" rel="noopener">Assertions — Playwright docs (web-first, auto-retrying expect)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-timeouts" rel="noopener">Timeouts — Playwright docs (test, expect, action and navigation timeouts)</a></li>
+      <li>[Article] <a href="https://www.checklyhq.com/docs/learn/playwright/waits-and-timeouts/" rel="noopener">Waits and timeouts — Learn Playwright, Checkly</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=j-QLpb6Tmg0" rel="noopener">How to avoid delays and waitFor statements using Playwright auto-waiting — Checkly</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vH8teMdXgW4" rel="noopener">AutoWait in Playwright, default timeout and how to override it — Naveen AutomationLabs</a></li>
+    </ul>
+
+    <h3>Fixtures, hooks and test structure</h3>
+    <p>Playwright's runner is fixture-based rather than hook-based. When you write <code>test('...', async ({ page }) =&gt; { ... })</code>, <code>page</code> is a fixture: the runner constructs a fresh <code>BrowserContext</code> and page for that test, injects it, and disposes it afterwards. Because each test gets its own context, cookies and storage never leak between tests — isolation is the default, not something you remember to clean up. Other built-ins you will reach for are <code>request</code> (an API client that shares the browser's cookies), <code>context</code>, and <code>browserName</code>.</p>
+    <p>Custom fixtures via <code>test.extend</code> are where suites stay readable at scale: a page-object, a seeded test user, a feature flag, or a worker-scoped resource created once per parallel worker instead of per test. They compose and they are lazy — a fixture is only built if a test actually asks for it, which is more than <code>beforeEach</code> can say. Alongside them, <code>test.describe</code> groups related tests, <code>beforeEach</code>/<code>afterEach</code> still exist for simple setup, <code>test.step()</code> labels phases so the trace and report read like a scenario, and <code>test.skip</code>/<code>test.fixme</code>/<code>test.slow</code> annotate the awkward cases honestly instead of leaving commented-out code.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const test = base.extend&lt;{ checkout: CheckoutPage }&gt;({
+  checkout: async ({ page }, use) =&gt; {
+    await use(new CheckoutPage(page));   // built only if a test asks for it
+  },
+});
+
+test.describe('checkout', () =&gt; {
+  test('places an order', async ({ checkout }) =&gt; {
+    await test.step('pay', () =&gt; checkout.payWithCard());
+  });
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/test-fixtures" rel="noopener">Fixtures — Playwright docs (built-in fixtures, test.extend, worker scope)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/writing-tests" rel="noopener">Writing tests — Playwright docs (actions, assertions, test isolation)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/api/class-test" rel="noopener">Test class API — describe, hooks, step and annotations (Playwright)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/keep-your-playwright-tests-structured-with-steps" rel="noopener">Keep your Playwright tests structured with steps — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=wXHiq9H3MB0" rel="noopener">3 Reasons Why You Should Use Custom Playwright Fixtures — Checkly</a></li>
+    </ul>
+
+    <h3>Network interception and stubbing with page.route()</h3>
+    <p><code>page.route(pattern, handler)</code> puts your test in front of the browser's network layer. The handler receives a <code>Route</code> and decides its fate: <code>fulfill()</code> to answer with a canned body, <code>abort()</code> to simulate a failure, <code>continue()</code> to let it through with modified headers or payload, or <code>fetch()</code> then <code>fulfill()</code> to take the real response and patch one field. Glob patterns like <code>'**/api/orders'</code> match the URLs your Angular <code>HttpClient</code> calls.</p>
+    <p>This is the lever that makes e2e affordable. Real backends are slow, shared, and refuse to produce the states you need to test — a 500, an empty result set, a payment gateway timeout, a token that expires mid-session. Stub those routes and the scenario becomes a two-line setup that runs in milliseconds. The discipline is knowing when <em>not</em> to: if you stub every request, you are no longer testing integration, just an expensive component test. Keep the critical journey talking to the real API and stub the edge cases around it. <code>page.route</code> is also how you block analytics, fonts and third-party widgets to cut noise and runtime, and <code>waitForResponse</code>/<code>expect(request)</code> let you assert that the app actually sent what it should.</p>
+    <pre class="code-block" data-label="TypeScript"><code>await page.route('**/api/orders', route =&gt;
+  route.fulfill({ status: 200, json: [{ id: 7, total: 499 }] }));
+
+await page.route('**/api/payment', route =&gt; route.abort('failed')); // gateway down
+await page.route(/analytics|hotjar/, route =&gt; route.abort());       // cut the noise</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/mock" rel="noopener">Mock APIs — Playwright docs (fulfill, modify, record and replay)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/network" rel="noopener">Network — Playwright docs (routing, monitoring, aborting requests)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/api/class-route" rel="noopener">Route class API — abort, continue, fallback, fetch, fulfill (Playwright)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/intercepting-http-requests-with-playwright" rel="noopener">Intercepting HTTP Requests with Playwright — Tim Deschryver</a></li>
+      <li>[Article] <a href="https://www.checklyhq.com/docs/learn/playwright/intercept-requests/" rel="noopener">Intercept requests — Learn Playwright, Checkly</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kvGszYAYQ6M" rel="noopener">How to test dynamic content in Playwright with API mocking — Playwright (official channel)</a></li>
+    </ul>
+
+    <h3>Debugging: trace viewer, UI mode and codegen</h3>
+    <p>The traditional pain of e2e work is a red CI job with a one-line error and no way to reproduce it locally. Playwright's answer is the <strong>trace</strong>: set <code>trace: 'on-first-retry'</code> and every retried failure produces a <code>trace.zip</code> containing a DOM snapshot before and after each action, the full network log, console output, source, and screenshots. Open it with <code>npx playwright show-trace</code> (or drop it on the hosted viewer) and step backwards through the run, hovering any action to see the exact page state and the locator it resolved. Attach the trace as a CI artifact and remote failures stop being guesswork.</p>
+    <p>Locally, <code>npx playwright test --ui</code> is the same machinery in watch mode: pick tests, re-run on save, time-travel through the timeline, and use the pick-locator tool to get a suggested locator for anything on the page. <code>npx playwright codegen &lt;url&gt;</code> records your clicks and typing into a runnable spec — excellent for discovering the right locator and for onboarding, though generated code always wants cleaning up into page objects. Round it out with <code>--debug</code> (Playwright Inspector, step-through), <code>--headed</code>, and <code>page.pause()</code>.</p>
+    <pre class="code-block" data-label="Shell"><code>npx playwright test --ui                 # watch mode + time-travel debugging
+npx playwright codegen http://localhost:4200
+npx playwright test --debug              # Playwright Inspector, step by step
+npx playwright show-trace trace.zip      # open a trace from CI</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/trace-viewer" rel="noopener">Trace viewer — Playwright docs (recording traces and reading them)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-ui-mode" rel="noopener">UI Mode — Playwright docs</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/codegen" rel="noopener">Test generator (codegen) — Playwright docs</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/debug" rel="noopener">Debugging tests — Playwright docs (Inspector, headed mode, page.pause)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=d0u6XhXknzU" rel="noopener">Playwright's UI Mode: watch mode and time travel debugging — Playwright (official channel)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ea4aZB0Zlsw" rel="noopener">Playwright Beginner Tutorial 6 — How to use Trace Viewer — Automation Step by Step</a></li>
+    </ul>
+
+    <h3>Authentication once, and running in parallel</h3>
+    <p>Logging in through the UI at the start of every test is the single biggest waste in most suites. The Playwright answer is <code>storageState</code>: run a <em>setup project</em> that performs the login once, call <code>page.context().storageState({ path: '.auth/user.json' })</code> to dump cookies and local storage to a file, then declare <code>use: { storageState: '.auth/user.json' }</code> so every subsequent test starts already authenticated. Multiple roles are just multiple state files, wired to different projects. Do not commit those files — they hold live session tokens.</p>
+    <p>Parallelism is on by default: Playwright shards test <em>files</em> across worker processes, each with its own browser instance, so a suite that takes twenty minutes serially can finish in three. <code>test.describe.configure({ mode: 'parallel' })</code> parallelises within a file; <code>mode: 'serial'</code> forces order when tests genuinely depend on each other (a smell worth resisting). <code>fullyParallel</code>, <code>workers</code> and <code>--shard</code> tune it for CI. Retries deserve care: <code>retries: 2</code> on CI plus <code>trace: 'on-first-retry'</code> gives you a diagnosable artifact for every flake, but retries hide instability rather than fix it — treat a test that only passes on retry as a bug report, and note that the HTML reporter marks it "flaky" precisely so it cannot be ignored.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// auth.setup.ts — runs once as a setup project
+await page.getByLabel('Username').fill(process.env.E2E_USER!);
+await page.getByRole('button', { name: 'Sign in' }).click();
+await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+await page.context().storageState({ path: '.auth/user.json' });</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://playwright.dev/docs/auth" rel="noopener">Authentication — Playwright docs (storageState, setup projects, multiple roles)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-parallel" rel="noopener">Parallelism — Playwright docs (workers, fullyParallel, serial mode, sharding)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-retries" rel="noopener">Retries — Playwright docs (retries, flaky classification, per-test control)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/fast-and-easy-authentication-with-playwright" rel="noopener">Fast and easy authentication with Playwright — Tim Deschryver</a></li>
+      <li>[Article] <a href="https://www.checklyhq.com/docs/learn/playwright/authentication/" rel="noopener">Authentication — Learn Playwright, Checkly</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_K8SY3MbayA" rel="noopener">Playwright Authentication — advanced scenarios with examples — Software Testing Tips and Tricks</a></li>
+    </ul>
+
+    <h3>Cypress awareness, and component tests versus e2e</h3>
+    <p>Cypress is the tool Playwright displaced, and you will still meet it in interviews and in existing codebases, so know the shape of the difference. Cypress runs its commands <em>inside</em> the browser alongside your app, which gives an excellent interactive runner and easy access to app internals, but historically constrained it: one browser tab and origin per test, no WebKit engine, no true cross-browser parity, and a chained command API that is not real promises. Playwright drives the browser over the DevTools/CDP-style protocol from Node, so multiple tabs, multiple origins, iframes, downloads, WebKit and cross-browser projects all fall out naturally, and tests are plain async/await. Cypress's own strength worth borrowing conceptually is <em>retry-ability</em> — the same idea as Playwright's web-first assertions. A fair answer in an interview: Playwright for new work and anything needing cross-browser or multi-origin coverage; Cypress is a reasonable place to stay if a mature suite and team habits already exist there.</p>
+    <p>Separately, do not confuse <em>component tests</em> with <em>e2e</em>. Playwright ships an experimental component-testing mode that mounts a single component in a real browser — useful when jsdom-style environments misrepresent layout or native browser behaviour, but it is not an end-to-end test: no routing, no backend, no journey. For Angular specifically, TestBed plus Vitest (modules 03 to 06 of this track) remains the component layer. Playwright's job starts where the whole application, served and routed, is what you need to prove.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.cypress.io/app/get-started/why-cypress" rel="noopener">Why Cypress? — Cypress docs (the architecture and its trade-offs, first-hand)</a></li>
+      <li>[Official] <a href="https://docs.cypress.io/app/core-concepts/testing-types" rel="noopener">Testing types: e2e vs component — Cypress docs</a></li>
+      <li>[Official] <a href="https://docs.cypress.io/app/core-concepts/retry-ability" rel="noopener">Retry-ability — Cypress docs (the same idea as web-first assertions)</a></li>
+      <li>[Official] <a href="https://playwright.dev/docs/test-components" rel="noopener">Components (experimental) — Playwright docs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MRDJoggYamo" rel="noopener">Cypress and Playwright: A Comparison — Rainer Hahnekamp</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=cixkQHNkoZ4" rel="noopener">Playwright vs Cypress: which one should you use for end-to-end testing? — Automation Step by Step</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-directives-store-testing.html">← Directives, Router and Store Testing</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="08-testing-strategy.html">Test Strategy and CI →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Playwright has become a standard line item in Indian frontend and SDET interviews — service companies probe setup and locators, product companies push on flake, traces and suite economics:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is end-to-end testing and how is it different from a unit or component test?</summary>
+      <div class="answer"><p>An e2e test exercises the deployed application as a user does — real browser, real routing, real (or deliberately stubbed) HTTP — and asserts on visible outcomes. A unit or component test isolates one piece with fakes around it. E2E gives the highest confidence that the pieces are wired together and the lowest speed and stability, so it sits at the top of the pyramid and covers critical journeys only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you add Playwright to an existing Angular project?</summary>
+      <div class="answer"><p><code>npm init playwright@latest</code> — it installs <code>@playwright/test</code>, downloads the browser binaries, and generates <code>playwright.config.ts</code> plus a sample spec. Point <code>testDir</code> at a dedicated folder such as <code>./e2e</code> so it does not clash with unit tests, set <code>baseURL</code>, and configure <code>webServer</code> to run <code>ng serve</code> and wait for it before the suite starts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a locator in Playwright, and why is it preferred over a stored element reference?</summary>
+      <div class="answer"><p>A locator describes <em>how to find</em> an element and is resolved fresh on every action, so it stays valid when Angular re-renders the DOM. Old-style element handles point at a specific node and go stale. Locators also bring auto-waiting and strict mode along for free.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which locator should you reach for first, and what is getByTestId for?</summary>
+      <div class="answer"><p><code>getByRole(role, { name })</code> first — it queries the accessibility tree, matches how users and assistive technology perceive the page, and doubles as an accessibility check. Then <code>getByLabel</code> for form controls, then text-based queries. <code>getByTestId</code> (<code>data-testid</code>) is the explicit escape hatch for elements with no accessible name or stable visible text; it is stable but tells you nothing about user experience, so it should not be the default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does Playwright's auto-waiting actually do?</summary>
+      <div class="answer"><p>Before each action it retries a set of actionability checks on the element — attached, visible, stable (animations finished), receiving events (not obscured), enabled, and editable for <code>fill</code> — until they all pass or the timeout expires. So a <code>click()</code> already waits for the button to be genuinely clickable; you do not add sleeps around it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is page.waitForTimeout an anti-pattern, and what do you use instead?</summary>
+      <div class="answer"><p>A fixed sleep guesses. On a loaded CI runner it is too short and the test flakes; everywhere else it is dead time multiplied by every test. Replace it with a condition: a web-first assertion such as <code>await expect(locator).toBeVisible()</code>, <code>toHaveText</code>, <code>toHaveURL</code>, or <code>page.waitForResponse()</code> when you are genuinely waiting on a specific call. Playwright's docs mark <code>waitForTimeout</code> as for debugging only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a web-first assertion, and how does it differ from expect(await locator.isVisible())?</summary>
+      <div class="answer"><p><code>await expect(locator).toBeVisible()</code> polls the page until the condition holds or the expect timeout expires. <code>expect(await locator.isVisible()).toBe(true)</code> takes a single snapshot at one instant, so it fails whenever the app has not finished rendering yet. The auto-retrying form is what removes most timing flake from a suite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain fixtures in Playwright. Why not just use beforeEach?</summary>
+      <div class="answer"><p>Fixtures are dependency-injected, per-test (or per-worker) resources declared in the test signature — <code>page</code>, <code>context</code>, <code>request</code> are built in, and <code>test.extend</code> adds your own such as page objects or seeded data. They are lazy (only constructed if a test requests them), composable, scoped, and they tear down automatically. <code>beforeEach</code> runs unconditionally for every test in scope and communicates through shared variables, which does not compose.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you mock an API response in a Playwright test, and when should you not?</summary>
+      <div class="answer"><p><code>await page.route('**/api/orders', route =&gt; route.fulfill({ json: [...] }))</code>; <code>route.abort()</code> simulates failure and <code>route.continue()</code> forwards a modified request. Use it for error states, empty states, third-party services and analytics noise. Do not stub the whole backend on your primary journey — at that point the test no longer proves integration and you are paying browser prices for a component test.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you avoid logging in through the UI in every test?</summary>
+      <div class="answer"><p>Run a setup project that logs in once and saves cookies plus local storage with <code>page.context().storageState({ path: '.auth/user.json' })</code>, then set <code>use: { storageState: '.auth/user.json' }</code> so every test starts authenticated. One state file per role for multi-role suites. Keep the files out of version control — they contain live session tokens.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A test fails only on CI and passes locally. How do you investigate?</summary>
+      <div class="answer"><p>Turn on tracing (<code>trace: 'on-first-retry'</code>), publish <code>trace.zip</code> as a CI artifact, and open it with <code>npx playwright show-trace</code>. The trace gives before/after DOM snapshots per action, the network log, console output and the resolved locator, so you see the actual page state at the failing step. Common culprits it exposes: a slower machine changing ordering, missing seed data, a different viewport, or a third-party request that only fails in CI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does Playwright achieve test isolation, and what does that mean for parallelism?</summary>
+      <div class="answer"><p>Each test gets a fresh <code>BrowserContext</code> — an independent cookie jar, storage and cache — created and destroyed by the <code>page</code> fixture, so no state leaks between tests. Because tests are independent by construction, the runner can shard test files across worker processes safely (<code>fullyParallel</code>, <code>workers</code>, <code>--shard</code> for multi-machine CI). Contexts are cheap compared with launching a browser, which is why this is fast rather than merely correct.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your e2e suite is slow and intermittently red. What do you actually change?</summary>
+      <div class="answer"><p>Cut the suite to genuine critical journeys and push the rest down to component and unit tests. Reuse auth via <code>storageState</code> instead of UI logins. Stub third-party and analytics traffic. Turn on parallel workers and shard across CI machines. Replace every fixed sleep with a web-first assertion, and every CSS/XPath selector with a role- or test-id-based locator. Enable retries with tracing so flakes are diagnosable — but treat each "flaky" result in the report as a defect to fix, not a pass.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Playwright versus Cypress — give a balanced comparison.</summary>
+      <div class="answer"><p>Cypress executes inside the browser next to your app: great interactive runner and easy app-internal access, but historically limited to one origin and tab per test, no WebKit engine, and a chained non-promise command API. Playwright drives browsers out of process from Node, giving real cross-browser coverage (Chromium, Firefox, WebKit), multi-tab and multi-origin flows, iframes, downloads, native async/await, built-in tracing and parallelism. Recommendation: Playwright for new suites and anything cross-browser; keep an existing well-maintained Cypress suite rather than rewriting for its own sake.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is Playwright component testing a replacement for TestBed in an Angular project?</summary>
+      <div class="answer"><p>No. Playwright's component mode is experimental and mounts a single component in a real browser — valuable when a jsdom-style environment misrepresents layout, focus or native browser behaviour, but it is not an end-to-end test and it is not the cheap default. In Angular the component layer stays with TestBed plus Vitest and CDK harnesses; Playwright earns its cost at the whole-application, real-routing, real-journey level.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.e2e.core — Playwright setup and config, locator model, auto-waiting, web-first assertions, fixtures and hooks</li>
+      <li>fet.e2e.advanced — page.route network interception, trace viewer / UI mode / codegen, storageState auth reuse, parallelism and retries, Cypress awareness</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

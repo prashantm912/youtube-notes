@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular TestBed and Fixtures module: configureTestingModule for standalone components, ComponentFixture, TestBed.inject and overrides, detectChanges and autoDetect, zoneless whenStable, DebugElement with By, and fakeAsync/tick/flush/waitForAsync — with verified official docs, community guides and videos, plus the interview questions they power.">
+  <title>Angular TestBed and Fixtures — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: TestBed and Fixtures</h1>
+  <p class="standfirst">TestBed is Angular's testing dependency-injection container: it assembles a throwaway module around the component under test so injection, templates and change detection all behave like the real application. Nearly every confusing Angular test failure traces back to one of those three.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → TestBed and Fixtures</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Vitest gives you <code>describe</code>, <code>it</code> and spies; it knows nothing about Angular. TestBed is the bridge — it compiles a disposable NgModule for the test, resolves the component's providers through real DI, and hands you a <code>ComponentFixture</code> wrapping the created component and its rendered DOM. This module orients you on configuring that module for standalone components, on the fixture API, and on the part that trips everyone up: when the DOM actually updates, how <code>fixture.detectChanges()</code> and zoneless <code>whenStable()</code> differ, how to query the view with <code>DebugElement</code> and <code>By</code>, and how <code>fakeAsync</code>/<code>tick</code> make asynchronous code testable synchronously.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>TestBed: a throwaway module built for one test</h3>
+    <p><code>TestBed.configureTestingModule({ imports, providers, declarations })</code> describes an Angular module that exists only for the current test file. Whatever the component needs to render — child components, directives, pipes — goes in <code>imports</code>; whatever it injects gets its real or faked implementation in <code>providers</code>. Because it is a genuine injector, <code>inject()</code>, constructor injection, <code>@Injectable({providedIn:'root'})</code> services and injection tokens all resolve exactly as they do at runtime.</p>
+    <p>With Angular v20 the important rule is this: a <strong>standalone component belongs in <code>imports</code>, never in <code>declarations</code></strong>. The <code>declarations</code> array is the legacy NgModule path, kept for components that still carry <code>standalone: false</code>; passing a standalone component to it throws. Standalone components also pull their own dependencies in with them, which is why the modern testing module is usually two lines instead of twenty. <code>compileComponents()</code> is only needed when templates and styles are in separate files and the build does not inline them — the Angular CLI does inline them, so most suites can skip the call.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  imports: [CartComponent],   // standalone component — NOT declarations
+  providers: [
+    { provide: CartService, useValue: fakeCart },
+    provideZonelessChangeDetection(),
+  ],
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/components-basics" rel="noopener">Basics of testing components — Angular (TestBed setup, the first fixture)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/testing/TestBed" rel="noopener">TestBed — Angular API reference (configureTestingModule, createComponent, inject, override*)</a></li>
+      <li>[Article] <a href="https://www.rainerhahnekamp.com/en/how-do-i-test-and-mock-standalone-components/" rel="noopener">How do I test and mock Standalone Components? — Rainer Hahnekamp</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/angular-standalone-components-and-angular-testing-library-make-component-tests-easier" rel="noopener">Angular standalone components make component tests easier — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V322hFii-H8" rel="noopener">Angular Unit Testing Crash Course — Make Your Project Bullet Proof — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>ComponentFixture, TestBed.inject and overrides</h3>
+    <p><code>TestBed.createComponent(CartComponent)</code> instantiates the component and returns a <code>ComponentFixture</code> — the handle to everything the test needs. <code>fixture.componentInstance</code> is the class instance (set inputs, call methods, read signals); <code>fixture.nativeElement</code> is the host DOM node, so <code>querySelector</code> and <code>textContent</code> work as in any DOM test; <code>fixture.debugElement</code> is Angular's richer wrapper over the same tree; and <code>fixture.destroy()</code> triggers the teardown path when you need to assert cleanup.</p>
+    <p><code>TestBed.inject(CartService)</code> pulls the same instance the component received, which is how you assert on a fake or spy after acting on the UI. When a provider cannot be swapped through the testing module — because it is baked into the component's own <code>providers</code> or <code>imports</code> — reach for <code>TestBed.overrideComponent()</code> (replace a component's metadata, typically to stub a heavy child) or <code>TestBed.overrideProvider()</code>. Both must be called <em>before</em> the first <code>createComponent</code>, since the injector is frozen once the module is instantiated. Treat overrides as an escape hatch: needing many of them usually means the component is doing too much.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const fixture = TestBed.createComponent(CartComponent);
+const component = fixture.componentInstance;
+const el: HTMLElement = fixture.nativeElement;
+const cart = TestBed.inject(CartService);   // the very instance the component got
+
+TestBed.overrideComponent(CartComponent, {
+  remove: { imports: [HeavyChartComponent] },
+  add:    { imports: [StubChartComponent] },
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/testing/ComponentFixture" rel="noopener">ComponentFixture — Angular API reference (componentInstance, nativeElement, debugElement, whenStable)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/utility-apis" rel="noopener">Testing utility APIs — Angular (the full TestBed method table, including the override family)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/services" rel="noopener">Testing services — Angular (TestBed.inject and provider substitution)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-testing-vitest/" rel="noopener">Modern Angular Testing with Vitest — The Fundamentals — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=n54qst9SHyY" rel="noopener">Angular TestBed Explained — Inject, Mock and Test Services — Leela Web Dev</a></li>
+    </ul>
+
+    <h3>Change detection in tests: detectChanges, autoDetect and zoneless</h3>
+    <p>Creating a fixture does <em>not</em> render the template. Angular's test harness deliberately hands you control of the change-detection cycle, so nothing binds until you ask: <code>fixture.detectChanges()</code> runs a cycle over the fixture's component and its children, executing <code>ngOnInit</code> on the first call and flushing bindings into the DOM afterwards. The classic beginner failure — "my test says the element is empty" — is a missing <code>detectChanges()</code> between mutating state and asserting on the markup. The mirror-image failure is asserting on the DOM <em>before</em> the first cycle when you meant to check the initial render.</p>
+    <p><code>fixture.autoDetectChanges()</code> restores automatic behaviour so the fixture refreshes itself after each turn — convenient, but it hides ordering bugs and makes "what ran when" harder to reason about, so explicit calls remain the default in most suites. Under <code>provideZonelessChangeDetection()</code> the picture shifts again: there is no Zone.js patching every timer and promise, refreshes are scheduled by signal writes and by <code>markForCheck()</code>, and the idiomatic wait becomes <code>await fixture.whenStable()</code> — which resolves once the application has no pending work. Zoneless tests therefore lean on <code>async</code>/<code>await</code> rather than the Zone-based helpers, and code that only updated the view because a Zone task happened to fire will fail loudly, which is the point.</p>
+    <pre class="code-block" data-label="TypeScript"><code>component.total.set(499);
+expect(el.textContent).not.toContain('499');  // DOM still stale
+fixture.detectChanges();                      // render now
+expect(el.textContent).toContain('499');
+
+await fixture.whenStable();                   // zoneless: wait for pending work</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/components-scenarios" rel="noopener">Component testing scenarios — Angular (detectChanges, automatic change detection, async tests)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/zoneless" rel="noopener">Zoneless — Angular (provideZonelessChangeDetection and its testing implications)</a></li>
+      <li>[Article] <a href="https://www.angularspace.com/angular-zoneless-unit-testing/" rel="noopener">Angular Zoneless Unit Testing — Angular Space</a></li>
+      <li>[Article] <a href="https://testing-angular.com/testing-components/" rel="noopener">Testing Components — Testing Angular (Molily's free online book)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KqVLjmHx5Xc" rel="noopener">Zoneless Angular — what works and what doesn't? — Speed Date With Angular</a></li>
+    </ul>
+
+    <h3>Querying the rendered view: DebugElement and By</h3>
+    <p><code>fixture.debugElement</code> wraps the rendered tree in a framework-aware structure: alongside <code>nativeElement</code> it exposes the owning component instance, the element's injector, its <code>attributes</code> and <code>properties</code>, and <code>triggerEventHandler()</code> for dispatching events straight at Angular's listeners. Query it with <code>query()</code> for the first match and <code>queryAll()</code> for every match, using the predicates from <code>By</code>: <code>By.css('.total')</code> for a CSS selector and <code>By.directive(BadgeComponent)</code> to find elements by the component or directive attached to them — something a raw <code>querySelector</code> cannot express.</p>
+    <p>Why it matters: <code>By.directive</code> is the clean way to grab a child component instance and assert on the inputs it received, and <code>DebugElement</code> is the only query path that survives non-DOM renderers. That said, the modern habit is to prefer user-facing queries — role, label, visible text — over structural CSS selectors, because tests coupled to class names break on every refactor. Reach for <code>nativeElement</code> and plain DOM APIs when you are simply reading text, and for <code>DebugElement</code> when you need Angular's view of the node.</p>
+    <pre class="code-block" data-label="TypeScript"><code>const rows  = fixture.debugElement.queryAll(By.css('[data-testid="row"]'));
+const badge = fixture.debugElement.query(By.directive(BadgeComponent));
+
+expect(rows.length).toBe(3);
+expect(badge.componentInstance.label()).toBe('New');
+rows[0].triggerEventHandler('click', null);   // fires the Angular listener</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/DebugElement" rel="noopener">DebugElement — Angular API reference (query, queryAll, triggerEventHandler)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/platform-browser/By" rel="noopener">By — Angular API reference (css, directive, all predicates)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/getting-the-most-value-out-of-your-angular-component-tests" rel="noopener">Getting the most value out of your Angular component tests — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6ZCh4LFJZj4" rel="noopener">Access the component template with nativeElement and debugElement — Leela Web Dev</a></li>
+    </ul>
+
+    <h3>Async in tests: fakeAsync, tick, flush and waitForAsync</h3>
+    <p>Real components debounce, poll, resolve promises and wait on HTTP. <code>fakeAsync()</code> wraps the test body in a special zone that queues every timer, <code>setInterval</code> and microtask instead of running it, so <code>tick(ms)</code> can advance a virtual clock deterministically and the whole test reads top-to-bottom as synchronous code. <code>tick()</code> with no argument drains pending microtasks; <code>flush()</code> runs every remaining macrotask regardless of delay; <code>flushMicrotasks()</code> drains only the microtask queue. If any task is still queued when the body ends, the test fails with an error naming the leftover timer — a genuinely useful signal that the component never cleaned up.</p>
+    <p><code>waitForAsync()</code> (the renamed <code>async()</code>) is the older sibling: it runs the body in a zone that tracks outstanding async work and pairs with <code>await fixture.whenStable()</code>, which is the right tool when you cannot control the clock — real promises, real HTTP mocks. The trade-off is the classic interview question: <code>fakeAsync</code> gives determinism and virtual time but cannot handle genuinely asynchronous work such as XHR; <code>waitForAsync</code> handles it but yields no control over timing. In zoneless applications both are being displaced by plain <code>async</code> test functions plus <code>await fixture.whenStable()</code>, though <code>fakeAsync</code> keeps its edge for anything driven by timers.</p>
+    <pre class="code-block" data-label="TypeScript"><code>it('debounces the search box', fakeAsync(() =&gt; {
+  fixture.detectChanges();
+  typeInto(input, 'ang');
+  tick(300);              // advance the virtual clock past the debounce
+  flush();                // drain anything still queued
+  fixture.detectChanges();
+  expect(results().length).toBe(3);
+}));</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/testing/fakeAsync" rel="noopener">fakeAsync — Angular API reference</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/testing/tick" rel="noopener">tick — Angular API reference (advancing the virtual clock)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/testing/waitForAsync" rel="noopener">waitForAsync — Angular API reference</a></li>
+      <li>[Article] <a href="https://dev.to/angular/understanding-async-tests-in-angular-f8n" rel="noopener">Understanding async tests in Angular — Angular collection, DEV Community</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SMrxFZ0XP0A" rel="noopener">Understanding the Angular fakeAsync Testing Zone — Angular University</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-vitest-basics.html">← Vitest Fundamentals</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="04-component-testing.html">Component Testing Deep →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>TestBed is the heart of the Angular testing round in Indian product and service-company interviews — these come up again and again, from screening calls to senior panels:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is TestBed and why does Angular need it?</summary>
+      <div class="answer"><p>TestBed is Angular's testing utility that builds a throwaway Angular module and injector for a test. Components are not plain classes — they need dependency injection, a compiled template and a change-detection cycle — so <code>new MyComponent()</code> is not enough. TestBed configures that miniature runtime, then creates the component inside it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does TestBed.configureTestingModule take?</summary>
+      <div class="answer"><p>An object shaped like NgModule metadata: <code>imports</code> (standalone components, directives, pipes and provider-bearing modules the test needs), <code>providers</code> (real or faked services, injection tokens, and providers like <code>provideZonelessChangeDetection()</code>), and the legacy <code>declarations</code> for non-standalone components. It must be called before the first <code>createComponent</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where does a standalone component go — imports or declarations?</summary>
+      <div class="answer"><p><code>imports</code>. <code>declarations</code> is the NgModule-era array and only accepts components marked <code>standalone: false</code>; putting a standalone component there throws an error. Standalone components also bring their own template dependencies along, so the testing module stays small.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a ComponentFixture and what do you get from it?</summary>
+      <div class="answer"><p>The object <code>TestBed.createComponent()</code> returns. It exposes <code>componentInstance</code> (the class, for setting inputs and calling methods), <code>nativeElement</code> (the host DOM node), <code>debugElement</code> (Angular's wrapper over the rendered tree), <code>detectChanges()</code>, <code>whenStable()</code> and <code>destroy()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why does my test say the element's text is empty?</summary>
+      <div class="answer"><p>Because no change-detection cycle has run. Creating the fixture does not render the template; call <code>fixture.detectChanges()</code> after creating it and again after every state change before asserting on the DOM. Angular hands the test explicit control of the cycle on purpose.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> detectChanges() vs autoDetectChanges() — when would you use each?</summary>
+      <div class="answer"><p><code>detectChanges()</code> runs one cycle when you ask, which keeps tests explicit about the sequence of state change then render then assert. <code>autoDetectChanges()</code> makes the fixture refresh itself after each turn — less ceremony, but it hides ordering mistakes and makes failures harder to localise. Most teams default to explicit calls and reserve auto-detect for tests dominated by asynchronous UI updates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you replace a real service with a fake in a TestBed test?</summary>
+      <div class="answer"><p>Register the substitute in <code>providers</code>: <code>{ provide: CartService, useValue: fakeCart }</code>, or <code>useClass</code> for a stub class and <code>useFactory</code> when construction needs logic. Then <code>TestBed.inject(CartService)</code> retrieves the same instance the component received, so you can assert on its spies afterwards.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> nativeElement vs debugElement — what is the difference?</summary>
+      <div class="answer"><p><code>nativeElement</code> is the raw DOM node, so you use ordinary DOM APIs on it. <code>debugElement</code> is Angular's wrapper: it also carries the owning component instance, the element injector, Angular's view of attributes and properties, <code>query</code>/<code>queryAll</code> with <code>By</code> predicates, and <code>triggerEventHandler()</code>. Use <code>debugElement</code> when you need Angular metadata or want to find nodes by directive.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is By.css versus By.directive?</summary>
+      <div class="answer"><p><code>By.css(selector)</code> matches by CSS selector, mirroring <code>querySelector</code>. <code>By.directive(Type)</code> matches elements that have that component or directive applied — impossible to express in CSS — which is how you reach a child component's instance and assert on the inputs it was given.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> fakeAsync and tick — what do they do?</summary>
+      <div class="answer"><p><code>fakeAsync()</code> runs the test body in a zone that queues timers and microtasks instead of executing them, and <code>tick(ms)</code> advances a virtual clock so those queued tasks run synchronously at the right simulated moment. The result is deterministic, instant tests for debounce, polling and timeout logic, written in a linear style with no callbacks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> tick() vs flush() vs flushMicrotasks()?</summary>
+      <div class="answer"><p><code>tick(ms)</code> advances the virtual clock by a stated amount and runs whatever is due, plus pending microtasks. <code>flush()</code> drains all remaining macrotasks whatever their delay, and returns the virtual time elapsed. <code>flushMicrotasks()</code> drains only the microtask queue — resolved promises — without moving the clock.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> fakeAsync vs waitForAsync — which do you pick, and what can fakeAsync not do?</summary>
+      <div class="answer"><p><code>fakeAsync</code> for anything timer-driven: full control of virtual time, synchronous assertions, and a failure if a task is left pending. It cannot handle genuinely asynchronous work such as a real XHR, because there is no clock to fast-forward. <code>waitForAsync</code> plus <code>await fixture.whenStable()</code> covers those cases by waiting for the zone's outstanding work to settle, at the cost of any timing control.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does zoneless change detection change the way you write TestBed tests?</summary>
+      <div class="answer"><p>With <code>provideZonelessChangeDetection()</code> there is no Zone.js patching timers and promises, so refreshes are scheduled by signal writes, <code>markForCheck()</code> and similar notifications. Tests become plain <code>async</code> functions that <code>await fixture.whenStable()</code> instead of leaning on <code>waitForAsync</code>; <code>fakeAsync</code> still works for timer-driven logic. A useful side effect is that any component which only rendered because some Zone task happened to fire now fails, exposing a missing notification.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you use TestBed.overrideComponent or overrideProvider, and what is the catch?</summary>
+      <div class="answer"><p>When a dependency cannot be swapped from the testing module because it lives in the component's own <code>providers</code> or <code>imports</code> — for example stubbing a heavy chart child or a component-scoped store. Both must run before the first <code>createComponent()</code>, since the injector and component definitions are frozen once the module is instantiated. The catch is design smell: a component needing several overrides is usually over-coupled, and refactoring it beats fighting the test harness.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Is compileComponents() still necessary, and why did it exist?</summary>
+      <div class="answer"><p>It exists to asynchronously fetch external <code>templateUrl</code> and <code>styleUrls</code> files before components are created. With the Angular CLI those resources are inlined at build time, so the call is a no-op for almost every project and modern guides omit it. You still need it in setups that compile without inlining — and because it returns a promise, it belongs in an <code>async</code> or <code>waitForAsync</code> hook.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.tb.configure — configureTestingModule, standalone component testing, ComponentFixture</li>
+      <li>fet.tb.detect — detectChanges mechanics, DebugElement and By, fakeAsync/tick/waitForAsync</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

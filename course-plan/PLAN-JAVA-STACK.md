@@ -362,7 +362,7 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E3:** S1 Spring (DONE 2026-07-19, 15 modules, 34/34, 241 links) → S2 Boot (DONE 2026-07-19, 12 modules, 24/24, 187 links) → H1 JPA (DONE 2026-07-19, 14 modules, 28/28, 256 links) → S3 Security (DONE 2026-07-19, 10 modules, 20/20, 140 links). **Phase E3 COMPLETE.**
 - **Phase E3b:** J3 Jakarta EE (DONE 2026-07-19, 14 modules, 28/28, 232 links; taught with constant Spring contrast). **Phase E3b COMPLETE.**
 - **Phase E4:** T2 Backend Testing (DONE 2026-07-19, 10 modules, 20/20, 172 links). **Phase E4 COMPLETE.**
-- **Phase E5:** A1 Angular Basics (DONE 2026-07-19, 10 modules, 20/20, 141 links) → A2 Angular Advanced (DONE 2026-07-19, 14 modules, 28/28, 211 links) → A3 Angular + T1 Frontend Testing
+- **Phase E5:** A1 Angular Basics (DONE 2026-07-19, 10 modules, 20/20, 141 links) → A2 Angular Advanced (DONE 2026-07-19, 14 modules, 28/28, 211 links) → A3 Angular State Management (DONE 2026-07-25, 8 modules, 16/16, 104 links) → T1 Frontend Testing (DONE 2026-07-25, 8 modules, 16/16, 192 links). **Phase E5 COMPLETE.**
 - **Phase E6:** M1 Microservices → M2 Messaging
 - **Phase E7:** O1 DevOps → C1 AWS → O2 Observability
 - **Phase E8:** Y1 System Design → Y2 Secure Coding
@@ -378,7 +378,7 @@ Scale: ~255 module pages across 21 tracks (directory format, per §2). Ship per-
 - [ ] E3: S1 (0/15), S2 (0/12), H1 (0/14), S3 (0/10)
 - [ ] E3b: J3 Jakarta EE (0/14)
 - [ ] E4: T2 (0/10)
-- [ ] E5: A1 (0/10), A2 (0/14), A3 (0/8), T1 (0/8)
+- [x] E5: A1 (10/10), A2 (14/14), A3 (8/8), T1 (8/8)
 - [ ] E6: M1 (0/12), M2 (0/10)
 - [ ] E7: O1 (0/14), C1 (0/12), O2 (0/8)
 - [ ] E8: Y1 (0/14), Y2 (0/10)

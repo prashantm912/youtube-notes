@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular service and HTTP testing module: plain instantiation without TestBed, TestBed.inject and provider overrides, the stub/spy/fake/mock vocabulary, provideHttpClientTesting, HttpTestingController expectOne/flush/verify, error paths and functional interceptor tests — with verified official docs, articles and videos, plus the interview questions they power.">
+  <title>Angular Service and HTTP Testing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Service and HTTP Testing</h1>
+  <p class="standfirst">Services are the cheapest thing in Angular to test well — most are plain classes that a constructor call and one fake dependency will cover. The ones that reach the network get a first-party mock transport instead of a real server.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Frontend Testing → Service and HTTP Testing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two halves. First, testing a service as an ordinary unit: instantiating it directly, reaching for <code>TestBed</code> only when injection actually earns its cost, overriding providers with <code>useValue</code> / <code>useClass</code> / injection-token stubs, and choosing the right kind of test double. Second, testing everything that talks HTTP: <code>provideHttpClientTesting()</code>, <code>HttpTestingController</code>, the expect/flush/verify rhythm, error simulation, and functional interceptors end to end. Examples assume Angular v20 or newer with Vitest as the runner.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Services in isolation — start with plain instantiation</h3>
+    <p>An Angular service is a TypeScript class. If its dependencies arrive through the constructor, the simplest possible test is <code>new CartService(fakePricing)</code> — no TestBed, no <code>configureTestingModule</code>, no change detection, no async plumbing. The test runs in microseconds, the failure message points straight at your logic, and nothing about the framework can break it. The official guide opens on exactly this note: services are often the easiest files to unit test, and the plainest approach is usually the right one.</p>
+    <p>Why it matters: TestBed compiles a miniature Angular application for every test. Paying that price for a class that only maps some data is how suites quietly become slow. Reach for the framework when the code under test genuinely needs the injector — hierarchical providers, <code>inject()</code> in field initialisers, tokens resolved at runtime — and not before. In an interview, "when do you <em>not</em> need TestBed?" separates people who understand the tool from people who memorised the boilerplate.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// cart.service.ts — an ordinary class with an injected collaborator
+export class CartService {
+  constructor(private pricing: PricingService) {}
+  total(items: Item[]) { return this.pricing.apply(items); }
+}
+
+// cart.service.spec.ts — no TestBed anywhere
+const pricing = { apply: vi.fn().mockReturnValue(250) } as unknown as PricingService;
+expect(new CartService(pricing).total([])).toBe(250);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/testing/services" rel="noopener">Testing services — Angular (the plain-instantiation path first, TestBed second)</a></li>
+      <li>[Article] <a href="https://testing-angular.com/testing-services/" rel="noopener">Testing Services — Testing Angular (the free book by Mathias Schäfer, the most complete treatment online)</a></li>
+      <li>[Article] <a href="https://modernangular.com/articles/getting-started-with-unit-testing-in-angular" rel="noopener">Getting Started with Unit Testing in Angular — Modern Angular (Josh Morony)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-testing-vitest/" rel="noopener">Modern Angular Testing with Vitest: The Fundamentals — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c57llB8QA2E" rel="noopener">I bet you can write an Angular unit test after this video — Joshua Morony</a></li>
+    </ul>
+
+    <h3>When TestBed earns its keep — TestBed.inject and provider overrides</h3>
+    <p>Once a service uses <code>inject()</code> internally, depends on an <code>InjectionToken</code>, or is provided somewhere other than the root, you need a real injector. <code>TestBed.configureTestingModule({ providers: [...] })</code> builds one, and <code>TestBed.inject(CartService)</code> pulls the instance out — the modern replacement for the old <code>TestBed.get</code>. Everything the service asks for must be present in that provider array, so the array itself becomes an honest, readable declaration of the unit's dependencies.</p>
+    <p>Overriding is the whole point. <code>{ provide: PricingService, useValue: fake }</code> swaps a collaborator for an object you control; <code>useClass: FakePricingService</code> swaps in a whole substitute implementation when the fake needs behaviour rather than canned values; <code>useFactory</code> builds one lazily. Injection tokens get stubbed the same way — <code>{ provide: API_BASE_URL, useValue: 'https://test.local' }</code> — which is how you keep environment configuration out of your assertions. <code>TestBed.overrideProvider</code> exists for the case where the module is already configured and you want to replace one entry before the first injection.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  providers: [
+    CartService,
+    { provide: PricingService, useValue: fakePricing },        // canned collaborator
+    { provide: TaxService,     useClass: FakeTaxService },     // substitute implementation
+    { provide: API_BASE_URL,   useValue: 'https://test.local' } // stubbed token
+  ]
+});
+const service = TestBed.inject(CartService);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/api/core/testing/TestBed" rel="noopener">TestBed — Angular API reference (configureTestingModule, inject, overrideProvider)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/testing/utility-apis" rel="noopener">Testing utility APIs — Angular (the full TestBed surface)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/di/defining-dependency-providers" rel="noopener">Defining dependency providers — Angular (useValue, useClass, useExisting, useFactory)</a></li>
+      <li>[Article] <a href="https://www.rainerhahnekamp.com/en/how-do-i-test-code-using-inject/" rel="noopener">How do I test code using inject() — Rainer Hahnekamp</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/how-to-globally-register-injection-tokens-within-the-angular-testbed" rel="noopener">How to globally register injection tokens within the Angular TestBed — Tim Deschryver</a></li>
+    </ul>
+
+    <h3>Test doubles: stub, spy, fake, mock — and where the boundary sits</h3>
+    <p>The words are used loosely in standups and precisely in interviews. A <strong>stub</strong> returns canned answers and asserts nothing. A <strong>spy</strong> is a stub that also records how it was called, so the test can assert on interactions — in Vitest that is <code>vi.fn()</code>, and in the older Jasmine world <code>jasmine.createSpyObj</code>. A <strong>fake</strong> is a working but simplified implementation, such as an in-memory repository. A <strong>mock</strong> is pre-programmed with expectations and fails the test itself when they are not met. Martin Fowler's original essay draws the line that matters: stubs support state verification, mocks perform behaviour verification.</p>
+    <p>The rule that keeps suites maintainable is <em>mock at the boundary, not in the middle</em>. Replace the things you do not own or cannot control — the network, the clock, storage, third-party SDKs — and let your own collaborating classes run for real. Faking every internal service produces tests that pass while the application is broken, because each double encodes an assumption nobody re-checked. This is also the reason component tests generally fake HTTP rather than faking the data service: the double sits at the edge of the system, so refactoring the service does not break twenty specs.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://martinfowler.com/articles/mocksArentStubs.html" rel="noopener">Mocks Aren't Stubs — Martin Fowler (the canonical definition of the vocabulary)</a></li>
+      <li>[Article] <a href="https://testing-angular.com/faking-dependencies/" rel="noopener">Faking dependencies (Mocking) — Testing Angular</a></li>
+      <li>[Article] <a href="https://dev.to/playfulprogramming-angular/testing-and-faking-angular-dependencies-p9i" rel="noopener">Testing and faking Angular dependencies — Lars Gyrup Brink Nielsen</a></li>
+      <li>[Article] <a href="https://modernangular.com/articles/testing-smart-components-services-in-angular" rel="noopener">Testing smart components and services in Angular — Modern Angular</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IeH0OPBcufw" rel="noopener">Mocking the injected service using createSpyObj and spying on methods — Leela Web Dev</a></li>
+    </ul>
+
+    <h3>HTTP testing: provideHttpClientTesting, expectOne and flush</h3>
+    <p>Angular ships a mock backend. Put <code>provideHttpClient()</code> and <code>provideHttpClientTesting()</code> in the testing module — in that order — and the real XHR/fetch transport is replaced by one that queues requests instead of sending them. Note that <code>HttpClientTestingModule</code> is the deprecated older form of the same thing; new code uses the two provider functions, which is also what lets you test standalone, provider-based applications without inventing an NgModule.</p>
+    <p>The rhythm is always the same: call the service, assert which request it made, then hand it a response. <code>httpMock.expectOne('/api/orders/7')</code> asserts that exactly one matching request is outstanding and returns it; the argument can be a URL string, a <code>{ method, url }</code> object, or a predicate function for anything more interesting (query parameters, headers, body shape). <code>req.request</code> exposes method, headers, params and body for assertions. <code>req.flush(body)</code> then delivers the response, at which point the subscriber callback runs synchronously — which is why a service test rarely needs <code>fakeAsync</code>. Sibling helpers <code>match()</code> (many requests) and <code>expectNone()</code> (assert nothing was sent, useful for cache-hit paths) round the API out.</p>
+    <pre class="code-block" data-label="TypeScript"><code>TestBed.configureTestingModule({
+  providers: [provideHttpClient(), provideHttpClientTesting()]
+});
+const service  = TestBed.inject(OrderService);
+const httpMock = TestBed.inject(HttpTestingController);
+
+let received: Order | undefined;
+service.load(7).subscribe(o =&gt; received = o);
+
+const req = httpMock.expectOne('/api/orders/7');
+expect(req.request.method).toBe('GET');
+req.flush({ id: 7, status: 'PAID' });   // subscriber runs now
+expect(received?.id).toBe(7);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/testing" rel="noopener">Testing HTTP requests — Angular (the provideHttpClientTesting setup and expect/flush flow)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/testing/provideHttpClientTesting" rel="noopener">provideHttpClientTesting — Angular API reference</a></li>
+      <li>[Official] <a href="https://angular.dev/api/common/http/testing/HttpTestingController" rel="noopener">HttpTestingController — Angular API reference (expectOne, match, expectNone, verify)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-http-testing-httptestingcontroller/" rel="noopener">Angular Mocking With HttpTestingController — Complete Guide — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lTDeTX3Zckw" rel="noopener">Mocking APIs in Angular testing using HttpTestingController — Leela Web Dev</a></li>
+    </ul>
+
+    <h3>Failure paths, verify(), and testing functional interceptors</h3>
+    <p>Half of a service's job is what it does when the call fails, and the mock backend can produce both kinds of failure. An HTTP error response comes from the same flush method with a status: <code>req.flush('Not found', { status: 404, statusText: 'Not Found' })</code>, which drives your retry, mapping and error-handling code down the error path. A transport-level failure — DNS, offline, connection reset — is <code>req.error(new ProgressEvent('network error'))</code>. Getting a candidate to name both, and to explain that they surface differently to an <code>HttpErrorResponse</code> handler, is a common senior-round probe.</p>
+    <p>Then the safety net: <code>afterEach(() =&gt; httpMock.verify())</code> throws if any request is still outstanding. Without it, a service that fires an unexpected extra call — a duplicate fetch, a stray analytics ping, a request from a leaked subscription — passes silently. Treat it as mandatory, exactly like closing a resource. Interceptors are tested through the same machinery rather than by calling them directly: register the functional interceptor with <code>provideHttpClient(withInterceptors([authInterceptor]))</code>, make a request through <code>HttpClient</code>, and assert on the request the controller captured — headers added, URL rewritten, retries performed. Test one interceptor per spec so a failure names its own culprit.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// error paths
+req.flush('Not found', { status: 404, statusText: 'Not Found' }); // HTTP error response
+req.error(new ProgressEvent('network error'));                    // transport failure
+
+// interceptor under test, wired through the real HttpClient pipeline
+TestBed.configureTestingModule({
+  providers: [
+    provideHttpClient(withInterceptors([authInterceptor])),
+    provideHttpClientTesting()
+  ]
+});
+httpClient.get('/api/me').subscribe();
+const req2 = httpMock.expectOne(r =&gt; r.headers.has('Authorization'));
+expect(req2.request.headers.get('Authorization')).toBe('Bearer test-token');
+
+afterEach(() =&gt; httpMock.verify()); // nothing unexpected was sent</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/interceptors" rel="noopener">Intercepting requests and responses — Angular (functional interceptors and withInterceptors)</a></li>
+      <li>[Article] <a href="https://dev.to/seanbh/how-to-test-a-functional-interceptor-in-angular-1bgp" rel="noopener">How to test a functional interceptor in Angular — Sean Bhattacharyya (DEV)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/writing-resilient-angular-component-tests-that-use-httpresource-with-httptestingcontroller" rel="noopener">Writing resilient Angular tests with HttpTestingController — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bvnQsO3kqc8" rel="noopener">Testing Angular HTTP services — mocking requests and verifying responses — Leela Web Dev</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V322hFii-H8" rel="noopener">Angular Unit Testing Crash Course — Monsterlessons Academy</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-component-testing.html">← Component Testing Deep</a>
+    <a href="index.html">All Frontend Testing modules</a>
+    <a href="06-directives-store-testing.html">Directives, Router and Store Testing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Service and HTTP testing is the part of the Angular testing round that Indian product and services companies probe hardest — it is where candidates either recite boilerplate or show judgement:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Do you always need TestBed to test an Angular service?</summary>
+      <div class="answer"><p>No. If the dependencies come in through the constructor, <code>new MyService(fakeDep)</code> is a complete, valid unit test — faster and simpler. TestBed is required when the class uses <code>inject()</code> internally, depends on injection tokens, or relies on the injector hierarchy. Preferring plain instantiation where possible is a signal of maturity, not a shortcut.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you obtain a service instance from TestBed?</summary>
+      <div class="answer"><p><code>TestBed.inject(MyService)</code> after <code>TestBed.configureTestingModule({ providers: [...] })</code>. It is the type-safe replacement for the deprecated <code>TestBed.get</code>. Everything the service depends on must appear in the providers array.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does provideHttpClientTesting() actually do?</summary>
+      <div class="answer"><p>It replaces <code>HttpClient</code>'s real backend (the XHR/fetch transport) with a mock backend that queues requests instead of sending them, and it provides <code>HttpTestingController</code> so the test can inspect those requests and supply responses. No server, no network, and the whole flow stays synchronous.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> HttpClientTestingModule or provideHttpClientTesting — which do you use now?</summary>
+      <div class="answer"><p><code>provideHttpClient()</code> plus <code>provideHttpClientTesting()</code> in the providers array. <code>HttpClientTestingModule</code> is the deprecated NgModule form of the same feature, kept for older codebases; the provider functions are what standalone, module-free Angular applications use and are required if you want functional interceptors registered via <code>withInterceptors</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you assert that a service issued a GET to a particular URL?</summary>
+      <div class="answer"><p>Call the service method and subscribe, then <code>const req = httpMock.expectOne('/api/orders/7')</code> and assert <code>req.request.method</code> equals 'GET'. <code>expectOne</code> fails if there is no match or more than one. Finish by calling <code>req.flush(...)</code> so the subscriber actually receives data.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> expectOne vs match vs expectNone?</summary>
+      <div class="answer"><p><code>expectOne</code> asserts exactly one outstanding matching request and returns it. <code>match</code> returns an array of all matching requests, for cases like parallel fetches where you need to flush several. <code>expectNone</code> asserts that no matching request was made — the way you prove a cache hit, a debounce, or a guard actually prevented a call. All three accept a URL string, a method/URL object, or a predicate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you simulate a server error, and how is that different from a network failure?</summary>
+      <div class="answer"><p>Server error: <code>req.flush(body, { status: 500, statusText: 'Server Error' })</code> — the backend responded, so the subscriber receives an <code>HttpErrorResponse</code> carrying that status and body. Network failure: <code>req.error(new ProgressEvent('network error'))</code> — no response at all, so the error has status 0 and an <code>error</code> property holding the event. Retry and offline logic behave differently on the two, which is exactly why interviewers ask.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why call httpMock.verify() in afterEach?</summary>
+      <div class="answer"><p>It throws if any request is still outstanding when the test ends, catching calls you never expected — a duplicate fetch, a leaked subscription firing again, an analytics ping. Without it those tests pass while the service quietly misbehaves. Treat it as the HTTP equivalent of asserting no resource was left open.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain stub, spy, fake and mock.</summary>
+      <div class="answer"><p>Stub — returns canned values, no assertions. Spy — a stub that also records calls so you can verify interactions (<code>vi.fn()</code>, or <code>jasmine.createSpyObj</code> in older suites). Fake — a real but simplified working implementation, such as an in-memory store. Mock — pre-programmed with expectations that it verifies itself. Fowler's shorthand: stubs enable state verification, mocks do behaviour verification.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> useValue vs useClass vs useFactory when overriding a provider in a test?</summary>
+      <div class="answer"><p><code>useValue</code> supplies a ready-made object — the usual choice for a literal fake or a stubbed configuration token. <code>useClass</code> supplies a substitute class that Angular instantiates, right when the double needs real behaviour or its own dependencies. <code>useFactory</code> builds the value lazily from a function, useful when construction depends on other injected values. <code>TestBed.overrideProvider</code> replaces an entry in an already-configured module before first injection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test a functional HTTP interceptor?</summary>
+      <div class="answer"><p>Register it in the testing module with <code>provideHttpClient(withInterceptors([myInterceptor]))</code> alongside <code>provideHttpClientTesting()</code>, then make a normal <code>HttpClient</code> call and assert on the request the controller captured — added headers, rewritten URL, retry count — or on the response the interceptor transformed. Test one interceptor per spec so a failure names its own cause; calling the interceptor function directly is possible but skips the pipeline you actually ship.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service uses inject() in a field initialiser and the test throws about running outside an injection context. Why?</summary>
+      <div class="answer"><p><code>inject()</code> is only legal while Angular is constructing the class inside an injection context. Calling <code>new MyService()</code> yourself has no such context, so it fails. Fix by obtaining the instance from <code>TestBed.inject(MyService)</code>, or by wrapping the construction in <code>TestBed.runInInjectionContext(() =&gt; new MyService())</code>. This is the most common reason a previously TestBed-free spec suddenly needs TestBed after a refactor to <code>inject()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A service spec passes alone but fails inside the full suite. How do you diagnose it?</summary>
+      <div class="answer"><p>Shared mutable state across tests. Usual suspects: a root-provided singleton carrying data between specs, a spy configured in one file and not reset, a subscription never torn down, module-level test data mutated in place, or a missing <code>httpMock.verify()</code> letting a stray request leak into the next test. Practical steps: run the suite in a fixed order to reproduce, build fixtures inside <code>beforeEach</code> rather than at module scope, enable spy restoration between tests, and make sure every spec configures its own TestBed rather than relying on one built elsewhere.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you not use HttpTestingController and reach for MSW instead?</summary>
+      <div class="answer"><p><code>HttpTestingController</code> intercepts inside Angular's <code>HttpClient</code>, so it is ideal for unit and component tests but cannot see traffic from <code>fetch</code>, a third-party SDK, or a real browser session. Mock Service Worker intercepts at the network layer, so the same handlers serve unit tests, component tests, end-to-end runs and local development from one definition of the API. Rule of thumb: controller for focused service and component specs, MSW when you want one shared contract across the whole suite and the dev server.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Frontend Testing track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>fet.svc.unit</li>
+      <li>fet.svc.http</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Frontend Testing track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
