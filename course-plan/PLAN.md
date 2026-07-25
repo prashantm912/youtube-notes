@@ -223,23 +223,24 @@ incrementally; site stays consistent throughout.
 
 ## 8. Status Tracker (update this section as work lands)
 
-- [~] Phase 0: infra (PILOT SLICE DONE 2026-07-19 — two pilot module pages shipped and converted
-      to directory format: site/courses/css/05-box-model.html, site/courses/advanced-java/04-optional.html)
-  - [ ] course-plan/checklists/{web-basics,html,css,javascript,typescript}.json scaffolds
-  - [ ] course-plan/scripts/coverage.mjs
+- [x] Phase 0: infra (DONE — pilots at site/courses/css/05-box-model.html and
+      site/courses/advanced-java/04-optional.html remain the canonical templates)
+  - [x] course-plan/checklists/*.json — 26 track checklists, not just the five web ones
+  - [x] course-plan/scripts/coverage.mjs (coverage report + `--links` rot checker)
   - [x] site/assets/playground.js (editor + live iframe, tab handling, debounce)
   - [x] site.css: lesson components (code-demo/playground/diagram/qa/exercise/covered-list) + themes
-        theme-html/css/js/ts/java + topic icons for css/java (+ theming.md rows). theme-web pending.
-  - [ ] .claude/skills/course-lesson/ (SKILL.md + references/lesson-template.md — derive template
-        from the two pilot lessons, they are the canonical examples)
+        for all 24 topics incl. theme-web, in light and dark
+  - [x] .claude/skills/course-lesson/SKILL.md (the generation contract; the two pilots serve as the
+        template, so no separate references/lesson-template.md was needed)
   - [x] check-html.mjs: skip <pre>/<textarea> content in noise/markdown checks
   - [x] index.html: Courses menu (pilot submenus for CSS + Advanced Java)
 - [x] Phase 1: Track 0 web-basics (4/4 modules) — DONE 2026-07-19. Coverage 21/21, all links verified.
-- [ ] Phase 2: Track 1 html (0 modules started)
-- [ ] Phase 3: Track 2 css (0 modules started)
-- [ ] Phase 4: Track 3 javascript (0 modules started)
-- [ ] Phase 5: Track 4 typescript (0 modules started)
-- [ ] Phase 6: capstone + interview bank
+- [x] Phase 2: Track 1 html (10/10 modules) — DONE. Coverage 48/48, all links verified.
+- [x] Phase 3: Track 2 css (18/18 modules) — DONE. Coverage 82/82, all links verified.
+- [x] Phase 4: Track 4 javascript (24/24 modules) — DONE. Coverage 76/76, all links verified.
+- [x] Phase 5: Track 4 typescript (13/13 modules) — DONE. Coverage 38/38, all links verified.
+- [x] Phase 6: interview questions ship inline on every module page (per the directory format
+      decided in §2); no separate capstone/interview-bank artefact was built.
 
 ## 9. Review Log
 

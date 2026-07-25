@@ -372,12 +372,12 @@ Scale: ~255 module pages across 21 tracks (directory format, per §2). Ship per-
 
 ## 6. Status Tracker
 
-- [ ] Shared Phase 0 infra (see PLAN.md) + this plan's themes/checklists scaffolds
-- [ ] E1: J1 (0/22), J2 (0/14)
-- [ ] E2: D1 (0/14)
-- [ ] E3: S1 (0/15), S2 (0/12), H1 (0/14), S3 (0/10)
-- [ ] E3b: J3 Jakarta EE (0/14)
-- [ ] E4: T2 (0/10)
+- [x] Shared Phase 0 infra (see PLAN.md) + this plan's themes/checklists scaffolds
+- [x] E1: J1 (22/22), J2 (14/14)
+- [x] E2: D1 (14/14)
+- [x] E3: S1 (15/15), S2 (12/12), H1 (14/14), S3 (10/10)
+- [x] E3b: J3 Jakarta EE (14/14)
+- [x] E4: T2 (10/10)
 - [x] E5: A1 (10/10), A2 (14/14), A3 (8/8), T1 (8/8)
 - [x] E6: M1 (12/12), M2 (10/10)
 - [x] E7: O1 (14/14), C1 (12/12), O2 (8/8)
