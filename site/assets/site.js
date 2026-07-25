@@ -71,31 +71,88 @@
     main.insertBefore(toc, main.firstElementChild);
   }
 
-  // Library search filter (index page only)
+  // Realm switch (index page): Health and Technology are separate libraries,
+  // one visible at a time. The choice survives a reload and is linkable via #hash.
+  var realmBtns = Array.prototype.slice.call(document.querySelectorAll(".realm-btn"));
+  var activeRealm = null;
+  var applyFilter = function () {};
+  if (realmBtns.length) {
+    var realms = {};
+    Array.prototype.slice.call(document.querySelectorAll(".realm")).forEach(function (r) {
+      realms[r.id.replace(/^realm-/, "")] = r;
+    });
+
+    function showRealm(name, push) {
+      if (!realms[name]) return;
+      activeRealm = realms[name];
+      Object.keys(realms).forEach(function (k) { realms[k].hidden = k !== name; });
+      realmBtns.forEach(function (b) {
+        var on = b.getAttribute("data-realm") === name;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      try { localStorage.setItem("kl-realm", name); } catch (e) { /* private mode */ }
+      if (push && history.replaceState) history.replaceState(null, "", "#" + name);
+      applyFilter(); // re-scope an active search to the realm now on screen
+    }
+
+    realmBtns.forEach(function (b) {
+      b.addEventListener("click", function () { showRealm(b.getAttribute("data-realm"), true); });
+    });
+
+    // A deep link to a section inside a realm must open that realm — on load and
+    // on any later hash change (in-page anchors do not reload the document).
+    function realmFromHash() {
+      var hash = location.hash.slice(1);
+      if (!hash) return null;
+      if (realms[hash]) return hash;
+      var target = document.getElementById(hash);
+      var owning = target && target.closest(".realm");
+      return owning ? owning.id.replace(/^realm-/, "") : null;
+    }
+
+    function syncToHash(scroll) {
+      var name = realmFromHash();
+      if (!name) return false;
+      showRealm(name, false);
+      var target = document.getElementById(location.hash.slice(1));
+      if (scroll && target && target.scrollIntoView) target.scrollIntoView();
+      return true;
+    }
+
+    if (!syncToHash(true)) {
+      var stored = null;
+      try { stored = localStorage.getItem("kl-realm"); } catch (e) { /* ignore */ }
+      showRealm(stored && realms[stored] ? stored : "health", false);
+    }
+    window.addEventListener("hashchange", function () { syncToHash(true); });
+  }
+
+  // Library search filter (index page only). Scoped to the active realm so a
+  // search never silently returns hits from the library you are not looking at.
   var filter = document.getElementById("library-filter");
   if (filter) {
-    var cards = Array.prototype.slice.call(document.querySelectorAll(".card"));
-    var submenus = Array.prototype.slice.call(document.querySelectorAll(".library-nav .submenu"));
-    var menus = Array.prototype.slice.call(document.querySelectorAll(".library-nav > .menu"));
-    var chips = document.querySelector(".topic-chips");
     var noResults = document.querySelector(".no-results");
-    filter.addEventListener("input", function () {
+    applyFilter = function () {
+      var scope = activeRealm || document;
       var q = filter.value.trim().toLowerCase();
       var anyShown = false;
-      cards.forEach(function (c) {
+      Array.prototype.slice.call(scope.querySelectorAll(".card")).forEach(function (c) {
         var hit = !q || c.textContent.toLowerCase().indexOf(q) !== -1;
         c.hidden = !hit;
         if (hit) anyShown = true;
       });
-      submenus.forEach(function (s) {
+      Array.prototype.slice.call(scope.querySelectorAll(".library-nav .submenu")).forEach(function (s) {
         s.hidden = !s.querySelector(".card:not([hidden])");
       });
-      menus.forEach(function (m) {
+      Array.prototype.slice.call(scope.querySelectorAll(".library-nav .menu")).forEach(function (m) {
         m.hidden = !m.querySelector(".submenu:not([hidden])");
       });
+      var chips = scope.querySelector(".topic-chips");
       if (chips) chips.hidden = !!q;
       if (noResults) noResults.hidden = anyShown;
-    });
+    };
+    filter.addEventListener("input", applyFilter);
   }
 
   // Interview Q&A: question count in heading + expand/collapse-all control
