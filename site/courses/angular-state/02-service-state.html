@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular Shared Services as State module: the store-lite service with private writable state exposed read-only via signals or BehaviorSubject, immutability discipline, derived state with computed, and the honest verdict on when a plain service is enough — with verified official and community resources plus interview questions.">
+  <title>Shared Services as State — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Shared Services as State</h1>
+  <p class="standfirst">Before you reach for a state-management library, Angular already gives you one: a root-provided service that owns some private state and hands out a read-only view of it. Done with discipline, this "store-lite" pattern carries most applications the whole way.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Angular State Management</a> → Shared Services as State</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>A shared service becomes a store the moment you stop letting callers write to it directly. This module covers the shape of that service — private writable state, public read-only projection, and a small set of methods that are the only way to change anything — in both flavours: the classic RxJS <code>BehaviorSubject</code> plus <code>asObservable()</code>, and the modern Angular v20 <code>signal()</code> plus <code>asReadonly()</code> and <code>computed()</code>. It then covers the discipline that makes it work: replacing state objects rather than mutating them, deriving instead of duplicating, and recognising the point where a plain service genuinely stops being enough.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The store-lite service: private writable state, public read-only view</h3>
+    <p>An Angular service marked <code>@Injectable({ providedIn: 'root' })</code> is a single instance shared by everyone who injects it — that is already the "single source of truth" that state libraries advertise. The store-lite pattern adds one rule on top: the writable handle stays <code>private</code>, and the public surface is read-only. With signals that means a private <code>signal()</code> exposed through <code>.asReadonly()</code>; with RxJS it means a private <code>BehaviorSubject</code> exposed through <code>.asObservable()</code>. <code>BehaviorSubject</code> specifically (not a plain <code>Subject</code>) because state must have a current value that late subscribers receive immediately — the same guarantee a signal gives for free.</p>
+    <p>Why it matters: the read-only projection is what turns a shared bag of variables into a store. Components can read the state and react to it, but the only way to change it is to call a named method on the service — <code>addToCart()</code>, <code>clearFilters()</code> — which keeps every mutation in one auditable file and makes the state machine testable without a single component. This encapsulation, not the library you pick, is the actual idea behind Redux-style architecture, and it is the answer interviewers are listening for when they ask why you would use a service instead of NgRx. Signals are the default for new code; the <code>BehaviorSubject</code> form remains essential for interop with existing codebases and for anything genuinely stream-shaped, where <code>toSignal</code> and <code>toObservable</code> let the two worlds meet.</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Injectable({ providedIn: 'root' })
+export class CartStore {
+  // modern (v20): writable stays private, consumers get a read-only signal
+  private readonly _items = signal&lt;Item[]&gt;([]);
+  readonly items = this._items.asReadonly();
+
+  // classic RxJS equivalent, still everywhere in existing code
+  private readonly itemsSubject = new BehaviorSubject&lt;Item[]&gt;([]);
+  readonly items$ = this.itemsSubject.asObservable();
+
+  add(item: Item): void {
+    this._items.update(list =&gt; [...list, item]);   // the ONLY way in
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/signals" rel="noopener">Signals — angular.dev (signal, set/update, asReadonly, computed: the whole primitive)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/di/creating-and-using-services" rel="noopener">Creating and using services — angular.dev (providedIn: 'root' and the app-wide singleton)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/index/class/BehaviorSubject" rel="noopener">BehaviorSubject — rxjs.dev API reference (current value, replay to new subscribers, asObservable)</a></li>
+      <li>[Article] <a href="https://modernangular.com/articles/service-with-a-signal-in-angular" rel="noopener">Service with a Subject vs Service with a Signal in Angular — Modern Angular (Joshua Morony)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JnwjU06yoEE" rel="noopener">My go-to way to manage state in Angular applications — Joshua Morony</a></li>
+    </ul>
+
+    <h3>Immutability, derived state with computed, and when a service is enough</h3>
+    <p>Angular's reactivity is reference-based. A signal notifies its dependents when <code>set()</code> or <code>update()</code> hands it a value that is not the same reference as before; <code>OnPush</code> components re-render when an input reference changes; memoised derivations recompute when an input reference changes. Push a row onto the array inside a signal and every one of those checks sees the identical reference and concludes nothing happened — the data changed, the screen did not. The fix is not a deep-equality option, it is a habit: never mutate, always replace. Spread the object or array, change the one field you meant to change, and hand back a fresh value (<code>update(s =&gt; ({ ...s, loading: false }))</code>). The same rule is why NgRx freezes state in development mode — it is enforcing a discipline you should already have.</p>
+    <p>Immutability also unlocks the second half of the pattern: <em>derived</em> state. Totals, filtered lists, "is the form valid" flags and view models should never be stored as separate fields that some method has to remember to keep in sync — that is the classic source of stale-UI bugs. Wrap them in <code>computed()</code>, which recalculates lazily, caches the result, and only tells the template to update when the value actually changed. Store the minimum irreducible state; compute everything else. In the RxJS flavour the equivalents are <code>map</code> and <code>combineLatest</code> over the exposed observable, with <code>shareReplay</code> if the work is expensive.</p>
+    <p>And the honest verdict: for most applications this is the finish line, not a stepping stone. A handful of feature-scoped store-lite services — one for the cart, one for the current user, one for a filter panel — gives you a single source of truth, testable state transitions, read-only consumers and derived values, with no actions, no reducers, no effects and no extra dependency. You outgrow it when several unrelated features must coordinate on the same state, when time-travel debugging or a strict audit trail of every change earns its keep, or when the team is large enough that an enforced convention beats a graceful one. Until one of those is genuinely true, adding NgRx buys ceremony rather than clarity — and being able to argue that trade-off out loud is a senior-level answer.</p>
+    <pre class="code-block" data-label="TypeScript"><code>private readonly _state = signal({ items: [] as Item[], coupon: null as string | null });
+readonly state = this._state.asReadonly();
+
+// derived, never stored: recomputes only when items actually change
+readonly total = computed(() =&gt;
+  this._state().items.reduce((sum, i) =&gt; sum + i.price * i.qty, 0));
+
+setQty(id: string, qty: number): void {
+  this._state.update(s =&gt; ({                       // new state object
+    ...s,
+    items: s.items.map(i =&gt; (i.id === id ? { ...i, qty } : i)),  // new array, new row
+  }));
+  // s.items[0].qty = qty   ← would change the data and update nothing on screen
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/tutorials/signals/2-deriving-state-with-computed-signals" rel="noopener">Deriving state with computed signals — angular.dev interactive tutorial</a></li>
+      <li>[Official] <a href="https://angular.dev/best-practices/skipping-subtrees" rel="noopener">Skipping component subtrees — angular.dev (how OnPush decides to re-render, and what breaks it)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/onpush-change-detection-how-it-works/" rel="noopener">Angular OnPush Change Detection: Avoid Common Pitfalls — Angular University (the immutability connection, in depth)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/angular-signals-your-architecture-5-options/" rel="noopener">Angular Signals and Your Architecture: 5 Options — ANGULARarchitects (where plain services sit among the alternatives)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QOiWLGV9Yrg" rel="noopener">Angular Signals enforce Immutability — Rainer Hahnekamp</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-communication-matrix.html">← Component Communication Matrix</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="03-ngrx-foundations.html">NgRx Foundations →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Service-based state is the most-asked state question in Indian Angular interviews — service companies screen on <code>BehaviorSubject</code>, product companies push on immutability and on why you did <em>not</em> use NgRx:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a shared service used as a store, and why <code>providedIn: 'root'</code>?</summary>
+      <div class="answer"><p>A service that holds application state and exposes methods to change it. <code>providedIn: 'root'</code> registers it in the root injector, so every component that injects it receives the <em>same instance</em> — one source of truth for the whole app. It is also tree-shakable: if nothing injects the service, it never ships in the bundle.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why expose <code>asReadonly()</code> or <code>asObservable()</code> instead of the writable signal or the Subject itself?</summary>
+      <div class="answer"><p>To stop consumers from writing. If a component can call <code>.set()</code> or <code>.next()</code> on your state, mutations scatter across the codebase and become impossible to trace. Exposing a read-only projection forces every change through a named service method, so the state transitions live in one file, are unit-testable on their own, and show up in one place during code review.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> <code>Subject</code> vs <code>BehaviorSubject</code> — which one for shared state, and why?</summary>
+      <div class="answer"><p><code>BehaviorSubject</code>. It requires an initial value and replays the current value to every new subscriber, so a component created later still gets the present state. A plain <code>Subject</code> emits only to subscribers already listening, so a late component sees nothing until the next change — the classic "my data is empty on first load" bug. <code>Subject</code> is for events, <code>BehaviorSubject</code> is for state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does a component consume signal-based state from such a service?</summary>
+      <div class="answer"><p>Inject the service and call the signal in the template: <code>{{ cart.total() }}</code>, or <code>&#64;for (item of cart.items(); track item.id)</code>. No <code>async</code> pipe, no subscription, no cleanup — reading a signal inside a template registers the dependency automatically and Angular marks only the affected views dirty. With the observable flavour you would use the <code>async</code> pipe instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> <code>set()</code> vs <code>update()</code> on a signal?</summary>
+      <div class="answer"><p><code>set(value)</code> replaces the state outright, when the new value does not depend on the old one. <code>update(fn)</code> derives the new value from the current one — <code>update(n =&gt; n + 1)</code>, or a spread over the previous state object. Both must be given a <em>new</em> reference for objects and arrays; neither is a place to mutate what you were handed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must you replace state objects instead of mutating them?</summary>
+      <div class="answer"><p>Angular compares by reference. <code>items().push(x)</code> keeps the same array reference, so the signal does not notify, <code>OnPush</code> parents do not re-check, and <code>computed()</code> derivations do not recompute — the model changed and the UI silently did not. Replacing (<code>[...items, x]</code>, <code>{ ...state, flag }</code>) produces a new reference, which is the signal every layer of the framework is watching for. It also makes state changes debuggable, since the previous value still exists untouched.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why derive with <code>computed()</code> instead of storing the derived value in another field?</summary>
+      <div class="answer"><p>Two stored fields can disagree; a derived one cannot. <code>computed()</code> recalculates lazily from its dependencies, memoises the result, and propagates only when the value actually changes — so a cart total can never drift out of sync with the items. Storing <code>total</code> alongside <code>items</code> means every mutation path has to remember to update both, which is exactly the bug class the pattern exists to remove. Rule: store the minimum irreducible state, compute the rest.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You have a legacy <code>BehaviorSubject</code> service and a new signal-based component. How do you bridge them?</summary>
+      <div class="answer"><p>Use the RxJS interop: <code>toSignal(this.svc.items$, { initialValue: [] })</code> converts an observable into a signal (and handles unsubscription when the injection context is destroyed), while <code>toObservable(someSignal)</code> goes the other way for code that still needs a stream. This lets you migrate a codebase service by service rather than in one big rewrite — a very common real-project question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Do you need to unsubscribe or clean up in a root-provided state service?</summary>
+      <div class="answer"><p>The exposed state itself does not leak — but <em>consumers</em> that manually subscribe to <code>items$</code> do, because a root service lives for the whole app and holds the subscription forever. Use the <code>async</code> pipe, <code>takeUntilDestroyed()</code>, or signals, all of which unsubscribe automatically. Signals sidestep the issue entirely: there is nothing to unsubscribe from. If the service itself subscribes to something long-lived, tie that to <code>DestroyRef</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does <code>OnPush</code> change detection interact with a state service?</summary>
+      <div class="answer"><p>An <code>OnPush</code> component re-renders when an input reference changes, when an event fires inside it, when the <code>async</code> pipe emits, or when a signal it reads changes. A service that always replaces state satisfies all of those cleanly, which is why immutability plus <code>OnPush</code> is a safe combination — and why a service that mutates in place produces components that update in some places (default change detection) and not others (<code>OnPush</code>), the most confusing bug shape in this area.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> <code>asReadonly()</code> prevents <code>set()</code> — does it make the state immutable?</summary>
+      <div class="answer"><p>No. It is a compile-time restriction on the signal handle only; the value it returns is the same object reference the service holds, so <code>store.items()[0].qty = 5</code> compiles and mutates the store's own data from the outside, silently and without notifying anyone. Defences: type the state with <code>readonly</code> / <code>Readonly&lt;T&gt;</code> so TypeScript rejects the write, return copies at the boundary when the data is genuinely at risk, or deep-freeze state in development builds the way NgRx's runtime checks do.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When does a store-lite service stop being enough, and what do you move to?</summary>
+      <div class="answer"><p>When many unrelated features must coordinate on the same slice and the update rules no longer fit in one readable file; when you need an explicit, replayable log of every change (time-travel debugging, audit); or when team size makes an enforced convention worth more than a graceful one. The intermediate step is usually NgRx SignalStore — the same encapsulation with <code>withState</code>/<code>withComputed</code>/<code>withMethods</code> plus composable features — and full NgRx Store with actions, reducers and effects only when the event log itself is the requirement. Most applications never cross that line, and saying so confidently is the point of the question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you <em>not</em> use <code>providedIn: 'root'</code> for a state service?</summary>
+      <div class="answer"><p>When the state should die with its feature. Providing the service in a component's <code>providers</code> (or on a route via <code>providers</code> on the route config) gives each instance its own state that is destroyed with the component or the route — right for a wizard, an editable detail panel, or a reusable widget where two instances must not share a cart. It also matters under SSR: a root singleton holding user-specific state on the server can bleed between requests, so per-request or per-route scoping is the safe default for anything user-specific.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.svc.storelite</li>
+      <li>ngs.svc.immutable</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

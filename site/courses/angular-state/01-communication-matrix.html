@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular Component Communication Matrix module: the full range of ways two pieces of an Angular app exchange data — input(), output(), model(), viewChild and contentChild signal queries, template reference variables, shared injectable services and router state — plus a decision rule for picking the cheapest mechanism, with verified resources and interview questions.">
+  <title>Component Communication Matrix — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Component Communication Matrix</h1>
+  <p class="standfirst">Before you reach for a store, answer a cheaper question: which two things actually need to talk, and how far apart are they? This opening module lays out every mechanism Angular gives you for moving data between components — and the rule for choosing the smallest one that works.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular State Management → Component Communication Matrix</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>State management in Angular is mostly a routing problem for <em>data</em>: something over here needs a value that lives over there. The whole track exists to answer that, and this module maps the options end to end — from the tightest coupling (a parent binding an <code>input()</code> on its own child) through signal queries and template reference variables, out to loosely coupled options like a shared injectable service or the URL itself carrying the state.</p>
+    <p>Everything here uses the current Angular (v20) signal-based APIs: <code>input()</code>, <code>output()</code>, <code>model()</code>, <code>viewChild()</code>, <code>contentChild()</code>, standalone components and <code>inject()</code>. The older decorator forms — <code>@Input</code>, <code>@Output</code>, <code>@ViewChild</code> — still compile and still come up in interviews, so they get named once here and then set aside. Depth on each mechanism lives in the linked official documentation; what this page adds is the comparison and the decision rule at the end.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Local wiring: inputs, outputs, signal queries and template references</h3>
+    <p>The cheapest communication in Angular is the kind the template already expresses. A parent passes data down by binding to a child's <code>input()</code>, which returns a read-only <code>InputSignal</code> — the child reads it like any other signal, so <code>computed()</code> and <code>effect()</code> react to changes without an <code>ngOnChanges</code> hook. Data travels back up through <code>output()</code>, which returns an <code>OutputEmitterRef</code> the child calls with a payload; the parent listens with ordinary event binding. When a value is genuinely owned jointly — a form control, a toggle, an expanded/collapsed flag — <code>model()</code> gives you a writable signal that supports the banana-in-a-box <code>[(value)]</code> syntax without needing a separate <code>valueChange</code> output. Inputs can be marked <code>input.required()</code> so the compiler enforces them, and can carry a <code>transform</code> function to normalise incoming values.</p>
+    <p>Sometimes a parent needs the child <em>instance</em> rather than a value: to call <code>focus()</code> on an element, read a child component's public API, or measure something in the DOM. That is what the signal queries <code>viewChild()</code>, <code>viewChildren()</code>, <code>contentChild()</code> and <code>contentChildren()</code> are for. The distinction that interviewers press on: <em>view</em> queries look inside the component's own template, <em>content</em> queries look at nodes projected into it through <code>&lt;ng-content&gt;</code> by a caller. Both target either a component/directive type or a template reference variable — the <code>#name</code> label you attach in the template, which is also directly usable inside that same template with no TypeScript at all. Signal queries return signals rather than being filled in during a lifecycle hook, which removes the classic "undefined in <code>ngOnInit</code>" trap that the <code>@ViewChild</code> decorator had.</p>
+    <p>Why it matters: this row of the matrix costs nothing and hides nothing. Data flows along the component tree, the template documents the contract, change detection is trivially predictable, and the child stays reusable because it depends on bindings rather than on a service. Most "we need state management" complaints turn out to be a parent-child relationship that was never expressed as a binding.</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Component({
+  selector: 'app-rating',
+  template: `
+    &lt;button #resetBtn (click)="score.set(0)"&gt;Reset&lt;/button&gt;
+    &lt;span&gt;{{ label() }}: {{ score() }}&lt;/span&gt;
+  `,
+})
+export class RatingComponent {
+  label = input.required&lt;string&gt;();          // parent -&gt; child, read-only signal
+  score = model(0);                          // two-way: [(score)] in the parent
+  cleared = output&lt;void&gt;();                  // child -&gt; parent, an event
+
+  // view query by template reference variable, returned as a signal
+  private resetBtn = viewChild&lt;ElementRef&lt;HTMLButtonElement&gt;&gt;('resetBtn');
+
+  // content query: a directive projected in by whoever uses this component
+  private badge = contentChild(BadgeDirective);
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/components/inputs" rel="noopener">Accepting data with input properties — angular.dev (input(), input.required, transforms, and the @Input comparison)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/components/outputs" rel="noopener">Custom events with outputs — angular.dev (output() and the OutputEmitterRef contract)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/components/queries" rel="noopener">Referencing component children with queries — angular.dev (viewChild/viewChildren vs contentChild/contentChildren as signals)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/templates/variables" rel="noopener">Variables in templates — angular.dev (template reference variables and @let)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gZQ5nVFWYSI" rel="noopener">Angular @Input vs Signal Input — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Going wider: shared services, router state, and choosing a mechanism</h3>
+    <p>Bindings stop being the answer the moment the two participants are not on the same branch of the tree. Two sibling routes, a header and a deeply nested table, a notification toast triggered from anywhere — passing a value through six intermediate components just to relay it is the "prop drilling" smell, and it couples every component in the chain to data it does not use. The standard fix is a shared injectable: a service marked <code>@Injectable({ providedIn: 'root' })</code>, pulled in with <code>inject()</code>, holding the value in a private <code>signal</code> and exposing it as a read-only <code>computed</code> or <code>.asReadonly()</code> plus explicit mutation methods. Provider scope is the design lever here — <code>providedIn: 'root'</code> makes one instance for the app, while providing the service on a component or a route makes a fresh instance per subtree, which is how you get "shared, but only within this feature". That pattern is the subject of module 02, and it is also the honest starting point for most applications.</p>
+    <p>The other wide channel is the URL. Path parameters, query parameters and route <code>data</code> are application state that survives a refresh, is shareable as a link, and participates in browser history for free — which makes them the right home for identifiers, filters, sorting, pagination and tab selection. Read them from <code>ActivatedRoute</code> (<code>paramMap</code> / <code>queryParamMap</code> for reactive reads, <code>snapshot</code> for one-shot ones) or, more simply, enable <code>withComponentInputBinding()</code> on <code>provideRouter</code> and let the router bind matching keys straight into your components' <code>input()</code>s. Beyond those, the tree also offers a couple of narrower channels worth knowing by name: content projection with <code>&lt;ng-content&gt;</code> lets a parent hand markup rather than data to a child, and router <code>resolve</code> functions deliver data to a route before it activates.</p>
+    <p>So, the decision rule — take the first line that fits, and stop:</p>
+    <pre class="code-block" data-label="Decision rule"><code>Parent renders the child?             -&gt; input() / output() / model()
+Parent needs the child instance?      -&gt; viewChild() / contentChild()
+Only used inside one template?        -&gt; template reference variable (#ref) or @let
+Should survive refresh or be linkable? -&gt; router params / query params
+Unrelated components, same feature?   -&gt; service provided on the route or component
+Unrelated components, whole app?      -&gt; service provided in root (module 02)
+Many writers, complex flows, audit trail?
+                                      -&gt; a real store (modules 03-07)</code></pre>
+    <p>Why it matters: senior interviews rarely ask "how does <code>@Input</code> work" — they ask you to justify a choice. Reaching for a global store when a binding would do adds indirection, boilerplate and a second source of truth; refusing a store when eight unrelated features write the same data produces a tangle of services nobody can trace. Being able to walk this matrix out loud, from cheapest to most powerful, is the answer that reads as experience.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/di/creating-and-using-services" rel="noopener">Creating and using services — angular.dev (providedIn scope and inject(), the basis of service-mediated communication)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/routing/read-route-state" rel="noopener">Read route state — angular.dev (ActivatedRoute, path params, query params, route data)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/router/withComponentInputBinding" rel="noopener">withComponentInputBinding — angular.dev API reference (bind route params straight to component inputs)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/angular-signals-your-architecture-5-options/" rel="noopener">Angular Signals and Your Architecture: 5 Options — ANGULARarchitects (where state should live, from component-local to a full store)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fTejxZ6W-90" rel="noopener">How Angular components should communicate in 2025 — Brian Treese</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="02-service-state.html">Shared Services as State →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Component communication is the warm-up round in almost every Indian Angular interview — service companies screen on the mechanics, product companies push on the trade-offs. These are the questions this module powers:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the ways two components can share data in Angular?</summary>
+      <div class="answer"><p>Parent to child with <code>input()</code>; child to parent with <code>output()</code>; both directions with <code>model()</code>; parent reaching into the child instance with <code>viewChild()</code> / <code>contentChild()</code>; template reference variables within a single template; a shared injectable service for unrelated components; and the URL itself through route params, query params and route data. Content projection with <code>&lt;ng-content&gt;</code> passes markup rather than values. Name them roughly in that order — cheapest coupling first — and you have answered the follow-up before it is asked.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does input() differ from the @Input decorator?</summary>
+      <div class="answer"><p><code>input()</code> is a signal-based function called in the class body; it returns a read-only <code>InputSignal</code> that you call like <code>this.title()</code>. Because it is a signal, <code>computed()</code> and <code>effect()</code> track it automatically, so you rarely need <code>ngOnChanges</code>. It also gives you <code>input.required&lt;T&gt;()</code>, which the compiler enforces at the binding site. <code>@Input</code> is the legacy decorator that sets a plain property; it still works and is not deprecated, but new code should use <code>input()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you send data from a child component back to its parent?</summary>
+      <div class="answer"><p>Declare <code>saved = output&lt;Order&gt;()</code> in the child and call <code>this.saved.emit(order)</code>. The parent listens with normal event binding: <code>&lt;app-form (saved)="onSaved($event)"&gt;</code>. <code>output()</code> replaces <code>@Output</code> with <code>EventEmitter</code>; it is not an observable, has no <code>subscribe</code> in templates, and is cleaned up automatically when the component is destroyed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a template reference variable and when would you use one?</summary>
+      <div class="answer"><p>A <code>#name</code> label on an element, component or directive that makes it addressable elsewhere in the <em>same</em> template — <code>&lt;input #email&gt;</code> then <code>{{ email.value }}</code> or <code>email.focus()</code> from a button click. It is the zero-cost option when the interaction never leaves one template. If the class needs the same reference, query it with <code>viewChild('email')</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does model() do, and when is two-way binding appropriate?</summary>
+      <div class="answer"><p><code>model()</code> declares a writable signal that is also an input and an implicit output, enabling <code>[(value)]</code> on the parent. Use it when the value is genuinely co-owned — a custom form control, a rating widget, an expanded flag. Prefer separate <code>input()</code> and <code>output()</code> when the child should only propose a change and the parent decides whether to accept it, because that keeps a single writer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> viewChild versus contentChild — what is the actual difference?</summary>
+      <div class="answer"><p>A view query searches the component's own template — nodes the component itself declares. A content query searches nodes that were projected into the component from outside through <code>&lt;ng-content&gt;</code>. So a tab container queries its tab children with <code>contentChildren()</code> because the consumer wrote them, while it queries its own internal indicator element with <code>viewChild()</code>. Content is resolved earlier than view, which is why the decorator era had <code>ngAfterContentInit</code> and <code>ngAfterViewInit</code> as separate hooks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why are signal queries preferred over the @ViewChild decorator?</summary>
+      <div class="answer"><p>Because they remove the timing trap. <code>@ViewChild</code> results were populated during lifecycle hooks, so reading them in <code>ngOnInit</code> gave <code>undefined</code> and code drifted into <code>ngAfterViewInit</code> plus <code>static: true</code> juggling. <code>viewChild()</code> returns a signal you read whenever you want — inside a <code>computed()</code> or <code>effect()</code> it simply re-evaluates when the result appears or changes. It is also better typed: <code>viewChild.required()</code> removes the <code>undefined</code> from the type.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is prop drilling and how do you fix it in Angular?</summary>
+      <div class="answer"><p>Passing a value down through components that do not use it, purely to reach a descendant. It couples every intermediate component to a contract it does not care about, and every change ripples through the chain. Fixes: hoist the value into a service and inject it where it is needed; provide that service at the feature route so its lifetime matches the feature; or restructure with content projection so the owner of the data renders the consumer directly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When should state live in the URL rather than in a service?</summary>
+      <div class="answer"><p>Whenever the user would reasonably expect to bookmark it, share it, refresh into it, or reach it with the back button — the selected record id, filters, sort order, page number, active tab. Route params identify the resource; query params refine the view. The trade-off is that URL state is stringly typed and public, so secrets, large objects and transient UI flags do not belong there.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does withComponentInputBinding change how you read route parameters?</summary>
+      <div class="answer"><p>Add it to <code>provideRouter(routes, withComponentInputBinding())</code> and the router binds path params, query params, matrix params and resolved <code>data</code> to component <code>input()</code>s whose names match the keys. The component then needs no <code>ActivatedRoute</code> injection and no subscription — the input is just a signal that updates on navigation. Fall back to <code>ActivatedRoute</code> when you need the parent route's params, non-matching key names, or the full URL tree.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Two sibling components need the same data. Walk me through your options.</summary>
+      <div class="answer"><p>First ask whether their common parent can own it and pass it down as inputs with outputs coming back — often the correct and cheapest answer. If the parent is far away or the value is refresh-worthy, put it in the URL. If neither fits, create a service and provide it at the narrowest scope that contains both siblings — the shared route or the common parent component — rather than in root, so the state is created and destroyed with the feature. A global store is the last option, not the first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you decide between a plain service and a store like NgRx?</summary>
+      <div class="answer"><p>Count writers and cross-cutting reads. One or two writers with simple transitions: a signal-holding service is enough and far less code. Many independent writers, multi-step async flows, optimistic updates, undo, or a genuine need to replay and audit what changed: a store earns its overhead, and the action log plus DevTools become the debugging tool. Also weigh team size and turnover — the store's ceremony buys uniformity across a large team. Deciding by application size alone is the answer that reads as junior.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A shared service exposes a writable signal directly. Why is that a problem, and what is the fix?</summary>
+      <div class="answer"><p>Any injector of the service can call <code>set()</code> or <code>update()</code>, so there is no single place where a transition happens and no way to reason about who changed what. Keep the writable signal private and expose <code>readonly state = this._state.asReadonly()</code> (or <code>computed()</code> projections), with named methods such as <code>addItem()</code> and <code>clear()</code> as the only mutation path. That is the store-lite discipline the next module builds on, and it is what makes a later migration to SignalStore or NgRx mechanical rather than a rewrite.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Are there cases where a parent legitimately reaches into a child with viewChild instead of using bindings?</summary>
+      <div class="answer"><p>Yes, but narrowly: imperative DOM work with no declarative equivalent (focus management, scroll position, measuring, calling <code>play()</code> on a media element) and calling a well-defined public method on a child component such as <code>reset()</code> on a form wrapper. What it should not become is a channel for reading or writing the child's data — that reverses the flow, breaks the child's encapsulation, and makes it unusable anywhere the parent is not present. If you find yourself pulling values out with <code>viewChild</code>, the value belongs to the parent and should be passed in.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.comm.local — input/output, signal view/content queries, template refs - parent-child communication</li>
+      <li>ngs.comm.choose — Service-mediated communication, router state, choosing the right mechanism</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

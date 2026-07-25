@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="NgRx Ergonomics and Testing module: the facade service pattern and the honest case against it, provideStoreDevtools with Redux DevTools time travel, @ngrx/router-store and router selectors, then testing reducers, selectors with projector, effects with provideMockActions and marble diagrams, and components with provideMockStore — with verified resources and interview questions.">
+  <title>NgRx Ergonomics and Testing — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: NgRx Ergonomics and Testing</h1>
+  <p class="standfirst">Actions, reducers, selectors and effects are only half the story. What decides whether a team still likes NgRx a year in is the machinery around it — the service layer components actually talk to, the debugger that replays the whole session, and a test suite that stays fast because the store is a pure function.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular State Management → NgRx Ergonomics and Testing</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two practical halves. First, the <em>ergonomics</em>: the facade service pattern (and the honest argument against it), the low-boilerplate functional creators, wiring <code>provideStoreDevtools</code> to the Redux DevTools extension for time-travel debugging, and putting router state into the store with <code>@ngrx/router-store</code>. Second, <em>testing</em>: reducers and selectors are pure functions and need no TestBed at all, effects are tested with <code>provideMockActions</code> plus marble diagrams, and components are isolated from the real store by <code>provideMockStore</code>. Everything here uses the current standalone provider APIs.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Facades, functional creators, Redux DevTools and router-store</h3>
+    <p>A <em>facade</em> is an injectable service that owns the <code>Store</code> so components never see it: it exposes ready-made observables or signals as fields and offers plain methods such as <code>loadProducts()</code> or <code>addToCart(id)</code> that dispatch behind the scenes. The upside is real — components stop importing action and selector files, the NgRx surface area a new joiner must learn shrinks to one class per feature, and cross-cutting logic (combining two selectors, debouncing a dispatch) gets a natural home. The honest counter-argument is equally real: it is a layer that adds no behaviour, it tempts developers to write imperative methods that <em>return</em> state and so quietly undo unidirectional data flow, the "we could swap NgRx out later" justification almost never gets exercised, and the "facades make components easier to test" argument lost most of its force once <code>provideMockStore</code> shipped. Treat it as a team convention worth arguing about, not a rule — and expect an interviewer to ask you to argue both sides.</p>
+    <p>The ergonomics that are <em>not</em> debatable: functional creators (<code>createActionGroup</code>, <code>createFeature</code>, and effects declared with <code>{ functional: true }</code> so they are standalone functions instead of class members) cut most of the boilerplate NgRx was once criticised for. <code>provideStoreDevtools</code> connects your store to the Redux DevTools browser extension, giving an action log, a live state inspector, a diff per action, and time travel — replay the exact sequence a bug reporter produced instead of guessing. Keep <code>logOnly</code> on outside development so a production build cannot have its state rewritten from the extension, cap history with <code>maxAge</code>, and use <code>autoPause</code> so a chatty polling effect does not flood the timeline. Finally, <code>provideRouterStore</code> from <code>@ngrx/router-store</code> mirrors the Angular Router into the store: navigation dispatches router actions your reducers and effects can react to, <code>getRouterSelectors()</code> gives you <code>selectRouteParams</code>, <code>selectQueryParams</code> and <code>selectUrl</code> so a selector can read the current id without injecting <code>ActivatedRoute</code>, and time travel now moves the URL too rather than leaving the address bar out of sync.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// app.config.ts
+providers: [
+  provideStore(reducers),
+  provideEffects(ProductEffects),
+  provideRouterStore(),                       // router state lands under state.router
+  provideStoreDevtools({
+    maxAge: 25,
+    logOnly: !isDevMode(),                    // read-only outside dev builds
+    autoPause: true,
+    connectInZone: true,
+  }),
+],
+
+// products.facade.ts — the optional service layer
+@Injectable({ providedIn: 'root' })
+export class ProductsFacade {
+  private store = inject(Store);
+  readonly products = this.store.selectSignal(selectAllProducts);
+  readonly loading  = this.store.selectSignal(selectProductsLoading);
+
+  load()            { this.store.dispatch(ProductActions.load()); }
+  select(id: string) { this.store.dispatch(ProductActions.select({ id })); }
+}
+
+// reading route state from the store instead of ActivatedRoute
+const { selectRouteParams } = getRouterSelectors();
+export const selectCurrentProduct = createSelector(
+  selectAllProducts, selectRouteParams,
+  (products, params) =&gt; products.find(p =&gt; p.id === params['id']),
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store-devtools/install" rel="noopener">Store Devtools: installation and setup — NgRx docs (provideStoreDevtools, maxAge, logOnly for production)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/router-store/selectors" rel="noopener">Router selectors — NgRx docs (getRouterSelectors, selecting route and query params from the store)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-ngrx-devtools/" rel="noopener">Angular NgRx DevTools: Important Practical Tips — Angular University (time travel and why router-store completes it)</a></li>
+      <li>[Article] <a href="https://auth0.com/blog/ngrx-facades-pros-and-cons/" rel="noopener">NgRx Facades: Pros and Cons — Rainer Hahnekamp (Auth0 blog — both sides of the facade argument)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mgH4FGs9M4g" rel="noopener">NgRx Router Store and the DevTools Time Travelling Debugger — Angular University</a></li>
+    </ul>
+
+    <h3>Testing reducers, selectors, effects and store-connected components</h3>
+    <p>NgRx is unusually pleasant to test because the interesting parts are pure. A <em>reducer</em> is a function of state and action, so a test is three lines with no TestBed, no dependency injection and no asynchrony: build a state, call the reducer with an action, assert on the returned object (and, while you are there, assert the previous state was not mutated). A <em>selector</em> created with <code>createSelector</code> exposes a <code>projector</code> function — calling <code>selectX.projector(inputA, inputB)</code> tests the projection logic directly, so you never have to hand-build a full application state object just to exercise one derived value. Reserve full-state selector tests for the composition itself, and remember memoization is stateful across tests: call <code>release()</code> or rebuild the selector if a stale cached result bites you.</p>
+    <p><em>Effects</em> are the part that needs machinery, because an effect is a stream in and a stream out. <code>provideMockActions(() =&gt; actions$)</code> feeds a controllable actions stream into the effect under test; the simplest tests push a single action and assert the emitted one. For anything timing-sensitive — <code>debounceTime</code>, <code>concatMap</code> ordering, retries — use RxJS marble diagrams inside <code>TestScheduler.run</code>, where <code>hot</code> models the actions stream, <code>cold</code> models the API call, and <code>expectObservable</code> asserts both the values and <em>when</em> they arrive in virtual time. Finally, for <em>components</em>, <code>provideMockStore({ initialState, selectors })</code> swaps in a fake store: <code>overrideSelector</code> pins whatever a selector should return (followed by <code>store.refreshState()</code> to push a new value mid-test), and spying on <code>store.dispatch</code> asserts the component fired the right action. That combination is why a facade is no longer required for testability — you can isolate a component from real reducers and effects without inventing a wrapper service.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// reducer — a pure function, no TestBed
+const next = productsReducer(initialState, ProductActions.loadSuccess({ products }));
+expect(next.items.length).toBe(2);
+expect(next).not.toBe(initialState);           // reducers return new state
+
+// selector — test the projection, not a hand-built state tree
+expect(selectVisibleProducts.projector(allProducts, 'shoes')).toEqual([shoe]);
+
+// effect — marble test with a controllable actions stream
+TestBed.configureTestingModule({
+  providers: [ProductEffects, provideMockActions(() =&gt; actions$), { provide: Api, useValue: api }],
+});
+testScheduler.run(({ hot, cold, expectObservable }) =&gt; {
+  actions$ = hot('-a', { a: ProductActions.load() });
+  api.getAll.mockReturnValue(cold('--b', { b: products }));
+  expectObservable(effects.load$).toBe('---c', { c: ProductActions.loadSuccess({ products }) });
+});
+
+// component — fake store, pinned selector, dispatch spy
+providers: [provideMockStore({ selectors: [{ selector: selectAllProducts, value: products }] })];
+const dispatch = jest.spyOn(store, 'dispatch');
+store.overrideSelector(selectAllProducts, []);
+store.refreshState();</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/testing" rel="noopener">Testing the Store — NgRx docs (reducers, selector projector, provideMockStore, overrideSelector, refreshState)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/effects/testing" rel="noopener">Testing Effects — NgRx docs (provideMockActions, marble diagrams, TestScheduler for time-dependent effects)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/guide/testing/marble-testing" rel="noopener">Testing RxJS Code with Marble Diagrams — RxJS docs (TestScheduler.run, hot and cold, expectObservable)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/testing-an-ngrx-project" rel="noopener">Testing an NgRx project — Tim Deschryver (end-to-end tour of reducer, selector, effect and component tests)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NOT-nJLDnyg" rel="noopener">Easy Angular Unit Testing in NgRx — JavaScript Marathon (This Dot Media)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-effects.html">← Effects and Side Effects</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="07-signal-store.html">NgRx SignalStore →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Tooling and testing are where Indian interviews separate "I followed an NgRx tutorial" from "I have maintained an NgRx codebase" — service-company rounds probe the DevTools setup, product-company rounds go straight at the test strategy:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a facade in an NgRx application?</summary>
+      <div class="answer"><p>An injectable service that wraps the <code>Store</code> for one feature. It exposes selected state as observables or signals and offers plain methods that dispatch actions internally, so components inject the facade instead of the store and never import action or selector files directly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you enable Redux DevTools in a standalone Angular app?</summary>
+      <div class="answer"><p>Install the <code>@ngrx/store-devtools</code> package and the Redux DevTools browser extension, then add <code>provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() })</code> to the providers array in <code>app.config.ts</code>, after <code>provideStore</code>. It replaces the older <code>StoreDevtoolsModule.instrument()</code> import.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the Redux DevTools extension actually give you?</summary>
+      <div class="answer"><p>A chronological log of every dispatched action, the full store state at each point, a diff showing exactly what that action changed, time travel to replay or step back through the sequence, and export or import of a state snapshot — which turns "it broke on my machine" into a file you can load.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you test a reducer?</summary>
+      <div class="answer"><p>Call it directly: <code>const next = reducer(someState, someAction)</code> and assert on the result. No TestBed, no injector, no async — a reducer is a pure function. Also assert the input state object was not mutated, since returning new state is the contract the whole store depends on.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is projector on a selector and why prefer it in tests?</summary>
+      <div class="answer"><p>Every <code>createSelector</code> result exposes <code>.projector(...)</code> — the raw projection function without the input selectors or memoization. Passing the inputs directly lets you test the derived-value logic without constructing an entire application state tree, so the test stays short and does not break when unrelated parts of the state shape change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does @ngrx/router-store do, and why would you add it?</summary>
+      <div class="answer"><p><code>provideRouterStore()</code> connects the Angular Router to the store: navigations dispatch router actions (request, navigation, navigated, cancel, error) that reducers and effects can react to, and the serialized router state lives under a <code>router</code> slice. Benefits: selectors can read route params without injecting <code>ActivatedRoute</code>, effects can trigger on navigation, and DevTools time travel also restores the URL instead of leaving the address bar stale.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you test a component that reads from the store?</summary>
+      <div class="answer"><p>Provide <code>provideMockStore({ initialState, selectors: [...] })</code> in the TestBed instead of the real store. Pin selector results with <code>overrideSelector</code>, push a new value mid-test with <code>store.overrideSelector(...)</code> followed by <code>store.refreshState()</code>, and assert behaviour by spying on <code>store.dispatch</code>. Reducers and effects never run, so the test stays focused on the component.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How is an effect tested? What does provideMockActions do?</summary>
+      <div class="answer"><p><code>provideMockActions(() =&gt; actions$)</code> supplies a stream you control in place of the real <code>Actions</code> stream, so you can push exactly the action the effect listens for. You stub the service the effect calls, subscribe to the effect observable, and assert the action it emits. Because the callback is re-read per test, assign <code>actions$</code> inside each test before the effect subscribes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is logOnly and why does it matter in production?</summary>
+      <div class="answer"><p>With <code>logOnly: true</code> the DevTools connection is restricted to recording — the extension can display actions and state but cannot dispatch, jump or rewrite state in the running app. Set it from <code>!isDevMode()</code> so development keeps full time travel while a production build is read-only. Many teams go further and skip the provider entirely in production builds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Argue against the facade pattern. When is it genuinely the wrong choice?</summary>
+      <div class="answer"><p>It adds an indirection layer that carries no behaviour of its own, so every feature costs one more file and one more hop when reading code. It invites anti-patterns — methods that dispatch and return state in one call, or that hide sequencing that belongs in an effect — which erodes unidirectional flow. Its historical selling point, testability, is now covered by <code>provideMockStore</code>. And the portability argument ("we can swap NgRx out") is rarely exercised, because actions and selectors leak through the facade's own types anyway. It is a reasonable convention for a large team wanting one entry point per feature; it is the wrong choice when it is adopted reflexively for a small feature or as a substitute for good selector design.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An effect uses debounceTime. Why does a naive test fail, and how do marble tests fix it?</summary>
+      <div class="answer"><p>A naive test subscribes and asserts synchronously, but the debounce schedules emission on a real timer, so nothing has been emitted yet — or the test waits on wall-clock time and turns flaky and slow. <code>TestScheduler.run</code> replaces the scheduler with virtual time: <code>hot</code> models the incoming actions stream, <code>cold</code> models the API response, and <code>expectObservable(effect$).toBe(diagram, values)</code> asserts both what was emitted and at which virtual frame. The suite stays deterministic and instant regardless of the debounce interval.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Selector memoization is caching stale values across tests. What is happening and how do you handle it?</summary>
+      <div class="answer"><p>A memoized selector holds its last inputs and last result on the selector object itself, which is module-level and therefore shared by every test in the file. If one test overrides it or feeds it a state object that is reference-equal to a previous one, the next test can receive the cached projection. Fixes: call <code>selector.release()</code> (or <code>store.resetSelectors()</code> when using MockStore) in an afterEach, always create new state objects rather than mutating, and prefer <code>.projector()</code> for pure-logic tests since it bypasses the memoized wrapper entirely.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.erg.tooling — Facades, functional creators, Redux DevTools, @ngrx/router-store</li>
+      <li>ngs.erg.testing — Testing reducers, selectors, effects (provideMockStore, marble tests)</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

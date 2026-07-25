@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="NgRx Effects module: createEffect, the Actions stream and ofType, functional effects with inject and provideEffects registration, the load/success/failure triple, optimistic vs pessimistic updates, catchError placement and choosing switchMap, concatMap, mergeMap or exhaustMap — with verified official and community resources plus the interview questions they power.">
+  <title>NgRx Effects and Side Effects — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Effects and Side Effects</h1>
+  <p class="standfirst">A reducer is a pure function, so it may never call an API, navigate the router, touch local storage or raise a toast. Everything impure is exiled to one place — effects — and the craft of NgRx is largely the craft of writing them so they never die, never double-fire, and never lie to the store.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular State Management → Effects and Side Effects</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Effects are the asynchronous half of NgRx: a long-lived RxJS pipeline that listens to every dispatched action, performs the impure work the reducer is forbidden to do, and feeds the result back into the store as another action. The module covers the building blocks (<code>createEffect</code>, the <code>Actions</code> stream, <code>ofType</code>), how effects are registered in a standalone app with <code>provideEffects</code> and written as functional effects with <code>inject()</code>, the canonical load / success / failure action triple, and then the two things interviews actually probe: where <code>catchError</code> must sit so the effect stream survives a failed request, and how to pick the right flattening operator for each kind of effect.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why effects exist: createEffect, the Actions stream, ofType</h3>
+    <p>NgRx reducers are pure functions of <code>(state, action)</code>. Purity is what makes the store replayable, time-travel debuggable and trivially testable — so an HTTP call inside a reducer is not merely bad style, it breaks the model. Effects are the sanctioned escape hatch. The <code>Actions</code> service is an observable of every action dispatched anywhere in the app, emitted <em>after</em> the reducers have already run. You pipe that stream through <code>ofType(SomeActions.something)</code> to filter down to the actions you care about, do the impure work, and map the outcome back to a new action. <code>createEffect</code> wraps that pipeline and, by default, subscribes the returned observable straight back into the dispatcher.</p>
+    <p>Why it matters: this is the discipline that keeps components dumb. A component dispatches "the user asked for the product list" and stops caring; the effect owns the HTTP client, the retry policy and the error translation. It is also why NgRx interviews open with "what belongs in a reducer versus an effect?" — the answer separates people who have read the docs from people who have shipped. One rule to internalise early: <code>ofType</code> accepts action creators directly (not just type strings), which gives you full type inference on the action payload downstream.</p>
+    <pre class="code-block" data-label="TypeScript"><code>@Injectable()
+export class ProductEffects {
+  private actions$ = inject(Actions);
+  private api = inject(ProductService);
+
+  loadProducts$ = createEffect(() =&gt;
+    this.actions$.pipe(
+      ofType(ProductPageActions.opened),           // filter the action stream
+      switchMap(() =&gt;
+        this.api.getAll().pipe(                    // impure work, safely nested
+          map(products =&gt; ProductApiActions.loadSuccess({ products })),
+          catchError(err =&gt; of(ProductApiActions.loadFailure({ error: err.message })))
+        )
+      )
+    )
+  );
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/effects" rel="noopener">@ngrx/effects — NgRx docs (the Actions stream, createEffect, why effects exist)</a></li>
+      <li>[Official] <a href="https://ngrx.io/api/effects/createEffect" rel="noopener">createEffect — NgRx API reference</a></li>
+      <li>[Official] <a href="https://ngrx.io/api/effects/ofType" rel="noopener">ofType — NgRx API reference (filtering by action creator with type inference)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/actions" rel="noopener">Actions — NgRx Store guide (good action hygiene, the source/event naming convention)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=I5MkHWeP5Fk" rel="noopener">NgRx Effects — Step by Step Implementation — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bx0g0ml0HcM" rel="noopener">Angular NgRx Interview Questions and Answers with Example — Nihira Techiees</a></li>
+    </ul>
+
+    <h3>Registering effects: provideEffects and functional effects with inject()</h3>
+    <p>In a standalone application there is no <code>EffectsModule.forRoot([])</code>. You register root effects by adding <code>provideEffects(...)</code> to the <code>providers</code> array in <code>app.config.ts</code>, alongside <code>provideStore()</code>; feature effects go into the <code>providers</code> of a lazily loaded route, where they are registered the moment that route activates and stay registered for the life of the app. <code>provideEffects</code> accepts effect classes, whole modules of functional effects, or a mixture of both.</p>
+    <p>Functional effects drop the class entirely. Pass <code>{ functional: true }</code> in the effect config and declare dependencies as default parameter values resolved with Angular's <code>inject()</code> — <code>(actions$ = inject(Actions), api = inject(ProductService))</code>. The payoff is testability: because the dependencies are ordinary parameters, a unit test calls the effect function with fakes and never needs <code>TestBed</code>. The NgRx docs recommend the parameter form over calling <code>inject()</code> in the body for exactly that reason, and <code>inject()</code> in the body must stay in a synchronous injection context anyway.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// product.effects.ts — functional effect, no class
+export const loadProducts = createEffect(
+  (actions$ = inject(Actions), api = inject(ProductService)) =&gt;
+    actions$.pipe(
+      ofType(ProductPageActions.opened),
+      exhaustMap(() =&gt; api.getAll().pipe(
+        map(products =&gt; ProductApiActions.loadSuccess({ products })),
+        catchError(e =&gt; of(ProductApiActions.loadFailure({ error: e.message })))
+      ))
+    ),
+  { functional: true }
+);
+
+// app.config.ts
+providers: [
+  provideStore(reducers),
+  provideEffects(ProductEffects, AuthEffects),   // classes
+];
+
+// lazy feature route
+{ path: 'orders', providers: [provideState(ordersFeature), provideEffects(orderEffects)] }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/api/effects/provideEffects" rel="noopener">provideEffects — NgRx API reference (root and feature registration)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/effects/install" rel="noopener">Installing @ngrx/effects — NgRx docs (setup and standalone wiring)</a></li>
+      <li>[Official] <a href="https://angular.dev/api/core/inject" rel="noopener">inject — angular.dev API reference (the injection context rules functional effects depend on)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/you-should-take-advantage-of-the-improved-ngrx-apis" rel="noopener">You should take advantage of the improved NgRx APIs — Tim Deschryver</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/ngrx-creator-functions-101" rel="noopener">NgRx creator functions 101 — Tim Deschryver</a></li>
+    </ul>
+
+    <h3>The load triple, and optimistic versus pessimistic updates</h3>
+    <p>Almost every data-fetching effect follows the same three-action shape: a <em>command</em> action that says something happened (<code>[Product Page] Opened</code> or <code>loadProducts</code>), and two <em>event</em> actions the API reports back with (<code>loadProductsSuccess</code>, <code>loadProductsFailure</code>). The reducer handles all three — set <code>loading: true</code> on the command, store the payload and clear the flag on success, store the message and clear the flag on failure. Keep the naming honest: actions are unique events, not reusable setters, so resist a single <code>setProducts</code> action fired from four places. <code>createActionGroup</code> gives you the whole triple with one declaration.</p>
+    <p>Writes come in two flavours and interviewers love the contrast. A <em>pessimistic</em> update waits for the server: dispatch <code>saveTodo</code>, the effect calls the API, and only <code>saveTodoSuccess</code> mutates the store. Correct, but the UI feels slow. An <em>optimistic</em> update mutates the store immediately in the reducer for <code>saveTodo</code>, lets the effect fire the request in the background, and dispatches a rollback action (<code>saveTodoFailure</code> carrying the previous value) if the server rejects it. Optimistic is the right call for cheap, high-confidence, easily reversible changes — toggling a checkbox, reordering a list, liking a post. It is the wrong call for payments, or anything where the server assigns the identity of the created record. Optimistic writes also force <code>concatMap</code> rather than <code>switchMap</code>: you must not cancel a request whose local mutation has already been applied.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const TodoActions = createActionGroup({
+  source: 'Todo API',
+  events: {
+    'Toggle Todo':          props&lt;{ id: string }&gt;(),          // optimistic: reducer flips it now
+    'Toggle Todo Failure':  props&lt;{ id: string; error: string }&gt;(), // reducer flips it back
+  },
+});
+
+export const toggleTodo = createEffect(
+  (actions$ = inject(Actions), api = inject(TodoService)) =&gt;
+    actions$.pipe(
+      ofType(TodoActions.toggleTodo),
+      concatMap(({ id }) =&gt; api.toggle(id).pipe(     // queue writes, never cancel them
+        map(() =&gt; TodoActions.toggleTodoNoop()),
+        catchError(e =&gt; of(TodoActions.toggleTodoFailure({ id, error: e.message })))
+      ))
+    ),
+  { functional: true }
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/walkthrough" rel="noopener">Store walkthrough — NgRx docs (the end-to-end action, reducer, selector, effect flow)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/effects/operators" rel="noopener">Effects operators — NgRx docs (ofType and the effect-specific operator set)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/start-using-ngrx-effects-for-this" rel="noopener">Start using @ngrx/effects for this — Tim Deschryver (effects beyond plain data fetching)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-ngrx-store-and-effects-crash-course/" rel="noopener">NgRx Store and Effects — An Architecture Guide — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SkoI_VHtcTU" rel="noopener">Angular Redux — NgRx Store, Effects and Selectors — Monsterlessons Academy</a></li>
+    </ul>
+
+    <h3>Error handling: where catchError must sit, and dispatch: false</h3>
+    <p>This is the single highest-value thing in the module. An effect is one long-lived subscription. RxJS terminates a stream on error — so if an HTTP failure is allowed to propagate to the <em>outer</em> action stream, that effect stops listening and the feature silently dies until the page is reloaded. The fix is placement, not the operator: <code>catchError</code> must live <em>inside</em> the inner observable, within the flattening operator's projection function, so the error is caught and converted to a failure action before it can reach the outer pipeline. A <code>catchError</code> chained after <code>switchMap</code> at the outer level compiles, passes a happy-path test, and is a production bug.</p>
+    <p>NgRx does give you a safety net: since version 8 an error escaping to the outer stream is reported to Angular's <code>ErrorHandler</code> and the effect is automatically resubscribed, up to a default of ten errors, after which it gives up. Treat that as a seatbelt, not a strategy — a resubscribed effect has already lost the action that triggered it. Two more essentials. First, <code>{ dispatch: false }</code>: effects that end in a genuine terminal side effect — router navigation, a snackbar, writing to local storage, logging — must declare it, because an effect that returns something other than an action while dispatch is on will feed the action back into the stream it is subscribed to and spin an infinite loop. Second, keep each effect to a single responsibility: one action in, one action out. Fanning several unrelated actions out of one effect makes the action log unreadable and is flagged by the official ESLint rules.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// WRONG — catchError outside: one failed request kills the effect forever
+actions$.pipe(
+  ofType(A.load),
+  switchMap(() =&gt; api.get()),
+  map(r =&gt; A.loadSuccess({ r })),
+  catchError(e =&gt; of(A.loadFailure({ e })))   // stream is already dead here
+);
+
+// RIGHT — catchError inside the inner observable
+actions$.pipe(
+  ofType(A.load),
+  switchMap(() =&gt; api.get().pipe(
+    map(r =&gt; A.loadSuccess({ r })),
+    catchError(e =&gt; of(A.loadFailure({ e })))
+  ))
+);
+
+// terminal side effect: no action comes out, so say so
+export const navigateAfterSave = createEffect(
+  (actions$ = inject(Actions), router = inject(Router)) =&gt;
+    actions$.pipe(ofType(A.saveSuccess), tap(() =&gt; router.navigate(['/orders']))),
+  { functional: true, dispatch: false }
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/effects/lifecycle" rel="noopener">Effects lifecycle — NgRx docs (non-dispatching effects, resubscribe on error, ROOT_EFFECTS_INIT, OnRunEffects)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/catchError" rel="noopener">catchError — rxjs.dev API reference</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/eslint-plugin/rules/no-dispatch-in-effects" rel="noopener">no-dispatch-in-effects — NgRx ESLint plugin rule (why an effect should return, not dispatch)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/rxjs-error-handling/" rel="noopener">RxJS Error Handling: Complete Practical Guide — Angular University</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/common-and-easy-to-make-mistakes-when-youre-new-to-ngrx" rel="noopener">Common and easy-to-make mistakes when you are new to NgRx — Tim Deschryver</a></li>
+    </ul>
+
+    <h3>Choosing the flattening operator per effect</h3>
+    <p>Every effect that performs async work nests an inner observable inside a flattening operator, and the choice is a behavioural decision, not a style preference. <code>switchMap</code> cancels the in-flight request when a new action arrives — correct for reads where only the latest result matters (type-ahead search, a filter change, a detail page reload), catastrophic for writes because a cancelled save looks successful to the user and never reaches the server. <code>concatMap</code> queues requests and runs them strictly in order — the safe default for writes and for any sequence where ordering matters. <code>mergeMap</code> runs everything concurrently with no ordering guarantee — right for independent, order-insensitive work such as firing analytics events or deleting several selected rows. <code>exhaustMap</code> ignores new actions while one is in flight — the double-click guard, and the canonical choice for a login button or a form submit.</p>
+    <p>A useful shorthand for interviews: search uses <code>switchMap</code>, save uses <code>concatMap</code>, login uses <code>exhaustMap</code>, and fire-and-forget uses <code>mergeMap</code>. Two related habits round the topic off. When an effect needs a slice of state, do not subscribe to the store inside the pipeline — use <code>concatLatestFrom</code> from <code>@ngrx/operators</code>, which reads the selector lazily only when the action actually arrives, so the selector is not evaluated on every unrelated dispatch. And when an effect legitimately needs a value the action does not carry, prefer widening the action payload at the dispatch site over reaching into the store from the effect.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// read: only the newest query matters -&gt; cancel the rest
+ofType(SearchActions.queryChanged), debounceTime(300), switchMap(...)
+
+// write: never cancel, never reorder
+ofType(CartActions.addItem),        concatMap(...)
+
+// submit button: swallow the double-click
+ofType(AuthActions.loginSubmitted), exhaustMap(...)
+
+// independent fire-and-forget work
+ofType(AnalyticsActions.tracked),   mergeMap(...)
+
+// needs state? read it lazily, do not subscribe
+ofType(OrderActions.checkout),
+concatLatestFrom(() =&gt; store.select(selectCartItems)),
+concatMap(([action, items]) =&gt; api.checkout(items).pipe(/* ... */))</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://rxjs.dev/api/operators/switchMap" rel="noopener">switchMap — rxjs.dev API reference (cancel the previous inner observable)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/concatMap" rel="noopener">concatMap — rxjs.dev API reference (queue inner observables in order)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/exhaustMap" rel="noopener">exhaustMap — rxjs.dev API reference (ignore new sources while one is active)</a></li>
+      <li>[Official] <a href="https://rxjs.dev/api/operators/mergeMap" rel="noopener">mergeMap — rxjs.dev API reference (run inner observables concurrently)</a></li>
+      <li>[Article] <a href="https://dev.to/danywalls/when-to-use-concatmap-mergemap-switchmap-and-exhaustmap-operators-in-building-a-crud-with-ngrx-31de" rel="noopener">When to use concatMap, mergeMap, switchMap and exhaustMap in a CRUD with NgRx — Dany Paredes (DEV)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2zJRw3Cl_Vs" rel="noopener">map, switchMap, mergeMap, concatMap, exhaustMap in RxJS — what is the difference? — Monsterlessons Academy</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-selectors.html">← Selectors and Entity State</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="06-ngrx-ergonomics.html">NgRx Ergonomics and Testing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Effects are where NgRx interviews get real — Indian product and service companies alike use them to separate tutorial knowledge from production experience:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an NgRx effect and why can't the work live in a reducer?</summary>
+      <div class="answer"><p>An effect is a long-lived RxJS pipeline that listens to the dispatched-action stream, performs impure work (HTTP, router navigation, local storage, notifications) and dispatches a new action with the result. Reducers must be pure functions of <code>(state, action)</code> — that purity is what makes the store predictable, replayable and time-travel debuggable. Any asynchrony or I/O inside a reducer breaks it, so it is exiled to effects.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the Actions service give you, and what does ofType do?</summary>
+      <div class="answer"><p><code>Actions</code> is an injectable observable of every action dispatched anywhere in the app, emitted after the reducers have already processed it. <code>ofType</code> is a pipeable operator that filters that stream to the action types you care about. Pass action creators rather than type strings and TypeScript infers the payload type for the rest of the pipe.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you register effects in a standalone Angular application?</summary>
+      <div class="answer"><p>Add <code>provideEffects(EffectsA, EffectsB)</code> to the <code>providers</code> array in <code>app.config.ts</code> for root effects, and to the <code>providers</code> of a lazily loaded route for feature effects. It replaces <code>EffectsModule.forRoot()</code> / <code>forFeature()</code>. It accepts effect classes and modules of functional effects interchangeably.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Describe the three actions of a typical data-loading flow.</summary>
+      <div class="answer"><p>A command action (<code>loadProducts</code>, or better, an event name such as <code>[Product Page] Opened</code>) that the reducer uses to set <code>loading: true</code>; a success action carrying the payload, which stores the data and clears the flag; and a failure action carrying an error message, which stores the error and clears the flag. Only the command is dispatched by the component — the other two come out of the effect.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When do you need dispatch: false, and what happens if you forget it?</summary>
+      <div class="answer"><p>Use it when the effect ends in a terminal side effect and produces no action — router navigation, showing a snackbar, writing to local storage, logging. If you omit it, whatever the pipeline emits is dispatched back into the action stream the effect itself is subscribed to, which re-triggers the effect and spins an infinite loop that freezes the tab.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where exactly must catchError go inside an effect, and why?</summary>
+      <div class="answer"><p>Inside the inner observable, within the flattening operator's projection function — <code>switchMap(() =&gt; api.get().pipe(map(...), catchError(...)))</code>. RxJS terminates a stream on error, so if the error reaches the outer action stream the effect's subscription ends and it stops reacting to that action for the rest of the session. Catching inside converts the failure into a failure <em>action</em> before it can escape, and the outer stream never sees an error at all.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> switchMap vs concatMap vs mergeMap vs exhaustMap — give one effect for each.</summary>
+      <div class="answer"><p><code>switchMap</code>: type-ahead search — cancel the stale request, only the newest query matters. <code>concatMap</code>: saving cart items — queue in order, never cancel a write. <code>mergeMap</code>: analytics events or bulk deletes — independent, order does not matter. <code>exhaustMap</code>: login or form submit — ignore repeat clicks until the current request settles. Using <code>switchMap</code> for a save is the classic production bug: the cancelled request never reaches the server but the UI shows success.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a functional effect and what does it improve?</summary>
+      <div class="answer"><p>An effect created with <code>createEffect(..., { functional: true })</code> outside any class, with dependencies supplied as default parameters resolved by <code>inject()</code>: <code>(actions$ = inject(Actions), api = inject(Api)) =&gt; ...</code>. It removes the <code>@Injectable</code> class boilerplate and, more importantly, makes tests trivial — call the function with fakes, no <code>TestBed</code> and no DI container needed. NgRx recommends the parameter form over calling <code>inject()</code> in the body for exactly this reason.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Optimistic vs pessimistic updates — how do the effects differ?</summary>
+      <div class="answer"><p>Pessimistic: the reducer ignores the command action and only the success action mutates state, so nothing changes until the server confirms. Optimistic: the reducer applies the change immediately on the command action, the effect fires the request in the background, and a failure action carries enough information to roll the state back. Optimistic suits cheap, reversible, high-confidence changes (toggles, reordering, likes); pessimistic is mandatory for payments and anywhere the server assigns identity. Optimistic writes must use <code>concatMap</code>, never <code>switchMap</code> — a cancelled request whose local mutation already landed leaves the client lying about server state.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> An effect needs a value from the store. What is the right way to get it?</summary>
+      <div class="answer"><p>Use <code>concatLatestFrom(() =&gt; store.select(selector))</code> from <code>@ngrx/operators</code>. Unlike <code>withLatestFrom</code>, it takes a factory and evaluates the selector lazily, only once the action actually arrives — so the selector is not recomputed on every unrelated dispatch. Better still, if the value is known at dispatch time, put it in the action payload and keep the effect free of store reads.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An effect stops firing after the API returns a 500 once. Diagnose it.</summary>
+      <div class="answer"><p>The <code>catchError</code> is chained on the outer pipe instead of inside the inner observable, so the error terminated the effect's subscription — it is no longer listening to the action stream, and every later dispatch is ignored until a reload. Move <code>catchError</code> inside the flattening operator's projection. Note that NgRx will report the error to Angular's <code>ErrorHandler</code> and automatically resubscribe the effect (up to a default of ten errors), but the triggering action is already lost, so resubscription is a seatbelt rather than a fix.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Two effects each react to the other's output action and the app hangs. What went wrong and how do you prevent it structurally?</summary>
+      <div class="answer"><p>A cyclic effect chain: effect A dispatches an action that effect B listens to, and B dispatches something A listens to, so the action stream never settles. It usually comes from generic setter-style actions reused across features instead of unique past-tense events. Prevention: name actions as unique events by source (<code>[Cart Page] Item Added</code>), keep one effect to a single responsibility with one action in and one action out, and enable the official NgRx ESLint rules — <code>avoid-cyclic-effects</code>, <code>no-multiple-actions-in-effects</code> and <code>no-dispatch-in-effects</code> catch all three shapes of this bug in CI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you make effects easy to test, and what do the tests assert?</summary>
+      <div class="answer"><p>Prefer functional effects with injected parameters so a test constructs the effect directly with stub services and a hand-made <code>Actions</code> observable — no <code>TestBed</code>, no <code>provideMockActions</code> ceremony. Assert three things per effect: the happy path emits the success action with the mapped payload; the error path emits the failure action and the returned observable does <em>not</em> error; and the concurrency behaviour matches intent (with a marble test, that two rapid actions produce two results under <code>concatMap</code> but one under <code>switchMap</code> or <code>exhaustMap</code>). Non-dispatching effects are asserted on the spy for the router or notification service instead.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.eff.basics</li>
+      <li>ngs.eff.errors</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

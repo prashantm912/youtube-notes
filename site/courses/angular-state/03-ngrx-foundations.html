@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="NgRx Foundations module: the Redux model in Angular terms — single source of truth, read-only state, pure reducers and the unidirectional action loop — then the modern standalone API with provideStore, provideState, createActionGroup, createReducer/on and state shape design, with verified resources and interview questions.">
+  <title>NgRx Foundations — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: NgRx Foundations</h1>
+  <p class="standfirst">NgRx is Redux wearing Angular's dependency injection and RxJS: one immutable state tree, events in, new state out, and a DevTools trace of every change in between. Get the loop and the vocabulary right here and selectors, effects and the entity adapter become detail rather than mystery.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Angular State Management</a> → NgRx Foundations</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two layers. The <em>model</em> first: Redux's three principles as NgRx implements them — a single source of truth, state that is read-only, and changes made only by pure reducer functions — plus the unidirectional action → reducer → store → selector loop that follows from them. Then the <em>API</em> you actually type in an Angular v20 app: standalone <code>provideStore()</code> and <code>provideState()</code> bootstrapping, <code>createActionGroup</code> for declaring events, <code>createReducer</code> with <code>on</code> for folding them into state, and the state-shape rules that keep a store maintainable a year later. Depth on each lives in the linked official docs.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The Redux model in Angular terms, and standalone provideStore setup</h3>
+    <p>Redux states three principles and NgRx inherits all three. <strong>Single source of truth</strong>: the whole application's state is one plain object tree held in one store. <strong>State is read-only</strong>: nothing writes to it directly — you <code>dispatch</code> an action, a serializable object describing something that happened. <strong>Changes are made with pure functions</strong>: reducers receive the previous state and the action and <em>return</em> a brand-new state object, never mutating the old one. On top of that Angular contributes dependency injection (<code>Store</code> is an injectable service) and RxJS contributes the plumbing (<code>Store</code> is simultaneously an Observable of state and an Observer of actions).</p>
+    <p>The flow is strictly one-directional and worth memorising as a sentence: a component or service dispatches an action, every reducer in the app sees it, the ones that care return new slices, the store swaps in the new state object, selectors recompute from it, and templates re-render. Because each reference changes only when its data changes, <code>OnPush</code> change detection works perfectly with it. Why it matters: the payoff is traceability — every state change has a named cause you can replay in Redux DevTools, time-travel through, and assert on in a unit test with no mocks. The cost is ceremony and file count, which is why NgRx's own docs push back with the SHARI checklist (state that is <em>Shared</em>, <em>Hydrated</em>, <em>Available</em> across routes, <em>Retrieved</em> via side effects, or <em>Impacted</em> by other sources) before you reach for a global store at all.</p>
+    <p>Setup in a modern standalone app is two functions. <code>provideStore()</code> goes in the root <code>providers</code> array and registers the store infrastructure once; convention is to leave it empty and register every slice with <code>provideState()</code>, either at the root or — better for lazy features — inside a route's own <code>providers</code>, so the slice arrives with the chunk that needs it. The <code>StoreModule.forRoot()</code> / <code>StoreModule.forFeature()</code> pair still works and is what you will meet in older codebases, but it is legacy: nothing new should be written with it.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// app.config.ts — standalone bootstrap
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideStore(),               // root store; kept empty by convention
+    provideState(booksFeature),   // an eagerly-loaded slice
+    provideStoreDevtools(),       // time-travel debugging in development
+  ],
+};
+
+// books.routes.ts — a lazy feature brings its own slice
+export const routes: Routes = [
+  {
+    path: 'books',
+    providers: [provideState(booksFeature)],   // replaces StoreModule.forFeature
+    loadComponent: () =&gt; import('./books-page').then((m) =&gt; m.BooksPage),
+  },
+];</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store" rel="noopener">@ngrx/store — NgRx docs (key concepts and the state management lifecycle diagram)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/walkthrough" rel="noopener">Store walkthrough — NgRx docs (a complete app wired up with provideStore, step by step)</a></li>
+      <li>[Official] <a href="https://redux.js.org/understanding/thinking-in-redux/three-principles" rel="noopener">Three Principles — Redux documentation (the source of the model NgRx implements)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-2-redux-ngrx-rxjs/" rel="noopener">Angular NgRx Store and Redux — When to use a Store and Why? — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=p0I7AOVh3ng" rel="noopener">NgRx Core Concepts: Store, Actions &amp; Reducers Explained — Procademy</a></li>
+    </ul>
+
+    <h3>Actions, reducers and state shape: createActionGroup, createReducer/on, feature state</h3>
+    <p>An action is a unique event: a <code>type</code> string plus optional payload. Instead of hand-writing one <code>createAction</code> call per event, <code>createActionGroup</code> declares a whole group from a <code>source</code> and an <code>events</code> dictionary — NgRx generates a camelCase creator per event (<code>'Book Added'</code> becomes <code>booksPageActions.bookAdded</code>) and stamps the type as <code>[Source] Event</code>. Use <code>emptyProps()</code> for payload-free events and <code>props&lt;{ … }&gt;()</code> for typed payloads. This is the current idiom; a bare <code>createAction</code> is still fine for one-off events.</p>
+    <p>The rule that separates a store you can debug from one you cannot is <em>good action hygiene</em>: actions describe events, not commands. Name them after what happened and where it happened — <code>'[Books Page] Opened'</code>, <code>'[Books API] Books loaded success'</code>, <code>'[Books API] Books loaded failure'</code> — never <code>loadBooks</code> or <code>setBooks</code>. One event dispatched from exactly one place; any number of reducers and effects may listen. The anti-pattern is a generic reusable action (a single <code>setLoading</code> fired from five components), which erases the DevTools trace, couples unrelated features and makes "why did this state change?" unanswerable. NgRx ships an ESLint rule, <code>good-action-hygiene</code>, that enforces the <code>[Source] Event</code> template for you.</p>
+    <p>Reducers are built with <code>createReducer(initialState, …on(…))</code>. Each <code>on(actionCreator, handler)</code> clause is narrowed to that action's payload type, and the handler returns a new state object — spread the old one, never mutate it. <code>createFeature({ name, reducer })</code> bundles a slice's name and reducer together and generates its feature selector and one selector per top-level key, which is why feature state is now usually declared as a feature object and handed straight to <code>provideState</code>. On shape: keep the tree <strong>flat</strong> (one shallow slice per feature, no deep nesting), <strong>normalized</strong> (entities in a dictionary keyed by id with a separate <code>ids</code> array rather than nested arrays — exactly what <code>@ngrx/entity</code> automates), and <strong>serializable</strong> (no class instances, Dates, Maps, Sets, Observables or DOM nodes; NgRx's <code>strictStateSerializability</code> runtime check will fail the build in development if you try). Derived values — totals, filtered lists, view models — belong in selectors, never as extra fields in state that a reducer must remember to keep in sync.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// books.actions.ts
+export const BooksPageActions = createActionGroup({
+  source: 'Books Page',                       // types become '[Books Page] …'
+  events: {
+    'Opened': emptyProps(),
+    'Book Added': props&lt;{ bookId: string }&gt;(),
+  },
+});
+
+// books.reducer.ts — flat, normalized, serializable
+export const booksFeature = createFeature({
+  name: 'books',
+  reducer: createReducer(
+    { ids: [] as string[], entities: {} as Record&lt;string, Book&gt;, loading: false },
+    on(BooksPageActions.opened, (state) =&gt; ({ ...state, loading: true })),
+    on(BooksApiActions.booksLoadedSuccess, (state, { books }) =&gt; ({
+      ...state,
+      loading: false,
+      ids: books.map((b) =&gt; b.id),
+      entities: Object.fromEntries(books.map((b) =&gt; [b.id, b])),
+    })),
+  ),
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/actions" rel="noopener">Actions — NgRx docs (the action anatomy and the "[Source] Event" naming convention)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/action-groups" rel="noopener">Action Groups — NgRx docs (createActionGroup, emptyProps and the props factory)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/reducers" rel="noopener">Reducers — NgRx docs (createReducer/on, plus registering root and feature state with provideState)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/lets-have-a-chat-about-actions-and-action-creators-within-ngrx" rel="noopener">Let's have a chat about Actions and Action Creators within NgRx — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rk83ZMqEDV4" rel="noopener">Creating Actions with NgRx Just Got Even Easier — Brandon Roberts (NgRx core team)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-service-state.html">← Shared Services as State</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="04-selectors.html">Selectors and Entity State →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>NgRx is the dividing line between "knows Angular" and "has shipped a large Angular app" in Indian interviews — service companies screen on the vocabulary, product companies push on state shape and design trade-offs. These are the questions this module powers:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is NgRx and what problem does it solve?</summary>
+      <div class="answer"><p>NgRx is a Redux-inspired, RxJS-powered global state container for Angular. It solves the problems that appear once state is shared across many components and routes: no single place to look for the current value, no record of what changed it, prop-drilling and duplicated copies drifting apart. NgRx replaces that with one immutable state tree, explicit named events, pure state transitions, and a DevTools timeline of every change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three principles of Redux?</summary>
+      <div class="answer"><p>(1) Single source of truth — the whole app's state lives in one object tree in one store. (2) State is read-only — the only way to change it is to dispatch an action describing what happened. (3) Changes are made with pure functions — reducers take the previous state plus an action and return a new state, with no mutation and no side effects.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the building blocks of NgRx and what each one does.</summary>
+      <div class="answer"><p><strong>Store</strong> — the injectable state container, an Observable of state and an Observer of actions. <strong>Action</strong> — a unique event with a type and optional payload. <strong>Reducer</strong> — a pure function computing the next state from the current state plus an action. <strong>Selector</strong> — a pure, memoized function reading and deriving slices of state. <strong>Effect</strong> — listens to the action stream and handles side effects (HTTP, router, storage), usually dispatching a result action back.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you set up NgRx in a standalone Angular app? What replaced StoreModule.forRoot?</summary>
+      <div class="answer"><p>Add <code>provideStore()</code> to the <code>providers</code> array in <code>app.config.ts</code> (used by <code>bootstrapApplication</code>) and register each slice with <code>provideState(feature)</code> — at the root for eager state, or in a route's <code>providers</code> for a lazy feature. <code>provideStore()</code> replaces <code>StoreModule.forRoot()</code> and <code>provideState()</code> replaces <code>StoreModule.forFeature()</code>; the module APIs still work but are the legacy path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Describe the unidirectional data flow of an NgRx app.</summary>
+      <div class="answer"><p>Component dispatches an action → the action reaches every reducer → matching <code>on</code> handlers return new slices → the store holds a new state object → selectors recompute → the template re-renders (and effects listening to that action fire their side effects, dispatching further actions). Data flows one way only; nothing writes back into state directly, which is what makes the flow replayable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is createActionGroup and why is it preferred over many createAction calls?</summary>
+      <div class="answer"><p>It declares a whole group of related action creators from one <code>source</code> and an <code>events</code> dictionary. The source is written once instead of repeated in every type string, event names are converted to camelCase creators automatically (<code>'Book Added'</code> → <code>bookAdded</code>), and the <code>[Source] Event</code> type format is guaranteed. Payloads use <code>emptyProps()</code> or <code>props&lt;T&gt;()</code>. Less boilerplate, no typos in type strings, same runtime behaviour as <code>createAction</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is "good action hygiene" and why should actions be events, not commands?</summary>
+      <div class="answer"><p>An action should be a unique event that says <em>where</em> it was dispatched and <em>what</em> occurred: <code>'[Books Page] Opened'</code>, not <code>'Load Books'</code>. Commands invert the relationship — the dispatcher starts deciding what the store should do, so one action gets reused from many places and the DevTools log stops telling you why anything happened. Events keep dispatchers dumb and listeners many: one event can drive several reducers and effects. NgRx's ESLint rule <code>good-action-hygiene</code> enforces the <code>[Source] Event</code> template.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does createReducer/on work, and why must a reducer be pure?</summary>
+      <div class="answer"><p><code>createReducer(initialState, on(actionA, handler), on(actionB, handler))</code> builds a function that switches on action type with full payload typing per clause. Purity — same inputs, same output, no mutation, no HTTP, no <code>Date.now()</code>, no randomness — is what makes state transitions replayable, time-travel debugging correct, and reducer tests trivially assertable with no mocks. Anything impure belongs in an effect.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Root state versus feature state — how and where do you register a feature slice?</summary>
+      <div class="answer"><p>Root state is registered at bootstrap and exists for the life of the app; feature state is a named slice added later, usually alongside a lazy-loaded route. In standalone apps, keep <code>provideStore()</code> empty and register slices with <code>provideState(feature)</code> — in <code>app.config.ts</code> for eager slices, or in the route's own <code>providers</code> array so the slice loads with the chunk. A <code>createFeature</code> object carries the name, the reducer and its generated selectors together.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How should you design the shape of the state tree?</summary>
+      <div class="answer"><p>Flat, normalized, serializable. Flat: one shallow slice per feature keyed by feature name, not deeply nested objects that force long spread chains in reducers. Normalized: entities in a dictionary keyed by id plus an <code>ids</code> array for order, so a single update touches one key instead of rebuilding a list (this is what <code>@ngrx/entity</code> generates for you). Serializable: plain objects and primitives only — no class instances, Dates, Maps, Sets, Observables or DOM nodes. Store the minimum; derive everything else in selectors.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A developer mutates state inside a reducer. What breaks, and how do you catch it?</summary>
+      <div class="answer"><p>The object reference does not change, so <code>OnPush</code> components and memoized selectors see "no change" and the UI silently goes stale; DevTools time-travel becomes wrong because past states were altered in place; and reducer tests pass while the app misbehaves. Catch it with NgRx runtime checks, on by default in development — <code>strictStateImmutability</code> and <code>strictActionImmutability</code> freeze state and actions and throw on mutation — backed by the <code>@ngrx/eslint-plugin</code> and code review. The fix is always to return a new object via spread or an immutable helper.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Should derived data such as a filtered list or a cart total live in the reducer or in a selector?</summary>
+      <div class="answer"><p>In a selector. Storing derived values duplicates the source of truth, and every reducer that touches an input then has to remember to recompute the derivative — the classic drift bug. Selectors are pure and memoized, so the computation reruns only when its inputs change and costs nothing on other dispatches. Keep state minimal and canonical; compose <code>createSelector</code> on top of it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Does every Angular app need NgRx? How do you argue the decision in a design round?</summary>
+      <div class="answer"><p>No — and saying so with reasons scores better than reciting the API. Use the SHARI checklist from the NgRx docs: reach for a store when state is Shared across many components, Hydrated from external storage, must be Available when re-entering routes, is Retrieved through side effects, or is Impacted by actions from elsewhere. For a form-heavy CRUD app with mostly local state, a signal-based service or NgRx SignalStore gives the same discipline for a fraction of the ceremony, and server cache state is often better handled by a data-fetching layer. Name the trade-off explicitly: traceability and testability bought with indirection and file count.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.ngrx.redux</li>
+      <li>ngs.ngrx.actions</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

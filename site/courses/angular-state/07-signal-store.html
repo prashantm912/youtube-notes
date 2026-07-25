@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="NgRx SignalStore module: signalStore with withState, withComputed, withMethods and withHooks, deep signals and patchState, then rxMethod, withEntities, custom store features and an honest comparison against classic NgRx Store and ComponentStore — with verified resources and interview questions.">
+  <title>NgRx SignalStore — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: NgRx SignalStore</h1>
+  <p class="standfirst">Actions, reducers and effects were the price of admission to NgRx for a decade. <code>@ngrx/signals</code> drops all three and rebuilds state management out of signals and composable features — and it is now the direction the library itself is heading, which is exactly why interview panels have started asking about it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular State Management → NgRx SignalStore</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two halves. First, the <em>store itself</em>: <code>signalStore()</code>, the feature functions that build it up (<code>withState</code>, <code>withComputed</code>, <code>withMethods</code>, <code>withHooks</code>), the deep signals it hands you for nested slices, and <code>patchState</code> as the single write path. Second, the <em>ecosystem and the trade-off</em>: <code>rxMethod</code> for reactive side effects, <code>withEntities</code> from <code>@ngrx/signals/entities</code>, writing your own reusable features with <code>signalStoreFeature</code>, and a straight comparison against classic NgRx Store and the older <code>@ngrx/component-store</code> that SignalStore effectively supersedes. Everything here assumes a current <code>@ngrx/signals</code> release on Angular v20 or newer; depth lives in the linked docs.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>signalStore: feature composition, deep signals and patchState</h3>
+    <p><code>signalStore()</code> does not take a configuration object full of reducers — it takes a <em>list of features</em> and returns an injectable class. <code>withState(initial)</code> turns every top-level property of your initial state into a signal on the store instance. <code>withComputed(store =&gt; ({...}))</code> adds derived signals. <code>withMethods(store =&gt; ({...}))</code> adds behaviour, and because its factory runs inside an injection context you can <code>inject()</code> services right there. <code>withHooks({ onInit, onDestroy })</code> ties work to the store's lifetime, and <code>withProps</code> attaches plain non-signal members such as an injected service or a subject. Each feature sees everything the previous features added, and the types flow through — that composition is the whole design.</p>
+    <p>Two details decide how the store behaves in practice. <strong>Scope:</strong> passing <code>{ providedIn: 'root' }</code> makes the store an application-wide singleton you simply inject; omitting it means you list the store in a component's <code>providers</code> array, which gives it the component's lifetime and a fresh instance per component — the local-state option that used to require ComponentStore. <strong>Writes:</strong> state is protected by default, so <code>patchState(store, partial)</code> can only be called from inside the store (typically from a method). <code>patchState</code> accepts either a partial object or an updater function <code>(state) =&gt; partial</code> for updates that depend on the current value, and it merges shallowly, so nested slices must be spread yourself. Reading nested state is the pleasant part: <em>deep signals</em> mean a nested object in your state is exposed as a signal whose properties are themselves signals, so <code>store.filter.query()</code> works without you ever declaring it.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export const BooksStore = signalStore(
+  { providedIn: 'root' },                       // omit this to provide it per component
+  withState({
+    books: [] as Book[],
+    filter: { query: '', order: 'asc' },        // nested -&gt; deep signals
+    isLoading: false,
+  }),
+  withComputed(({ books, filter }) =&gt; ({
+    booksCount: computed(() =&gt; books().length),
+    sorted: computed(() =&gt; sortBooks(books(), filter.order())),  // filter.order() is a signal
+  })),
+  withMethods((store) =&gt; ({
+    setQuery(query: string) {
+      patchState(store, (s) =&gt; ({ filter: { ...s.filter, query } }));  // updater fn
+    },
+  })),
+  withHooks({ onInit: (store) =&gt; store.setQuery('') }),
+);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store" rel="noopener">SignalStore — NgRx docs (signalStore, withState/withComputed/withMethods, patchState, root vs component scope)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-state" rel="noopener">SignalState — NgRx docs (the lightweight sibling, and where deep signals are explained)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store/lifecycle-hooks" rel="noopener">Lifecycle Hooks — NgRx docs (withHooks, onInit and onDestroy)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/signals" rel="noopener">Signals — angular.dev (signal, computed and the reactivity model SignalStore is built on)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/the-new-ngrx-signal-store-for-angular-2-1-flavors/" rel="noopener">The new NgRx Signal Store for Angular: 3 + 1 Flavors — ANGULARarchitects (Manfred Steyer)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=S68Ypg2rf8s" rel="noopener">Angular NgRx Signal Store: what are deep signals? — Angular University</a></li>
+    </ul>
+
+    <h3>rxMethod, custom features, and how SignalStore compares to Store and ComponentStore</h3>
+    <p>Signals are synchronous, so asynchronous work still needs somewhere to live. <code>rxMethod</code> (from <code>@ngrx/signals/rxjs-interop</code>) is that place: you give it an RxJS pipeline and get back a function you can call with a plain value, a signal, or an observable. It manages the subscription for you and tears it down with the store's injector, which is what makes debounced search, <code>switchMap</code> cancellation and retry logic expressible without a single <code>Effect</code> class. <code>withEntities</code> from <code>@ngrx/signals/entities</code> is the SignalStore counterpart to <code>@ngrx/entity</code>: it adds <code>entityMap</code>, <code>ids</code> and an <code>entities</code> signal plus updaters such as <code>setAllEntities</code>, <code>addEntity</code>, <code>updateEntity</code> and <code>removeEntity</code>, with named collections when one store holds several lists. Repeated shapes — loading flags, pagination, a data-service wiring — become reusable <code>signalStoreFeature</code> functions, which is how teams keep twenty stores from containing the same twenty lines.</p>
+    <p>The honest comparison matters more than the API surface, because that is what interviewers push on. Classic NgRx Store is the global, Redux-style, event-sourced option: actions give you a replayable audit trail, DevTools time travel, and a strict separation that scales across many teams — at the cost of files and ceremony. <code>@ngrx/component-store</code> was the older answer to "I want a store, but only for this component": RxJS-based, with <code>select</code>, <code>updater</code> and <code>effect</code>, tied to a component's lifetime. SignalStore covers that same local territory with far less RxJS, and covers the global case too via <code>providedIn: 'root'</code> — so new code should reach for SignalStore rather than ComponentStore, while existing ComponentStore code is stable and does not need a panic migration. The one thing classic Store still gives you that a plain SignalStore does not is the action stream itself; the newer <code>@ngrx/signals/events</code> plugin brings an event-driven, reducer-like flow into SignalStore for teams that want it back.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// reactive side effect + entity updater, inside withMethods
+loadByQuery: rxMethod&lt;string&gt;(
+  pipe(
+    debounceTime(300),
+    distinctUntilChanged(),
+    tap(() =&gt; patchState(store, { isLoading: true })),
+    switchMap((q) =&gt; books.search(q).pipe(
+      tapResponse({
+        next: (list) =&gt; patchState(store, setAllEntities(list), { isLoading: false }),
+        error: () =&gt; patchState(store, { isLoading: false }),
+      }),
+    )),
+  ),
+),
+
+// a reusable custom feature, dropped into any store
+export function withCallState() {
+  return signalStoreFeature(
+    withState&lt;{ callState: 'init' | 'loading' | 'loaded' }&gt;({ callState: 'init' }),
+    withComputed(({ callState }) =&gt; ({
+      isLoading: computed(() =&gt; callState() === 'loading'),
+    })),
+  );
+}</code></pre>
+    <table>
+      <caption>SignalStore vs classic NgRx Store vs ComponentStore</caption>
+      <thead>
+        <tr><th>Dimension</th><th>SignalStore (@ngrx/signals)</th><th>NgRx Store (@ngrx/store)</th><th>ComponentStore (@ngrx/component-store)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Primitive</td><td>Signals, composable features</td><td>Actions, reducers, selectors, effects</td><td>RxJS observables per component</td></tr>
+        <tr><td>Typical scope</td><td>Either — root singleton or component-provided</td><td>Global application state</td><td>Local, one component subtree</td></tr>
+        <tr><td>Boilerplate</td><td>One store declaration</td><td>Actions + reducer + selectors + effects files</td><td>Moderate — updaters and effects</td></tr>
+        <tr><td>Async work</td><td><code>rxMethod</code>, or plain async methods</td><td><code>createEffect</code> on the action stream</td><td><code>effect()</code> with RxJS</td></tr>
+        <tr><td>Collections</td><td><code>withEntities</code></td><td><code>@ngrx/entity</code> adapter</td><td>Hand-rolled</td></tr>
+        <tr><td>DevTools / time travel</td><td>State inspection via state tracking; no action log by default</td><td>Full action log and time travel</td><td>Not built in</td></tr>
+        <tr><td>Extensibility</td><td><code>signalStoreFeature</code> custom features</td><td>Meta-reducers, feature creators</td><td>Inheritance</td></tr>
+        <tr><td>Status</td><td>Current direction of the library</td><td>Actively maintained, still right for large event-sourced domains</td><td>Legacy for new code — superseded by SignalStore</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/signals/rxjs-integration" rel="noopener">RxJS Integration — NgRx docs (rxMethod, calling it with a value, signal or observable)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store/custom-store-features" rel="noopener">Custom Store Features — NgRx docs (signalStoreFeature and typed feature inputs)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store/entity-management" rel="noopener">Entity Management — NgRx docs (withEntities, updaters and named collections)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/component-store/comparison" rel="noopener">ComponentStore vs Store — NgRx docs (the official framing of local vs global state)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/en/blog/smarter-not-harder-simplifying-your-application-with-ngrx-signal-store-and-custom-features/" rel="noopener">Smarter, Not Harder: Simplifying your Application with NgRx Signal Store and Custom Features — ANGULARarchitects</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/bits/hello-ngrx-signals" rel="noopener">Hello @ngrx/signals — Tim Deschryver (signalState and signalStore side by side)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2kXczWBGCJ8" rel="noopener">NgRx Signal Store — is it an NgRx replacement? — Monsterlessons Academy</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-ngrx-ergonomics.html">← NgRx Ergonomics and Testing</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="08-state-strategy.html">State Strategy and Migration →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>SignalStore is the newest thing on Angular state-management question banks — Indian product companies ask it to separate people who track the ecosystem from people who learned NgRx once in 2019, and service-company panels increasingly ask it as the "what is new in Angular" question:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is NgRx SignalStore and how does it differ from classic NgRx Store?</summary>
+      <div class="answer"><p>SignalStore is the store from the <code>@ngrx/signals</code> package. Instead of actions, reducers, selectors and effects, you declare a store as a composition of <em>features</em> — <code>withState</code>, <code>withComputed</code>, <code>withMethods</code>, <code>withHooks</code> — and state is exposed as Angular signals rather than observables. Same goals (a single source of truth, immutable updates, derived state), far less boilerplate, and no action stream unless you opt into the events plugin.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you create a SignalStore and make it available across the whole application?</summary>
+      <div class="answer"><p>Call <code>signalStore({ providedIn: 'root' }, withState({...}), ...)</code> and assign it to an exported constant. That returns an injectable class registered in the root injector, so any component or service just does <code>private store = inject(BooksStore)</code> — nothing to add to a providers array.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does withState do, and how do you read a value in a template?</summary>
+      <div class="answer"><p><code>withState(initialState)</code> seeds the store and turns each top-level property into a signal on the store instance. In a template you call it like any signal: <code>{{ store.isLoading() }}</code> — no <code>async</code> pipe, and it works cleanly with <code>OnPush</code> and zoneless change detection.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is patchState and why not assign to the state directly?</summary>
+      <div class="answer"><p><code>patchState(store, partial)</code> is the only write path. It applies an immutable shallow merge and notifies every dependent signal in one go. Direct mutation would bypass the signal graph, so nothing would recompute — and state is protected by default, so <code>patchState</code> is rejected from outside the store unless you pass <code>{ protectedState: false }</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> withComputed vs withMethods — what goes in each?</summary>
+      <div class="answer"><p><code>withComputed</code> is for <em>derived read-only</em> values: memoized <code>computed()</code> signals built from existing state, such as a filtered list or a total. <code>withMethods</code> is for <em>behaviour</em>: functions that change state via <code>patchState</code> or perform side effects. Rule of thumb — if it can be recalculated from state, it is a computed; if it causes something, it is a method.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are deep signals?</summary>
+      <div class="answer"><p>When a state slice is a nested object, SignalStore does not stop at one signal — it exposes each nested property as a signal too, created lazily and memoized. So with state <code>{ filter: { query, order } }</code> you can read <code>store.filter.query()</code> directly and a component that only depends on <code>query</code> will not recompute when <code>order</code> changes. It is what makes fine-grained reactivity work without you writing a selector per field.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> providedIn root versus providing the store in a component — how do you choose?</summary>
+      <div class="answer"><p><code>{ providedIn: 'root' }</code> gives one shared instance for the app's lifetime — right for authenticated user, cart, feature flags, anything several routes read. Listing the store in a component's <code>providers</code> array gives a fresh instance per component that is destroyed with it — right for a form's working copy, a wizard, a modal, or a list widget rendered many times. This second mode is the local-state use case that used to require ComponentStore.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is rxMethod and when do you need it over a plain async method?</summary>
+      <div class="answer"><p><code>rxMethod</code> wraps an RxJS pipeline into a callable store method and manages the subscription against the store's injector. Use it when you need RxJS semantics that <code>async</code>/<code>await</code> cannot express: <code>debounceTime</code>, <code>distinctUntilChanged</code>, <code>switchMap</code> cancellation of a stale request, retries, or concurrency control. A one-shot fetch with no cancellation concern is perfectly fine as a plain async method inside <code>withMethods</code>. A bonus: you can call an <code>rxMethod</code> with a signal, and it re-runs whenever that signal changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does withEntities give you, and how does it relate to @ngrx/entity?</summary>
+      <div class="answer"><p><code>withEntities</code> from <code>@ngrx/signals/entities</code> is the SignalStore version of the entity adapter: it stores a collection normalized as an <code>entityMap</code> plus an <code>ids</code> array, exposes a derived <code>entities</code> signal, and ships updaters like <code>setAllEntities</code>, <code>addEntity</code>, <code>updateEntity</code> and <code>removeEntity</code> that you pass straight into <code>patchState</code>. Named collections let one store hold several lists. Same normalization benefits as <code>@ngrx/entity</code> — O(1) lookup, no duplicate records — without reducers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is withHooks for?</summary>
+      <div class="answer"><p>It attaches lifecycle behaviour to the store rather than to a component: <code>onInit</code> runs when the store is created (load initial data, start an <code>rxMethod</code> driven by a signal, restore from storage) and <code>onDestroy</code> when its injector is destroyed. For a component-provided store that is the component's lifetime; for a root store it is the application's. It keeps initialization inside the store instead of scattered across every consumer's <code>ngOnInit</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you write a custom feature, and why bother?</summary>
+      <div class="answer"><p>Write a function that returns <code>signalStoreFeature(...)</code> composing the built-in features, then drop it into any store's feature list. Classic examples are <code>withCallState</code> (a loading/loaded/error flag plus derived booleans), <code>withPagination</code>, <code>withUndoRedo</code> and <code>withDataService</code>. The payoff is that cross-cutting state stops being copy-pasted into every store, and the feature can declare the state it expects so misuse is a compile error rather than a runtime one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Does SignalStore replace ComponentStore? What would you tell a team still on it?</summary>
+      <div class="answer"><p>For new code, yes — SignalStore covers ComponentStore's local-state role with signals instead of RxJS, plus deep signals, entity support and composable features, and it also handles the global case. ComponentStore remains maintained and there is no forced migration, so the advice is: stop writing new ComponentStores, migrate opportunistically when a component is being reworked, and translate <code>select</code> to computed signals, <code>updater</code> to methods calling <code>patchState</code>, and <code>effect</code> to <code>rxMethod</code> — the shapes map almost one to one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> patchState with an object versus an updater function — and what about nested state?</summary>
+      <div class="answer"><p>Pass an object when the new value does not depend on the old one; pass an updater <code>(state) =&gt; partial</code> when it does (incrementing a counter, appending to a list), because reading the signal separately and then patching can race with other updates. Either way the merge is <em>shallow</em>: to change one field of a nested slice you must spread it yourself, and you must never mutate the existing object — the store's runtime checks will flag it in development. Updaters compose too, which is exactly how entity helpers like <code>addEntity</code> are implemented.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Would you replace NgRx Store with SignalStore in a large enterprise application?</summary>
+      <div class="answer"><p>Not reflexively. Classic Store earns its ceremony where you genuinely need the action stream: a replayable audit trail, DevTools time travel, many features reacting to one event, and a hard boundary between teams. SignalStore wins on ergonomics, on local and feature-scoped state, and on anything signal-first or zoneless. A realistic answer is a hybrid — keep the existing global store, build new feature and component state as SignalStores, and reach for <code>@ngrx/signals/events</code> if a SignalStore genuinely needs event-driven, multi-listener semantics. Migrating a working store wholesale is cost without benefit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you test a SignalStore, and what makes it easier than testing a reducer-plus-effect setup?</summary>
+      <div class="answer"><p>Create the store inside a <code>TestBed.runInInjectionContext</code> (or provide it in a testing module), call its methods, and assert on the signals by reading them — no marble diagrams, no mock action stream, and dependencies swapped with normal provider overrides. Because a SignalStore bundles state, derived state and behaviour in one unit, one test covers what previously needed a reducer test plus an effect test plus a selector test. For asynchronous flows driven by <code>rxMethod</code>, mock the injected service and flush with the usual fake-async tooling.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.sig.store — signalStore, withState/withComputed/withMethods, deep signals</li>
+      <li>ngs.sig.compare — rxMethod, custom features, ComponentStore as the legacy comparison</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

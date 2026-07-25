@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="NgRx Selectors and Entity State module: createFeatureSelector and createSelector, how memoization actually works, composing small selectors into one view-model selector consumed with selectSignal, then normalizing collections with @ngrx/entity — createEntityAdapter, EntityState, adapter CRUD methods and getSelectors — with verified official and community resources plus interview questions.">
+  <title>Selectors and Entity State — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: Selectors and Entity State</h1>
+  <p class="standfirst">Reducers are the write model; selectors are the read model. This module is about the query layer that sits between your store and your components — how a memoized selector avoids recomputation, how to compose one view model per screen, and how <code>@ngrx/entity</code> stops you hand-rolling array lookups over collections.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Angular State Management → Selectors and Entity State</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>NgRx separates reading from writing in the spirit of CQRS: reducers own state transitions, selectors own the projections components actually consume. Half of this module is the selector API — <code>createFeatureSelector</code>, <code>createSelector</code>, memoization semantics, and folding many small selectors into a single view-model selector that a component reads with one <code>store.selectSignal(...)</code>. The other half is <code>@ngrx/entity</code>: why collections belong in a normalized <code>ids</code> + <code>entities</code> shape, how <code>createEntityAdapter</code> generates the CRUD helpers your reducer calls, and how <code>adapter.getSelectors()</code> hands the query layer back to you for free. Everything uses current standalone NgRx, including the signals interop.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>createSelector, memoization, and view-model selectors</h3>
+    <p>A selector is a pure function from state to a slice of it. <code>createFeatureSelector&lt;T&gt;('featureKey')</code> grabs a whole registered feature slice without you typing <code>state.books</code> everywhere; <code>createSelector(...inputs, projector)</code> then takes one or more input selectors and a projector function that combines their results. The payoff is <em>memoization</em>: NgRx remembers the last arguments a selector was called with and the last value it produced. If every input result is <em>reference-equal</em> to the previous run, the projector is skipped entirely and the cached output is returned — which also means downstream selectors and the template see the same object reference and change detection has nothing to do.</p>
+    <p>That single sentence explains most selector bugs. Memoization compares by reference, not by deep value, so a reducer that mutates an array in place (<code>state.items.push(x)</code>) hands back the same reference and the selector reports "nothing changed" — the screen goes stale. Conversely, a projector that builds a fresh object or array on every call (<code>books.map(...)</code> inside a component, or <code>{ ...a, ...b }</code> in an unmemoized function) breaks reference equality further downstream and defeats <code>OnPush</code>. The composition habit that survives code review is small, reusable selectors near the reducer plus one <em>view-model selector</em> per screen that assembles them, so the component subscribes once instead of juggling four streams. Read it with <code>store.selectSignal(selector)</code> for a <code>Signal</code>, or <code>store.select(selector)</code> when you still need an <code>Observable</code> to pipe; both are backed by the same memoized function, and <code>selectSignal</code> accepts an equality function just like <code>computed</code>.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// books.selectors.ts
+export const selectBooksState = createFeatureSelector&lt;BooksState&gt;('books');
+
+export const selectQuery   = createSelector(selectBooksState, s =&gt; s.query);
+export const selectLoading = createSelector(selectBooksState, s =&gt; s.loading);
+
+// one view model per screen — the component takes a single signal
+export const selectBooksPageVm = createSelector(
+  selectAllBooks, selectQuery, selectLoading,
+  (books, query, loading) =&gt; ({
+    books: books.filter(b =&gt; b.title.includes(query)),
+    loading,
+    isEmpty: !loading &amp;&amp; books.length === 0,
+  })
+);
+
+// books-page.component.ts
+private readonly store = inject(Store);
+readonly vm = this.store.selectSignal(selectBooksPageVm);   // Signal&lt;BooksPageVm&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/selectors" rel="noopener">Selectors — NgRx docs (createSelector, createFeatureSelector, memoization, selectSignal, advanced composition)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/store/feature-creators" rel="noopener">Feature Creators — NgRx docs (createFeature generates the feature selector and child selectors for you)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/solving-angular-slow-renders-with-ngrx-selectors" rel="noopener">Solving Angular slow renders with NgRx selectors — Tim Deschryver (the case for view-model selectors)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/parameterized-selectors" rel="noopener">Parameterized NgRx Selectors — Tim Deschryver (selector factories and the memoization they cost you)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=QBjv-xV7Fac" rel="noopener">NgRx Selectors — An In-Depth Explanation — Angular University</a></li>
+    </ul>
+
+    <h3>@ngrx/entity: normalized collections and the adapter</h3>
+    <p>Storing a collection as a plain array forces every reducer to do work the store should not care about: find the index, splice it out, rebuild the array immutably, and repeat for add, update and remove. Normalization fixes this by keeping two things instead — <code>ids</code>, an ordered array of primary keys, and <code>entities</code>, a dictionary keyed by id. Lookup by id becomes O(1) rather than a scan, an entity exists in exactly one place so two screens cannot drift out of sync, and ordering is decoupled from storage. <code>EntityState&lt;T&gt;</code> is exactly that pair, and you extend it to add your own slice properties such as <code>selectedId</code> or <code>loading</code>.</p>
+    <p><code>createEntityAdapter&lt;T&gt;()</code> returns a stateless helper configured with <code>selectId</code> (only needed when your primary key is not literally <code>id</code>) and an optional <code>sortComparer</code> — set the comparer to <code>false</code> when you do not need sorted output, because sorting costs on every write. The adapter gives you <code>getInitialState()</code> to seed the slice, a full set of immutable collection methods used inside <code>on(...)</code> handlers — <code>addOne</code>/<code>addMany</code>, <code>setOne</code>/<code>setMany</code>/<code>setAll</code>, <code>updateOne</code>/<code>updateMany</code> (which take an <code>Update&lt;T&gt;</code> of <code>{ id, changes }</code> and therefore support partial updates), <code>upsertOne</code>/<code>upsertMany</code>, <code>mapOne</code>/<code>map</code>, and <code>removeOne</code>/<code>removeMany</code>/<code>removeAll</code> — and finally <code>getSelectors()</code>, which returns <code>selectIds</code>, <code>selectEntities</code>, <code>selectAll</code> and <code>selectTotal</code>. Compose those four with your feature selector and the whole read layer for a collection is four lines. This is the point where the two halves of the module meet: the adapter produces the base selectors, and <code>createSelector</code> composes them into the view models the screens want.</p>
+    <pre class="code-block" data-label="TypeScript"><code>export interface BooksState extends EntityState&lt;Book&gt; { selectedId: string | null; }
+
+export const adapter = createEntityAdapter&lt;Book&gt;({
+  selectId: b =&gt; b.isbn,                                   // key is not called "id"
+  sortComparer: (a, b) =&gt; a.title.localeCompare(b.title),  // or false, if unsorted
+});
+
+export const initialState: BooksState = adapter.getInitialState({ selectedId: null });
+
+export const reducer = createReducer(initialState,
+  on(BooksApi.loadedAll, (state, { books })  =&gt; adapter.setAll(books, state)),
+  on(BooksApi.created,   (state, { book })   =&gt; adapter.addOne(book, state)),
+  on(BooksApi.patched,   (state, { update }) =&gt; adapter.updateOne(update, state)), // { id, changes }
+  on(BooksApi.deleted,   (state, { isbn })   =&gt; adapter.removeOne(isbn, state)),
+);
+
+// the read layer, for free
+const { selectAll, selectEntities, selectTotal } = adapter.getSelectors();
+export const selectAllBooks   = createSelector(selectBooksState, selectAll);
+export const selectBookMap    = createSelector(selectBooksState, selectEntities);
+export const selectBookCount  = createSelector(selectBooksState, selectTotal);</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/entity/interfaces" rel="noopener">Entity Interfaces — NgRx docs (EntityState with ids/entities, and EntityAdapter)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/entity/adapter" rel="noopener">Entity Adapter — NgRx docs (createEntityAdapter, every collection method, Update&lt;T&gt;, getSelectors)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/normalizing-state" rel="noopener">Normalizing state — Tim Deschryver (why the ids + entities shape beats nested arrays)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/ngrx-entity/" rel="noopener">Angular NgRx Entity — Complete Practical Guide — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jKBzefC6Ciw" rel="noopener">NgRx Entity Update: Master the Entity Adapter Update Pattern — procademy</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-ngrx-foundations.html">← NgRx Foundations</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="05-effects.html">Effects and Side Effects →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Selectors and the entity adapter are where Indian NgRx interviews get specific — service-company rounds test the API, product-company rounds test whether you understand memoization and state shape:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a selector in NgRx and why not just read state directly?</summary>
+      <div class="answer"><p>A selector is a pure function that projects a slice of store state. Reading state directly couples every component to the exact state shape, so a rename breaks the whole app; a selector is a single point of change, is independently unit-testable, is reusable across components, and — unlike an inline map — is memoized so the projection does not re-run on every emission.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> createFeatureSelector vs createSelector?</summary>
+      <div class="answer"><p><code>createFeatureSelector&lt;T&gt;('key')</code> returns the top-level slice registered under that feature key — it is the entry point. <code>createSelector(...inputSelectors, projector)</code> derives a new value from one or more existing selectors and memoizes the result. In practice you write one feature selector per feature and many <code>createSelector</code>s on top of it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you consume a selector in a standalone component today?</summary>
+      <div class="answer"><p>Inject the store with <code>private store = inject(Store)</code>, then either <code>store.selectSignal(selectX)</code> for a <code>Signal</code> you read as <code>x()</code> in the template, or <code>store.select(selectX)</code> for an <code>Observable</code> you render with the <code>async</code> pipe. Signals are the current default because they need no unsubscribe and compose with <code>computed</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is @ngrx/entity and what problem does it solve?</summary>
+      <div class="answer"><p>A small library for managing collections in a normalized shape. It supplies <code>EntityState&lt;T&gt;</code> (an <code>ids</code> array plus an <code>entities</code> dictionary), an adapter that generates immutable add/update/remove/upsert helpers for your reducer, and ready-made selectors. It removes the repetitive, error-prone array manipulation from reducers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does EntityState look like, and why keep both ids and entities?</summary>
+      <div class="answer"><p><code>{ ids: string[] | number[]; entities: { [id]: T } }</code>. The dictionary gives O(1) lookup and a single source of truth per record; the ids array preserves order (including any <code>sortComparer</code> order), which a plain object cannot guarantee. <code>selectAll</code> simply maps ids over the dictionary to rebuild the ordered array for the view.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does memoization in createSelector actually work?</summary>
+      <div class="answer"><p>The selector caches its last input arguments and its last output. On each call it compares the new inputs to the cached ones with a reference check; if all match, it returns the cached output without invoking the projector. Because the returned reference is also unchanged, downstream selectors short-circuit too and <code>OnPush</code> components skip re-rendering. Memoized selectors also expose <code>release()</code> to clear that cache when needed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your component does not update after a state change even though the reducer ran. What is the usual cause?</summary>
+      <div class="answer"><p>State was mutated instead of replaced — <code>state.items.push(item)</code> or assigning to an existing object property. The array or object reference is unchanged, so the selector's reference check says "same input" and returns the cached value. Fix it by returning new references from the reducer, and turn on NgRx runtime checks (<code>strictStateImmutability</code>, <code>strictActionImmutability</code>) in development so mutation throws instead of failing silently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a view-model selector and why is it preferred over combining several selectors in the component?</summary>
+      <div class="answer"><p>One selector that composes all the state a screen needs into a single object, consumed with one <code>selectSignal</code> or one <code>async</code> pipe. It keeps derivation logic out of the template (so it runs on state change, not on every change-detection pass), removes multi-stream coordination bugs, makes the screen's data contract explicit, and is far easier to test — you feed it a state object and assert the view model.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Which adapter methods would you use for "replace the list from the server", "save an edited row", and "toggle one field"?</summary>
+      <div class="answer"><p><code>setAll(books, state)</code> replaces the whole collection after a load. <code>updateOne({ id, changes }, state)</code> applies a partial update to one record — <code>upsertOne</code> if it may not exist yet. <code>mapOne</code> updates one entity via a map function when the new value depends on the current one. <code>removeOne</code>/<code>removeMany</code> (which also accepts a predicate) handle deletion.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you configure selectId and sortComparer, and what do they cost?</summary>
+      <div class="answer"><p><code>createEntityAdapter&lt;Book&gt;({ selectId: b =&gt; b.isbn, sortComparer: (a, b) =&gt; a.title.localeCompare(b.title) })</code>. <code>selectId</code> is only required when the key is not named <code>id</code>. A <code>sortComparer</code> keeps <code>ids</code> permanently ordered, which is convenient but re-sorts on every write; pass <code>false</code> when the API already returns the order you want or when the view sorts, since that is measurably faster for large collections.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Selectors with arguments: how do you write one, and what is the memoization trap?</summary>
+      <div class="answer"><p>Either pass runtime data through props into the projector, or use a selector <em>factory</em> — a function returning <code>createSelector(...)</code>. The trap is that a factory creates a brand-new memoized instance on every invocation, so calling it inside a template or on every emission gives you a cache of size one that is thrown away each time — the memoization benefit disappears and you may leak instances. Create the factory result once in a field, or prefer composing the argument into state or into a parent view-model selector.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Where should filtering, sorting and pagination of a large list live — reducer, selector, or component?</summary>
+      <div class="answer"><p>Keep the raw normalized collection plus the filter criteria in state; derive the visible list in a memoized selector. The reducer should not store derived data (it goes stale and duplicates truth), and the component should not compute it inline (it re-runs on every change detection). If the derivation is genuinely expensive, split it into layered selectors so each memoizes independently, and if the dataset is large enough that the client should not hold it at all, move filtering and paging to the server and store only the current page.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you unit-test selectors, and what makes them cheap to test?</summary>
+      <div class="answer"><p>They are pure functions, so no <code>TestBed</code> and no store are needed: call the selector with a handcrafted state object and assert the result. For composed selectors, use <code>selector.projector(...inputValues)</code> to test the projection logic in isolation without building the whole state tree — this is the standard trick and it keeps tests immune to state-shape refactors. In component tests, override values with <code>provideMockStore({ selectors: [{ selector: selectX, value: … }] })</code> or <code>store.overrideSelector</code>, remembering to call <code>refreshState()</code> after changing them.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.sel.create — createSelector memoization, composing selectors, view-model selectors</li>
+      <li>ngs.sel.entity — @ngrx/entity adapter, EntityState, normalized collections</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

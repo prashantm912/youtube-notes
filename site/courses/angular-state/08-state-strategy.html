@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Angular State Strategy and Migration module: the five-way state taxonomy, why most state-management pain is really server-cache management, when NgRx earns its ceremony, migration paths from signal service to SignalStore to NgRx Store, and a worked admin-dashboard case study — with verified official and community resources plus the interview questions they power.">
+  <title>State Strategy and Migration — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-angular lesson-page">
+<header class="page-header">
+  <h1>Module: State Strategy and Migration</h1>
+  <p class="standfirst">Seven modules taught you the mechanisms. This one is about judgement: deciding which slice of your application deserves which mechanism, recognising that "we need a state library" is usually a misdiagnosis of a caching problem, and moving an existing codebase between approaches without a rewrite.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Angular State Management</a> → State Strategy and Migration</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This is the synthesis chapter for the track. It starts by breaking "state management" into five separate problems — local component state, shared client state, server-cache state, URL state and form state — because only one or two of them ever want a store. It then spends real time on the server cache, which is where most of the pain actually lives, using Angular v20's <code>resource()</code> and <code>httpResource()</code> plus the TanStack Query Angular adapter. From there: a decision framework for when NgRx Store earns its ceremony, concrete migration paths (signal service → SignalStore → full NgRx Store, and <code>StoreModule.forRoot</code> → standalone providers), and a worked admin-dashboard case study that assigns a mechanism to each slice and explains why.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The taxonomy: five kinds of state wearing one name</h3>
+    <p>"State management" is a single phrase covering at least five unrelated problems. <em>Local component state</em> — an accordion's open flag, a spinner, a hovered row — belongs in a <code>signal()</code> on the component and nowhere else; hoisting it into a store is pure cost. <em>Shared client state</em> — the signed-in user, a theme, a shopping cart, a feature-flag map — is genuinely application-wide and genuinely client-owned, and this is the only category a client store is actually designed for. <em>Server-cache state</em> — the product list, the order you are viewing — is not your state at all: it is a local copy of somebody else's data that goes stale the moment you fetch it. <em>URL state</em> — the current page, active filters, the selected tab — belongs in route and query parameters so it survives a refresh and can be pasted into Slack. <em>Form state</em> — draft values, dirty and touched flags, validation errors — belongs to the forms system, which already manages it far better than a reducer will.</p>
+    <p>Why it matters: almost every over-engineered Angular codebase is the result of applying one mechanism to all five categories. Push server data through a reducer and you have hand-written a cache with no invalidation policy; push filters through a store instead of the URL and you have broken the back button and shareable links; push a form draft through a store and you have reimplemented <code>FormGroup</code> badly. Interviewers at product companies test exactly this: they will not ask you to recite <code>createReducer</code>, they will describe a screen and ask where each piece of data should live. Getting the taxonomy right is what makes the rest of the decisions easy.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// Same screen, five different homes — this is the whole module in one comment.
+drawerOpen   = signal(false);                    // local: component signal
+user         = inject(AuthStore).user;           // shared client: one app-wide store
+orders       = httpResource(() =&gt; `/api/orders?page=${this.page()}`); // server cache
+page         = input.required&lt;number&gt;();         // URL: bound from query params
+editForm     = new FormGroup({ /* ... */ });     // form: the forms system owns it</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/signals" rel="noopener">Signals overview — angular.dev (the primitive for local and shared client state)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/routing/read-route-state" rel="noopener">Read route state — angular.dev (route and query params: the URL as a state container)</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/forms" rel="noopener">Forms overview — angular.dev (why form state already has an owner)</a></li>
+      <li>[Article] <a href="https://blog.angular-university.io/angular-2-redux-ngrx-rxjs/" rel="noopener">Angular NgRx Store and Redux — When to use a Store and Why? — Angular University</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2LwuV6s-Cy4" rel="noopener">State Management in Angular — Do I need Redux &amp; NgRx? — Decoded Frontend</a></li>
+    </ul>
+
+    <h3>Server-cache state: the problem most "state management" actually is</h3>
+    <p>Open any store in a typical enterprise Angular app and count the slices. Most of them hold rows fetched from an API, wrapped in <code>loading</code>, <code>error</code> and <code>lastFetched</code> fields, refreshed by an effect. That is not state management — that is a cache, written by hand, usually without a staleness policy, deduplication, or a story for what happens when two components ask for the same resource at once. The moment you recognise this, the questions change: not "which store?" but "how long is this data fresh, what invalidates it, and what do we show while we refetch?"</p>
+    <p>Angular v20 answers part of this natively. <code>resource()</code> models an async dependency as a signal-based unit with <code>value</code>, <code>status</code>, <code>error</code> and <code>reload()</code>, re-running whenever its reactive <code>params</code> change; <code>httpResource()</code> is the HttpClient-flavoured version that takes a URL (or request object) built from signals and gives you the response as a signal, with typed <code>value</code> and a request lifecycle you never subscribe to. What Angular deliberately does <em>not</em> give you is a shared cache: two components calling <code>httpResource</code> for the same URL issue two requests, and there is no cross-component invalidation or mutation lifecycle. That is where the ecosystem answer comes in — the TanStack Query Angular adapter provides the query cache, keyed by a <code>queryKey</code>, with <code>staleTime</code> and <code>gcTime</code>, request deduplication, background refetch and explicit invalidation after mutations. Its default behaviour <em>is</em> stale-while-revalidate: serve the cached value instantly, refetch in the background, swap in the fresh result. Learn that model even if you never adopt the library, because it is the vocabulary interviewers use — "stale", "invalidate", "refetch on window focus" — and once you own it, the number of slices your NgRx store actually needs collapses.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// Angular-native: reactive URL in, signal out. No subscription, no loading flag by hand.
+export class OrdersComponent {
+  page   = signal(1);
+  orders = httpResource&lt;Order[]&gt;(() =&gt; `/api/orders?page=${this.page()}`);
+  // orders.value() | orders.isLoading() | orders.error() | orders.reload()
+}
+
+// What it does NOT do: share one cache between components, dedupe concurrent
+// requests, or invalidate after a mutation. That is the query-library's job.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/http/http-resource" rel="noopener">Reactive data fetching with httpResource — angular.dev</a></li>
+      <li>[Official] <a href="https://angular.dev/guide/signals/resource" rel="noopener">Async reactivity with resources — angular.dev (resource(), status, reload)</a></li>
+      <li>[Official] <a href="https://tanstack.com/query/latest/docs/framework/angular/overview" rel="noopener">TanStack Query Angular — Overview (the server-state library, signal-based adapter)</a></li>
+      <li>[Official] <a href="https://tanstack.com/query/latest/docs/framework/angular/guides/important-defaults" rel="noopener">Important Defaults — TanStack Query Angular (staleTime, gcTime, stale-while-revalidate)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=s19YO0DPO_w" rel="noopener">Making Angular's resource() even more powerful — Joshua Morony</a></li>
+    </ul>
+
+    <h3>When NgRx Store earns its ceremony — a decision framework</h3>
+    <p>NgRx Store is not overkill because it is complicated; it is overkill when the properties it buys you are properties you do not need. What it buys: a single serialisable source of truth, a strictly auditable change log (every mutation is a named action, replayable in DevTools), memoised derived views via selectors, and a hard separation of side effects. Those properties earn their price on a large, long-lived application with many teams, complex cross-feature interactions, and a real need to reason about "how did the state get into this shape?" — think a trading terminal, a claims-processing workbench, an editor with undo. NgRx's own guidance frames this well: if your state is shared across many components, hydrated from elsewhere, retrieved repeatedly, or genuinely complex, a store helps; if it is none of those, it does not.</p>
+    <p>The practical framework, in order: (1) Can this live in a component signal? Do that. (2) Is it shared client state used by a handful of components? A signal service with a readonly public surface is enough. (3) Is it server data? Reach for <code>httpResource</code>/<code>resource</code> or a query library before any store. (4) Is it a self-contained feature's local-but-complex state — a wizard, a filterable table, a drawer? <code>@ngrx/signals</code> SignalStore scoped to that feature, provided at route or component level, is the modern sweet spot; it is the successor to ComponentStore and the NgRx team now points local-state work there. (5) Only when several features must coordinate, the change history matters, and the team is large enough to benefit from the convention, does global NgRx Store pay for itself. Two more honest signals: if your reducers mostly set <code>loading: true</code>, you are managing a cache, not state; and if a store slice has exactly one consumer, it is a signal in disguise.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/store/why" rel="noopener">Why use NgRx Store for State Management? — ngrx.io (the official "when is it worth it" guidance)</a></li>
+      <li>[Official] <a href="https://ngrx.io/guide/component-store/comparison" rel="noopener">Comparison of ComponentStore and Store — ngrx.io (local vs global state, side by side)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/blog/the-ngrx-signal-store-and-your-architecture/" rel="noopener">The NgRx Signal Store and Your Architecture — ANGULARarchitects (Manfred Steyer, on where stores belong per layer)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/bits/hello-ngrx-signals" rel="noopener">Hello @ngrx/signals — Tim Deschryver (signalState vs signalStore, and what each replaces)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V-D2sk_azcs" rel="noopener">NgRx Signal Store Trilogy, Part 1: Why, When, and How? — Rainer Hahnekamp</a></li>
+    </ul>
+
+    <h3>Migration paths: signal service → SignalStore → NgRx Store</h3>
+    <p>The good news is that these three are points on one line, not competing religions, so migration is incremental rather than a rewrite. A signal service already has the shape of a store: private writable signals, public <code>computed</code> readonly accessors, methods that mutate. Promoting it to a SignalStore is largely mechanical — the private signals become <code>withState</code>, the computed accessors become <code>withComputed</code>, the methods become <code>withMethods</code>, and async work moves into <code>rxMethod</code> or a plain async method. Consumers barely change, because both expose signals. Going the other way is equally cheap, which is why starting with a service costs you almost nothing.</p>
+    <p>Promoting a SignalStore to global NgRx Store is a bigger step and should be driven by a real requirement (cross-feature coordination, action-level auditability), not by aesthetics. Do it slice by slice: the two can coexist in the same application, so move one feature, keep the facade its components already call, and let the facade's implementation switch from store methods to <code>store.dispatch</code> and selectors. Keeping a facade in front of state is what makes this migration a one-file change per feature instead of a hundred-component change.</p>
+    <p>The other migration every legacy Angular codebase faces is module-to-standalone. NgRx ships a <code>provide*</code> equivalent for every module registration: <code>StoreModule.forRoot()</code> → <code>provideStore()</code>, <code>EffectsModule.forRoot()</code> → <code>provideEffects()</code>, <code>StoreDevtoolsModule.instrument()</code> → <code>provideStoreDevtools()</code>, <code>StoreRouterConnectingModule.forRoot()</code> → <code>provideRouterStore()</code>. Feature registrations move out of lazy <code>NgModule</code>s and into the route's own <code>providers</code> array, which is strictly better — the slice's lifetime now matches the route's. Run the Angular standalone migration schematics first to get components and bootstrapping converted, then swap the NgRx module imports; adopt the standalone APIs wholesale per application rather than mixing both styles.</p>
+    <pre class="code-block" data-label="TypeScript"><code>// Step 1 — signal service (start here, always)
+@Injectable({ providedIn: 'root' })
+export class CartService {
+  private _items = signal&lt;Item[]&gt;([]);
+  readonly items = this._items.asReadonly();
+  readonly total = computed(() =&gt; this.items().reduce((s, i) =&gt; s + i.price, 0));
+  add(item: Item) { this._items.update(list =&gt; [...list, item]); }
+}
+
+// Step 2 — same contract, SignalStore shape
+export const CartStore = signalStore(
+  { providedIn: 'root' },
+  withState({ items: [] as Item[] }),
+  withComputed(({ items }) =&gt; ({ total: computed(() =&gt; items().reduce((s, i) =&gt; s + i.price, 0)) })),
+  withMethods((store) =&gt; ({ add: (i: Item) =&gt; patchState(store, { items: [...store.items(), i] }) })),
+);
+
+// Step 3 — module-based NgRx becomes standalone providers
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideStore({ cart: cartReducer }),   // was StoreModule.forRoot(...)
+    provideEffects(CartEffects),           // was EffectsModule.forRoot([...])
+    provideStoreDevtools({ maxAge: 25 }),  // was StoreDevtoolsModule.instrument(...)
+  ],
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://ngrx.io/guide/signals/signal-store" rel="noopener">SignalStore — ngrx.io (withState, withComputed, withMethods: the migration target)</a></li>
+      <li>[Official] <a href="https://ngrx.io/api/store/provideStore" rel="noopener">provideStore — ngrx.io API reference (the standalone replacement for StoreModule.forRoot)</a></li>
+      <li>[Official] <a href="https://angular.dev/reference/migrations/standalone" rel="noopener">Standalone migration — angular.dev (the schematics that convert an NgModule app)</a></li>
+      <li>[Article] <a href="https://dev.to/ngrx/using-ngrx-packages-with-standalone-angular-features-53d8" rel="noopener">Using NgRx Packages with Standalone Angular Features — the NgRx team (every module → provider mapping)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/you-should-take-advantage-of-the-improved-ngrx-apis" rel="noopener">You should take advantage of the improved NgRx APIs — Tim Deschryver</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HqxY0JPlh54" rel="noopener">Angular NgRx Signal Store Crash Course (for NgRx beginners) — Angular University</a></li>
+    </ul>
+
+    <h3>Case study: an admin dashboard, slice by slice</h3>
+    <p>Take a concrete screen — the one you will be asked to design in a system-design round. An admin dashboard shows a paginated, sortable table of users; a filter bar (search text, status, date range); a row-click that opens an edit drawer with a form; and a save that must refresh the table. A junior answer puts all of it in one NgRx feature slice with a dozen actions. Here is the slice-by-slice assignment instead.</p>
+    <p><strong>Filters, sort and page number → the URL.</strong> They are the definition of shareable, refresh-surviving view state; put them in query params, bind them into the component with <code>withComponentInputBinding()</code>, and you get the back button, deep links and bookmarking for free. <strong>The table rows → server-cache state.</strong> An <code>httpResource</code> (or a query keyed on the filter tuple) whose URL is computed from those URL-derived signals: change a filter, the key changes, the data refetches, and stale-while-revalidate keeps the old rows on screen so the table does not flash empty. No reducer, no <code>loading</code> boolean, no effect. <strong>Drawer open/closed and the selected row id → local component state</strong>, a plain <code>signal()</code> — or the id in the URL too, if you want a deep-linkable drawer, which is usually the better call. <strong>The edit form's draft → the forms system</strong>, seeded from the selected row with a <code>linkedSignal</code> so switching rows resets the draft cleanly while still allowing local edits. <strong>The save → a mutation</strong>, and the only interesting design decision on the page: after a successful PUT, invalidate the users query key rather than hand-patching the row into a store, so every consumer of that data converges on the server's truth. <strong>Signed-in user and permissions → one small shared client store</strong>, because it is read everywhere and owned by the client.</p>
+    <p>Count what is left for NgRx Store on this screen: nothing. That is not an argument against NgRx — it is the argument for the taxonomy. Add a second screen that must react when this one saves, an offline queue, or an undo stack, and the calculus changes; the framework tells you <em>when</em> it changed instead of leaving it to taste. If the table grows into a shared, normalised collection consumed by several features, that is the moment for <code>withEntities</code> or the <code>@ngrx/entity</code> adapter and a normalised shape, not before.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://angular.dev/guide/signals/linked-signal" rel="noopener">Dependent state with linkedSignal — angular.dev (resettable drafts derived from a selection)</a></li>
+      <li>[Official] <a href="https://tanstack.com/query/latest/docs/framework/angular/guides/query-invalidation" rel="noopener">Query Invalidation — TanStack Query Angular (invalidate after a mutation instead of patching)</a></li>
+      <li>[Article] <a href="https://timdeschryver.dev/blog/normalizing-state" rel="noopener">Normalizing state — Tim Deschryver (when a collection slice deserves a normalised shape)</a></li>
+      <li>[Article] <a href="https://www.angulararchitects.io/en/blog/the-new-ngrx-signal-store-for-angular-2-1-flavors/" rel="noopener">The new NgRx Signal Store for Angular: 3+n Flavors — ANGULARarchitects (choosing a flavour per slice)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z7zK2u4vBrA" rel="noopener">I tried to build my dream (simple) state management for Angular — Joshua Morony</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-signal-store.html">← NgRx SignalStore</a>
+    <a href="index.html">All Angular State Management modules</a>
+    <a href="index.html">Back to the track contents →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>This is the module that shows up in architecture and design rounds — Indian service companies ask it to check you will not over-engineer a delivery, product companies ask it to check you can defend a decision. Expect scenarios rather than API recall:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the different kinds of state in an Angular application?</summary>
+      <div class="answer"><p>Five useful categories: local component state (a toggle, a spinner), shared client state (signed-in user, theme, cart), server-cache state (a local copy of API data), URL state (page, filters, selected tab) and form state (draft values, dirty/touched, validation). They have different owners and different lifetimes, so they want different mechanisms — treating them as one problem is the root cause of most over-engineering.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Does every Angular application need NgRx?</summary>
+      <div class="answer"><p>No. Most applications are fine with component signals plus a couple of signal services, and their API data belongs in a resource or query cache rather than a store. NgRx Store earns its cost on large, long-lived apps with many teams, cross-feature coordination and a real need for an auditable change history. Saying "it depends, here is my checklist" is the answer interviewers want — not a yes or a no.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where should a table's current filters and page number live?</summary>
+      <div class="answer"><p>In the URL as query parameters. That makes the view shareable and bookmarkable, survives a refresh, and restores the back button's meaning. Bind them into the component with <code>withComponentInputBinding()</code> and derive the data request from them. Putting them in a store instead is the classic mistake — you gain nothing and lose deep links.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is server-cache state and why is it not really "your" state?</summary>
+      <div class="answer"><p>It is a local copy of data the server owns — a product list, an order. You never have the authoritative version, only a snapshot that starts going stale the instant it arrives. So the meaningful questions are about freshness and invalidation (how long is it good for, what makes it wrong, what do we show while we refetch), not about reducers. Once you frame it that way, a cache is the right tool, not a store.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What do resource() and httpResource() give you, and what do they deliberately not give you?</summary>
+      <div class="answer"><p>They turn an async dependency into signals: <code>value</code>, <code>status</code>/<code>isLoading</code>, <code>error</code>, plus <code>reload()</code>, re-running automatically when the reactive params or computed URL change — so no subscription and no hand-rolled loading flags. <code>httpResource</code> is the HttpClient-backed variant taking a URL or request object. What they do not provide: a shared cache across components, request deduplication, cross-component invalidation, mutation lifecycles, retries or polling. Each resource fetches independently, which is exactly the gap a query library fills.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain stale-while-revalidate and how you would apply it to a dashboard table.</summary>
+      <div class="answer"><p>Serve the cached value immediately, kick off a background refetch, then swap in the fresh result. The user sees data instantly instead of a spinner, and correctness catches up a moment later. On a dashboard table it means changing a filter keeps the previous rows visible while the new page loads, so the layout never collapses to an empty state. In TanStack Query this is the default, tuned with <code>staleTime</code> (how long a value is considered fresh) and <code>gcTime</code> (how long an unused cache entry is kept).</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> After a successful save, would you patch the row into your store or refetch? Defend it.</summary>
+      <div class="answer"><p>Default to invalidating the query key and refetching: the server may have applied defaults, computed fields, audit stamps or concurrent changes, so hand-patching risks a UI that quietly disagrees with the database. Patch optimistically only when latency matters more than exactness, and even then follow it with an invalidation and a rollback path on failure. The bug you are avoiding is two sources of truth drifting apart.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you migrate a signal service into a SignalStore?</summary>
+      <div class="answer"><p>Almost mechanically, because the shapes match. Private writable signals become <code>withState</code>, public computed accessors become <code>withComputed</code>, mutating methods become <code>withMethods</code> using <code>patchState</code>, and async work becomes <code>rxMethod</code> or a plain async method. Consumers barely change since both expose signals. Provide it at root, route or component level depending on the intended lifetime. The reverse migration is equally cheap, which is why starting with a plain service is a safe default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you move a StoreModule.forRoot application to standalone providers?</summary>
+      <div class="answer"><p>Every NgRx module has a provider equivalent: <code>StoreModule.forRoot</code> → <code>provideStore</code>, <code>EffectsModule.forRoot</code> → <code>provideEffects</code>, <code>StoreDevtoolsModule.instrument</code> → <code>provideStoreDevtools</code>, <code>StoreRouterConnectingModule.forRoot</code> → <code>provideRouterStore</code>. Run Angular's standalone migration schematics to convert components and bootstrapping first, then move root registrations into <code>bootstrapApplication</code>'s providers and feature registrations into the lazy route's own <code>providers</code> array — which also ties the slice's lifetime to the route. Commit to the standalone APIs application-wide rather than mixing both styles.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the state for an admin dashboard: paginated table, filter bar, edit drawer. Where does each piece live?</summary>
+      <div class="answer"><p>Filters, sort and page → query params in the URL (shareable, refresh-safe, back button works). Table rows → server cache keyed on that filter tuple via <code>httpResource</code> or a query, with stale-while-revalidate so the table does not flash empty. Drawer open state and selected row id → a component signal, or the URL if the drawer should be deep-linkable. Edit draft → a reactive form seeded from the selected row, reset cleanly via <code>linkedSignal</code>. Save → a mutation that invalidates the rows query. Signed-in user and permissions → one small shared client store. Net result: no global NgRx slice is required for this screen, and that is the point of doing the triage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your team's NgRx store is 80% loading flags and API rows. What is the diagnosis and the remediation plan?</summary>
+      <div class="answer"><p>Diagnosis: they built a cache by hand without a caching policy — no staleness rules, no deduplication, no invalidation strategy, and effects doing work a library already does. Remediation, incrementally: pick one feature, replace its load actions/reducer/effect with a resource or a query keyed on its inputs, keep the existing facade so components do not change, delete the slice, measure. Repeat feature by feature. What legitimately stays in the store is client-owned state and anything needing an auditable change history. Do not attempt a big-bang rewrite — coexistence is supported and per-feature migration is reviewable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> When would you argue AGAINST removing NgRx from a codebase that has it?</summary>
+      <div class="answer"><p>When the properties it provides are load-bearing: a replayable action log used for debugging production incidents, undo/redo, offline queueing, or many teams relying on the convention to stay coordinated. Also when the migration cost is real and the benefit is aesthetic — churn on a working system is a cost, not a win. The senior answer names the properties being bought, checks whether anything else in the system depends on them, and proposes stopping new slices from being added rather than ripping out working ones.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A slice of your store has exactly one consumer. What does that tell you, and what is the general rule?</summary>
+      <div class="answer"><p>It tells you the state was hoisted for no reason — global scope with a single reader is a component signal wearing ceremony, and it costs you locality, lifetime management (the slice outlives the component) and reviewability. The general rule: state should live at the narrowest scope that all its consumers share, and be promoted only when a second consumer genuinely appears. Promotion is cheap along the service → SignalStore → Store line; demotion after a year of coupling is not.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Angular State Management checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>ngs.str.scope — Global vs local vs server state, when NgRx is overkill, server-state caching</li>
+      <li>ngs.str.migrate — Migration paths (service to SignalStore to NgRx), state-design case study</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Angular State Management track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
