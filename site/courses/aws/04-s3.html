@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Amazon S3 module: buckets and objects, the flat keyspace, multipart upload, durability and strong consistency, storage classes and lifecycle rules, versioning and delete markers, encryption, bucket policies vs ACLs vs Block Public Access, presigned URLs, static hosting with CloudFront and event notifications — with verified resources and interview questions.">
+  <title>S3 Object Storage — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-cloud lesson-page">
+<header class="page-header">
+  <h1>Module: S3 Object Storage</h1>
+  <p class="standfirst">S3 looks like a hard disk in the console and behaves nothing like one. Almost every expensive S3 mistake — the runaway bill, the leaked bucket, the "renamed" folder that cost a million requests — starts with someone treating an object store as a filesystem.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Cloud AWS</a> → S3 Object Storage</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Amazon S3 is the default place data lands on AWS: application uploads, database backups, build artefacts, data-lake parquet, static front-ends, logs from every other service. It is cheap, effectively unlimited, and callable from anywhere with a signed HTTPS request — which is exactly why it is also the service most often left open to the internet by accident.</p>
+    <p>The first half of this module is the storage model: what a bucket and an object actually are, why the keyspace is flat, how big an object can be and when you must use multipart upload, what eleven nines of durability does and does not promise, and how to pick a storage class and let lifecycle rules move data down the cost curve on their own. The second half is access — encryption, the four overlapping permission layers, presigned URLs, static hosting and event notifications. That second half is where the breaches happen, so it is where interviewers dig.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Buckets and objects: an object store is not a filesystem</h3>
+    <p>A <em>bucket</em> is a container with a name that must be globally unique across every AWS account on the planet — not unique to your account, unique to S3 — and that name has to be DNS-compatible: lowercase, 3 to 63 characters, no underscores, no uppercase, no IP-address shapes. A bucket is created in exactly one region and its data stays in that region unless you deliberately replicate it, which is the answer to most data-residency questions. An <em>object</em> is four things bundled together: a key (a UTF-8 string up to 1024 bytes), the value (the bytes themselves), metadata (system metadata like content type and storage class, plus your own <code>x-amz-meta-*</code> headers), and — if the bucket is versioned — a version id.</p>
+    <p>The part that trips people up is that the keyspace is <strong>flat</strong>. There are no directories. <code>invoices/2026/07/inv-9001.pdf</code> is one key containing slash characters, not a file three levels deep. The console draws folders by asking S3 to list with <code>/</code> as a delimiter and rendering the common prefixes; nothing hierarchical exists on the server. Three consequences follow immediately, and they are all interview material: there is no atomic rename (a "rename" is a server-side copy followed by a delete, so renaming a million-object prefix is two million billable requests), there is no partial in-place update (changing one byte means rewriting the whole object), and a listing returns at most 1000 keys per request in lexicographic order, so anything that walks a large bucket must paginate.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html" rel="noopener">What is Amazon S3? — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html" rel="noopener">Bucket naming rules — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingObjects.html" rel="noopener">Working with objects: keys, metadata and version ids — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html" rel="noopener">Organizing objects using prefixes — Amazon S3 User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mt32JEAxrA4" rel="noopener">AWS S3 — Bucket, Objects, Versioning, Bucket Policy, LifeCycle, Storage Classes (demo) — knowledgeindia LearnCloud</a></li>
+    </ul>
+
+    <h3>Object size, multipart upload and request throughput</h3>
+    <p>A single object can hold up to 5 TB, but a single <code>PUT</code> can carry only 5 GB. Anything larger <em>must</em> go through multipart upload, and AWS recommends switching to it above roughly 100 MB anyway. Multipart splits the object into parts (minimum 5 MB each except the last, maximum 10,000 parts), uploads them independently and in parallel, and reassembles them when you send the complete request. The wins are throughput on a fat pipe, a retry that only re-sends one failed part instead of the whole file, and the ability to start uploading before the final size is known. The AWS SDKs' transfer-manager classes do all of this for you — you rarely hand-roll the three API calls.</p>
+    <p>Multipart has one classic operational trap: parts from an upload that was never completed or aborted stay in the bucket, are billed as storage, and do <em>not</em> show up in a normal object listing. Buckets have quietly accumulated terabytes this way. Every production bucket should carry a lifecycle rule that aborts incomplete multipart uploads after a few days. On throughput, S3 scales to at least 3,500 write and 5,500 read requests per second <em>per partitioned prefix</em>, and it partitions automatically as load grows — so spreading hot data across several prefixes still helps, while the old advice about random hash prefixes has not been necessary for years. For large reads, byte-range fetches let you pull an object in parallel chunks.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "Rules": [{
+    "ID": "abort-orphaned-multipart-parts",
+    "Status": "Enabled",
+    "Filter": { "Prefix": "" },
+    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html" rel="noopener">Uploading and copying objects using multipart upload — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html" rel="noopener">Uploading objects — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html" rel="noopener">Best practices design patterns: optimizing S3 performance — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/aws-s3-multipart-upload" rel="noopener">Multipart Uploads in Amazon S3 with Java — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yAoKmP76oL4" rel="noopener">The Last Amazon S3 Video You'll Need To Watch (presigned URLs, multipart upload) — Milan Jovanović</a></li>
+    </ul>
+
+    <h3>Durability, availability, and the consistency question interviewers still ask</h3>
+    <p>S3 Standard is designed for 99.999999999% durability — eleven nines — by redundantly storing every object across a minimum of three Availability Zones in the region. The number is a statement about hardware and media failure: if you stored ten million objects you would expect, on average, to lose one of them once every ten thousand years. Availability is a different and much smaller number (S3 Standard is designed for 99.99% availability with a 99.9% SLA), and it varies by storage class — One Zone-IA lives in a single AZ, so an AZ loss can destroy the data outright, which is the whole reason it is cheaper.</p>
+    <p>The point worth carrying into a design review: <strong>durability is not backup.</strong> Eleven nines protects you from disks dying. It does nothing about a <code>DELETE</code> issued by a buggy deploy script, an overwrite that replaces good data with garbage, ransomware with valid credentials, or an account compromise — all of those replicate perfectly across all three AZs at machine speed. Real protection is versioning plus lifecycle-managed noncurrent versions, MFA delete or Object Lock on the buckets that matter, and replication into a <em>different account</em> so that a compromise of one account cannot reach the copy.</p>
+    <p>On consistency: since December 2020 S3 provides <strong>strong read-after-write consistency</strong> for all GET, PUT and LIST operations — including overwrites and deletes — at no extra cost and with no performance penalty. Before that, new-object PUTs were read-after-write consistent but overwrites and deletes were only eventually consistent, which is why a generation of data pipelines carried retry loops and "S3 guard" metadata layers. Interviewers who learned S3 before 2021 still ask the eventual-consistency question, so answer it in two moves: describe the old model, then state what changed and when. Note the remaining caveat — bucket-level <em>configuration</em> changes (policies, ACLs, replication settings) are still eventually consistent, so a policy edit may take a moment to take effect everywhere.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/DataDurability.html" rel="noopener">Resilience and data protection in Amazon S3 — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/s3/faqs/" rel="noopener">Amazon S3 FAQs — durability, availability and consistency answers straight from AWS</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/" rel="noopener">Amazon S3 Update — Strong Read-After-Write Consistency — AWS News Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2020/12/aws-s3-strong-consistency/" rel="noopener">AWS Announces Strong Read-After-Write Consistency for S3 — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=S4swTRi1i0w" rel="noopener">AWS re:Invent 2025 — Deep dive on Amazon S3 (STG407) — AWS Events</a></li>
+    </ul>
+
+    <h3>Storage classes: a cost-versus-access-pattern decision</h3>
+    <p>Every storage class trades a lower per-GB storage price against some combination of retrieval charges, retrieval latency, a minimum billable object size and a minimum storage duration. <strong>S3 Standard</strong> has no retrieval fee and no minimums — the default for hot, frequently read data. <strong>Standard-IA</strong> and <strong>One Zone-IA</strong> cut the storage price roughly in half but add a per-GB retrieval charge, bill a minimum of 128 KB per object and a minimum of 30 days; One Zone-IA is cheaper again because it lives in one AZ only, so use it exclusively for data you can regenerate. <strong>Intelligent-Tiering</strong> charges a small per-object monitoring fee and then moves objects between access tiers automatically with <em>no</em> retrieval charges — the right default whenever the access pattern is unknown, seasonal or changing, which in practice is most application data.</p>
+    <p>The Glacier family is archive storage and the differentiator is retrieval time. <strong>Glacier Instant Retrieval</strong> gives millisecond access with a 90-day minimum duration — archive pricing for data you occasionally need immediately. <strong>Glacier Flexible Retrieval</strong> (the old Glacier) is cheaper but you must restore first: expedited in minutes, standard in a few hours, bulk in up to half a day. <strong>Glacier Deep Archive</strong> is the cheapest storage AWS sells, with a 180-day minimum and restores measured in hours to a couple of days — compliance archives and tape replacement. Two costs catch people out: deleting an object before its minimum duration is billed as if you had kept it for the full period, and every restore from Glacier is a paid request in addition to the per-GB retrieval charge.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html" rel="noopener">Understanding and managing Amazon S3 storage classes — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://aws.amazon.com/s3/storage-classes/" rel="noopener">Amazon S3 storage classes — side-by-side comparison table (AWS)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/intelligent-tiering-overview.html" rel="noopener">How S3 Intelligent-Tiering works — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/restoring-objects.html" rel="noopener">Restoring archived objects — Amazon S3 User Guide (retrieval tiers and their timings)</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/storage/analyze-access-patterns-and-use-the-most-cost-effective-amazon-s3-storage-class/" rel="noopener">Analyze access patterns and use the most cost-effective S3 storage class — AWS Storage Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Nj0Htnsbq1w" rel="noopener">Amazon S3 Storage Classes Tutorial — Lifecycle Rule, Intelligent-Tiering, Glacier — KnoDAX</a></li>
+    </ul>
+
+    <h3>Lifecycle policies: moving and expiring data without a cron job</h3>
+    <p>A lifecycle configuration is a set of rules attached to a bucket, each scoped by a filter (prefix, object tag, object size, or the whole bucket) and carrying two kinds of action. <em>Transition</em> actions move objects to a cheaper storage class after N days; <em>expiration</em> actions delete them. On a versioned bucket you get the same pair for noncurrent versions, plus the two housekeeping actions every bucket should have: abort incomplete multipart uploads, and remove expired object delete markers. A typical rule chain reads like a retention policy written in JSON: Standard for a month, Standard-IA for a quarter, Glacier Flexible for a year, gone after seven.</p>
+    <p>Two operational facts matter. First, lifecycle is asynchronous and batched — S3 evaluates rules at least once a day, so a transition happens <em>on or after</em> the day you specified, not at a precise moment; billing changes when the transition actually completes. Second, transitions are not free: each object transitioned costs a request, so moving ten million 20 KB log files to Glacier can cost more in requests than it ever saves in storage. That is exactly why the object-size filter exists — transition the large objects, leave the small ones in Standard or hand the whole problem to Intelligent-Tiering.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "Rules": [{
+    "ID": "invoice-archive-ladder",
+    "Status": "Enabled",
+    "Filter": { "And": { "Prefix": "invoices/", "ObjectSizeGreaterThan": 131072 } },
+    "Transitions": [
+      { "Days": 30,  "StorageClass": "STANDARD_IA" },
+      { "Days": 90,  "StorageClass": "GLACIER" },
+      { "Days": 365, "StorageClass": "DEEP_ARCHIVE" }
+    ],
+    "Expiration": { "Days": 2555 },
+    "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html" rel="noopener">Managing the lifecycle of objects — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-transition-general-considerations.html" rel="noopener">Transitioning objects: general considerations — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-configuration-examples.html" rel="noopener">Examples of S3 Lifecycle configurations — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/storage/optimize-storage-costs-with-new-amazon-s3-lifecycle-filters-and-actions/" rel="noopener">Optimize storage costs with new S3 Lifecycle filters and actions — AWS Storage Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mCbwZQfgMaA" rel="noopener">AWS S3 Lifecycle Rules Tutorial — TechWithDavid</a></li>
+    </ul>
+
+    <h3>Versioning, delete markers and MFA delete</h3>
+    <p>Versioning is a bucket-level switch, and it is one-way in an important sense: once enabled it can be <em>suspended</em> but never returned to the unversioned state, and objects written while it was on keep their versions. With versioning on, every <code>PUT</code> to an existing key creates a new version with a fresh version id and keeps the old one — which is the protection against a bad overwrite, and also the reason a versioned bucket with no lifecycle rules grows without limit while you keep paying for versions nobody can see in the console's default view.</p>
+    <p>Deletes are where the model gets interesting. A <code>DELETE</code> without a version id does not delete anything: it inserts a <em>delete marker</em> that becomes the current version, so a GET returns 404 and a normal LIST omits the key, but every prior version is intact. Delete the delete marker and the object is back — this is the single most useful S3 recovery trick to know. A <code>DELETE</code> <em>with</em> a version id permanently destroys that specific version and is the only way to actually free the storage. Lifecycle handles the cleanup at scale via <code>NoncurrentVersionExpiration</code> and <code>ExpiredObjectDeleteMarker</code>. For the buckets that really matter, <strong>MFA delete</strong> requires an MFA code from the account root user before any version can be permanently deleted or the versioning state changed; it can only be configured through the CLI or API, never the console, which is exactly why it is rare in the wild — and why Object Lock, with its per-object WORM retention and legal holds, is the more practical compliance control today.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html" rel="noopener">Retaining multiple versions of objects with S3 Versioning — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeleteMarker.html" rel="noopener">Working with delete markers — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/MultiFactorAuthenticationDelete.html" rel="noopener">Configuring MFA delete — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-and-other-bucket-config.html" rel="noopener">Lifecycle and other bucket configurations — how lifecycle interacts with versioning</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ejl8-n2LMW4" rel="noopener">AWS S3 Bucket Versioning, Delete Marker and restoring a deleted file — Coderjony</a></li>
+    </ul>
+
+    <h3>Encryption at rest and in transit</h3>
+    <p>Since January 2023 every new object is encrypted at rest by default with <strong>SSE-S3</strong> (AES-256, keys entirely managed by AWS) at no additional cost — so "is my data encrypted?" now has a boring default answer, and the real question is which key you want to control. <strong>SSE-KMS</strong> encrypts with an AWS KMS key you can audit, rotate and restrict with its own key policy, giving you a second, independent gate: a principal needs both S3 permissions and <code>kms:Decrypt</code> on the key to read an object. The cost is real, though — every PUT triggers a <code>GenerateDataKey</code> call and every GET a <code>Decrypt</code> call, which are billed and count against your KMS request quota, so a high-throughput bucket can genuinely throttle on KMS. <strong>S3 Bucket Keys</strong> exist precisely for this: a short-lived bucket-level key cuts KMS request traffic by up to 99%, and you should switch it on for any busy SSE-KMS bucket. <strong>SSE-C</strong> puts you in charge: you send the encryption key on every request, S3 uses it and throws it away, and if you lose it the data is gone.</p>
+    <p>Encryption in transit is separate and is not on by default in the sense people assume — S3 accepts plain HTTP. The fix is a bucket policy that denies every request where the <code>aws:SecureTransport</code> condition key is false, which is a control auditors ask for by name. A second policy commonly paired with it denies any <code>PutObject</code> whose <code>s3:x-amz-server-side-encryption</code> header is not the algorithm you mandate, so a misconfigured client cannot quietly write objects under the wrong key.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyUnencryptedTransport",
+    "Effect": "Deny",
+    "Principal": "*",
+    "Action": "s3:*",
+    "Resource": ["arn:aws:s3:::acme-invoices", "arn:aws:s3:::acme-invoices/*"],
+    "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+  }]
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/serv-side-encryption.html" rel="noopener">Protecting data with server-side encryption — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html" rel="noopener">Server-side encryption with AWS KMS keys (SSE-KMS) — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucket-key.html" rel="noopener">Reducing the cost of SSE-KMS with S3 Bucket Keys — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerSideEncryptionCustomerKeys.html" rel="noopener">Server-side encryption with customer-provided keys (SSE-C) — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/aws/amazon-s3-encrypts-new-objects-by-default/" rel="noopener">Amazon S3 now encrypts new objects by default — AWS News Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=k9jTWDXIH38" rel="noopener">Amazon S3 Encryption Tutorial — SSE-S3, SSE-KMS, DSSE-KMS — KnoDAX</a></li>
+    </ul>
+
+    <h3>Bucket policies, IAM policies and the legacy of ACLs</h3>
+    <p>Access to an S3 object is decided by several policy types evaluated together, and knowing which one to reach for is the practical skill. <strong>IAM identity policies</strong> attach to a user or role and say what that principal may do — this is the right tool for your own applications, because the permission travels with the workload's role and you manage it in one place. <strong>Bucket policies</strong> are resource-based: they attach to the bucket, name a <code>Principal</code>, and are the only way to grant access to another AWS account directly or to make something genuinely public. They are also where account-wide guardrails live, because a <code>Deny</code> in a bucket policy cannot be argued with by any identity policy. The evaluation rule to state in an interview is simple: an explicit <code>Deny</code> anywhere always wins; otherwise, for same-account access, an <code>Allow</code> in either the identity policy or the bucket policy is enough.</p>
+    <p><strong>ACLs</strong> are the original 2006 mechanism — per-bucket and per-object grants to canonical user ids or predefined groups such as <code>AllUsers</code>. They are legacy and AWS says so plainly. Since April 2023 new buckets are created with Object Ownership set to <em>bucket owner enforced</em>, which disables ACLs entirely and makes the bucket owner the owner of every object written to it, including cross-account uploads. This also fixed a genuinely nasty old failure mode where another account uploaded an object you could not read in your own bucket. The recommendation is unambiguous: leave ACLs disabled, use IAM policies for your own principals, use bucket policies for cross-account grants and for deny-based guardrails, and treat any requirement for ACLs as a legacy migration to plan out rather than a design choice.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-management.html" rel="noopener">Identity and access management for Amazon S3 — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucket-policies.html" rel="noopener">Using bucket policies — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/how-s3-evaluates-access-control.html" rel="noopener">How Amazon S3 authorizes a request — Amazon S3 User Guide (the evaluation order)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html" rel="noopener">Access control list (ACL) overview — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/security/how-to-use-bucket-policies-and-apply-defense-in-depth-to-help-secure-your-amazon-s3-data/" rel="noopener">How to use bucket policies and apply defense in depth to secure your S3 data — AWS Security Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EefEP5SNbYU" rel="noopener">Controlling access in AWS S3 through ACLs, bucket policies and public access settings — Techno Ranch</a></li>
+    </ul>
+
+    <h3>Block Public Access and Object Ownership: the guardrail that ends the headlines</h3>
+    <p>Every "millions of records exposed in an unsecured S3 bucket" story comes down to the same thing: someone granted public read through an ACL or a bucket policy, usually to make one file work, and nobody noticed. <strong>S3 Block Public Access</strong> is the account-level and bucket-level guardrail that makes that impossible regardless of what the policies say. It has four independent settings — block new public ACLs, ignore existing public ACLs, block new public bucket policies, and restrict public access granted by any policy — and since April 2023 all four are enabled by default on new buckets, alongside ACLs being disabled.</p>
+    <p>Two habits follow. Turn Block Public Access on at the <em>account</em> level, so it applies to every bucket including ones created later by a rushed engineer or a half-reviewed Terraform module; a per-bucket setting is one careless <code>terraform apply</code> from being switched off. And when someone genuinely needs to serve files to the public, do not reach for the block-public-access toggle — that is what CloudFront with Origin Access Control is for, covered below. Back the guardrail with IAM Access Analyzer for S3, which continuously reports buckets reachable from outside your account or organization, and with the S3 security best-practices checklist as your review script.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html" rel="noopener">Blocking public access to your Amazon S3 storage — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html" rel="noopener">Controlling ownership of objects and disabling ACLs — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/security-best-practices.html" rel="noopener">Security best practices for Amazon S3 — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-analyzer.html" rel="noopener">Reviewing bucket access using IAM Access Analyzer for S3 — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/aws/heads-up-amazon-s3-security-changes-are-coming-in-april-of-2023/" rel="noopener">Heads-Up: Amazon S3 security changes are coming in April 2023 — AWS News Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=dViqIHY623o" rel="noopener">Amazon S3 will enable Block Public Access for all new buckets — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Presigned URLs: letting the browser talk to S3 directly</h3>
+    <p>A presigned URL is an ordinary S3 URL carrying a Signature Version 4 signature in its query string, generated by your backend using its own credentials. Anyone holding the URL can perform that one operation — usually a single GET or a single PUT of one specific key — until the expiry you set, with no AWS credentials of their own. It is the standard answer to "how does a browser or mobile app upload a 200 MB video?": your API authenticates the user, generates a presigned PUT URL, and returns it; the client uploads straight to S3. Nothing large ever flows through your application servers, which removes the bandwidth cost, the request-timeout problems and the temp-disk pressure in one move.</p>
+    <p>Interview-grade details worth having ready. The URL inherits the permissions of the principal that signed it, so sign with a narrowly scoped role, never with broad admin credentials. Maximum lifetime is 7 days when signed with IAM user credentials, but only as long as the session when signed with temporary STS credentials (an instance profile or Lambda role) — the URL dies with the session, whatever expiry you asked for, which is a very common production surprise. A presigned URL is a bearer token: anyone who obtains it has that access, so keep expiries short and treat the URLs as secrets in logs. For uploads with server-side constraints — a maximum file size, a required content type, a fixed key prefix — use a presigned POST policy instead of a presigned PUT, because a plain presigned PUT cannot cap the size of what gets uploaded.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html" rel="noopener">Working with presigned URLs — Amazon S3 User Guide (limits, expiry, credential caveats)</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/ShareObjectPreSignedURL.html" rel="noopener">Sharing an object with a presigned URL — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/PresignedUrlUploadObject.html" rel="noopener">Uploading objects with presigned URLs — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://aws.amazon.com/blogs/compute/patterns-for-building-an-api-to-upload-files-to-amazon-s3/" rel="noopener">Patterns for building an API to upload files to Amazon S3 — AWS Compute Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=V2arOZ72d6M" rel="noopener">Amazon S3 Presigned URLs — uploads and downloads tutorial — Milan Jovanović</a></li>
+    </ul>
+
+    <h3>Static website hosting, and why CloudFront with OAC is the production answer</h3>
+    <p>S3 can serve a static site directly: switch on website hosting, nominate an index document and an error document, and the bucket gets a website endpoint that resolves relative paths and directory-style URLs. It is the cheapest possible way to publish a built React or Angular bundle. But the website endpoint has hard limits that make it wrong for anything customer-facing: it speaks HTTP only, so no HTTPS and therefore no custom-domain TLS, it requires the bucket contents to be genuinely public (fighting your Block Public Access guardrail), it serves from one region so users far away pay the latency, and it gives you no caching layer, no access logs at the edge and no WAF.</p>
+    <p>The production pattern is CloudFront in front of a completely private bucket, using <strong>Origin Access Control</strong>. OAC is a CloudFront-signed identity that the bucket policy trusts; the bucket stays fully blocked to the public, only CloudFront can read it, and you get TLS with an ACM certificate on your own domain, edge caching, compression, HTTP/2 and HTTP/3, WAF integration and CloudFront Functions for things like SPA routing rewrites. Note the pairing detail: with OAC you use the bucket's <em>REST</em> endpoint as the origin, not the website endpoint, so index-document resolution for sub-paths is handled by CloudFront's default root object and a small function rather than by S3. OAC replaces the older Origin Access Identity, which still works but is no longer what you should build.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteHosting.html" rel="noopener">Hosting a static website using Amazon S3 — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/website-hosting-cloudfront-walkthrough.html" rel="noopener">Speeding up your website with Amazon CloudFront — Amazon S3 User Guide walkthrough</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html" rel="noopener">Restricting access to an Amazon S3 origin with OAC — Amazon CloudFront Developer Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=KtWFGnB_dOs" rel="noopener">Amazon CloudFront Origin Access Control (OAC): all you need to know — Stormit</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pYlPQegCZPU" rel="noopener">Deploying a secure static website with S3, CloudFront and OAC — step-by-step guide</a></li>
+    </ul>
+
+    <h3>Event notifications: S3 as an event source for Lambda, SQS, SNS and EventBridge</h3>
+    <p>S3 can publish an event whenever something happens to an object — created, removed, restored from Glacier, replicated, tagged, or transitioned by lifecycle — and deliver it to Lambda, an SQS queue, an SNS topic, or EventBridge. This turns the bucket into the front door of an asynchronous pipeline: an upload lands, a Lambda generates a thumbnail or extracts text, a message goes to a queue for a batch worker. Notifications can be filtered by key prefix and suffix, which is how you route <code>uploads/</code> to one function and <code>reports/*.csv</code> to another. Delivery is typically within seconds but is not guaranteed to be ordered or exactly once, so consumers must be idempotent — a fact that turns into a follow-up question surprisingly often.</p>
+    <p>Two choices to be able to defend. Pick <strong>SQS over direct Lambda</strong> when the processing is slow, spiky or needs a retry/dead-letter story you control — the queue absorbs the burst and decouples the producer from your concurrency limits. Pick <strong>EventBridge</strong> when you need more than the native integration gives you: richer content-based filtering on any part of the event, more than one consumer per event without fan-out plumbing, cross-account and cross-region routing, archive and replay, and a schema registry. EventBridge covers all S3 API-level activity rather than the fixed notification event list, at the cost of an extra hop and per-event pricing. The classic gotcha to mention unprompted: a Lambda that writes its output back into the same bucket and prefix that triggered it will re-trigger itself — filter by prefix or write to a different bucket.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventNotifications.html" rel="noopener">Amazon S3 Event Notifications — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/notification-how-to-event-types-and-destinations.html" rel="noopener">Supported event types and destinations — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/EventBridge.html" rel="noopener">Using EventBridge with Amazon S3 — Amazon S3 User Guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=y3Eec_w85xo" rel="noopener">AWS S3 Event Notification: triggering Lambda, SQS and SNS — Ram N Java</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=mOysNzNFDRw" rel="noopener">Building an event-driven application with Amazon EventBridge — Amazon Web Services</a></li>
+    </ul>
+
+    <h3>Beyond one bucket: replication, Object Lock and Requester Pays</h3>
+    <p><strong>Replication</strong> copies objects automatically from a source bucket to one or more destinations. Cross-Region Replication (CRR) serves disaster recovery, latency for a distant user base, and data-residency obligations; Same-Region Replication (SRR) serves log aggregation and, most usefully, copying into a <em>separate account</em> so a compromise or a rogue delete in the source cannot reach the copy. Versioning must be enabled on both ends, replication is asynchronous by default (S3 Replication Time Control adds a 15-minute SLA at extra cost), and — the detail interviewers probe — enabling replication does not backfill: only objects written after the rule exists are replicated, and existing data needs S3 Batch Replication. Delete markers replicate only if you opt in, and version-specific deletes never replicate, which is deliberate protection against a delete propagating to your DR copy.</p>
+    <p><strong>Object Lock</strong> gives write-once-read-many retention — governance mode (privileged users can override) or compliance mode (nobody, including the root user, can delete until the retention expires), plus indefinite legal holds. It must be enabled at bucket creation and requires versioning, and it is the practical control for regulatory retention and for ransomware-resistant backups. <strong>Requester Pays</strong> flips the billing for downloads and requests onto the caller, who must send <code>x-amz-request-payer</code> and cannot be anonymous — the standard arrangement for publishing large open datasets without funding the whole internet's egress.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html" rel="noopener">Replicating objects within and across Regions — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-what-is-isnot-replicated.html" rel="noopener">What is and is not replicated — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html" rel="noopener">Locking objects with Object Lock — Amazon S3 User Guide</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/RequesterPaysBuckets.html" rel="noopener">Using Requester Pays buckets — Amazon S3 User Guide</a></li>
+      <li>[Article] <a href="https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html" rel="noopener">Security Pillar — AWS Well-Architected Framework (data protection at rest and in transit)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NXehLy7IiPM" rel="noopener">AWS re:Invent 2024 — Dive deep on Amazon S3 (STG302) — AWS Events</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-ec2.html">← EC2 and Compute</a>
+    <a href="index.html">All Cloud AWS modules</a>
+    <a href="05-vpc.html">VPC Networking →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>S3 shows up in almost every AWS round in India — service companies favour the storage-class and lifecycle questions because they map to certification syllabi, while product companies push on presigned uploads, the access-control layers and how you would actually protect data from a bad delete:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is S3, and how is a bucket different from an object?</summary>
+      <div class="answer"><p>S3 is object storage reached over an HTTPS API. A bucket is the container: its name is globally unique across all AWS accounts, must be DNS-compatible, and is tied to a single region where the data lives. An object is what you store — a key (up to 1024 UTF-8 bytes), the value, metadata (system plus your own <code>x-amz-meta-*</code> headers), and a version id when versioning is on. There is no filesystem underneath; the keyspace is flat.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Are there folders in S3?</summary>
+      <div class="answer"><p>No. <code>logs/2026/app.log</code> is a single key that happens to contain slashes. The console renders folders by listing with <code>/</code> as a delimiter and grouping the common prefixes. Because of that there is no atomic rename (rename means server-side copy plus delete, billed per object), no in-place partial edit, and listing is lexicographic and paginated at 1000 keys per request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the maximum object size and the maximum single-PUT size?</summary>
+      <div class="answer"><p>An object can be up to 5 TB. A single PUT can carry at most 5 GB, so anything larger requires multipart upload, and AWS recommends multipart above roughly 100 MB regardless. Parts are at least 5 MB each (except the last) and there can be at most 10,000 of them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the S3 storage classes and say when you would use each.</summary>
+      <div class="answer"><p>Standard for hot data with no retrieval fee; Intelligent-Tiering when the access pattern is unknown or changing (small monitoring fee, no retrieval charges); Standard-IA for infrequent but immediately needed data across three AZs; One Zone-IA for the same but only for reproducible data, since a single AZ loss destroys it; Glacier Instant Retrieval for archives you occasionally need in milliseconds; Glacier Flexible Retrieval for archives where a wait of minutes to hours is acceptable; Glacier Deep Archive for compliance data restored in hours to days at the lowest price.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does versioning do, and what happens when you delete a versioned object?</summary>
+      <div class="answer"><p>Versioning keeps every write of a key rather than overwriting. A delete without a version id does not remove anything — it adds a delete marker as the new current version, so GET returns 404 and normal listings skip the key, while all prior versions survive. Removing the delete marker restores the object. Only a delete that names a specific version id destroys data and reclaims the storage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you let a browser upload a large file directly to S3 without proxying it through your backend?</summary>
+      <div class="answer"><p>Generate a presigned URL. The backend authenticates the user, then uses its own IAM role to sign a URL for one operation on one key with a short expiry, and returns it; the browser PUTs straight to S3. For files above a few hundred megabytes, presign each part of a multipart upload. Points to raise: the URL carries the signer's permissions so sign with a narrow role; a URL signed with temporary STS credentials expires with the session no matter what expiry you requested; the URL is a bearer token, so keep it short-lived and out of logs; use a presigned POST policy rather than a presigned PUT when you need to enforce a maximum file size or content type; and configure CORS on the bucket for browser uploads.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A bucket costs far more than expected but the object count looks small. What do you check?</summary>
+      <div class="answer"><p>Old noncurrent versions on a versioned bucket that has no <code>NoncurrentVersionExpiration</code> rule; orphaned incomplete multipart upload parts, which are billed but never appear in a listing; millions of tiny objects in IA or Glacier classes, each billed at the 128 KB minimum and each having cost a transition request; early deletions inside the 30/90/180-day minimum durations, billed for the full period anyway; and request or data-transfer charges rather than storage. Use S3 Storage Lens and Storage Class Analysis to see which it is, then fix with lifecycle rules or Intelligent-Tiering.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Bucket policy, IAM policy or ACL — which do you use, and how are they evaluated?</summary>
+      <div class="answer"><p>IAM identity policies for your own principals, because permission travels with the role. Bucket policies for cross-account grants and for account-wide deny guardrails, because they attach to the resource and can name a Principal. ACLs are legacy and disabled by default on new buckets via Object Ownership set to bucket owner enforced — do not design with them. Evaluation: an explicit Deny anywhere always wins; otherwise, within one account, an Allow in either the identity policy or the bucket policy suffices. Block Public Access overrides both when it comes to public access.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> SSE-S3 vs SSE-KMS vs SSE-C — and what is the catch with SSE-KMS?</summary>
+      <div class="answer"><p>SSE-S3 uses AES-256 keys AWS manages entirely, is free and has been the default for new objects since January 2023. SSE-KMS uses a KMS key you can audit, rotate and gate with its own key policy, so a reader needs both S3 permissions and <code>kms:Decrypt</code> — the catch is that every PUT and GET makes a KMS API call, which costs money and consumes KMS request quota, so a high-traffic bucket can throttle; S3 Bucket Keys cut that traffic by up to 99%. SSE-C means you supply the key on every request and S3 never stores it — maximum control, and total data loss if you lose the key.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is S3 eventually consistent?</summary>
+      <div class="answer"><p>Not since December 2020. S3 provides strong read-after-write consistency for all GET, PUT and LIST operations, including overwrites and deletes, at no extra cost and with no performance penalty. Before that, new-object PUTs were read-after-write consistent but overwrites and deletes were eventually consistent, which is why older data pipelines carried retry loops and external metadata layers. The remaining caveat is that bucket-level configuration changes such as policies and ACLs are still eventually consistent.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you serve a static Angular or React build to users worldwide, securely?</summary>
+      <div class="answer"><p>Put the build in a private bucket with Block Public Access on, and front it with CloudFront using Origin Access Control so only CloudFront can read the bucket. That gives HTTPS on a custom domain via ACM, edge caching and compression, HTTP/2 and HTTP/3, WAF, and access logs. S3 static website hosting on its own is HTTP-only, needs a public bucket, and serves from one region — fine for an internal demo, wrong for production. Use the bucket's REST endpoint as the CloudFront origin with OAC, and handle SPA route rewrites with a CloudFront Function.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> S3 gives eleven nines of durability, so why do you still need backups?</summary>
+      <div class="answer"><p>Because durability only covers hardware and media failure. A delete issued by a buggy deploy, an overwrite with corrupt data, ransomware holding valid credentials, or a compromised account all replicate perfectly across the three Availability Zones at machine speed — the storage layer is doing exactly its job. Real protection is versioning with lifecycle-managed noncurrent versions, MFA delete or Object Lock in compliance mode on the buckets that matter, and replication into a separate AWS account so that compromising one account cannot reach the copy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Design the storage and lifecycle policy for an application that writes 500 GB of transaction logs a day, queried heavily for a week, occasionally for a quarter, and retained seven years for audit.</summary>
+      <div class="answer"><p>Write to S3 Standard, partitioned by date prefix. Lifecycle: transition to Standard-IA at 30 days, Glacier Flexible Retrieval at 90, Deep Archive at 365, expire at 2555 days. Add an object-size filter so files below about 128 KB are not transitioned — the per-object transition request would cost more than the storage saved — and compact small log files into larger objects before they land. Enable versioning with <code>NoncurrentVersionExpiration</code> plus an abort rule for incomplete multipart uploads, turn on default SSE-KMS with a Bucket Key, and add Object Lock in compliance mode if the seven years is a regulatory requirement. Validate the plan against Storage Class Analysis before rolling it out, and remember the audit restore from Deep Archive takes hours, so document the retrieval runbook.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your bucket has Block Public Access enabled but a bucket policy granting <code>s3:GetObject</code> to <code>Principal: "*"</code>. What happens, and why is that the right design?</summary>
+      <div class="answer"><p>The requests are denied. Block Public Access is evaluated as an account and bucket-level guardrail ahead of the policy, so a policy granting public access is simply ignored. That is deliberate defence in depth: policy edits happen constantly under deadline pressure, while the guardrail is a separate, rarely-touched control that an over-broad policy cannot defeat. Set it at the account level so it also covers buckets created later by automation, and when you genuinely need public delivery use CloudFront with OAC rather than turning the guardrail off.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> An S3-triggered Lambda writes its output back to the same bucket and the bill explodes. Diagnose it, and say how you would redesign the pipeline.</summary>
+      <div class="answer"><p>The Lambda's own write raises another <code>ObjectCreated</code> event that re-invokes it — an infinite recursion billed per invocation and per request. Immediate fix: write output to a different bucket, or filter the notification by a prefix or suffix the output cannot match. Redesign: put SQS between S3 and the worker so bursts are absorbed and you own the retry and dead-letter behaviour, make the consumer idempotent because S3 notifications are neither ordered nor guaranteed exactly once, and move to EventBridge if you need several consumers, cross-account routing, richer filtering or replay. AWS also has a recursive-invocation detector that will trip on this pattern.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You enable cross-region replication on a bucket holding 40 TB and nothing appears in the destination. What is wrong?</summary>
+      <div class="answer"><p>Replication only applies to objects written after the rule was created — it does not backfill. Existing data needs S3 Batch Replication. While you are there, check the other usual causes: versioning must be enabled on both source and destination, the replication IAM role needs read on the source and replicate permissions on the destination, objects encrypted with SSE-KMS need the rule configured to replicate them and the role needs access to both keys, and delete markers replicate only if you opt in (version-specific deletes never replicate, by design, so a targeted delete cannot propagate to your DR copy).</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Cloud AWS track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>aws.s3.core — Buckets and objects, storage classes, lifecycle policies, versioning, durability model</li>
+      <li>aws.s3.access — Encryption options, bucket policies vs ACLs vs Block Public Access, presigned URLs, static hosting, event notifications</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Cloud AWS track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

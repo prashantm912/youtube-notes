@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CI/CD concepts module: continuous integration vs delivery vs deployment defined precisely, the deployment pipeline and its commit stage, quality gates that block versus inform, flaky tests, build-once-deploy-many artifact immutability, promotion by reference, provenance and SBOM, and the DORA four keys — with verified resources and interview questions.">
+  <title>CI/CD Concepts — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: CI/CD Concepts</h1>
+  <p class="standfirst">Before any YAML, the ideas: what "CI" actually names, why a pipeline has stages at all, which gates deserve the power to stop a release, and why the binary that reaches production must be the exact binary your tests approved.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → CI/CD Concepts</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module is deliberately tool-agnostic. Every claim here holds whether your pipeline runs on GitHub Actions, Jenkins, GitLab CI, Azure Pipelines, Argo or a shell script on a build box — and once you hold the principles, learning any one of those tools is a syntax exercise. The next module does exactly that with GitHub Actions.</p>
+    <p>Two halves. First, the flow: the precise difference between continuous integration, continuous delivery and continuous deployment; the deployment pipeline as Jez Humble and Dave Farley defined it; the quality gates each stage runs, which of them should block and which should merely inform; and why feedback speed — not gate count — is the number that decides whether developers trust the pipeline. Second, the payload: artifacts. Build once and deploy many, immutable versioned tags, artifact repositories, promotion between environments by reference rather than rebuild, configuration injected at deploy time, and the supply-chain layer of provenance, SBOM and signing. We close with the DORA four keys, which are how you judge whether any of it is working.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Continuous integration, delivery and deployment — three different things</h3>
+    <p><strong>Continuous integration is a practice, not a server.</strong> It means every developer merges their work into the shared trunk at least daily, and every merge triggers an automated build with tests that verifies the integrated whole. The point is to make integration a non-event by doing it constantly, so conflicts stay minutes wide instead of weeks wide. A team that runs Jenkins on long-lived feature branches merged quarterly is not doing CI, no matter how green the dashboard is; a team that pair-programs onto trunk with a shell script running the tests is. Interviewers who know the topic will probe exactly this distinction, because "we have a CI server" is the most common wrong answer in the industry.</p>
+    <p><strong>Continuous delivery</strong> extends CI: every build that passes the pipeline is <em>proven releasable</em>, and the software is kept in a deployable state at all times. Deployment becomes a business decision behind a button — you could ship this commit right now, you are choosing when. <strong>Continuous deployment</strong> removes the button: every build that passes every gate goes to production automatically, with no human in the loop. So continuous deployment implies continuous delivery, but not the reverse, and the gap between them is entirely organisational rather than technical. Many regulated Indian enterprises deliberately run continuous delivery and stop there — an auditor, a change-advisory board or a customer release window owns the final click — and that is a legitimate engineering position, not a failure.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/continuousIntegration.html" rel="noopener">Continuous Integration — Martin Fowler (the canonical definition and its practices)</a></li>
+      <li>[Official] <a href="https://martinfowler.com/bliki/ContinuousDelivery.html" rel="noopener">ContinuousDelivery — Martin Fowler bliki (and how the term drifted)</a></li>
+      <li>[Official] <a href="https://minimumcd.org/minimumcd/" rel="noopener">Minimum Viable CD — minimumcd.org (the smallest honest definition, signed by the CD community)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/continuous-delivery/principles/continuous-integration-vs-delivery-vs-deployment" rel="noopener">Continuous integration vs delivery vs deployment — Atlassian</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/continuous-integration-deployment-delivery" rel="noopener">Continuous Integration vs Deployment vs Delivery — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7SNbDWob6cI" rel="noopener">The Difference Between Continuous Delivery &amp; Continuous Deployment — Dave Farley (Modern Software Engineering)</a></li>
+    </ul>
+
+    <h3>The deployment pipeline: commit stage first, and it must be fast</h3>
+    <p>The deployment pipeline is an automated implementation of your build, deploy, test and release process, arranged so that each stage takes the artifact from the stage before it and applies a progressively more expensive, more production-like test. The first stage — the <em>commit stage</em> — compiles, runs unit tests, runs cheap static analysis, and produces the deployable artifact. Everything after it consumes that artifact: automated acceptance tests against a deployed instance, then capacity and performance testing, then manual exploratory or UAT environments, then release. Later stages are usually triggered by the artifact passing the earlier one, and the pipeline as a whole is the single route to production — nothing reaches production that did not come out of it.</p>
+    <p>The commit stage has a hard budget: it should finish in minutes, not hours, because it gates every developer on the team many times a day. Humble and Farley's rule of thumb is around ten minutes; past that, developers stop waiting for it, carry on to the next task, and the whole feedback loop collapses into a nightly-build cadence with a queue of broken commits. This is why the pyramid matters — thousands of fast unit tests in the commit stage, a much smaller set of slow end-to-end acceptance tests in a later stage — and why "add the integration tests to the commit stage" is usually the wrong instinct. Design the pipeline for a fast first verdict and defer expense, and stage-gate on evidence rather than on ceremony.</p>
+    <pre class="code-block" data-label="Pipeline"><code>commit stage    compile + unit tests + lint  -> build the artifact once   (target: minutes)
+acceptance      deploy artifact to a prod-like env, run acceptance suite  (tens of minutes)
+capacity        performance / load against the same artifact              (longer, can be parallel)
+exploratory     UAT / manual testing on the same artifact                 (on demand)
+production      release the same artifact                                 (button, or automatic)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/DeploymentPipeline.html" rel="noopener">DeploymentPipeline — Martin Fowler bliki (stages, the commit stage, fan-out)</a></li>
+      <li>[Official] <a href="https://continuousdelivery.com/implementing/patterns/" rel="noopener">Patterns and Antipatterns — continuousdelivery.com (Jez Humble)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/continuous-delivery/principles/pipeline" rel="noopener">What is a CI/CD pipeline? — Atlassian continuous delivery principles</a></li>
+      <li>[Article] <a href="https://docs.github.com/en/actions/get-started/continuous-integration" rel="noopener">About continuous integration — GitHub Docs (the concepts, before the syntax)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eoaDr5PpT2c" rel="noopener">Continuous Delivery Pipelines: How to Build Better Software Faster — Dave Farley, GOTO 2021</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CmVxoNkkACQ" rel="noopener">What is CI/CD? Introduction to CI/CD and how it works — Abhishek Veeramalla</a></li>
+    </ul>
+
+    <h3>Quality gates: which ones block, which ones only inform</h3>
+    <p>A quality gate is an automated check with the authority to stop the artifact advancing. The usual ladder, cheapest first: compilation, unit tests, code formatting and lint, unit-test coverage thresholds, static analysis for bugs and code smells, secret scanning, dependency vulnerability scanning (SCA) against a known-vulnerability database, SAST for injection and unsafe-API patterns, licence compliance, and integration tests against real dependencies in containers. Later stages add acceptance tests, contract tests, performance budgets and DAST against a running instance. Each gate should answer a question the previous one could not, and should run at the earliest stage where it can answer it.</p>
+    <p>The honest part of this topic — and the part that separates a senior answer from a textbook one — is deciding which gates block. A gate that blocks must be trustworthy, fast and deterministic, or the team will route around it. Compilation and unit tests obviously block. A coverage threshold blocking a build is more contentious: coverage measures which lines executed, not whether they were verified, and a hard percentage reliably produces assertion-free tests written to satisfy the number. Ratcheting coverage on <em>changed</em> code, or failing only on a drop, is the usual compromise. Vulnerability scanners are the sharpest case: blocking on every CVE with severity above a threshold sounds responsible until a transitive dependency with no available fix stops every release in the company, so mature teams block on new critical findings in first-party and directly-reachable code, and merely report the rest onto a tracked backlog with an expiry date. Write the policy down, review it, and never let a gate be permanently suppressed with no owner.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.sonarsource.com/sonarqube-server/instance-administration/analysis-functions/quality-standards" rel="noopener">Quality gates and quality profiles — SonarQube Server documentation (clean-as-you-code thresholds)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-community/Source_Code_Analysis_Tools" rel="noopener">Source Code Analysis Tools — OWASP Community (what SAST can and cannot find)</a></li>
+      <li>[Official] <a href="https://owasp.org/www-project-dependency-check/" rel="noopener">OWASP Dependency-Check — dependency (SCA) scanning in the build</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/TestPyramid.html" rel="noopener">TestPyramid — Martin Fowler bliki (which tests belong in which stage)</a></li>
+      <li>[Article] <a href="https://dora.dev/capabilities/test-automation/" rel="noopener">Test automation — DORA capability (what the research says actually predicts performance)</a></li>
+    </ul>
+
+    <h3>Feedback speed, and the flaky test that destroys trust</h3>
+    <p>Pipeline feedback speed is the metric that matters most, because it multiplies against every other property of the system. A pipeline that answers in six minutes is a conversation; a pipeline that answers in ninety minutes is a batch job, and teams respond to batch jobs by batching — bigger commits, longer branches, more merge conflicts, larger and riskier releases. The levers are the same everywhere: parallelise independent jobs, cache dependencies and build outputs, run only the tests affected by a change where your tooling can determine that safely, and move genuinely slow suites out of the commit stage into a later stage that consumes the artifact. Measure the wall-clock time from push to verdict and treat regressions in it as bugs.</p>
+    <p>Flaky tests — tests that pass and fail on identical code — are the single most effective way to destroy a pipeline. Once a red build might be nothing, every red build might be nothing, and the team's response to failure becomes "re-run it", which is the moment the pipeline stops being a quality gate and becomes a slot machine. The standard causes are shared mutable state between tests, real time and real clocks, dependence on test ordering, unsynchronised asynchrony (sleeps instead of waits), and external services. The standard cure is not "retry twice": it is to quarantine the flaky test out of the blocking suite immediately so the build goes green again, raise a ticket with an owner and a deadline, fix or delete it, and track the quarantine list as debt that must shrink. Auto-retrying flaky tests in place hides the signal and lets the quarantine list grow forever.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://continuousdelivery.com/foundations/continuous-integration/" rel="noopener">Continuous Integration foundations — continuousdelivery.com (keeping the build green)</a></li>
+      <li>[Official] <a href="https://dora.dev/capabilities/continuous-integration/" rel="noopener">Continuous integration — DORA capability (how to measure and improve it)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/nonDeterminism.html" rel="noopener">Eradicating Non-Determinism in Tests — Martin Fowler (quarantine, causes, cures)</a></li>
+      <li>[Article] <a href="https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html" rel="noopener">Flaky Tests at Google and How We Mitigate Them — Google Testing Blog</a></li>
+      <li>[Article] <a href="https://trunkbaseddevelopment.com/" rel="noopener">Trunk Based Development — trunkbaseddevelopment.com (the branching model CI actually requires)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kgYhZOzb6EM" rel="noopener">The Foundations of Continuous Delivery — Modern Software Engineering</a></li>
+    </ul>
+
+    <h3>Build once, deploy many: the immutable artifact</h3>
+    <p>The commit stage produces the artifact exactly once — a jar, a container image, a wheel, a tarball — and that identical byte sequence is what every subsequent stage tests and what production eventually runs. This is the single most important idea in the second half of CI/CD, and it follows from one observation: if you rebuild per environment, then the thing you tested in staging is not the thing you shipped to production. Compilers, base images, transitive dependency resolution, build-tool plugins and even file ordering are not guaranteed to be identical between two runs on two machines at two times, so a rebuild is a new artifact with a new risk profile, validated by nothing. Teams that hit "build and deploy to prod" as a separate job from "build and deploy to staging" have a pipeline that proves nothing about what is running.</p>
+    <p>Immutability is the enforcement mechanism. Once version 1.4.7 is published it never changes: no overwriting, no republishing, no "we patched the jar in place". If something is wrong you publish 1.4.8. This gives you a stable identity to reason about — a specific digest in a specific registry, traceable to a specific commit — so that "which build is in production?" has an exact answer during an incident instead of an archaeology project. Container digests make this concrete: an image digest is a content hash, so pinning a deployment to <code>sha256:…</code> is a cryptographic guarantee that the bits have not changed, in a way that pinning a tag is not.</p>
+    <pre class="code-block" data-label="Concept"><code>WRONG: build -> deploy dev | build -> deploy stage | build -> deploy prod   (3 artifacts, 1 tested)
+RIGHT: build ------ artifact 1.4.7 ------> dev -> stage -> prod             (1 artifact, promoted)
+
+# the identity that survives promotion is the digest, not the tag
+registry.example.com/orders@sha256:9f2c...e1  <- immutable, content-addressed
+registry.example.com/orders:1.4.7             <- immutable by policy
+registry.example.com/orders:latest            <- mutable, means nothing in a deployment</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/build-release-run" rel="noopener">Build, release, run — The Twelve-Factor App (strict separation of the three stages)</a></li>
+      <li>[Official] <a href="https://docs.cloud.google.com/architecture/devops" rel="noopener">DevOps capabilities — Google Cloud Architecture Center (the DORA capability catalogue)</a></li>
+      <li>[Article] <a href="https://jfrog.com/learn/devops/software-artifact-repository/" rel="noopener">What is a software artifact repository? — JFrog</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/topics/developers-practitioners/devops-and-cicd-google-cloud-explained" rel="noopener">DevOps and CI/CD on Google Cloud explained — Google Cloud Blog</a></li>
+    </ul>
+
+    <h3>Artifact repositories, and version tags you can trust</h3>
+    <p>An artifact repository is the system of record for built binaries: Sonatype Nexus and JFrog Artifactory for the general case, plus format-native registries — Maven Central and your internal Maven repo for jars, npm and PyPI mirrors for packages, and OCI registries such as GitHub Container Registry (GHCR), Amazon ECR, Google Artifact Registry or Docker Hub for images. Three jobs, not one: it stores what you publish, it proxies and caches what you consume from the public internet (so a deleted upstream package or a network outage does not stop your builds, and so every third-party dependency can be scanned before it reaches a developer), and it holds the retention and access policy that decides who may publish what, and for how long snapshots survive.</p>
+    <p>Tagging discipline is where this becomes an interview topic. Distinguish immutable tags from mutable ones: a semantic version like <code>1.4.7</code>, or a version plus commit SHA, is intended to identify one artifact forever, whereas <code>latest</code>, <code>main</code>, <code>dev</code> and Maven <code>-SNAPSHOT</code> versions are moving pointers that mean something different depending on when you looked. Deploy from mutable tags and you lose reproducibility and rollback: "roll back to the previous <code>latest</code>" is not a sentence with a meaning. Enforce it in the registry rather than in a wiki — ECR offers tag immutability at the repository level, Nexus and Artifactory can forbid redeployment of a released version, and Kubernetes' own image documentation warns against relying on mutable tags. Also decide retention deliberately: keep every released version, expire snapshot and pull-request builds on a schedule, and never let a "clean up the registry" script delete an image that a running Deployment still references.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/repository-management.html" rel="noopener">Repository Management — Apache Maven (why you run an internal repository at all)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry" rel="noopener">Working with the Container registry (GHCR) — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-tag-mutability.html" rel="noopener">Image tag mutability — Amazon ECR User Guide</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/containers/images/" rel="noopener">Images — Kubernetes documentation (tags, digests, and the case against latest)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-deploy-nexus" rel="noopener">Deploy a Maven artifact to Nexus — Baeldung (release vs snapshot repositories)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7h0qVfdwkLk" rel="noopener">Introduction to Sonatype Nexus Repository 3 — DevOps Made Easy</a></li>
+    </ul>
+
+    <h3>Promotion by reference, and configuration injected per environment</h3>
+    <p>Promotion is moving a specific artifact version from one environment to the next — dev to QA to staging to production — <em>by reference</em>. The promotion job does not rebuild, does not recompile, and ideally does not even copy bytes: it records that digest <code>sha256:9f2c…</code> is now approved for the next environment, or it retags the same manifest into a "released" repository without changing the underlying content. Some organisations model this as separate repositories per maturity level (build → verified → released); others record it as deployment metadata against an environment. Either way, the environment is a property of the deployment, never of the binary.</p>
+    <p>Which forces the corollary: <strong>configuration is injected at deploy time, not baked in at build time</strong>. Anything that varies between environments — database URLs, feature-flag defaults, log levels, third-party endpoints, credentials — must arrive from outside the artifact: environment variables, a ConfigMap and Secret, a config server, a parameter store. The moment you build a separate image for staging with staging's properties compiled in, you have destroyed build-once-deploy-many and reintroduced the untested-binary problem. This is Twelve-Factor's config principle, and its practical test is simple: could this artifact be open-sourced tomorrow without leaking a single credential? Keep environment-specific config in an environment-scoped store with approvals and an audit trail — GitHub Actions environments and GitLab CI environments both give you protection rules and a deployment history for exactly this.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/config" rel="noopener">Config — The Twelve-Factor App (strict separation of config from code)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments" rel="noopener">Managing environments for deployment — GitHub Docs (protection rules, required reviewers)</a></li>
+      <li>[Official] <a href="https://docs.gitlab.com/ci/environments/" rel="noopener">Environments and deployments — GitLab CI/CD documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/configmap/" rel="noopener">ConfigMaps — Kubernetes documentation (injecting config into an unchanged image)</a></li>
+      <li>[Article] <a href="https://dora.dev/capabilities/deployment-automation/" rel="noopener">Deployment automation — DORA capability</a></li>
+    </ul>
+
+    <h3>Provenance, SBOM and signing: proving where an artifact came from</h3>
+    <p>Immutability tells you the artifact has not changed; it does not tell you the artifact is <em>yours</em>. Supply-chain attacks target exactly that gap — a compromised build machine, a typosquatted dependency, a poisoned base image, a publish token stolen from a maintainer. Three artefacts close it. <strong>Provenance</strong> is signed, machine-readable metadata emitted by the build system stating which source commit, which builder, which parameters and which dependencies produced this exact digest; SLSA is the framework that grades how tamper-resistant that claim is, with build levels rising from "provenance exists" to "provenance is produced by a hardened, non-falsifiable builder". <strong>An SBOM</strong> — CycloneDX or SPDX — is the inventory of every component inside the artifact, which is what lets you answer "are we affected?" in minutes rather than weeks when the next Log4Shell lands, and is increasingly a procurement requirement for enterprise and government customers.</p>
+    <p><strong>Signing</strong> binds the two to an identity. Sigstore's <code>cosign</code> made this practical by removing long-lived private keys: it issues a short-lived certificate tied to an OIDC identity (your CI workflow's own identity, for instance), signs, and records the signature in a public transparency log, so verification checks who signed rather than which key was used. The deployment-time payoff is admission control — a cluster policy that refuses to run any image without a valid signature from your build workflow and provenance naming a commit on your trunk. Generate the SBOM and provenance in the same job that produces the artifact, attach them to the registry alongside it, and verify at deploy rather than trusting a badge in a README.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://slsa.dev/spec/v1.0/levels" rel="noopener">Security levels — SLSA v1.0 specification (Build L1 to L3, and what each actually guarantees)</a></li>
+      <li>[Official] <a href="https://slsa.dev/spec/v1.0/provenance" rel="noopener">Provenance — SLSA v1.0 specification (the attestation format)</a></li>
+      <li>[Official] <a href="https://docs.sigstore.dev/cosign/signing/overview/" rel="noopener">Signing overview — Sigstore cosign documentation (keyless signing, transparency log)</a></li>
+      <li>[Official] <a href="https://www.cyclonedx.org/" rel="noopener">CycloneDX — OWASP SBOM standard (formats, tooling, build-plugin generation)</a></li>
+      <li>[Article] <a href="https://www.cisa.gov/topics/information-communications-technology-supply-chain-security/sbom" rel="noopener">Software Bill of Materials (SBOM) — CISA (why customers are asking for one)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hF95PiItWtM" rel="noopener">SLSA, Sigstore, SBOM &amp; Software Supply Chain Security: what does it all mean? — Abdel Sghiouar, NDC Conferences</a></li>
+    </ul>
+
+    <h3>Judging the pipeline: the DORA four keys</h3>
+    <p>Every pipeline discussion eventually needs a scoreboard, and the DORA research programme supplies the one the industry agrees on. Two throughput measures: <strong>deployment frequency</strong> (how often you successfully release to production) and <strong>lead time for changes</strong> (how long from code committed to code running in production). Two stability measures: <strong>change failure rate</strong> (what percentage of deployments cause a degradation requiring a fix, rollback or hotfix) and <strong>failed deployment recovery time</strong> (how long to restore service when one does) — this last key was previously named time to restore service, and was refined in later reports to focus specifically on deployment-caused failures.</p>
+    <p>The finding that makes the four keys worth quoting in an interview is that throughput and stability move <em>together</em>, not against each other. Elite performers deploy more often <em>and</em> break things less, because small batches are easier to test, easier to review, easier to diagnose and easier to roll back — the pipeline is the mechanism that makes small batches cheap. Two cautions worth voicing: these are team-level system metrics for improving your own delivery over time, not individual performance measures, and any one of them optimised alone is gameable (deploy an empty commit hourly and your frequency looks elite). Read them as a set, and pair them with a reliability signal so speed is never purchased with outages.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://dora.dev/guides/dora-metrics/" rel="noopener">DORA's software delivery metrics: the four keys — dora.dev</a></li>
+      <li>[Official] <a href="https://dora.dev/capabilities/continuous-delivery/" rel="noopener">Continuous delivery — DORA capability (the practice behind the numbers)</a></li>
+      <li>[Official] <a href="https://dora.dev/research/" rel="noopener">DORA research — the reports and the evidence base</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bIolJv_bWtg" rel="noopener">The Difference Between DevOps &amp; Continuous Delivery — Dave Farley, GOTO 2024</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="11-kubernetes-production.html">← Kubernetes in Production</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="13-github-actions.html">GitHub Actions →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>CI/CD concepts are asked in almost every Indian backend and DevOps round — service companies test the definitions and the pipeline stages, product companies push into gate design, artifact immutability and the DORA numbers:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is continuous integration?</summary>
+      <div class="answer"><p>A development practice where every developer merges into the shared trunk at least daily and each merge is verified by an automated build with tests. The goal is to make integration a non-event, so conflicts and broken assumptions surface within minutes instead of at the end of a release. Emphasise that CI is a practice, not a tool — running Jenkins on long-lived feature branches is not CI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between continuous delivery and continuous deployment?</summary>
+      <div class="answer"><p>Continuous delivery means every build that passes the pipeline is proven releasable and the software is always in a deployable state — releasing is a business decision behind a button someone presses. Continuous deployment removes the button: every build that passes every gate goes to production automatically with no human approval. Continuous deployment implies continuous delivery; the reverse is not true, and the gap is organisational (compliance, change boards, release windows, marketing) rather than technical.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the typical stages of a CI/CD pipeline?</summary>
+      <div class="answer"><p>Commit stage — compile, unit tests, lint and static analysis, and produce the artifact. Then automated acceptance tests against a deployed instance of that artifact, then capacity/performance testing, then exploratory or UAT environments, then release. Each later stage is slower and more production-like, and every stage consumes the same artifact the commit stage produced.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a build artifact, and where is it stored?</summary>
+      <div class="answer"><p>The deployable output of the build — a jar or war, a container image, a wheel, a tarball. It is stored in an artifact repository or registry: Nexus or Artifactory for the general case, an internal Maven repository for jars, an OCI registry such as GHCR, ECR or Artifact Registry for images. The repository also proxies and caches third-party dependencies and holds the retention and access policy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a quality gate?</summary>
+      <div class="answer"><p>An automated check with the authority to stop the artifact advancing to the next stage. Typical gates: compilation, unit tests, lint and formatting, coverage thresholds, static analysis, secret scanning, dependency vulnerability scanning, SAST, licence checks, then acceptance and performance budgets later on. A gate that blocks must be fast, deterministic and trusted, or the team will route around it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why must the commit stage be fast, and what do you do when it is not?</summary>
+      <div class="answer"><p>Because it gates every developer many times a day. The working target is under about ten minutes; beyond that developers stop waiting for the result, context-switch away, and the feedback loop degrades into a nightly-build cadence with broken commits stacking up. Fixes: parallelise independent jobs, cache dependencies and build outputs, keep the commit stage to fast unit tests and cheap static analysis, and move slow integration, acceptance and performance suites into later stages that consume the already-built artifact.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does "build once, deploy many" mean and why does it matter?</summary>
+      <div class="answer"><p>The pipeline builds the deployable artifact exactly once, and that identical binary is what gets tested in every environment and what eventually runs in production. If you rebuild per environment, the thing you tested is not the thing you shipped — compiler versions, base images, transitive dependency resolution and build plugins can all differ between runs — so every test result before production becomes evidence about a different artifact. It also gives you one identity to trace and one thing to roll back to.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Immutable versus mutable tags — why does it matter which one you deploy from?</summary>
+      <div class="answer"><p>An immutable tag such as <code>1.4.7</code>, or a content digest, identifies one artifact forever. A mutable tag such as <code>latest</code>, <code>main</code> or a Maven <code>-SNAPSHOT</code> is a moving pointer whose meaning depends on when you resolved it. Deploying from a mutable tag destroys reproducibility (two pods started an hour apart can run different code), makes rollback meaningless, and makes incident forensics guesswork. Enforce immutability in the registry itself — ECR tag immutability, or forbidding redeployment of released versions in Nexus/Artifactory — and pin deployments to digests where you can.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you promote a build from staging to production?</summary>
+      <div class="answer"><p>By reference, not by rebuild. The promotion step approves the already-tested artifact version or digest for the next environment — retagging the same manifest into a released repository, or recording a deployment against a protected environment — and the deploy job pulls that exact artifact. Environment-specific configuration is injected at deploy time from environment variables, a ConfigMap and Secret, a config server or a parameter store. If your "deploy to prod" job starts with a build step, you do not have promotion.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where should environment-specific configuration live, and why not in the artifact?</summary>
+      <div class="answer"><p>Outside the artifact, supplied at deploy time. Baking staging's database URL into a staging image means you build a different binary per environment, which breaks build-once-deploy-many and reintroduces the untested-binary problem; it also puts credentials inside a stored, distributable artifact. The Twelve-Factor test is whether the artifact could be made public tomorrow without leaking a secret. Keep the values in an environment-scoped store with access control, approvals and an audit trail.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the DORA four keys and say what each measures.</summary>
+      <div class="answer"><p>Deployment frequency — how often you successfully release to production. Lead time for changes — from code committed to code running in production. Change failure rate — the percentage of deployments causing degradation that needs a hotfix, rollback or fix-forward. Failed deployment recovery time — how long to restore service after a deployment-caused failure (previously framed as time to restore service). The first two are throughput, the last two stability, and the research finding is that they improve together rather than trading off.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A team wants to block every build with any CVE above medium severity. Critique that policy.</summary>
+      <div class="answer"><p>It sounds responsible and usually stops all releases. A single transitive dependency with a published CVE and no fixed version available will block every service in the estate, so the policy gets suppressed wholesale within a fortnight and you end up with less security than a nuanced one. Better: block on new critical and high findings in first-party code and in directly reachable dependency paths, report everything else to a tracked backlog with owners and expiry dates, keep a reviewed allowlist with justifications and end dates rather than permanent suppressions, and scan the base image separately so platform fixes are not the application team's release blocker.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Should a coverage threshold be a blocking gate?</summary>
+      <div class="answer"><p>Usually not as a flat global percentage. Coverage records which lines executed, not whether behaviour was verified, so a hard number reliably produces assertion-free tests written to satisfy the metric while real risk stays untested. More defensible variants: require coverage on changed lines only, fail on a drop rather than on an absolute figure, or ratchet the floor upward so it can never regress. Treat coverage as a conversation starter about untested areas, and let mutation testing or code review carry the quality judgement.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your pipeline has flaky tests and developers just re-run failed builds. How do you fix it?</summary>
+      <div class="answer"><p>Stop treating it as a test problem and treat it as a trust problem: once a red build might mean nothing, every red build means nothing. Quarantine flaky tests out of the blocking suite immediately so the build is honest again, raise a ticket per test with a named owner and a deadline, and track the quarantine list as debt that must shrink — a growing list is a failing team, not a working process. Then fix root causes: shared mutable state between tests, real clocks and dates, order dependence, sleeps instead of waits on asynchrony, and reliance on live external services. Do not paper over it with blanket auto-retries, which hide the signal permanently.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you prove that the image running in production is the one your pipeline built?</summary>
+      <div class="answer"><p>Content addressing plus attestation. Deploy by digest so the bits are cryptographically fixed, and have the build emit signed SLSA provenance naming the source commit, the builder and the build parameters, plus an SBOM. Sign the artifact with cosign using a short-lived certificate tied to the CI workflow's OIDC identity, recorded in a transparency log, so verification checks who signed rather than which key was used. Then enforce it at deploy time with admission control that refuses any image lacking a valid signature and acceptable provenance — the guarantee has to be verified where the workload starts, not asserted in a README.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A manager wants to raise deployment frequency to elite levels this quarter. What do you tell them?</summary>
+      <div class="answer"><p>That frequency is an outcome, not a lever. Deploying an empty commit every hour hits the number and improves nothing, so any one key optimised alone is gameable and the four must be read as a set with a reliability signal alongside. The real levers are batch size and pipeline trust: small changes merged to trunk daily, a fast commit stage, no flaky tests, automated deployment with a rehearsed rollback, and decoupling release from deploy with feature flags so shipping code is not the same event as exposing a feature. Also frame them as team-level system metrics for improving your own trend, never as individual performance measures.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.ci.pipeline — Continuous integration vs delivery vs deployment, pipeline stages, quality gates</li>
+      <li>dev.ci.artifacts — Artifact management and immutability, environment promotion, build once deploy many</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

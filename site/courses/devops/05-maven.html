@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Maven module: POM anatomy and the effective POM, the standard directory layout, the three lifecycles with phases and goals, plugin executions, the mvnw wrapper, dependency scopes, nearest-wins mediation and dependency:tree, dependencyManagement and BOM import, multi-module reactor builds, profiles and the essential plugins — with verified resources and interview questions.">
+  <title>Maven — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Maven</h1>
+  <p class="standfirst">Maven is not a scripting tool you program — it is a model you describe. Learn the two ideas it is built on, convention over configuration and a declarative dependency graph, and almost every mysterious build failure stops being mysterious.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Maven</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Maven has run the Java build for twenty years, and the reason it still does is that it refuses to let each project invent its own build. You do not tell Maven <em>how</em> to compile, test and package; you declare <em>what</em> the project is — coordinates, packaging, dependencies, a parent — and a fixed lifecycle plus a set of plugins does the rest. Everything that feels strange about Maven follows from that choice, including the parts people complain about.</p>
+    <p>Two things cause almost all the confusion. The first is the lifecycle-phase-goal relationship: most developers can type <code>mvn clean install</code> without being able to say what each word does or why <code>package</code> also compiles. The second is dependency mediation: Maven flattens a graph of transitive dependencies into one version per artifact using a rule that is simple, documented, and consistently surprising. This module covers POM anatomy, the lifecycles, plugins and the wrapper, then scopes, mediation, BOMs, multi-module reactor builds, profiles and the plugins you will actually configure.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>POM anatomy: coordinates, packaging, parent inheritance and the effective POM</h3>
+    <p>The <code>pom.xml</code> is a description of a project, not a build script. Its core is the GAV triple — <code>groupId</code> (a reverse-DNS namespace you control), <code>artifactId</code> (the module name) and <code>version</code> — which uniquely addresses the artifact in every repository on earth. Add <code>packaging</code> (<code>jar</code> by default, plus <code>war</code>, <code>pom</code> for aggregators and BOMs, <code>maven-plugin</code>, <code>ear</code>) and you have told Maven what to produce; packaging also silently selects which goals get bound to which phases, which is why a <code>pom</code>-packaged module never produces a jar.</p>
+    <p>Every POM inherits, whether you declare a <code>&lt;parent&gt;</code> or not: with no parent you still inherit the Super POM baked into the Maven distribution, which supplies Central as a repository, the default directory layout and default plugin versions. What actually runs is the <em>effective POM</em> — your file merged with its parents, the Super POM, active profiles and property interpolation. When a dependency version, plugin configuration or property is not what you expected, <code>mvn help:effective-pom</code> is the tool that ends the argument, and knowing it exists is a genuine seniority signal in interviews. Keep versions in <code>&lt;properties&gt;</code> rather than sprinkled through the file, and never use the <code>${project.version}</code>-style expressions in places Maven cannot resolve at model-build time.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;project xmlns="http://maven.apache.org/POM/4.0.0"&gt;
+  &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;          &lt;!-- always 4.0.0 on Maven 3.x --&gt;
+  &lt;parent&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+    &lt;version&gt;3.5.4&lt;/version&gt;
+    &lt;relativePath/&gt;                             &lt;!-- empty: resolve from the repository --&gt;
+  &lt;/parent&gt;
+
+  &lt;groupId&gt;com.acme.orders&lt;/groupId&gt;             &lt;!-- G --&gt;
+  &lt;artifactId&gt;order-service&lt;/artifactId&gt;         &lt;!-- A --&gt;
+  &lt;version&gt;1.4.0-SNAPSHOT&lt;/version&gt;              &lt;!-- V --&gt;
+  &lt;packaging&gt;jar&lt;/packaging&gt;
+
+  &lt;properties&gt;
+    &lt;java.version&gt;21&lt;/java.version&gt;
+    &lt;testcontainers.version&gt;1.20.4&lt;/testcontainers.version&gt;
+  &lt;/properties&gt;
+&lt;/project&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-the-pom.html" rel="noopener">Introduction to the POM — Apache Maven guides (Super POM, minimal POM, inheritance, aggregation)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/pom.html" rel="noopener">POM Reference — Apache Maven (every element, authoritative)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-help-plugin/effective-pom-mojo.html" rel="noopener">help:effective-pom — Maven Help Plugin documentation</a></li>
+      <li>[Article] <a href="https://books.sonatype.com/mvnref-book/reference/pom-relationships.html" rel="noopener">POM Relationships — Maven: The Complete Reference (Sonatype)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-packaging-types" rel="noopener">Maven Packaging Types — Baeldung</a></li>
+    </ul>
+
+    <h3>Convention over configuration: the standard directory layout</h3>
+    <p>Maven's second founding idea is that if every project puts sources, resources and tests in the same place, no project needs to configure where they are. <code>src/main/java</code>, <code>src/main/resources</code>, <code>src/test/java</code>, <code>src/test/resources</code>, output in <code>target/</code> — obey that and the compiler, resource, surefire and jar plugins all work with zero configuration. Deviate and you are writing configuration to fight defaults for the rest of the project's life.</p>
+    <p>The payoff is portability of <em>people</em>, not just builds. A developer who has never seen your repository can clone it, run one command and know where the integration tests live. That is also why Maven is still the default in large service companies: onboarding cost matters more than build-script expressiveness. The same convention is what lets tools — IDEs, Sonar, Jacoco, container plugins — work on your project without being told anything about it.</p>
+    <pre class="code-block" data-label="TEXT"><code>order-service/
+  pom.xml
+  mvnw  mvnw.cmd  .mvn/wrapper/     &lt;- the wrapper, committed
+  src/
+    main/java/            &lt;- production sources
+    main/resources/       &lt;- application.yml, static files, become classpath root
+    test/java/            &lt;- *Test.java  (surefire) and *IT.java (failsafe)
+    test/resources/
+  target/                 &lt;- everything generated; never committed
+    classes/  test-classes/  order-service-1.4.0-SNAPSHOT.jar</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html" rel="noopener">Introduction to the Standard Directory Layout — Apache Maven guides</a></li>
+      <li>[Official] <a href="https://maven.apache.org/what-is-maven.html" rel="noopener">What is Maven? — Apache Maven (the project model and its objectives)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/getting-started/index.html" rel="noopener">Maven Getting Started Guide — Apache Maven (the long-form official walkthrough)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-directory-structure" rel="noopener">Apache Maven Standard Directory Layout — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Xatr8AZLOsE" rel="noopener">Maven Tutorial — Crash Course — Marco Codes</a></li>
+    </ul>
+
+    <h3>The three lifecycles, and why one phase runs every phase before it</h3>
+    <p>Maven ships exactly three built-in lifecycles. <strong>clean</strong> has three phases (<code>pre-clean</code>, <code>clean</code>, <code>post-clean</code>) and deletes <code>target/</code>. <strong>site</strong> generates project documentation. <strong>default</strong> is the one that builds software, and it has twenty-three ordered phases; the ones worth memorising are <code>validate</code>, <code>compile</code>, <code>test</code>, <code>package</code>, <code>verify</code>, <code>install</code>, <code>deploy</code>, with <code>process-resources</code>, <code>test-compile</code> and the <code>integration-test</code> trio in between. The single rule that explains most beginner confusion: <em>invoking a phase runs that phase and every phase before it in the same lifecycle</em>. So <code>mvn package</code> also validates, compiles, processes resources and runs unit tests, and <code>mvn deploy</code> runs the entire default lifecycle.</p>
+    <p>The lifecycles are independent of each other, which is why <code>mvn clean install</code> is two arguments rather than one: you are asking for the <code>clean</code> phase of the clean lifecycle and then the <code>install</code> phase of the default lifecycle. Know the difference between the last three too, because it is a stock interview question. <code>package</code> produces the artifact in <code>target/</code>; <code>verify</code> additionally runs integration tests and quality checks bound after packaging; <code>install</code> copies the artifact into your local repository at <code>~/.m2/repository</code> so other local projects resolve it; <code>deploy</code> pushes it to a remote repository such as Nexus or Artifactory for everyone else. On CI, <code>mvn verify</code> is usually the right command — <code>install</code> pollutes a shared local repository for no benefit.</p>
+    <pre class="code-block" data-label="TEXT"><code>default lifecycle (abridged, in order — running one runs all preceding):
+  validate -&gt; compile -&gt; test -&gt; package -&gt; verify -&gt; install -&gt; deploy
+             |          |        |          |
+             |          |        |          +-- integration-test + failsafe:verify
+             |          |        +------------- jar/war assembled into target/
+             |          +---------------------- surefire runs unit tests
+             +--------------------------------- sources compiled to target/classes
+
+clean lifecycle:  pre-clean -&gt; clean -&gt; post-clean
+site  lifecycle:  pre-site -&gt; site -&gt; post-site -&gt; site-deploy</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html" rel="noopener">Introduction to the Build Lifecycle — Apache Maven guides (all three lifecycles, every phase, default bindings)</a></li>
+      <li>[Article] <a href="https://books.sonatype.com/mvnref-book/reference/lifecycle-sect-structure.html" rel="noopener">Build Lifecycle Structure — Maven: The Complete Reference (Sonatype)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-goals-phases" rel="noopener">Maven Goals and Phases — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-install-versus-verify" rel="noopener">Difference Between mvn install and mvn verify — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=i2xWZMH_GZs" rel="noopener">Maven Lifecycle Phases and Goals — Bharath Thippireddy</a></li>
+    </ul>
+
+    <h3>Goals, plugin executions, and calling plugin:goal directly</h3>
+    <p>Phases do nothing by themselves. A phase is a slot; the work is done by <em>goals</em>, and a goal is one task inside a <em>plugin</em>. <code>compiler:compile</code>, <code>surefire:test</code>, <code>jar:jar</code>, <code>install:install</code> — those are goals, and the default lifecycle mapping for <code>jar</code> packaging is what binds them to <code>compile</code>, <code>test</code>, <code>package</code> and <code>install</code>. That mapping is why an empty POM still builds a jar correctly. When you add a plugin with an <code>&lt;execution&gt;</code> you are declaring "run this goal at this phase, with this configuration", and you can bind several executions of the same plugin to different phases with different settings, each identified by an <code>&lt;id&gt;</code>.</p>
+    <p>You can also skip the lifecycle entirely and invoke a goal directly as <code>plugin:goal</code> — <code>mvn dependency:tree</code>, <code>mvn help:effective-pom</code>, <code>mvn versions:display-dependency-updates</code>, <code>mvn spring-boot:run</code>. Nothing before it runs, which is exactly what you want for a diagnostic. Two related habits keep builds reproducible: pin every plugin version (in <code>&lt;pluginManagement&gt;</code> on the parent, so children inherit the version without inheriting the binding), and remember that <code>&lt;pluginManagement&gt;</code> only declares configuration while <code>&lt;plugins&gt;</code> actually activates it — the same split as <code>dependencyManagement</code> versus <code>dependencies</code>.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;build&gt;
+  &lt;pluginManagement&gt;                &lt;!-- versions + config, no activation --&gt;
+    &lt;plugins&gt;
+      &lt;plugin&gt;
+        &lt;groupId&gt;org.apache.maven.plugins&lt;/groupId&gt;
+        &lt;artifactId&gt;maven-failsafe-plugin&lt;/artifactId&gt;
+        &lt;version&gt;3.5.2&lt;/version&gt;
+      &lt;/plugin&gt;
+    &lt;/plugins&gt;
+  &lt;/pluginManagement&gt;
+
+  &lt;plugins&gt;
+    &lt;plugin&gt;
+      &lt;artifactId&gt;maven-failsafe-plugin&lt;/artifactId&gt;
+      &lt;executions&gt;
+        &lt;execution&gt;
+          &lt;id&gt;integration-tests&lt;/id&gt;
+          &lt;goals&gt;                    &lt;!-- these goals bind to their default phases: --&gt;
+            &lt;goal&gt;integration-test&lt;/goal&gt;   &lt;!-- phase: integration-test --&gt;
+            &lt;goal&gt;verify&lt;/goal&gt;             &lt;!-- phase: verify --&gt;
+          &lt;/goals&gt;
+        &lt;/execution&gt;
+      &lt;/executions&gt;
+    &lt;/plugin&gt;
+  &lt;/plugins&gt;
+&lt;/build&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-plugins.html" rel="noopener">Introduction to Plugins — Apache Maven guides</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/mini/guide-configuring-plugins.html" rel="noopener">Guide to Configuring Plug-ins — Apache Maven (executions, phases, inherited configuration)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/plugins/index.html" rel="noopener">Available Plugins — Apache Maven (the full index of official plugins and goals)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-plugin-management" rel="noopener">Plugin Management in Maven — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=594jY1QDDkc" rel="noopener">Plugins and Profiles in Maven — Tech Primers</a></li>
+    </ul>
+
+    <h3>The Maven wrapper: mvnw belongs in the repository</h3>
+    <p>The wrapper is a tiny committed script pair (<code>mvnw</code>, <code>mvnw.cmd</code>) plus a <code>.mvn/wrapper/maven-wrapper.properties</code> file naming an exact Maven version. On first run it downloads that distribution into a user-level cache and then delegates to it. The result is that the Maven version becomes part of the source tree, versioned and reviewed like any other dependency, instead of being an undeclared property of whichever laptop or agent happens to run the build.</p>
+    <p>This matters more than it sounds. Without it, a developer on an old Maven and a CI agent on a new one can produce different results, and "works on my machine" becomes a build problem rather than a code problem. With it, a fresh clone needs only a JDK — <code>./mvnw verify</code> works with nothing else installed, which is why Spring Initializr has generated it into every project for years. Generate or upgrade it with <code>mvn wrapper:wrapper -Dmaven=3.9.9</code>, commit all the wrapper files, and always invoke <code>./mvnw</code> rather than <code>mvn</code> in scripts, Dockerfiles and CI pipelines. Note that Maven 3.9.x remains the current stable line; keep the wrapper pinned there rather than tracking pre-release versions.</p>
+    <pre class="code-block" data-label="BASH"><code># create or upgrade the wrapper, then commit everything it writes
+mvn wrapper:wrapper -Dmaven=3.9.9
+
+git add mvnw mvnw.cmd .mvn/wrapper/maven-wrapper.properties
+
+# from now on, every script and pipeline uses the wrapper
+./mvnw clean verify          # Linux / macOS / Git Bash
+mvnw.cmd clean verify        # Windows shell</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/wrapper/" rel="noopener">Apache Maven Wrapper — official documentation (setup, distribution types, properties)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/docs/history.html" rel="noopener">Maven Releases History — Apache Maven (which version to pin the wrapper to)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-wrapper" rel="noopener">A Quick Guide to Maven Wrapper — Baeldung</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2020/04/maven-wrapper/" rel="noopener">Maven to Include Default Wrapper — InfoQ (why the wrapper became first-class)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EFx7pkGj8x8" rel="noopener">Maven Wrapper Explained — Switch Between Maven Versions — Karpado</a></li>
+    </ul>
+
+    <h3>Dependency scopes and what each one means for the classpath</h3>
+    <p>A scope answers two questions at once: which classpaths this dependency appears on, and whether it propagates to projects that depend on you. <strong>compile</strong> (the default) is on all three classpaths and propagates. <strong>provided</strong> is on compile and test classpaths but excluded at runtime and never propagated — the container or the JDK supplies it (a servlet API, a Lombok-style annotation processor, a Spring Boot configuration processor). <strong>runtime</strong> is the mirror image: absent at compile time, present at runtime and test — the classic case is a JDBC driver you must not let anyone import directly. <strong>test</strong> is visible only to test compilation and execution and never propagates, which is what keeps JUnit out of your shipped jar. <strong>system</strong> points at an absolute path on disk, is deprecated, and should be treated as a code smell. <strong>import</strong> is different in kind — it is legal only inside <code>&lt;dependencyManagement&gt;</code> on a <code>pom</code>-packaged artifact and pulls in that POM's managed versions rather than any jar.</p>
+    <p>Two consequences are worth internalising because interviewers probe them. First, scope is a compile-time <em>and</em> a packaging decision: mark something <code>provided</code> that the runtime does not actually provide and you get a <code>NoClassDefFoundError</code> in production that no test caught. Second, scope controls transitivity, so it is your main lever for not inflicting your test and tooling dependencies on your consumers. The related <code>&lt;optional&gt;true&lt;/optional&gt;</code> flag says "I use this, but you decide whether you need it" — it stops propagation without changing your own classpath.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;dependencies&gt;
+  &lt;dependency&gt;                                &lt;!-- compile: everywhere, propagates --&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+  &lt;/dependency&gt;
+
+  &lt;dependency&gt;                                &lt;!-- runtime: no compile access --&gt;
+    &lt;groupId&gt;org.postgresql&lt;/groupId&gt;
+    &lt;artifactId&gt;postgresql&lt;/artifactId&gt;
+    &lt;scope&gt;runtime&lt;/scope&gt;
+  &lt;/dependency&gt;
+
+  &lt;dependency&gt;                                &lt;!-- provided: compile only, not packaged --&gt;
+    &lt;groupId&gt;jakarta.servlet&lt;/groupId&gt;
+    &lt;artifactId&gt;jakarta.servlet-api&lt;/artifactId&gt;
+    &lt;scope&gt;provided&lt;/scope&gt;
+  &lt;/dependency&gt;
+
+  &lt;dependency&gt;                                &lt;!-- test: never shipped, never propagated --&gt;
+    &lt;groupId&gt;org.testcontainers&lt;/groupId&gt;
+    &lt;artifactId&gt;postgresql&lt;/artifactId&gt;
+    &lt;scope&gt;test&lt;/scope&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html" rel="noopener">Introduction to the Dependency Mechanism — Apache Maven guides (scopes, the scope-propagation table, dependencyManagement, import)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/ref/current/maven-model/maven.html" rel="noopener">Maven Model Descriptor — Apache Maven reference (the exact semantics of every dependency element)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-dependency-scopes" rel="noopener">Maven Dependency Scopes — Baeldung</a></li>
+      <li>[Article] <a href="https://reflectoring.io/maven-scopes-gradle-configurations/" rel="noopener">Maven Scopes and Gradle Configurations Explained — Reflectoring</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ADkWysrTVuE" rel="noopener">Maven Dependency Scopes Explained — Skilled Engg</a></li>
+    </ul>
+
+    <h3>Transitive dependencies, nearest-wins mediation, and dependency:tree</h3>
+    <p>You declare a handful of dependencies; Maven resolves the closure of everything they need. That closure is a graph, but the classpath is a flat list, so Maven must pick exactly one version per <code>groupId:artifactId</code>. The rule is <em>nearest wins</em>: the version at the shallowest depth in the tree from your POM. If two candidates sit at the same depth, the one <strong>declared first</strong> in the POM wins. Maven does not pick the highest version — that is Gradle's rule, and mixing the two up is a classic interview trap.</p>
+    <p>Nearest-wins surprises people because it makes your build sensitive to declaration order and to depth, both of which change when you add an unrelated library. The symptom is a <code>NoSuchMethodError</code> or <code>ClassNotFoundException</code> at runtime after a dependency bump: the code was compiled against one version of a transitive library and ran against another. The diagnosis is always the same command — <code>mvn dependency:tree</code>, ideally with <code>-Dverbose</code> to show the omitted candidates and <code>-Dincludes=</code> to filter to the artifact in question. Three fixes, in order of preference: declare the artifact directly in your POM (depth 1 always wins, and it documents the intent), pin the version in <code>&lt;dependencyManagement&gt;</code>, which overrides mediation entirely, or add an <code>&lt;exclusion&gt;</code> to the dependency dragging in the wrong copy. Also run <code>mvn dependency:analyze</code> occasionally: it names dependencies you use but do not declare (the ones a transitive change will break) and dependencies you declare but never use.</p>
+    <pre class="code-block" data-label="BASH"><code>./mvnw dependency:tree -Dverbose -Dincludes=com.google.guava:guava
+
+# [INFO] com.acme:order-service:jar:1.4.0-SNAPSHOT
+# [INFO] +- com.acme:billing-client:jar:2.1.0:compile
+# [INFO] |  \- com.google.guava:guava:jar:32.1.3-jre:compile      &lt;- depth 2, WINS
+# [INFO] \- com.acme:search-client:jar:4.0.0:compile
+# [INFO]    \- (com.google.guava:guava:jar:33.4.0-jre:compile - omitted for conflict)
+
+./mvnw dependency:analyze     # used-but-undeclared / declared-but-unused</code></pre>
+    <pre class="code-block" data-label="XML"><code>&lt;!-- fix 1 (best): declare it yourself at depth 1 --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.google.guava&lt;/groupId&gt;
+  &lt;artifactId&gt;guava&lt;/artifactId&gt;
+  &lt;version&gt;33.4.0-jre&lt;/version&gt;
+&lt;/dependency&gt;
+
+&lt;!-- fix 3: cut the offending copy out of the offender --&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;com.acme&lt;/groupId&gt;
+  &lt;artifactId&gt;billing-client&lt;/artifactId&gt;
+  &lt;version&gt;2.1.0&lt;/version&gt;
+  &lt;exclusions&gt;
+    &lt;exclusion&gt;
+      &lt;groupId&gt;com.google.guava&lt;/groupId&gt;
+      &lt;artifactId&gt;guava&lt;/artifactId&gt;
+    &lt;/exclusion&gt;
+  &lt;/exclusions&gt;
+&lt;/dependency&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-dependency-plugin/tree-mojo.html" rel="noopener">dependency:tree — Maven Dependency Plugin (verbose mode, includes/excludes filters, output formats)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-optional-and-excludes-dependencies.html" rel="noopener">Optional Dependencies and Dependency Exclusions — Apache Maven guides</a></li>
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-dependency-plugin/analyze-mojo.html" rel="noopener">dependency:analyze — Maven Dependency Plugin (used-undeclared and unused-declared)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-dependency-graph" rel="noopener">Understanding the Maven Dependency Graph or Tree — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-version-collision" rel="noopener">How to Resolve a Version Collision of Artifacts in Maven — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=i5pP5i9uS9c" rel="noopener">How to Resolve Maven Dependency Conflicts — Tech Primers</a></li>
+    </ul>
+
+    <h3>dependencyManagement and BOMs: pinning a whole family of versions</h3>
+    <p><code>&lt;dependencies&gt;</code> adds a dependency. <code>&lt;dependencyManagement&gt;</code> adds nothing — it only says "if anyone in this project or its children uses this artifact, here is the version, scope and exclusions to use". Children then declare the dependency with no <code>&lt;version&gt;</code> at all. That separation is what makes a parent POM useful: one place to change a version, and no risk of forcing an unwanted jar onto every module. It also beats mediation outright — a managed version wins over the nearest-wins rule no matter how deep the transitive copy is, which makes it the cleanest way to force a security patch across a whole tree.</p>
+    <p>A <strong>BOM</strong> is that idea packaged for reuse: a <code>pom</code>-packaged artifact whose entire content is a <code>&lt;dependencyManagement&gt;</code> block covering a family of mutually tested versions. You consume it with <code>&lt;scope&gt;import&lt;/scope&gt;</code> inside your own <code>dependencyManagement</code>. Spring Boot is the worked example and shows both routes: inherit <code>spring-boot-starter-parent</code> (you get managed versions plus plugin configuration, resource filtering and a Java version, but you spend your one <code>&lt;parent&gt;</code> slot), or import <code>spring-boot-dependencies</code> as a BOM (versions only, and you keep your parent for your own company POM). You can import as many BOMs as you like — that is the point of import scope, since a POM has only one parent. Note the ordering rule when BOMs overlap: the first import wins, so put the one you consider authoritative first.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;dependency&gt;                                  &lt;!-- BOM import: versions only --&gt;
+      &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+      &lt;artifactId&gt;spring-boot-dependencies&lt;/artifactId&gt;
+      &lt;version&gt;3.5.4&lt;/version&gt;
+      &lt;type&gt;pom&lt;/type&gt;
+      &lt;scope&gt;import&lt;/scope&gt;
+    &lt;/dependency&gt;
+    &lt;dependency&gt;                                  &lt;!-- a second BOM, also fine --&gt;
+      &lt;groupId&gt;org.testcontainers&lt;/groupId&gt;
+      &lt;artifactId&gt;testcontainers-bom&lt;/artifactId&gt;
+      &lt;version&gt;${testcontainers.version}&lt;/version&gt;
+      &lt;type&gt;pom&lt;/type&gt;
+      &lt;scope&gt;import&lt;/scope&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;
+
+&lt;dependencies&gt;
+  &lt;dependency&gt;                                    &lt;!-- no version: it is managed --&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/using/build-systems.html" rel="noopener">Build Systems — Spring Boot reference documentation (starter-parent versus importing the dependencies BOM)</a></li>
+      <li>[Article] <a href="https://books.sonatype.com/mvnref-book/reference/pom-relationships-sect-project-dependencies.html" rel="noopener">Project Dependencies — Maven: The Complete Reference (Sonatype)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-dependencymanagement-vs-dependencies-tags" rel="noopener">Maven dependencyManagement vs. dependencies Tags — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-maven-bom" rel="noopener">Spring with Maven BOM — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-dependencies-order" rel="noopener">Why the Order of Maven Dependencies Is Important — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2dPon1G5S-M" rel="noopener">How Dependency Management Works in Spring Boot Applications — SivaLabs</a></li>
+    </ul>
+
+    <h3>Multi-module reactor builds: aggregation and inheritance are not the same thing</h3>
+    <p>These two ideas share a file and are constantly conflated. <strong>Aggregation</strong> is a <code>pom</code>-packaged POM listing <code>&lt;modules&gt;</code>; running Maven on it starts the <em>reactor</em>, which collects all listed modules, reads their inter-module dependencies and topologically sorts them so each module is built after everything it needs. Order in the <code>&lt;modules&gt;</code> list is irrelevant — the dependency graph decides. <strong>Inheritance</strong> is a child naming a <code>&lt;parent&gt;</code> to receive its properties, dependencyManagement, pluginManagement and common dependencies. A typical repository uses one POM for both, but you can aggregate modules that inherit from something else entirely, and you can inherit from a company parent that aggregates nothing.</p>
+    <p>The reactor is also where the useful command-line flags live. <code>-pl</code> (project list) restricts the build to named modules; <code>-am</code> (also make) adds the upstream modules those depend on, which is the combination you want when iterating on one service in a large repository; <code>-amd</code> builds the downstream dependents instead; <code>-rf</code> resumes from a module after a mid-build failure; <code>-T 1C</code> builds independent modules in parallel with one thread per core. One caveat that bites in CI: inside a reactor build, modules resolve their siblings from the reactor itself, but a build of a single module alone will look in the local or remote repository — which is why a module that builds fine as part of the whole project can fail when built in isolation.</p>
+    <pre class="code-block" data-label="BASH"><code># aggregator pom.xml: &lt;packaging&gt;pom&lt;/packaging&gt; + &lt;modules&gt;
+#   order-domain, order-service, order-api, order-batch
+
+./mvnw -pl order-service -am verify   # build order-service + what it depends on
+./mvnw -pl order-api -amd verify      # build order-api + everything depending on it
+./mvnw -rf order-service verify       # resume from this module after a failure
+./mvnw -T 1C clean verify             # one build thread per CPU core</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/mini/guide-multiple-modules.html" rel="noopener">Guide to Working with Multiple Modules — Apache Maven (reactor, build order, -pl / -am / -amd / -rf)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/mini/guide-multiple-modules-4.html" rel="noopener">Guide to Working with Multiple Modules in Maven 4 — Apache Maven</a></li>
+      <li>[Article] <a href="https://books.sonatype.com/mvnref-book/reference/running-sect-options.html" rel="noopener">Maven Command Line Options — Maven: The Complete Reference (Sonatype)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-multi-module" rel="noopener">Multi-Module Project with Maven — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DG9B2w-N42s" rel="noopener">Multi-Module Project With Spring Boot and Maven — Java Techie</a></li>
+    </ul>
+
+    <h3>Profiles and activation: the same POM, different environments</h3>
+    <p>A profile is a named block of POM fragments — properties, dependencies, plugins, repositories, even an alternative build configuration — that is merged into the effective POM only when the profile is active. Use them for genuine build-time variation: a slow test suite you run only on CI, a different packaging for an on-premise release, an extra plugin for a release build. Do <em>not</em> use them to select application configuration at build time; that is what Spring profiles and externalised configuration are for, and baking environment settings into an artifact defeats build-once-deploy-anywhere.</p>
+    <p>Activation has several routes and knowing them all is a common interview probe: explicitly with <code>-P name</code> (and <code>-P !name</code> to deactivate), by JDK version range, by operating system, by the presence or the value of a system property, by a file existing or missing, or via <code>&lt;activeProfiles&gt;</code> in <code>settings.xml</code> for machine-level concerns such as an internal mirror. <code>&lt;activeByDefault&gt;</code> has one sharp edge that catches everyone: it is disabled the moment <em>any other profile in the same POM</em> is activated by any means, so "default" profiles silently vanish. Prefer a property-based activation, and check what is actually on with <code>mvn help:active-profiles</code>.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;profiles&gt;
+  &lt;profile&gt;
+    &lt;id&gt;integration&lt;/id&gt;
+    &lt;activation&gt;
+      &lt;property&gt;&lt;name&gt;env.CI&lt;/name&gt;&lt;/property&gt;   &lt;!-- active when CI is set --&gt;
+    &lt;/activation&gt;
+    &lt;properties&gt;
+      &lt;skipITs&gt;false&lt;/skipITs&gt;
+    &lt;/properties&gt;
+  &lt;/profile&gt;
+
+  &lt;profile&gt;
+    &lt;id&gt;native&lt;/id&gt;                                &lt;!-- opt in with -P native --&gt;
+    &lt;build&gt;&lt;plugins&gt;
+      &lt;plugin&gt;
+        &lt;groupId&gt;org.graalvm.buildtools&lt;/groupId&gt;
+        &lt;artifactId&gt;native-maven-plugin&lt;/artifactId&gt;
+      &lt;/plugin&gt;
+    &lt;/plugins&gt;&lt;/build&gt;
+  &lt;/profile&gt;
+&lt;/profiles&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/guides/introduction/introduction-to-profiles.html" rel="noopener">Introduction to Build Profiles — Apache Maven guides (every activation trigger and its precedence)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/settings.html" rel="noopener">Settings Reference — Apache Maven (activeProfiles, mirrors, servers in settings.xml)</a></li>
+      <li>[Article] <a href="https://books.sonatype.com/mvnref-book/reference/profiles.html" rel="noopener">Build Profiles — Maven: The Complete Reference (Sonatype)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-profiles" rel="noopener">Guide to Maven Profiles — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CkbEnZVue3g" rel="noopener">Maven Profiles — How to Create and Activate a Maven Profile — AJ Automation</a></li>
+    </ul>
+
+    <h3>The plugins you will actually configure</h3>
+    <p>Six or seven plugins carry almost every real build. <strong>maven-compiler-plugin</strong> selects the language level — on modern Maven set <code>&lt;maven.compiler.release&gt;</code> rather than the old source/target pair, because <code>release</code> also checks that you only use APIs present in that JDK. <strong>maven-surefire-plugin</strong> runs unit tests at the <code>test</code> phase and by default matches <code>*Test</code>, <code>Test*</code>, <code>*Tests</code>, <code>*TestCase</code>. <strong>maven-failsafe-plugin</strong> is its sibling for integration tests: it matches <code>*IT</code>, binds to <code>integration-test</code> and <code>verify</code>, and — the point of the split — its failures are reported in the <code>verify</code> goal <em>after</em> the post-integration-test phase, so containers and servers still get torn down when a test fails. Surefire failing the build immediately would leave them running.</p>
+    <p>For packaging, <strong>maven-jar-plugin</strong> produces the plain jar; <strong>maven-shade-plugin</strong> produces an uber-jar with dependencies unpacked and optionally relocated (the relocation feature is how libraries avoid inflicting their own dependency conflicts on you); for Spring, <strong>spring-boot-maven-plugin</strong>'s <code>repackage</code> goal rewrites the jar into an executable, nested-jar layout and also gives you <code>spring-boot:run</code> and <code>spring-boot:build-image</code>. Finally the two governance plugins: <strong>maven-enforcer-plugin</strong> fails the build on rule violations — minimum Maven and JDK version, banned dependencies, no duplicate classes, dependency convergence — and is the single most effective way to stop bad dependencies entering a large codebase; <strong>versions-maven-plugin</strong> reports available upgrades with <code>versions:display-dependency-updates</code> and can apply them.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;properties&gt;
+  &lt;maven.compiler.release&gt;21&lt;/maven.compiler.release&gt;
+&lt;/properties&gt;
+
+&lt;plugin&gt;
+  &lt;artifactId&gt;maven-enforcer-plugin&lt;/artifactId&gt;
+  &lt;executions&gt;&lt;execution&gt;
+    &lt;id&gt;enforce-rules&lt;/id&gt;
+    &lt;goals&gt;&lt;goal&gt;enforce&lt;/goal&gt;&lt;/goals&gt;
+    &lt;configuration&gt;&lt;rules&gt;
+      &lt;requireMavenVersion&gt;&lt;version&gt;[3.9.0,)&lt;/version&gt;&lt;/requireMavenVersion&gt;
+      &lt;requireJavaVersion&gt;&lt;version&gt;[21,)&lt;/version&gt;&lt;/requireJavaVersion&gt;
+      &lt;dependencyConvergence/&gt;      &lt;!-- fail when a transitive version conflicts --&gt;
+      &lt;bannedDependencies&gt;&lt;excludes&gt;
+        &lt;exclude&gt;commons-logging:commons-logging&lt;/exclude&gt;
+      &lt;/excludes&gt;&lt;/bannedDependencies&gt;
+    &lt;/rules&gt;&lt;/configuration&gt;
+  &lt;/execution&gt;&lt;/executions&gt;
+&lt;/plugin&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-compiler-plugin/" rel="noopener">Apache Maven Compiler Plugin — official documentation (release, source/target, annotation processing)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/surefire/maven-surefire-plugin/" rel="noopener">Apache Maven Surefire Plugin — official documentation (unit test execution and reporting)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/surefire/maven-failsafe-plugin/" rel="noopener">Apache Maven Failsafe Plugin — official documentation (why integration tests need a separate plugin)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/plugins/maven-shade-plugin/" rel="noopener">Apache Maven Shade Plugin — official documentation (uber-jars, transformers, relocation)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/enforcer/maven-enforcer-plugin/" rel="noopener">Apache Maven Enforcer Plugin — official documentation (built-in rules)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/maven-plugin/index.html" rel="noopener">Spring Boot Maven Plugin — Spring reference documentation (repackage, run, build-image)</a></li>
+      <li>[Official] <a href="https://www.mojohaus.org/versions/versions-maven-plugin/index.html" rel="noopener">Versions Maven Plugin — MojoHaus documentation (display-dependency-updates and friends)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-integration-test" rel="noopener">Integration Testing with Maven — Baeldung (surefire versus failsafe in practice)</a></li>
+    </ul>
+
+    <h3>Maven 4 on the horizon: what changes, and what you should still learn first</h3>
+    <p>Maven 4 has been in release candidates for a while and is not yet generally available — the 3.9.x line is what real projects run and what interviews ask about, so learn that first. The headline change is the split between the <em>build POM</em> and the <em>consumer POM</em>: your source POM may use the new <code>modelVersion</code> 4.1.0 with conveniences that were previously impossible, while Maven publishes a cleaned, fully-resolved 4.0.0-model POM to the repository for consumers. That decoupling is what finally allows a parent version to be inferred, module versions to be omitted, and build-only sections to be stripped from what downstream users see.</p>
+    <p>Other changes worth recognising by name: a dedicated <code>bom</code> packaging type that distinguishes a real bill of materials from a parent POM, <code>&lt;subprojects&gt;</code> as the clearer replacement for <code>&lt;modules&gt;</code>, a <code>root="true"</code> attribute plus a <code>${project.rootDirectory}</code> property that fix the perennial "where is the top of this multi-module build" problem, and an <code>mvnup</code> upgrade tool. Maven 4 requires Java 17 to run (though it can still build for older targets) and keeps backwards compatibility as an explicit goal, so existing 4.0.0-model POMs continue to work. Treat it as awareness, not as something to migrate to today.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://maven.apache.org/whatsnewinmaven4.html" rel="noopener">What's new in Maven 4? — Apache Maven (build/consumer POM, model 4.1.0, bom packaging, subprojects)</a></li>
+      <li>[Official] <a href="https://maven.apache.org/guides/mini/guide-migration-to-mvn4.html" rel="noopener">Starting with Maven 4 — Apache Maven migration guide</a></li>
+      <li>[Article] <a href="https://www.infoq.com/maven/news/" rel="noopener">Maven news — InfoQ (release-by-release coverage of the Maven 4 candidates)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=P1nDlF2vg1I" rel="noopener">Wait No More, Here Comes Maven 4! — Robert Scholte and Maarten Mulders (Devoxx)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="04-branching-strategies.html">← Branching and Versioning</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="06-gradle.html">Gradle →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Maven is asked in almost every Java round in India, from L1 screening at service companies to design-adjacent rounds at product firms. Scopes and transitive-conflict debugging come up more than anything else — expect to be handed a broken dependency tree and asked to reason out loud:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Maven and what problem does it solve?</summary>
+      <div class="answer"><p>A build and project-management tool built on convention over configuration and a declarative project model. You describe the project in <code>pom.xml</code> — coordinates, packaging, dependencies, parent — and a standard lifecycle plus plugins compile, test, package and publish it. It solves three things at once: reproducible builds, automatic transitive dependency resolution from repositories, and a uniform project layout so any Java developer can work on any Maven project without learning a bespoke build script.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are GAV coordinates, and what does packaging control?</summary>
+      <div class="answer"><p><code>groupId</code>, <code>artifactId</code> and <code>version</code> — the address that uniquely identifies an artifact in any repository. <code>packaging</code> (jar, war, pom, ear, maven-plugin) says what to produce and, less obviously, selects the default lifecycle mapping: which plugin goals get bound to which phases. That is why a <code>pom</code>-packaged aggregator never builds a jar and a <code>war</code> project runs the war plugin instead of the jar plugin.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain the difference between a lifecycle, a phase and a goal.</summary>
+      <div class="answer"><p>A lifecycle is an ordered sequence of phases; Maven has three (clean, default, site). A phase is a stage in that sequence — compile, test, package, install. A goal is a single task implemented by a plugin, such as <code>compiler:compile</code> or <code>surefire:test</code>. Goals are bound to phases, so running a phase executes every goal bound to it and to all preceding phases. You can also run a goal directly as <code>mvn plugin:goal</code>, which skips the lifecycle entirely.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does mvn clean install actually do, and why two words?</summary>
+      <div class="answer"><p>Two separate lifecycles. <code>clean</code> deletes <code>target/</code>. <code>install</code> runs the whole default lifecycle up to and including install: validate, compile, test, package, verify, then copy the artifact into the local repository at <code>~/.m2/repository</code> so other local projects can resolve it. On CI, <code>mvn verify</code> is usually more appropriate — installing into a shared agent's local repository gains nothing and can hide resolution problems.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the Maven dependency scopes and what each means.</summary>
+      <div class="answer"><p><strong>compile</strong> — default; on compile, test and runtime classpaths, and propagates transitively. <strong>provided</strong> — compile and test only, excluded from the packaged artifact, not transitive; the container or JDK supplies it. <strong>runtime</strong> — runtime and test but not compile; JDBC drivers. <strong>test</strong> — test compilation and execution only, never propagated, never shipped. <strong>system</strong> — like provided but with an explicit local file path; deprecated, avoid. <strong>import</strong> — only valid inside <code>dependencyManagement</code> on a pom artifact; pulls in that POM's managed versions rather than a jar.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Two libraries pull in different versions of the same jar. Which one does Maven use?</summary>
+      <div class="answer"><p>Nearest wins: the version at the shallowest depth from your POM. If both are at the same depth, the first one declared in the POM wins. Maven does <em>not</em> choose the highest version — that is Gradle's default. Diagnose with <code>mvn dependency:tree -Dverbose -Dincludes=group:artifact</code>, which shows the omitted candidates and the reason. Fix by declaring the artifact directly (depth 1 always wins), pinning it in <code>dependencyManagement</code> (which overrides mediation completely), or excluding it from the offending dependency.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> dependencyManagement versus dependencies — what is the difference?</summary>
+      <div class="answer"><p><code>dependencies</code> actually adds the dependency to the classpath. <code>dependencyManagement</code> adds nothing; it centrally declares the version, scope and exclusions to use <em>if</em> this project or a child declares that artifact. Children then omit the version. Two extra properties matter: a managed version overrides transitive mediation regardless of depth, and it lets a parent govern versions without forcing unwanted jars onto every module.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a BOM, and how do you use one without inheriting from it?</summary>
+      <div class="answer"><p>A bill of materials is a <code>pom</code>-packaged artifact whose content is a <code>dependencyManagement</code> block covering a family of mutually tested versions. You consume it inside your own <code>dependencyManagement</code> with <code>&lt;type&gt;pom&lt;/type&gt;&lt;scope&gt;import&lt;/scope&gt;</code>. That is how you get Spring Boot's managed versions while keeping your <code>&lt;parent&gt;</code> for a company POM — inherit <code>spring-boot-starter-parent</code> or import <code>spring-boot-dependencies</code>, and you can import many BOMs but have only one parent. When two imported BOMs manage the same artifact, the first import wins.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Surefire or failsafe — why are there two test plugins?</summary>
+      <div class="answer"><p>Surefire runs unit tests at the <code>test</code> phase and fails the build immediately. Failsafe runs integration tests (<code>*IT</code>) at <code>integration-test</code> but deliberately does not fail there — it records the result and fails later in the <code>verify</code> goal, after <code>post-integration-test</code> has run. That ordering is the whole reason it exists: containers, embedded servers and Testcontainers resources get torn down even when a test fails, instead of being left running by an immediate build abort.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the Maven wrapper and why commit it?</summary>
+      <div class="answer"><p><code>mvnw</code>, <code>mvnw.cmd</code> and <code>.mvn/wrapper/maven-wrapper.properties</code> — a committed launcher that downloads and uses an exact Maven version. It makes the build tool itself a versioned part of the repository, so every developer, CI agent and Docker build uses the same Maven, and a fresh clone needs only a JDK. Always invoke <code>./mvnw</code> in scripts and pipelines rather than whatever <code>mvn</code> happens to be on the machine.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Aggregation and inheritance in a multi-module project — are they the same?</summary>
+      <div class="answer"><p>No, they are independent mechanisms that usually share a file. Aggregation is a <code>pom</code>-packaged POM listing <code>&lt;modules&gt;</code>; it drives the reactor, which topologically sorts modules by their inter-module dependencies and builds them in one run — the order you list them is irrelevant. Inheritance is a child pointing at a <code>&lt;parent&gt;</code> to receive properties, dependencyManagement, pluginManagement and common dependencies. You can aggregate modules that inherit from something else, and inherit from a parent that aggregates nothing.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your service throws NoSuchMethodError in production but every test passed. Walk through the diagnosis.</summary>
+      <div class="answer"><p>Classic mediation mismatch: compiled against one version of a transitive library, running against another — or a second copy is on the runtime classpath. Run <code>mvn dependency:tree -Dverbose</code> filtered to the class's artifact and find which version won and why. Check whether the failing artifact is marked <code>provided</code> while nothing actually provides it at runtime, and whether the packaging (shaded uber-jar, Spring Boot repackage, application server) is contributing a second copy. Fix by pinning the version in <code>dependencyManagement</code>, then prevent recurrence with the enforcer plugin's <code>dependencyConvergence</code> and <code>bannedDependencies</code> rules so the build fails at commit time instead of at 2am.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you debug a value in the POM that is not what you expect?</summary>
+      <div class="answer"><p><code>mvn help:effective-pom</code> — it prints your POM merged with all parents, the Super POM, active profiles and resolved properties, which is what Maven actually executes. Pair it with <code>mvn help:active-profiles</code> to see which profiles are contributing, and <code>mvn help:evaluate -Dexpression=project.version</code> for a single value. Most "Maven is ignoring my configuration" reports turn out to be a parent overriding it, a profile that is or is not active, or a plugin declared in <code>pluginManagement</code> but never activated in <code>plugins</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you speed up a slow multi-module build on CI?</summary>
+      <div class="answer"><p>Build in parallel with <code>-T 1C</code>; restrict scope with <code>-pl module -am</code> when only part of the tree changed; use <code>-o</code> offline or a repository manager mirror so artifact downloads are local; cache <code>~/.m2/repository</code> between pipeline runs keyed on the POM checksums; use <code>-rf</code> to resume rather than rebuilding after a mid-build failure; run <code>verify</code> rather than <code>install</code>; and split slow integration tests behind a failsafe-driven profile so the fast feedback loop stays fast. Beyond that, look at build caching or incremental extensions, and question whether one giant reactor should be several independently versioned repositories.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is activeByDefault on a profile considered a trap?</summary>
+      <div class="answer"><p>Because it is not really a default. <code>&lt;activeByDefault&gt;true&lt;/activeByDefault&gt;</code> is disabled as soon as any other profile in the same POM becomes active by any mechanism — a <code>-P</code> flag, a property, a JDK match. Developers then discover that passing an unrelated profile silently removed their "default" dependencies or plugin configuration. Prefer explicit property-based or file-based activation, or put the configuration in the main build and let a profile override it, and verify with <code>mvn help:active-profiles</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A security advisory requires a specific version of a library that only arrives transitively, four levels deep. How do you force it everywhere?</summary>
+      <div class="answer"><p>Pin it in <code>&lt;dependencyManagement&gt;</code> on the root parent POM: managed versions override nearest-wins mediation at any depth, and every module inherits the pin without gaining a new direct dependency. Verify with <code>mvn dependency:tree -Dverbose -Dincludes=</code> across the reactor, add an enforcer <code>bannedDependencies</code> rule with a version range so a vulnerable copy can never come back, and where the library ships its own BOM, import that instead of pinning artifacts one by one. Exclusions are the last resort — they must be repeated on every dependency that drags the artifact in, so they rot quietly as the tree changes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the build POM versus consumer POM split in Maven 4?</summary>
+      <div class="answer"><p>In Maven 4 the POM you author (build POM, optionally <code>modelVersion</code> 4.1.0) is decoupled from the POM published to the repository (consumer POM, still the 4.0.0 model). Maven generates the consumer POM during the build with everything resolved and build-only sections stripped, so older tools keep working. That decoupling is what enables the new conveniences — inferred parent and module versions, the <code>root</code> attribute and <code>${project.rootDirectory}</code>, a dedicated <code>bom</code> packaging type and <code>&lt;subprojects&gt;</code>. Worth recognising, but Maven 4 is still pre-GA and 3.9.x is what production projects run.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.mvn.pom — POM anatomy, lifecycle, phases and goals, the wrapper</li>
+      <li>dev.mvn.deps — Dependency mediation, BOM and dependencyManagement, multi-module builds, profiles, essential plugins</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

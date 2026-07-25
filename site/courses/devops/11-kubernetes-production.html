@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="Kubernetes in production module: ConfigMaps and Secrets, liveness/readiness/startup probes, resource requests and limits, QoS, HPA and cluster autoscaling, rolling updates, rollbacks and PodDisruptionBudgets, Ingress and Gateway API, persistent storage, RBAC and securityContext, StatefulSets and Jobs, Helm, Kustomize and GitOps — with verified resources and interview questions.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kubernetes in Production — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Kubernetes in Production</h1>
+  <p class="standfirst">A Deployment that runs on your laptop cluster is perhaps a quarter of a production workload. The rest is configuration you can rotate, health signals the scheduler can trust, resource numbers that survive a noisy neighbour, and a way to ship the whole thing repeatably. This module is that remaining three quarters.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Kubernetes in Production</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The previous module got a container scheduled and reachable. This one covers everything you must add before that Deployment is safe to run for real: externalised configuration and secrets, probes that tell Kubernetes the truth about your process, requests and limits that make scheduling and eviction predictable, autoscaling, and a rollout strategy you can reverse in one command.</p>
+    <p>The second half is the platform layer around your workload — how traffic gets in (Ingress, and the Gateway API that is replacing it), how state is stored (PersistentVolumes, StorageClasses, dynamic provisioning), how access is restricted (RBAC, <code>securityContext</code>, Pod Security Standards), which controllers to reach for beyond <code>Deployment</code> (StatefulSets, DaemonSets, Jobs, CronJobs), and how the whole manifest set is packaged and delivered (Helm, Kustomize, GitOps with Argo CD or Flux). All of it applies to current Kubernetes releases; the APIs named here are stable unless flagged otherwise.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>ConfigMaps and Secrets: environment variables versus mounted files</h3>
+    <p>Configuration does not belong in the image. A <code>ConfigMap</code> holds non-confidential key/value data — feature flags, log levels, a whole <code>application.yaml</code>, a connection URL — and a <code>Secret</code> holds the confidential equivalent, with a handful of typed variants (<code>kubernetes.io/dockerconfigjson</code> for registry pulls, <code>kubernetes.io/tls</code> for certificates, <code>Opaque</code> for everything else). Both are namespaced objects, both cap out around one mebibyte, and the container consumes them in one of two ways: injected as environment variables (<code>envFrom</code> or individual <code>valueFrom</code> entries), or projected into the filesystem as a volume.</p>
+    <p>The choice between the two is not cosmetic, and it is a favourite interview probe. Environment variables are resolved once, at process start, and are then frozen for the life of the container — update the ConfigMap and the running pod never notices, so a rollout (or a restart annotation) is the only way to pick up the change. A volume-mounted ConfigMap or Secret is refreshed in place by the kubelet within roughly a minute, so an application that watches its config file can hot-reload without a restart. Files also keep secrets out of <code>/proc/&lt;pid&gt;/environ</code>, out of crash dumps and out of child processes that inherit the environment. Default to files for anything you may want to rotate; use environment variables for the small, static values that frameworks expect there. Note the exception: keys consumed with <code>subPath</code> are <em>not</em> updated, which surprises people who mount a single file into an existing directory.</p>
+    <pre class="code-block" data-label="YAML"><code>envFrom:                          # frozen at container start
+  - configMapRef: { name: app-config }
+volumeMounts:
+  - name: app-config-files        # refreshed in place by the kubelet
+    mountPath: /etc/app
+    readOnly: true
+  - name: db-credentials
+    mountPath: /etc/secrets
+    readOnly: true
+volumes:
+  - name: app-config-files
+    configMap: { name: app-config }
+  - name: db-credentials
+    secret: { secretName: db-credentials, defaultMode: 0400 }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/configmap/" rel="noopener">ConfigMaps — Kubernetes documentation (immutability, size limit, consumption modes)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/secret/" rel="noopener">Secrets — Kubernetes documentation (types, mounting, automatic updates)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/" rel="noopener">Configure a Pod to Use a ConfigMap — Kubernetes task guide</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/inject-data-application/distribute-credentials-secure/" rel="noopener">Distribute Credentials Securely Using Secrets — Kubernetes task guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=FAnQTgr04mU" rel="noopener">Kubernetes ConfigMap and Secret as Kubernetes Volumes — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>The plain truth about Secrets: base64 is not encryption</h3>
+    <p>A Kubernetes <code>Secret</code> stores its values base64-encoded, and base64 is an encoding, not a cipher — anyone who can run <code>kubectl get secret -o yaml</code> can decode it in one pipe. By default the value also lands in etcd in the clear, so a stolen etcd snapshot or a filesystem backup of a control-plane node is a full credential dump. Saying this out loud is the answer interviewers are listening for; candidates who describe Secrets as "encrypted" are marked down immediately.</p>
+    <p>Three controls turn a Secret into something defensible. First, <strong>encryption at rest</strong>: configure an <code>EncryptionConfiguration</code> on the API server so <code>secrets</code> resources are encrypted before they reach etcd, ideally with a KMS provider so the data-encryption key itself lives in a hardware-backed store rather than a file on disk. Second, <strong>RBAC</strong>: <code>get</code> and <code>list</code> on Secrets is effectively "read all credentials in this namespace", so it should be granted to almost nobody, and workloads should read their own Secret through a mounted volume rather than through API access. Third, <strong>keep the material out of Git</strong>: either an external secret operator (External Secrets Operator, or a CSI secrets-store driver) that syncs from Vault, AWS Secrets Manager, Azure Key Vault or GCP Secret Manager into the cluster on demand, or Sealed Secrets / SOPS if you genuinely must commit an encrypted blob. Also audit the ambient sources of leakage: <code>kubectl describe</code> output, application logs that echo their config, and CI job logs.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/" rel="noopener">Encrypting Confidential Data at Rest — Kubernetes documentation (EncryptionConfiguration and KMS providers)</a></li>
+      <li>[Official] <a href="https://external-secrets.io/latest/" rel="noopener">External Secrets Operator — official documentation (SecretStore, ExternalSecret, supported backends)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/security/security-checklist/" rel="noopener">Security Checklist — Kubernetes documentation (the secrets and RBAC rows)</a></li>
+      <li>[Article] <a href="https://learnk8s.io/kubernetes-secrets-in-git" rel="noopener">How to keep your Kubernetes secrets secure in Git — Learnk8s</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=o7-H8QWUPqI" rel="noopener">Kubernetes Security Tutorial: RBAC, Network Policies, Kyverno, Secrets, External Secrets — Abhishek.Veeramalla</a></li>
+    </ul>
+
+    <h3>Probes done properly: liveness, readiness and startup</h3>
+    <p>Probes are the most misconfigured area in Kubernetes, and the three kinds answer three different questions. A <strong>readiness</strong> probe answers "can I serve traffic right now?" — failing it removes the pod's IP from the Service endpoints, so traffic stops arriving, but nothing is restarted. A <strong>liveness</strong> probe answers "am I wedged beyond recovery?" — failing it makes the kubelet kill and restart the container. A <strong>startup</strong> probe answers "have I finished booting?" — while it is still failing, the liveness and readiness probes are suspended entirely, which is how a JVM or a Rails app with a forty-second cold start survives without you inflating the liveness timings for the whole life of the pod. Each supports <code>httpGet</code>, <code>tcpSocket</code>, <code>exec</code> and gRPC handlers.</p>
+    <p>The trap that takes down real clusters: <strong>a liveness probe must never check a downstream dependency</strong>. If <code>/healthz</code> also pings the database, then a database blip fails the liveness probe on every replica at once, the kubelet restarts them all, they come up, fail again, and you have converted a recoverable dependency outage into a cluster-wide CrashLoopBackOff — while the restart storm removes the very capacity that could have served cached or degraded responses. Keep liveness local and nearly trivial ("is this process still processing?"); put dependency checks in readiness, where the consequence is shedding traffic rather than killing processes. Sensible defaults: liveness generous (a period of ten seconds or more, a failure threshold of at least three, so a single hiccup never restarts anything), readiness tight (short period, low threshold, so a saturated pod is pulled from rotation quickly), and startup with a high <code>failureThreshold</code> multiplied by <code>periodSeconds</code> to cover the worst realistic boot. Remember also that a probe failure is only ever about that one container, and that <code>terminationGracePeriodSeconds</code> plus a <code>preStop</code> hook is what gives in-flight requests time to drain during a normal shutdown.</p>
+    <pre class="code-block" data-label="YAML"><code>startupProbe:      # 30 x 10s = up to five minutes to boot; liveness is suspended until this passes
+  httpGet: { path: /healthz, port: 8080 }
+  failureThreshold: 30
+  periodSeconds: 10
+livenessProbe:     # local only - no database, no downstream HTTP call
+  httpGet: { path: /healthz, port: 8080 }
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+readinessProbe:    # may check dependencies; failing sheds traffic, never restarts
+  httpGet: { path: /readyz, port: 8080 }
+  periodSeconds: 5
+  failureThreshold: 2</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/" rel="noopener">Liveness, Readiness and Startup Probes — Kubernetes concepts (what each probe means and when it applies)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" rel="noopener">Configure Liveness, Readiness and Startup Probes — Kubernetes task guide (every field, with worked examples)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-setting-up-health-checks-with-readiness-and-liveness-probes" rel="noopener">Kubernetes best practices: setting up health checks with readiness and liveness probes — Google Cloud Blog</a></li>
+      <li>[Article] <a href="https://blog.colinbreck.com/kubernetes-liveness-and-readiness-probes-how-to-avoid-shooting-yourself-in-the-foot/" rel="noopener">Kubernetes liveness and readiness probes: how to avoid shooting yourself in the foot — Colin Breck</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=x2e6pIBLKzw" rel="noopener">Kubernetes Health Probes Explained: Liveness vs Readiness Probes (CKA series) — Tech Tutorials with Piyush</a></li>
+    </ul>
+
+    <h3>Resource requests and limits: scheduling, throttling and the OOM kill</h3>
+    <p>Two numbers per container, two completely different jobs. <strong>Requests drive scheduling</strong>: the scheduler places a pod only on a node whose allocatable capacity minus the sum of existing requests still covers it, and the request is also what the pod is guaranteed once running. <strong>Limits drive enforcement</strong> at runtime by the kernel. Getting this distinction wrong is the single most common Kubernetes misconception, and it comes up in almost every interview: a pod with a small request and a huge limit will schedule easily and then misbehave, while a pod with a request equal to its peak will schedule badly and waste capacity.</p>
+    <p>The enforcement differs sharply by resource because CPU is compressible and memory is not. Exceed your CPU limit and the kernel's CFS quota simply <em>throttles</em> you — the container runs slower, tail latency degrades, and nothing dies, which is why many practitioners now set CPU requests but deliberately omit CPU limits on latency-sensitive services. Exceed your memory limit and there is nothing to compress: the container is <strong>OOM-killed</strong> and restarted, showing exit code 137 and reason <code>OOMKilled</code>. That asymmetry drives the standard advice — set memory request equal to memory limit, size it from observed working set plus headroom, and treat every OOM kill as a sizing bug rather than a transient. The request/limit pair also determines the pod's <strong>QoS class</strong>, which decides eviction order under node pressure: <code>Guaranteed</code> (every container has request equal to limit for both CPU and memory) is evicted last, <code>Burstable</code> (requests set, limits higher or absent) next, and <code>BestEffort</code> (nothing set) first. On the JVM specifically, modern container-aware JDKs read the cgroup memory limit rather than the host's RAM, so <code>-XX:MaxRAMPercentage</code> sizes the heap from the limit — but the heap is not the whole process: metaspace, thread stacks, code cache, direct buffers and the GC's own structures live outside it, so a heap sized at the full container limit is a guaranteed OOM kill. Leave headroom, typically a heap around three quarters of the limit or less.</p>
+    <pre class="code-block" data-label="YAML"><code>resources:
+  requests:            # what the scheduler reserves, and what you are guaranteed
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    memory: "512Mi"    # equal to request -> predictable; exceed it and the kernel OOM-kills you
+    # cpu deliberately omitted: a CPU limit only throttles, and throttling hurts tail latency
+env:
+  - name: JAVA_TOOL_OPTIONS
+    value: "-XX:MaxRAMPercentage=70.0"   # heap from the cgroup limit, headroom for non-heap</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/" rel="noopener">Resource Management for Pods and Containers — Kubernetes documentation (units, enforcement, OOM behaviour)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/" rel="noopener">Pod Quality of Service Classes — Kubernetes documentation (Guaranteed, Burstable, BestEffort and eviction order)</a></li>
+      <li>[Article] <a href="https://learnk8s.io/setting-cpu-memory-limits-requests" rel="noopener">Setting the right requests and limits in Kubernetes — Learnk8s</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-resource-requests-and-limits" rel="noopener">Kubernetes best practices: Resource requests and limits — Google Cloud Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=x9_9iaVszpM" rel="noopener">Kubernetes Antipatterns: CPU Limits (Natan Yellin) — Platform Engineering</a></li>
+    </ul>
+
+    <h3>Autoscaling: HPA, and the VPA and node autoscalers around it</h3>
+    <p>The <code>HorizontalPodAutoscaler</code> changes the replica count of a Deployment or StatefulSet to hold a target metric. The classic form targets average CPU utilisation as a percentage <em>of the request</em> — which is exactly why requests must be set sensibly before HPA means anything; with no CPU request there is no denominator and the autoscaler cannot compute utilisation at all. The <code>autoscaling/v2</code> API extends this to memory, to custom application metrics (queue depth, requests per second, active sessions) exposed through the custom-metrics or external-metrics API by an adapter such as Prometheus Adapter or KEDA, and to multiple metrics at once, where the largest resulting replica count wins. Tune the stabilisation and scaling policies under <code>behavior</code> so a bursty workload does not flap: scaling up fast and down slowly is the usual shape.</p>
+    <p>Two neighbours complete the picture and are worth naming in an interview. The <strong>VerticalPodAutoscaler</strong> adjusts requests and limits rather than replica count; it is excellent as a recommender for right-sizing, and historically conflicted with HPA on the same CPU metric (in-place pod resizing is reducing that friction, but treat "HPA and VPA on the same resource metric" as a design smell). And neither helps if the cluster has no room: when pods sit <code>Pending</code> for lack of capacity, a node autoscaler must add machines — the classic <strong>Cluster Autoscaler</strong>, which grows and shrinks pre-defined node groups, or <strong>Karpenter</strong>, which provisions right-sized nodes directly from the pending pods' requirements and consolidates them as load drops. The chain to be able to recite: metrics-server feeds HPA, HPA adds pods, pending pods trigger the node autoscaler, the node autoscaler adds nodes.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/" rel="noopener">Horizontal Pod Autoscaling — Kubernetes documentation (algorithm, autoscaling/v2, behavior policies)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale-walkthrough/" rel="noopener">HorizontalPodAutoscaler Walkthrough — Kubernetes task guide (a working load-test demo)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/cluster-administration/cluster-autoscaling/" rel="noopener">Cluster Autoscaling — Kubernetes documentation (node autoscalers, Cluster Autoscaler and Karpenter)</a></li>
+      <li>[Official] <a href="https://karpenter.sh/" rel="noopener">Karpenter — official site and documentation (just-in-time node provisioning and consolidation)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ADWQYCh0PJE" rel="noopener">Kubernetes HPA Explained in 10 Minutes (Scale Pods Automatically) — Cloud Guru</a></li>
+    </ul>
+
+    <h3>Rolling updates, rollbacks and PodDisruptionBudgets</h3>
+    <p>A Deployment's default <code>RollingUpdate</code> strategy replaces pods gradually, governed by two knobs. <code>maxSurge</code> is how many pods above the desired count may exist during the roll (extra capacity, costs resources); <code>maxUnavailable</code> is how many below it may be missing (cheaper, but reduces capacity mid-roll). Both default to 25 percent and both accept a count or a percentage. Setting <code>maxUnavailable: 0</code> with a non-zero surge gives a genuinely zero-capacity-loss rollout, at the price of briefly running extra pods — the right default for a user-facing service, provided the app tolerates two versions in flight at once. The alternative strategy, <code>Recreate</code>, kills everything before starting the new version and is only appropriate where two versions genuinely cannot coexist, for example against a single-writer datastore.</p>
+    <p>The rollout is observable and reversible: <code>kubectl rollout status</code> blocks until the roll completes or the <code>progressDeadlineSeconds</code> timer marks it failed, <code>kubectl rollout history</code> lists revisions, and <code>kubectl rollout undo</code> returns to the previous ReplicaSet — which is why <code>revisionHistoryLimit</code> (default ten) matters; set it to zero and you have thrown away your ability to roll back. Note that a rollback restores the pod template, not your database, so backward-compatible schema changes remain your responsibility. Separately, <code>minReadySeconds</code> stops a rollout from racing ahead of pods that pass readiness and then immediately fall over. Finally, a <strong>PodDisruptionBudget</strong> protects the same workload against <em>voluntary</em> disruption — node drains, cluster upgrades, autoscaler consolidation — by declaring <code>minAvailable</code> or <code>maxUnavailable</code>, so a <code>kubectl drain</code> blocks rather than evicting your last two replicas simultaneously. A PDB does nothing about involuntary disruption such as a node dying, and a badly set PDB (for example <code>minAvailable</code> equal to the replica count) will stall cluster maintenance indefinitely.</p>
+    <pre class="code-block" data-label="YAML"><code>spec:
+  replicas: 4
+  revisionHistoryLimit: 10       # keep rollbacks possible
+  minReadySeconds: 15
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                # one extra pod during the roll
+      maxUnavailable: 0          # never drop below the desired count
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+spec:
+  minAvailable: 3                # drains and upgrades must respect this
+  selector: { matchLabels: { app: orders } }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" rel="noopener">Deployments — Kubernetes documentation (rolling update strategy, rollbacks, revision history)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/" rel="noopener">kubectl rollout — Kubernetes command reference (status, history, undo, pause, resume)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/pods/disruptions/" rel="noopener">Disruptions — Kubernetes documentation (voluntary vs involuntary, PodDisruptionBudget semantics)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/run-application/configure-pdb/" rel="noopener">Specifying a Disruption Budget for your Application — Kubernetes task guide</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XbVNMhr55WM" rel="noopener">Kubernetes Rolling Updates Tutorial (maxSurge and maxUnavailable) — DevOps Dude</a></li>
+    </ul>
+
+    <h3>Getting traffic in: Ingress, and the Gateway API that replaces it</h3>
+    <p><code>Ingress</code> is the long-standing way to expose HTTP and HTTPS routes from outside the cluster: one object holds host and path rules, a TLS section referencing a Secret, and an <code>ingressClassName</code> selecting the controller (NGINX, Traefik, HAProxy, a cloud load balancer) that actually implements it. It works, it is everywhere, and it is effectively frozen — the API has been feature-complete for years and new capability is not being added to it. Everything real-world therefore lives in controller-specific annotations, which is precisely the problem: rewrite rules, timeouts, canary weights, authentication and rate limits are all expressed as vendor strings that do not survive a change of controller.</p>
+    <p>The <strong>Gateway API</strong> is the official successor, developed by SIG Network as a set of CRDs and now GA for its core resources. It fixes three things. <em>Role separation</em>: <code>GatewayClass</code> is owned by the infrastructure provider, <code>Gateway</code> (the listener, its ports and TLS) by the cluster operator, and <code>HTTPRoute</code> by the application team — so developers manage routing for their own namespace without editing one shared, cluster-wide object. <em>Richer routing as first-class typed fields</em> rather than annotations: header and query matching, traffic splitting by weight (canary and blue-green without vendor extensions), request and response header manipulation, redirects, rewrites, timeouts, plus sibling kinds such as <code>GRPCRoute</code> and <code>TLSRoute</code>. And <em>portability</em>: because the expressive bits are in the spec and conformance is tested, a route means the same thing across implementations. Ingress is not being deleted and existing clusters keep working — but new platform work should target the Gateway API, and knowing why is now a standard senior-level question.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/ingress/" rel="noopener">Ingress — Kubernetes documentation (rules, IngressClass, TLS, path types)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/services-networking/gateway/" rel="noopener">Gateway API — Kubernetes concepts (how it relates to Ingress and Services)</a></li>
+      <li>[Official] <a href="https://gateway-api.sigs.k8s.io/docs/concepts/api-overview/" rel="noopener">API Overview — Kubernetes Gateway API (GatewayClass, Gateway, HTTPRoute and the resource model)</a></li>
+      <li>[Official] <a href="https://gateway-api.sigs.k8s.io/docs/concepts/roles-and-personas/" rel="noopener">Roles and Personas — Kubernetes Gateway API (the role separation Ingress could not express)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2lcx74HUz1U" rel="noopener">Kubernetes Gateway API Tutorial for Beginners: Ingress vs Gateway API — Tech Tutorials with Piyush</a></li>
+    </ul>
+
+    <h3>Storage: PersistentVolumes, claims, StorageClasses and access modes</h3>
+    <p>Container filesystems are ephemeral and a rescheduled pod starts clean, so anything that must survive needs a volume backed by real storage. The model separates supply from demand: a <code>PersistentVolume</code> is a piece of storage in the cluster (an EBS volume, an Azure disk, a Ceph RBD image, an NFS export), and a <code>PersistentVolumeClaim</code> is a workload's request for storage of a given size and class. The pod references only the claim, which is what makes the manifest portable — the same Deployment runs on EKS, AKS and a laptop cluster because the concrete volume is resolved by the platform, not by the app team.</p>
+    <p>Manually pre-creating PVs does not scale, so <strong>dynamic provisioning</strong> is the norm: a <code>StorageClass</code> names a provisioner (usually a CSI driver) plus its parameters — disk type, IOPS, replication, encryption, filesystem — and a claim that names the class causes a matching volume to be created on demand. Two class fields deserve attention: <code>reclaimPolicy</code> (<code>Delete</code> destroys the backing disk when the claim goes away, <code>Retain</code> keeps it for manual recovery — the difference between a tidy dev cluster and a career-defining data loss), and <code>volumeBindingMode: WaitForFirstConsumer</code>, which delays provisioning until the pod is scheduled so the disk is created in the right zone. Finally, know the <strong>access modes</strong>: <code>ReadWriteOnce</code> (mountable read-write by pods on a single node — the mode nearly all block storage supports), <code>ReadOnlyMany</code>, <code>ReadWriteMany</code> (needs a shared filesystem such as NFS, EFS or CephFS; typical cloud block devices cannot do it), and <code>ReadWriteOncePod</code>, which restricts the volume to exactly one pod cluster-wide.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/" rel="noopener">Persistent Volumes — Kubernetes documentation (lifecycle, access modes, reclaim policies, expansion)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/storage/storage-classes/" rel="noopener">Storage Classes — Kubernetes documentation (provisioners, parameters, volume binding mode)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/storage/dynamic-provisioning/" rel="noopener">Dynamic Volume Provisioning — Kubernetes documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/storage/volumes/" rel="noopener">Volumes — Kubernetes documentation (every volume type, including emptyDir and projected)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0swOh5C3OVM" rel="noopener">Kubernetes Volumes explained: Persistent Volume, Persistent Volume Claim and Storage Class — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Security: RBAC, securityContext and Pod Security Standards</h3>
+    <p>Kubernetes authorisation is role-based and additive — there are no deny rules, and anything not explicitly allowed is refused. A <code>Role</code> grants verbs (<code>get</code>, <code>list</code>, <code>watch</code>, <code>create</code>, <code>update</code>, <code>patch</code>, <code>delete</code>) on resources within one namespace; a <code>ClusterRole</code> does the same cluster-wide or for non-namespaced resources; a <code>RoleBinding</code> attaches either kind to a subject inside a namespace, and a <code>ClusterRoleBinding</code> attaches a ClusterRole everywhere. Subjects are users, groups, or — for workloads — <code>ServiceAccounts</code>. Every pod runs as a ServiceAccount, and the <code>default</code> one in each namespace should be left powerless: give each workload its own ServiceAccount with the narrowest role it needs, and set <code>automountServiceAccountToken: false</code> on anything that never calls the API at all.</p>
+    <p>RBAC controls what a workload may ask the API server; <code>securityContext</code> controls what the container may do on its node. The production baseline is short and should be recitable: <code>runAsNonRoot: true</code> with an explicit non-zero <code>runAsUser</code>, <code>readOnlyRootFilesystem: true</code> (mount an <code>emptyDir</code> for genuinely writable paths), <code>allowPrivilegeEscalation: false</code>, and <code>capabilities.drop: ["ALL"]</code>, adding back only what is truly required. <code>privileged: true</code> is effectively root on the host and belongs to a handful of infrastructure DaemonSets, never to an application. Enforcing this fleet-wide is the job of the <strong>Pod Security Standards</strong> — three named profiles, <code>privileged</code> (unrestricted), <code>baseline</code> (blocks known privilege escalations) and <code>restricted</code> (the hardened profile that requires the settings above) — applied per namespace by the built-in Pod Security Admission controller in <code>enforce</code>, <code>audit</code> or <code>warn</code> mode. Roll them out in <code>warn</code> first; going straight to <code>enforce: restricted</code> on a live namespace will reject deployments you did not expect.</p>
+    <pre class="code-block" data-label="YAML"><code>securityContext:                 # container level
+  runAsNonRoot: true
+  runAsUser: 10001
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+seccompProfile:
+  type: RuntimeDefault
+---
+# namespace label that enforces the hardened profile
+# pod-security.kubernetes.io/enforce: restricted
+# pod-security.kubernetes.io/warn: restricted</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/" rel="noopener">Using RBAC Authorization — Kubernetes documentation (Roles, ClusterRoles, bindings, ServiceAccount subjects)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/security-context/" rel="noopener">Configure a Security Context for a Pod or Container — Kubernetes task guide</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/security/pod-security-standards/" rel="noopener">Pod Security Standards — Kubernetes documentation (privileged, baseline and restricted profiles)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/security/pod-security-admission/" rel="noopener">Pod Security Admission — Kubernetes documentation (enforce, audit and warn modes per namespace)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes-rbac" rel="noopener">Role-Based Access Control in Kubernetes — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uGcDt7iNFkE" rel="noopener">Kubernetes RBAC Explained: Role Based Access Control (CKA series) — Tech Tutorials with Piyush</a></li>
+    </ul>
+
+    <h3>Beyond Deployment: StatefulSets, DaemonSets, Jobs and CronJobs</h3>
+    <p>A Deployment treats its pods as interchangeable cattle, which is wrong for anything that has an identity. A <code>StatefulSet</code> gives each replica a <strong>stable ordinal name</strong> (<code>kafka-0</code>, <code>kafka-1</code>) that survives rescheduling, a <strong>stable network identity</strong> through a headless Service so peers can address each other by DNS, and its <strong>own PersistentVolumeClaim</strong> minted from <code>volumeClaimTemplates</code> and re-attached to the same ordinal when the pod moves. Creation, scaling and rolling updates proceed in order rather than all at once, with <code>partition</code> in the update strategy allowing a staged canary across ordinals. That is exactly what a quorum-based system needs — and it is why databases, Kafka, ZooKeeper and Elasticsearch use StatefulSets. Note that deleting a StatefulSet deliberately does not delete its PVCs, and that running a serious datastore this way is a real operational commitment; a managed service is often the better trade in an enterprise.</p>
+    <p>Three more controllers complete the toolbox. A <code>DaemonSet</code> runs exactly one pod per node (or per matching node), which is how log shippers, metrics agents, CNI plugins and CSI node drivers are deployed — it scales with the cluster, not with your traffic. A <code>Job</code> runs pods to <em>completion</em> rather than forever, with <code>completions</code> and <code>parallelism</code> for batch fan-out, <code>backoffLimit</code> to cap retries and <code>ttlSecondsAfterFinished</code> to clean up finished objects; use it for migrations, imports and one-off repairs. A <code>CronJob</code> creates Jobs on a schedule, and its interesting fields are the ones that decide failure behaviour: <code>concurrencyPolicy</code> (<code>Allow</code>, <code>Forbid</code> or <code>Replace</code>) stops a slow run from piling up on the next, <code>startingDeadlineSeconds</code> bounds how late a missed run may start, and the history limits control how many finished Jobs are retained. CronJob guarantees are at-least-once, so the job body must be idempotent.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/" rel="noopener">StatefulSets — Kubernetes documentation (stable identity, ordered rollout, volumeClaimTemplates)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/" rel="noopener">DaemonSet — Kubernetes documentation</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/job/" rel="noopener">Jobs — Kubernetes documentation (completions, parallelism, backoffLimit, TTL cleanup)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/" rel="noopener">CronJob — Kubernetes documentation (schedules, concurrency policy, missed-run handling)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pPQKAR1pA9U" rel="noopener">Kubernetes StatefulSet simply explained: Deployment vs StatefulSet — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Packaging the manifests: Helm charts, and Kustomize as the template-free alternative</h3>
+    <p>A real service is a dozen YAML files, and shipping it to dev, staging and production means the same dozen files with different replica counts, image tags, hostnames and resource sizes. <strong>Helm</strong> solves this by templating: a <em>chart</em> is a directory of Go-templated manifests plus a <code>Chart.yaml</code> and a <code>values.yaml</code> of defaults; <code>helm install</code> renders the templates against merged values and applies the result as a named <em>release</em>, tracked with a revision history so <code>helm upgrade</code> and <code>helm rollback</code> work like Deployment rollouts at the whole-application level. Charts declare dependencies on other charts and are distributed through repositories or OCI registries, which is why almost every third-party component you install (Prometheus, cert-manager, an ingress controller) arrives as a chart. Useful habits: <code>helm template</code> to see the rendered YAML before it touches the cluster, <code>--atomic</code> so a failed upgrade rolls itself back, and a <code>values.schema.json</code> so a typo in values is caught rather than silently ignored.</p>
+    <p><strong>Kustomize</strong> takes the opposite position: no templating language at all. You keep plain, valid Kubernetes YAML as a <em>base</em> and describe each environment as an <em>overlay</em> that patches it — strategic-merge patches or JSON patches, plus generators for ConfigMaps and Secrets (with content hashes appended to names, so a config change automatically triggers a rollout) and setters for common fields like image tags, name prefixes and common labels. It is built into <code>kubectl</code> (<code>kubectl apply -k</code>), so there is nothing to install and no release state stored in the cluster. The rough guide: Helm when you are distributing something configurable to other people or consuming third-party components; Kustomize when you own the manifests and want them to stay readable, greppable YAML. The two compose — a common pattern is rendering a chart and post-processing it with Kustomize, and Argo CD supports both natively.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://helm.sh/docs/" rel="noopener">Helm documentation — the official docs home (install, charts, releases, best practices)</a></li>
+      <li>[Official] <a href="https://helm.sh/docs/topics/charts/" rel="noopener">Charts — Helm documentation (chart structure, values, dependencies, OCI distribution)</a></li>
+      <li>[Official] <a href="https://helm.sh/docs/chart_template_guide/getting_started/" rel="noopener">Chart Template Guide — Helm documentation (templating from first principles)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/" rel="noopener">Declarative Management of Kubernetes Objects Using Kustomize — Kubernetes task guide</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes-helm" rel="noopener">Using Helm and Kubernetes — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zka4lJbA-y4" rel="noopener">Package Management with Helm — Christian Lempa</a></li>
+    </ul>
+
+    <h3>GitOps: Argo CD and Flux as the deployment model</h3>
+    <p>The pipeline pattern most teams start with is push-based: CI builds an image and then runs <code>kubectl apply</code> or <code>helm upgrade</code> against the cluster. That requires handing cluster credentials to the CI system, it leaves no reliable record of what is actually running, and it silently tolerates drift — someone edits a live object with <code>kubectl edit</code> and no one finds out until the next incident. <strong>GitOps</strong> inverts it: a Git repository holds the declarative desired state, and an agent <em>inside</em> the cluster continuously reconciles the cluster towards it. Deployment becomes a pull request; rollback becomes a revert; the audit trail is the commit history; and CI never needs cluster credentials because nothing is pushed inward. The principles are written up vendor-neutrally by the OpenGitOps project: declarative, versioned and immutable, pulled automatically, continuously reconciled.</p>
+    <p>Two CNCF-graduated implementations dominate. <strong>Argo CD</strong> models each deployable unit as an <code>Application</code> pointing at a repo path and a target cluster/namespace, renders plain manifests, Helm charts or Kustomize overlays, and shows a live sync/health status in a well-known web UI — with automated sync, self-heal (revert manual drift) and prune (delete removed objects) as explicit switches, plus <code>ApplicationSet</code> for fanning one definition across many clusters. <strong>Flux</strong> is a set of composable controllers (source, kustomize, helm, image automation, notification) driven purely by CRDs with no UI of its own, which suits teams that prefer everything expressed as Kubernetes objects. The detail worth raising unprompted in an interview: the image tag in Git is what makes the whole model work, so pin immutable tags or digests rather than <code>latest</code>, and let an image-automation controller commit tag bumps back to the repository so the promotion itself stays a reviewable change.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://argo-cd.readthedocs.io/en/stable/" rel="noopener">Argo CD — official documentation (Applications, sync policies, self-heal, ApplicationSet)</a></li>
+      <li>[Official] <a href="https://argo-cd.readthedocs.io/en/stable/understand_the_basics/" rel="noopener">Understand the Basics — Argo CD documentation (the concepts to learn first)</a></li>
+      <li>[Official] <a href="https://fluxcd.io/flux/concepts/" rel="noopener">Flux concepts — official Flux documentation (sources, reconciliation, the controller set)</a></li>
+      <li>[Official] <a href="https://opengitops.dev/" rel="noopener">OpenGitOps — the four GitOps principles (CNCF working group)</a></li>
+      <li>[Article] <a href="https://www.redhat.com/en/topics/devops/what-is-gitops" rel="noopener">What is GitOps? — Red Hat</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MeU5_k9ssrs" rel="noopener">Argo CD Tutorial for Beginners: GitOps CD for Kubernetes — TechWorld with Nana</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="10-kubernetes-basics.html">← Kubernetes Fundamentals</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="12-cicd-concepts.html">CI/CD Concepts →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Production Kubernetes is the highest-yield DevOps topic in Indian product and service-company rounds. Liveness-versus-readiness and requests-versus-limits are asked almost every single time; the later questions are what separate a certification holder from someone who has actually operated a cluster:</p>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a ConfigMap and a Secret?</summary>
+      <div class="answer"><p>Both are namespaced key/value objects consumed as environment variables or mounted files, and both are limited to roughly one mebibyte. A ConfigMap holds non-confidential configuration in plain text; a Secret holds confidential data, stores values base64-encoded, has typed variants (TLS, docker registry, service account token), is handled more carefully by the kubelet, and can be encrypted at rest and locked down with RBAC. The intent differs more than the mechanics.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Are Kubernetes Secrets encrypted?</summary>
+      <div class="answer"><p>No — by default they are only base64-encoded, which anyone with read access can decode instantly, and they are written to etcd in the clear. To make them defensible you need encryption at rest configured on the API server (ideally with a KMS provider), tight RBAC so almost nobody can get or list Secrets, and preferably an external secret store such as Vault or a cloud secret manager synced in by an operator like External Secrets Operator.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> Explain liveness versus readiness probes.</summary>
+      <div class="answer"><p>A failing readiness probe removes the pod from its Service endpoints so no new traffic is routed to it — the container keeps running and can recover. A failing liveness probe makes the kubelet kill and restart the container. Readiness means "not right now"; liveness means "I am wedged, restart me". Both are per-container and evaluated independently.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What problem does a startup probe solve?</summary>
+      <div class="answer"><p>Slow-booting applications. While a startup probe is still failing, liveness and readiness probes are disabled entirely, so a JVM or a heavy framework that takes a minute to warm up is not killed mid-boot. Without it you would have to set a huge initial delay or a huge liveness failure threshold, which then leaves a genuinely wedged process undetected for that same long window for the rest of the pod's life.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between resource requests and limits?</summary>
+      <div class="answer"><p>The request is what the scheduler reserves — a pod is only placed on a node whose remaining allocatable capacity covers the sum of requests, and it is what the container is guaranteed. The limit is the runtime ceiling enforced by the kernel. Requests are about placement, limits are about enforcement, and the pair together determines the pod's QoS class and therefore its eviction priority.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What happens when a container exceeds its CPU limit versus its memory limit?</summary>
+      <div class="answer"><p>CPU is compressible: exceeding the limit throttles the container through the kernel's CFS quota, so it just runs slower and tail latency suffers — nothing is killed. Memory is not compressible: exceeding the limit gets the container OOM-killed by the kernel and restarted, visible as exit code 137 and reason OOMKilled. That asymmetry is why memory request and limit are usually set equal, and why many teams set CPU requests but omit CPU limits on latency-sensitive services.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the QoS classes and what decides them.</summary>
+      <div class="answer"><p>Guaranteed — every container in the pod sets both CPU and memory, with request equal to limit. Burstable — at least one request is set but the pod does not qualify as Guaranteed. BestEffort — no requests or limits at all. Under node memory pressure the kubelet evicts BestEffort first, then Burstable pods that exceed their requests, and Guaranteed last, so the class you fall into is effectively your survival ranking during an incident.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Your ConfigMap changed but the running pods still use the old value. Why?</summary>
+      <div class="answer"><p>Almost certainly because it was injected as environment variables, which are resolved once at container start and never refreshed — you need a rollout (commonly forced with a checksum annotation on the pod template, or kubectl rollout restart) to pick up the change. A ConfigMap mounted as a volume is updated in place by the kubelet within about a minute, and an app that watches the file can reload without restarting. The exception is a key mounted with subPath, which is never updated.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What do maxSurge and maxUnavailable control, and how do you get a zero-capacity-loss rollout?</summary>
+      <div class="answer"><p>maxSurge is how many pods above the desired replica count may exist during a rolling update; maxUnavailable is how many below it may be missing. Both default to 25 percent. Set maxUnavailable to 0 and maxSurge to at least 1 and the new pod must become ready before an old one is removed, so capacity never dips — at the cost of briefly running extra pods and of requiring the app to tolerate two versions running at once.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you roll back a bad Deployment, and what makes rollback possible?</summary>
+      <div class="answer"><p>kubectl rollout undo (optionally with a revision from kubectl rollout history) switches back to the previous ReplicaSet, which Kubernetes retains up to revisionHistoryLimit — set that to zero and you have destroyed your rollback path. Use kubectl rollout status to detect the failure in the first place, bounded by progressDeadlineSeconds. Remember the rollback restores the pod template only: database migrations must be backward compatible or the rollback will not save you.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Deployment versus StatefulSet — when do you need a StatefulSet?</summary>
+      <div class="answer"><p>When replicas are not interchangeable. A StatefulSet gives each pod a stable ordinal name that survives rescheduling, a stable DNS identity via a headless Service so peers can find each other, and its own PersistentVolumeClaim from volumeClaimTemplates that is reattached to the same ordinal. Creation, scaling and updates are ordered rather than simultaneous. That is what quorum systems need — Kafka, ZooKeeper, Elasticsearch, replicated databases. Stateless web and API services should stay Deployments.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> What is a PodDisruptionBudget and what does it not protect against?</summary>
+      <div class="answer"><p>It declares minAvailable or maxUnavailable for a set of pods and constrains voluntary disruptions — node drains, cluster upgrades, autoscaler consolidation — so an operator's kubectl drain blocks rather than evicting your last replicas together. It does nothing for involuntary disruption such as a node crash or a kernel panic, and a PDB set too strictly (minAvailable equal to the replica count) will block cluster maintenance forever.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Intermediate</span> Helm versus Kustomize — how do you choose?</summary>
+      <div class="answer"><p>Helm templates: a chart of Go-templated manifests plus values, installed as a versioned release with upgrade and rollback semantics and distributed through repositories or OCI registries. Kustomize patches: plain valid YAML bases with per-environment overlays, built into kubectl, no templating language and no release state. Use Helm to distribute something configurable to others or to consume third-party components; use Kustomize when you own the manifests and want them to remain readable YAML. They compose, and Argo CD supports both.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why must a liveness probe never check a downstream dependency?</summary>
+      <div class="answer"><p>Because it turns a dependency outage into a cluster-wide cascading failure. If the health endpoint pings the database, one database blip fails liveness on every replica simultaneously, the kubelet restarts them all, they come back, fail again, and you get a fleet-wide CrashLoopBackOff — destroying the capacity that could have served cached or degraded responses, and adding a reconnect storm on top of the recovering dependency. Liveness must be local and near-trivial; dependency checks belong in readiness, where the consequence is shedding traffic rather than killing processes.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your Java service is OOM-killed even though the heap never reaches Xmx. Explain.</summary>
+      <div class="answer"><p>The container memory limit applies to the whole process, not to the heap. Metaspace, thread stacks, JIT code cache, GC structures, direct and mapped byte buffers, and native library allocations all live outside the heap, so a heap sized at the container limit guarantees an eventual kill. Modern container-aware JDKs read the cgroup limit, so use MaxRAMPercentage at roughly seventy percent rather than a hard Xmx pinned to the limit, budget explicitly for non-heap memory, and treat the OOM kill as a sizing bug rather than a transient fault.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why is the Gateway API replacing Ingress, and what exactly does it fix?</summary>
+      <div class="answer"><p>Ingress is feature-frozen, so everything beyond simple host and path routing is expressed as controller-specific annotations that are neither portable nor validated. The Gateway API fixes three things. Role separation: GatewayClass is owned by the infrastructure provider, Gateway by the cluster operator, and HTTPRoute by the application team, so developers route their own traffic without editing a shared cluster-wide object. Richer routing as typed spec fields: header and query matching, weighted traffic splitting for canaries, header rewrites, redirects and timeouts, plus GRPCRoute and TLSRoute. And portability, because the behaviour is specified and conformance-tested. Ingress still works and is not being removed, but new platform work should target the Gateway API.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> What does the restricted Pod Security Standard actually require, and how would you adopt it?</summary>
+      <div class="answer"><p>Broadly: run as a non-root user, no privilege escalation, drop all Linux capabilities (NET_BIND_SERVICE aside), a RuntimeDefault or Localhost seccomp profile, no host namespaces, no hostPath volumes, no privileged containers. Enforce it per namespace with Pod Security Admission labels. Adopt it by labelling namespaces with warn and audit first, fixing everything the API server complains about, and only then switching to enforce — going straight to enforce on a live namespace rejects workloads you did not know were violating it. Pair it with per-workload ServiceAccounts and automountServiceAccountToken disabled where the API is never called.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Your HPA is not scaling even under obvious load. Walk through the diagnosis.</summary>
+      <div class="answer"><p>Check in order: is metrics-server (or the custom metrics adapter) installed and returning data for kubectl top pods; do the containers have a CPU request, since CPU utilisation is a percentage of the request and without one there is no denominator; does kubectl describe hpa show a metric value or an unknown/error condition; has the HPA already hit maxReplicas; is the stabilisation window or a scale-up behavior policy damping the change; and finally, are the new pods actually schedulable — if they sit Pending for lack of node capacity the HPA has done its job and the missing piece is Cluster Autoscaler or Karpenter.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> Why is GitOps preferred over running kubectl apply from a CI pipeline?</summary>
+      <div class="answer"><p>The push model hands cluster credentials to the CI system, produces no durable record of what is running, and tolerates drift silently. GitOps puts the desired state in Git and runs a reconciler inside the cluster that pulls it, so deployment is a pull request, rollback is a revert, the audit trail is the commit history, manual drift is reverted automatically by self-heal, and CI needs no inbound access to the cluster. Argo CD and Flux are the CNCF-graduated implementations. The prerequisite is immutable image tags or digests in Git rather than latest, with an image-automation controller committing promotions back to the repository.</p></div>
+    </details>
+
+    <details class="qa"><summary><span class="level">Pro</span> A pod is Pending with FailedScheduling, and a PersistentVolumeClaim is also Pending. What do you check?</summary>
+      <div class="answer"><p>For the pod: node capacity against its requests, taints without matching tolerations, node selectors or affinity rules that match nothing, and topology-spread constraints that cannot be satisfied. For the claim: does a StorageClass with that name exist and is one marked default; is the CSI provisioner running; does the requested access mode exist on that backend, since ReadWriteMany is impossible on ordinary cloud block storage; and does the class use WaitForFirstConsumer, in which case the claim stays Pending by design until a pod is scheduled — meaning the pod is the thing to fix, not the claim.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.k8s.config — ConfigMaps and Secrets, probes, resource requests and limits, HPA, rolling updates and rollbacks</li>
+      <li>dev.k8s.platform — Ingress and Gateway API, storage, RBAC and securityContext, Helm, StatefulSets and Jobs, GitOps awareness</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

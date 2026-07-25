@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Deployment strategies module: recreate, rolling, blue-green and canary compared on risk, cost, rollback speed and complexity; feature flags and decoupling deploy from release; shadow traffic and A/B testing; backward-compatible database migrations, expand-contract, migration tooling, rollback discipline and environment parity — with verified resources and interview questions.">
+  <title>Deployment Strategies — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Deployment Strategies</h1>
+  <p class="standfirst">The pipeline has built, tested and signed your artifact. Everything up to this point was rehearsal — this module is about the last hop, where a new version has to reach real users without an outage, and where the database refuses to play by the same rules as the code.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Deployment Strategies</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything earlier in this track — Git history you can reason about, reproducible Maven and Gradle builds, small immutable images, a Kubernetes cluster that can schedule them, a pipeline that gates them — exists to make one moment safe: the moment production starts running code it was not running a minute ago. This is the closing module, so it is also the one that ties the rest together.</p>
+    <p>Two halves. The first is the mechanics of shifting traffic: recreate, rolling update, blue-green and canary, compared honestly on risk, cost, rollback speed and operational complexity, plus the idea that makes all of them optional — <em>deploy and release are different events</em>, and feature flags are what separates them. The second half is the part that turns a five-minute rollback into a three-hour incident: data. Schema changes do not roll back the way code does, so backward-compatible migrations, the expand-contract pattern, migration tooling, an honest rollback policy and dev/prod parity are not footnotes here — they are the substance.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Deploy is not release: the distinction the whole module rests on</h3>
+    <p><strong>Deployment</strong> is a technical event: a build artifact is installed and started in an environment. <strong>Release</strong> is a business event: users can now reach the behaviour that artifact contains. Most teams conflate the two because their tooling conflates them — pushing the image is what turns the feature on — and every painful launch you have sat through is downstream of that conflation. Once the two events are separable, deployment becomes boring and frequent, and release becomes a deliberate, reversible decision made by whoever owns the feature rather than by whoever owns the pipeline.</p>
+    <p>The twelve-factor formulation is useful vocabulary here: <em>build, release, run</em> are three strictly separated stages, a release is an immutable build-plus-config pair with its own id, and you can roll back to a previous release without rebuilding. Note also what the DORA research consistently finds: elite performers are not elite because they deploy carefully, they are elite because they deploy <em>often</em>, in small pieces, which is only tolerable when a deployment is low-drama by construction. Everything below is machinery for making it low-drama.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/build-release-run" rel="noopener">Build, release, run — The Twelve-Factor App (strict separation of the three stages)</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/release-engineering/" rel="noopener">Release Engineering — Site Reliability Engineering (the Google SRE book, free online)</a></li>
+      <li>[Article] <a href="https://dora.dev/capabilities/deployment-automation/" rel="noopener">Deployment automation — DORA capability (evidence, anti-patterns, how to improve)</a></li>
+      <li>[Article] <a href="https://dora.dev/capabilities/trunk-based-development/" rel="noopener">Trunk-based development — DORA capability (why short-lived branches and flags go together)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/devops" rel="noopener">What is DevOps? — Atlassian DevOps guides</a></li>
+    </ul>
+
+    <h3>The four strategies, compared honestly</h3>
+    <p>There are only four shapes, and the differences between them are entirely about who absorbs the risk of a bad version: all users at once, some users for a while, no users until you flip a switch, or a small measured slice. Read the table as a decision aid, not a ranking — the safest strategy is also the most machinery, and a nightly batch service with a maintenance window genuinely should take the simple option.</p>
+    <table>
+      <caption>Choosing a deployment strategy</caption>
+      <thead>
+        <tr><th>Dimension</th><th>Recreate</th><th>Rolling update</th><th>Blue-green</th><th>Canary</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>How it works</td><td>Stop all old pods, start all new ones</td><td>Replace instances a few at a time</td><td>Build a full second environment, switch traffic at once</td><td>Send a small share of live traffic to the new version, then ramp</td></tr>
+        <tr><td>Downtime</td><td>Yes — the gap between stop and ready</td><td>None</td><td>None</td><td>None</td></tr>
+        <tr><td>Blast radius of a bad build</td><td>Every user, immediately</td><td>A growing share as the rollout proceeds</td><td>Every user at the instant of the switch</td><td>Only the canary share, until you promote</td></tr>
+        <tr><td>Extra infrastructure cost</td><td>None</td><td>Small — the surge replicas only</td><td>Highest — a duplicate environment</td><td>Modest — surge replicas plus the analysis stack</td></tr>
+        <tr><td>Rollback speed</td><td>Slow — a second full restart</td><td>Medium — a reverse rolling update</td><td>Instant — switch the router back</td><td>Fast — abort and shift traffic back to stable</td></tr>
+        <tr><td>Two versions live at once?</td><td>No</td><td>Yes, unavoidably</td><td>Briefly, or not at all</td><td>Yes, deliberately and for longer</td></tr>
+        <tr><td>Operational complexity</td><td>Lowest</td><td>Low — the platform default</td><td>Medium — plus a data-migration problem</td><td>Highest — traffic splitting and automated analysis</td></tr>
+        <tr><td>Fits when</td><td>Batch jobs, internal tools, an agreed window</td><td>Ordinary stateless services (the default)</td><td>Big-bang cutovers, strict version isolation, regulated releases</td><td>High-traffic user-facing services where a bug is expensive</td></tr>
+      </tbody>
+    </table>
+    <p>Two honest caveats. First, cost is not only money: blue-green doubles infrastructure but also doubles the surface you must keep configured identically, and configuration drift between blue and green is a classic incident cause. Second, "rollback speed" measures the <em>code</em>. If the release also changed the schema, every column in that row is optimistic until you have read the second half of this module.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cloud.google.com/deploy/docs/deployment-strategies" rel="noopener">Use a deployment strategy — Google Cloud Deploy documentation (standard, canary and parallel)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/management/" rel="noopener">Managing workloads — Kubernetes documentation (applying updates, scaling, rollout mechanics)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0QhUhrWGB9k" rel="noopener">Kubernetes Deployment Strategies with Demos: Canary, Blue Green, Rolling Update — Abhishek Veeramalla</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=uIeUiAborZs" rel="noopener">Deployment Strategies Explained: Blue-Green, Canary, Rolling and Shadow — EmbarkX (Faisal Memon)</a></li>
+    </ul>
+
+    <h3>Recreate and rolling update: the two the platform gives you free</h3>
+    <p><code>Recreate</code> terminates every old Pod before creating new ones. It is the strategy everyone dismisses and occasionally the correct one: a singleton that cannot tolerate two writers, a job runner holding an exclusive lock, a schema change so invasive that running both versions is genuinely impossible. It buys simplicity with an outage, and if the outage is thirty seconds at three in the morning on an internal tool, that is a rational trade rather than a failure of ambition.</p>
+    <p><code>RollingUpdate</code> is the Kubernetes default and the one you will use for almost everything. Two knobs govern it: <code>maxSurge</code> (how many extra Pods above the desired count may exist during the rollout) and <code>maxUnavailable</code> (how far below the desired count you may drop). The rollout is gated on readiness probes, so a new Pod receives traffic only when it says it is ready — which is why a badly written readiness probe converts a rolling update into a silent outage. The tax you pay is structural, not configurable: <strong>for the duration of the rollout, version N and version N+1 are both serving live traffic.</strong> Every API contract, every message schema, every cache key and every database column touched by that release must be compatible with both versions simultaneously. That single sentence is the reason the second half of this module exists.</p>
+    <pre class="code-block" data-label="YAML"><code>spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%          # extra capacity allowed during the rollout
+      maxUnavailable: 0      # never dip below desired replicas
+  minReadySeconds: 10        # a Pod must stay ready this long before it counts
+  progressDeadlineSeconds: 600
+  template:
+    spec:
+      containers:
+        - name: api
+          readinessProbe:    # gates traffic; get this wrong and the rollout lies
+            httpGet: { path: /readyz, port: 8080 }
+          lifecycle:
+            preStop:
+              exec: { command: ["sleep", "5"] }   # let endpoints drain first</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/" rel="noopener">Deployments — Kubernetes documentation (Recreate vs RollingUpdate, surge, revision history)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tutorials/kubernetes-basics/update/update-intro/" rel="noopener">Performing a rolling update — Kubernetes Basics tutorial</a></li>
+      <li>[Article] <a href="https://kubernetes.io/blog/2018/04/30/zero-downtime-deployment-kubernetes-jenkins/" rel="noopener">Zero-downtime deployment in Kubernetes — Kubernetes blog (readiness, draining, the failure modes)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Kmi4VfxRsvw" rel="noopener">Blue-Green vs Canary vs Rolling Deploy Explained — Thetips4you</a></li>
+    </ul>
+
+    <h3>Blue-green: two environments and one switch</h3>
+    <p>Blue-green keeps two production-capable environments. Blue is live; you deploy the new version to green, run smoke tests and health checks against it with no user traffic on it at all, and then switch the router — a load balancer target group, a Kubernetes Service selector, a DNS record, an Ingress or Gateway route. The appeal is the rollback story: it is the same switch in the other direction, executable in seconds by someone who does not need to understand the change. That is a genuinely different risk profile from "wait for a reverse rolling update to finish while the incident channel fills up".</p>
+    <p>Two costs, and interviewers ask about both. The obvious one is infrastructure: you are paying for double capacity, at least during the cutover window, plus the discipline to keep the idle environment identical to the live one. The subtle one is data. Both environments almost always talk to <em>the same</em> database — duplicating the datastore means replicating writes and reconciling them, which most teams sensibly refuse — so the instant switch does not undo any schema change the green version applied. Blue-green gives you an instant code rollback and no data rollback at all, which is exactly why blue-green shops end up more rigorous about backward-compatible migrations than anyone else. Note also the long-lived in-flight work: sessions, WebSocket connections and half-finished jobs pinned to blue need a drain policy, or the switch is instant for you and an error page for them.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/BlueGreenDeployment.html" rel="noopener">BlueGreenDeployment — Martin Fowler bliki (the canonical description, including the database caveat)</a></li>
+      <li>[Official] <a href="https://argo-rollouts.readthedocs.io/en/stable/features/bluegreen/" rel="noopener">Blue-Green Deployment Strategy — Argo Rollouts documentation (preview service, promotion, auto-rollback)</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/architecture/guide/aks/blue-green-deployment-for-aks" rel="noopener">Blue-green deployment for AKS — Azure Architecture Center</a></li>
+      <li>[Article] <a href="https://octopus.com/devops/software-deployments/blue-green-deployment/" rel="noopener">Blue-green deployment — Octopus DevOps guides</a></li>
+      <li>[Article] <a href="https://launchdarkly.com/blog/what-is-blue-green-deployment/" rel="noopener">What is blue-green deployment? — LaunchDarkly blog</a></li>
+    </ul>
+
+    <h3>Canary: a small slice of real traffic, promoted on evidence</h3>
+    <p>A canary release routes a deliberately small share of live production traffic — often two or five percent to begin with — to the new version, holds it there while you watch error rate, latency percentiles and business metrics, and only then ramps. It is the only strategy that tests the new version against the thing your staging environment cannot simulate: real users, real data distribution, real concurrency, real third-party latency. The blast radius of a bad build is bounded by the split rather than by how fast a human notices.</p>
+    <p>The machinery is the price. You need traffic splitting that is finer-grained than "one Service, N Pods" — an Ingress controller with weighted backends, the Kubernetes Gateway API's weighted <code>backendRefs</code>, or a service mesh — and you need to decide how a user is assigned: sticky by session (so one unlucky user does not flip between versions mid-checkout) or purely by weight. You also need a baseline to compare against. Google's own canary-analysis guidance is emphatic on this point: compare the canary to an equivalent freshly-deployed baseline of the old version, not to the long-running production fleet, or you will attribute warm-cache and JIT differences to your change.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/CanaryRelease.html" rel="noopener">CanaryRelease — Martin Fowler bliki (the pattern and its relationship to blue-green)</a></li>
+      <li>[Official] <a href="https://docs.cloud.google.com/deploy/docs/deployment-strategies/canary" rel="noopener">Use a canary deployment strategy — Google Cloud Deploy documentation</a></li>
+      <li>[Official] <a href="https://gateway-api.sigs.k8s.io/guides/user-guides/traffic-splitting/" rel="noopener">Traffic splitting — Kubernetes Gateway API guides (weighted backendRefs)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/devops-sre/canary-analysis-lessons-learned-and-best-practices-from-google-and-waze" rel="noopener">Canary analysis: lessons learned and best practices from Google and Waze — Google Cloud blog</a></li>
+      <li>[Article] <a href="https://launchdarkly.com/blog/what-is-a-canary-release/" rel="noopener">What is a canary release? — LaunchDarkly blog</a></li>
+    </ul>
+
+    <h3>Progressive delivery: Argo Rollouts, Flagger and automated analysis</h3>
+    <p>Canary by hand is a person watching a dashboard and typing <code>kubectl</code> — which works until the release happens on a Friday evening. Progressive delivery is the automation of that judgement. <strong>Argo Rollouts</strong> replaces the Deployment resource with a <code>Rollout</code> that owns a scripted sequence of steps (set weight, pause, analyse, set weight, pause, promote) and an <code>AnalysisTemplate</code> that queries Prometheus, Datadog, New Relic or a web endpoint at each pause. If the metric fails its success condition, the rollout aborts and traffic goes back to stable without a human. <strong>Flagger</strong>, part of the Flux project, does the same job driven by an annotated Canary custom resource and integrates with the common meshes and ingress controllers.</p>
+    <p>What both really buy you is not the ramping — it is the <em>defined stop condition</em>. The failure mode of manual canaries is not that nobody looks; it is that the person looking has no pre-agreed threshold, so ambiguity resolves as "it's probably fine, promote it". Writing the success criteria into an AnalysisTemplate forces the team to answer, before the release, the question they otherwise argue about during the incident: what number means we stop?</p>
+    <pre class="code-block" data-label="YAML"><code>apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+spec:
+  strategy:
+    canary:
+      analysis:
+        templates: [{ templateName: success-rate }]   # aborts the rollout on failure
+      steps:
+        - setWeight: 5
+        - pause: { duration: 10m }
+        - setWeight: 25
+        - pause: { duration: 30m }
+        - setWeight: 50
+        - pause: {}            # indefinite: a human promotes the last step</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://argo-rollouts.readthedocs.io/en/stable/features/canary/" rel="noopener">Canary Deployment Strategy — Argo Rollouts documentation (steps, weights, traffic routing)</a></li>
+      <li>[Official] <a href="https://argo-rollouts.readthedocs.io/en/stable/features/analysis/" rel="noopener">Analysis and progressive delivery — Argo Rollouts documentation (AnalysisTemplate, metric providers)</a></li>
+      <li>[Official] <a href="https://docs.flagger.app/usage/deployment-strategies" rel="noopener">Deployment strategies — Flagger documentation (canary, A/B, blue-green, mirroring)</a></li>
+      <li>[Video] <a href="https://www.infoq.com/presentations/progressive-delivery/" rel="noopener">Progressive Delivery — InfoQ conference presentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=C34TJFDsq-s" rel="noopener">Progressive Delivery Made Easy With Argo Rollouts — Kevin Dubois (CNCF)</a></li>
+    </ul>
+
+    <h3>Feature flags: the thing that actually separates deploy from release</h3>
+    <p>All four strategies above still couple "this code is running" to "this behaviour is visible". A feature flag breaks that coupling in the one place it is cheapest to break: a conditional in your own code, evaluated per request against a rule set you can change at runtime. The workflow it enables is the whole point of this module. <strong>Ship dark:</strong> merge and deploy the feature behind a flag that is off, so the code reaches production in small increments and is continuously integration-tested there. <strong>Enable internally:</strong> turn it on for your own staff or a beta segment. <strong>Ramp:</strong> five percent, then twenty-five, then everyone, watching metrics at each step. <strong>Kill instantly:</strong> when something breaks, flip the flag off — no rebuild, no redeploy, no pipeline, no rollback of unrelated changes that happened to ride the same release.</p>
+    <p>The discipline half. Martin Fowler's taxonomy is worth learning because the answer to "how long does this flag live?" depends on its kind: <em>release toggles</em> are transitional and should be deleted within days or weeks of full rollout; <em>experiment toggles</em> live as long as the test; <em>ops toggles</em> (kill switches, load-shedding) may be permanent by design; <em>permission toggles</em> are really entitlements and belong in your authorisation model rather than your flag system. What kills teams is <strong>flag debt</strong>: every flag doubles the notional number of code paths, and a codebase with two hundred stale release toggles has a combinatorial test surface nobody can reason about, plus real incidents caused by a forgotten flag defaulting the wrong way. Treat removal as part of the feature — a ticket created when the flag is created, an owner and expiry date on every flag, a periodic report of flags older than their expiry, and a rule that the release toggle is deleted in the same sprint the feature goes to a hundred percent.</p>
+    <pre class="code-block" data-label="Java"><code>// Ship dark: the code is deployed, the behaviour is not released.
+if (flags.isEnabled("checkout-v2", user)) {   // per-request, per-user evaluation
+    return newCheckout.quote(cart);
+}
+return legacyCheckout.quote(cart);            // delete this branch, and the flag,
+                                              // in the sprint after full rollout</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/feature-toggles.html" rel="noopener">Feature Toggles (aka Feature Flags) — Pete Hodgson on martinfowler.com (the taxonomy and the removal discipline)</a></li>
+      <li>[Official] <a href="https://openfeature.dev/docs/reference/intro/" rel="noopener">OpenFeature — CNCF vendor-neutral feature flagging specification and SDKs</a></li>
+      <li>[Article] <a href="https://launchdarkly.com/blog/what-are-feature-flags/" rel="noopener">What are feature flags? — LaunchDarkly blog</a></li>
+      <li>[Article] <a href="https://docs.getunleash.io/guides/feature-flag-best-practices" rel="noopener">Feature flag best practices — Unleash documentation (naming, lifecycle, cleanup)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=lqRQYEHAtpk" rel="noopener">Feature Branches and Toggles in a Post-GitHub World — Sam Newman, GOTO 2017</a></li>
+    </ul>
+
+    <h3>Adjacent techniques: shadow traffic and A/B testing</h3>
+    <p><strong>Shadow (mirrored) traffic</strong> copies live requests to the new version while the real response still comes from the old one. The user never sees the shadow result, so a crash or a wrong answer costs nothing — you are testing whether the new version survives production-shaped load and production-shaped data. It is the right tool for a rewrite, a database engine swap or a big refactor where you want confidence before any user is exposed. The trap is side effects: a mirrored request that charges a card, sends an SMS or writes a row does it for real. Shadowing is safe only for genuinely read-only paths, or with the downstream writes stubbed and the shadow environment pointed at a copy.</p>
+    <p><strong>A/B testing</strong> looks like canary and is not. Canary asks a technical question — is this build healthy? — and is judged on error rate and latency over minutes or hours. A/B testing asks a product question — does variant B convert better? — is judged on business metrics over days or weeks, needs a statistically meaningful sample, and requires sticky assignment so a user sees one consistent variant. Same traffic-splitting plumbing, completely different owner, duration and success criterion. Saying that cleanly in an interview signals you have shipped rather than read.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://istio.io/latest/docs/tasks/traffic-management/mirroring/" rel="noopener">Mirroring — Istio traffic management tasks (shadowing live traffic to a new version)</a></li>
+      <li>[Official] <a href="https://argo-rollouts.readthedocs.io/en/stable/" rel="noopener">Argo Rollouts — documentation home (experiments, traffic mirroring, integrations)</a></li>
+      <li>[Official] <a href="https://fluxcd.io/flagger/" rel="noopener">Flagger — Flux project (progressive delivery operator for Kubernetes)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/solutions/devops/integrations/feature-flags" rel="noopener">Feature flags in DevOps — Atlassian (experimentation and controlled rollout)</a></li>
+    </ul>
+
+    <h3>The part people forget: schema changes are not code changes</h3>
+    <p>Code is stateless and disposable; you can replace a container with its predecessor and nothing is lost. A database holds state, and a migration is a one-way transformation of that state. <code>DROP COLUMN</code> has no inverse — the values are gone. A type narrowing has no inverse for rows that no longer fit. A backfill that mangles data cannot be un-mangled by running the migration backwards. This asymmetry is why "we can just roll back" is the most dangerous sentence in a release meeting, and why database change management is a distinct DORA capability rather than a detail of deployment automation.</p>
+    <p>The governing rule follows directly from rolling updates: <strong>during a rollout, old and new application versions are both live against the same schema, so every migration must be compatible with both.</strong> A migration that renames <code>user_name</code> to <code>username</code> breaks version N the instant it runs, and version N is still serving half your traffic. The consequence is that database change stops being a step in a release and becomes a sequence spread across several releases — which is exactly what the expand-contract pattern formalises. Practically: version your schema in the same repository as the code that uses it, make migrations forward-only and additive by default, and treat "is this change backward-compatible with the currently deployed version?" as a mandatory review question on every pull request that touches the schema.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/articles/evodb.html" rel="noopener">Evolutionary Database Design — Martin Fowler and Pramod Sadalage (the foundational article)</a></li>
+      <li>[Article] <a href="https://dora.dev/capabilities/database-change-management/" rel="noopener">Database change management — DORA capability</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/database-continuous-delivery/" rel="noopener">Database Continuous Delivery — InfoQ</a></li>
+      <li>[Article] <a href="https://spring.io/blog/2016/05/31/zero-downtime-deployment-with-a-database" rel="noopener">Zero downtime deployment with a database — Spring blog (the multi-release dance, worked through)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ka-PLyjV3AI" rel="noopener">Database schema migrations with zero downtime — Michiel Rook (conference talk)</a></li>
+    </ul>
+
+    <h3>Expand-contract (parallel change), step by step</h3>
+    <p>Expand-contract — Danilo Sato's <em>parallel change</em> — is how you make a breaking schema change without ever having a breaking moment. You expand the schema so old and new shapes coexist, migrate the readers and writers across while both work, then contract by removing the old shape once nothing references it. The canonical example is renaming a column, and the point is that it takes at least three deployments rather than one. Deliberately slower, and enormously cheaper than an outage.</p>
+    <p>Walk the steps for renaming <code>full_name</code> to <code>display_name</code>:</p>
+    <ol>
+      <li><strong>Expand.</strong> Add the new nullable column. Purely additive, so the running version is unaffected and this migration is safe to deploy on its own.</li>
+      <li><strong>Dual-write.</strong> Deploy an application version that writes both columns and still reads the old one. Now every new or updated row is correct in both places.</li>
+      <li><strong>Backfill.</strong> Copy historical rows into the new column in batches, throttled, restartable and idempotent — never one giant transaction that locks the table and blocks production.</li>
+      <li><strong>Switch reads.</strong> Deploy a version that reads the new column and still writes both. This is the reversible step: if the new column is wrong, redeploy the previous version and reads go back to the old column, which is still being maintained.</li>
+      <li><strong>Stop writing the old.</strong> Once the read switch has soaked in production, deploy a version that writes only the new column. The old column is now stale but harmless.</li>
+      <li><strong>Contract.</strong> After the retention period you are comfortable with — and only when no deployed version and no report, ETL job or downstream consumer references it — drop the old column.</li>
+    </ol>
+    <p>Two frequently-missed details. Constraints expand the same way: add a new constraint as <code>NOT VALID</code> (or the equivalent for your engine) and validate it separately, so you never take a full-table lock during a release. And the same pattern applies beyond columns — renaming a Kafka topic field, changing a REST response shape, or splitting a table all follow expand, migrate, contract, because in each case two versions of a consumer are live at once.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://martinfowler.com/bliki/ParallelChange.html" rel="noopener">ParallelChange (expand-contract) — Danilo Sato on martinfowler.com</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/liquibase-refactor-schema-of-java-app" rel="noopener">Use Liquibase to Safely Evolve Your Database Schema — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/database-migrations-with-flyway" rel="noopener">Database Migrations with Flyway — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ABRDZZXs3t0" rel="noopener">Kubernetes and Liquibase zero-downtime deployments: breaking changes — Philip Starritt</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=_lAjBOXhrXY" rel="noopener">Database Migration Strategies and a Flyway example — CodeOpinion</a></li>
+    </ul>
+
+    <h3>Migration tooling, and where migrations should actually run</h3>
+    <p><strong>Flyway</strong> applies ordered, versioned SQL files (<code>V1__init.sql</code>, <code>V2__add_display_name.sql</code>) and records what it applied in a schema-history table, refusing to proceed if a previously applied file's checksum changed. <strong>Liquibase</strong> models changes as changesets in XML, YAML, JSON or SQL, tracks them in <code>DATABASECHANGELOG</code>, takes a lock so two instances cannot migrate concurrently, and supports declared rollback instructions per changeset. Flyway is simpler and SQL-native; Liquibase is more abstract and more capable of describing a rollback. Either is fine; having none — schema changes applied by hand from someone's laptop — is the actual failure.</p>
+    <p>The operational question interviewers actually care about is <em>where</em> the migration runs. Both Spring Boot starters will happily run migrations on application startup, which is convenient on a laptop and wrong in a multi-replica deployment: five Pods start simultaneously, contend for the lock, four wait, startup probes may time out and the orchestrator kills Pods mid-rollout. Worse, it couples schema change to Pod scheduling, so you cannot verify the migration succeeded before shipping code that depends on it. Run migrations as their own pipeline step against the target database — a Kubernetes <code>Job</code> or Helm pre-upgrade hook, an init container that only the migration workload runs, or a dedicated CD stage — so exactly one process applies them, its exit code gates the deployment, and its output is a first-class artifact of the release.</p>
+    <pre class="code-block" data-label="YAML"><code># Migration as its own gated step, not a side effect of application startup
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate-v2
+  annotations:
+    helm.sh/hook: pre-upgrade          # runs and must succeed before the rollout
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0                      # fail loudly; do not half-apply twice
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: flyway
+          image: flyway/flyway:11
+          args: ["-connectRetries=10", "migrate"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://documentation.red-gate.com/flyway/flyway-concepts/migrations" rel="noopener">Migrations — Flyway documentation (versioned, repeatable, naming and checksums)</a></li>
+      <li>[Official] <a href="https://docs.liquibase.com/" rel="noopener">Liquibase documentation (changelogs, changesets, changelog lock)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/data-initialization.html" rel="noopener">Database initialization — Spring Boot reference (Flyway and Liquibase integration)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/kubernetes-liquibase-spring-boot" rel="noopener">Using Liquibase in Kubernetes — Baeldung on Ops (separating the migration container)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=LQI19ngeLsA" rel="noopener">Zero downtime deployment with Kubernetes, Spring Boot and Flyway — Nicolas Frankel</a></li>
+    </ul>
+
+    <h3>Rollback discipline, and why roll-forward is often the better answer</h3>
+    <p>Be precise about what is rollback-safe. <strong>Safe:</strong> a stateless code change, a config value, a feature flag, an image tag with no schema or contract change. <strong>Conditionally safe:</strong> a change that ran only additive migrations — the extra column is unused by the old version, so redeploying it works. <strong>Not safe:</strong> anything that dropped or narrowed a column, rewrote data, published a new message schema consumers have already begun reading, or migrated a cache format. For that last category, "roll back" is not a button, it is a project.</p>
+    <p>Which is why mature teams bias toward <strong>roll-forward</strong>: fix the defect, ship a new version through the same pipeline you trust. Rolling back to version N means running a build that has not been exercised against the current data, current config and current downstream contracts for however long — the old version is not a known-good state, it is an untested state that used to be good. Roll-forward is only viable if your pipeline is fast, so pipeline duration is a reliability property, not a developer-convenience property. Feature flags shorten this further: a kill switch is a partial rollback that needs no build at all.</p>
+    <p>Two habits worth more than any tool. First, <strong>test the rollback path</strong> — rehearse it in a lower environment, actually run the previous image against the migrated schema, because an untested rollback procedure is a rumour. Second, <strong>write the decision rule before the incident</strong>: state in the runbook, per release, which of roll back, roll forward or flag-off applies, who may call it, and what threshold triggers it. Deciding this at three in the morning with a paging alert going off produces the worst version of the decision, every time.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/kubectl_rollout_undo/" rel="noopener">kubectl rollout undo — Kubernetes reference (revision history and reverting a Deployment)</a></li>
+      <li>[Official] <a href="https://documentation.red-gate.com/flyway/flyway-concepts/migrations/undo-migrations" rel="noopener">Undo migrations — Flyway documentation (what undo can and cannot do)</a></li>
+      <li>[Official] <a href="https://docs.liquibase.com/workflows/liquibase-community/using-rollback.html" rel="noopener">Using rollback — Liquibase documentation (declared rollback per changeset)</a></li>
+      <li>[Article] <a href="https://octopus.com/blog/database-rollbacks-pitfalls" rel="noopener">The pitfalls of database rollbacks — Octopus Deploy blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/flyway-roll-back" rel="noopener">Rolling Back Migrations with Flyway — Baeldung</a></li>
+    </ul>
+
+    <h3>Environment parity, preview environments, and what you would do on Monday</h3>
+    <p>Every strategy above assumes the thing you tested resembles the thing you shipped to. Dev/prod parity is the twelve-factor principle that the gap between environments should be small in time (hours between write and deploy, not weeks), in personnel (the people who wrote it deploy it) and in tools (the same database engine, the same message broker, the same versions). The classic violation is backing-service substitution — SQLite or H2 in dev against PostgreSQL in production, an in-memory queue against Kafka — which works right up to the first transaction-isolation, collation or timezone difference, and then produces a bug that is unreproducible by definition. Containers plus Compose, and Testcontainers in the test suite, remove most of this excuse.</p>
+    <p><strong>Ephemeral preview environments</strong> are parity's practical form: every pull request gets a temporary, fully deployed environment built from that branch, torn down on merge. Reviewers click the change instead of imagining it, integration tests run against real infrastructure, and the environment is disposable so nobody nurses a long-lived "staging" that has quietly drifted three months away from production. Keep them cheap and short-lived, seed them with anonymised or synthetic data, and make teardown automatic.</p>
+    <p><strong>The Monday verdict for this track.</strong> If you take one action away from these fourteen modules, take this sequence. Get every deploy to production going through the pipeline you built, from a commit on trunk, with no manual step. Set your Deployments to rolling update with <code>maxUnavailable: 0</code> and readiness probes that tell the truth. Adopt a migration tool and run it as a gated pipeline step, forward-only and additive, and make backward compatibility a review question. Introduce one feature flag on your next risky change and delete it once the feature is fully rolled out — that single habit converts scary releases into ordinary ones faster than any deployment strategy. Add canary automation later, when your metrics are good enough to make the decision automatable. Everything else in this track was preparation for shipping on a Tuesday afternoon without anyone holding their breath.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://12factor.net/dev-prod-parity" rel="noopener">Dev/prod parity — The Twelve-Factor App (time, personnel and tools gaps)</a></li>
+      <li>[Official] <a href="https://12factor.net/config" rel="noopener">Config — The Twelve-Factor App (config in the environment, one build across all stages)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments" rel="noopener">Managing environments for deployment — GitHub Actions documentation (protection rules, approvals)</a></li>
+      <li>[Official] <a href="https://vercel.com/docs/deployments/environments" rel="noopener">Environments and preview deployments — Vercel documentation</a></li>
+      <li>[Article] <a href="https://render.com/docs/preview-environments" rel="noopener">Preview environments — Render documentation (ephemeral per-pull-request environments)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="13-github-actions.html">← GitHub Actions</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="index.html">Back to the track contents →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Deployment strategy is where Indian product and service-company interviews check whether you have actually operated a system or only configured one — the strategy comparison is near-guaranteed, and the database follow-ups are where most candidates come apart:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a deployment and a release?</summary>
+      <div class="answer"><p>Deployment is technical: the build artifact is installed and running in an environment. Release is the business event: users can reach the new behaviour. They are separable — you can deploy code that is switched off, and release it later by flipping a flag — and separating them is what makes frequent deployment safe.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the main deployment strategies and the trade-off each makes.</summary>
+      <div class="answer"><p>Recreate: stop all, start all — downtime, but simplest and sometimes correct. Rolling update: replace instances gradually — no downtime, little extra cost, but two versions run at once. Blue-green: two full environments and an instant traffic switch — instant rollback, double infrastructure, and no data rollback. Canary: a small share of live traffic on the new version, promoted on metrics — smallest blast radius, most machinery.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do maxSurge and maxUnavailable control in a Kubernetes rolling update?</summary>
+      <div class="answer"><p>maxSurge is how many Pods above the desired replica count may exist during the rollout (extra capacity); maxUnavailable is how far below the desired count you may drop. Setting maxUnavailable to 0 with a non-zero maxSurge means capacity never dips, at the cost of briefly needing extra room. Readiness probes gate when a new Pod starts receiving traffic.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a feature flag and what does it let you do that a deployment cannot?</summary>
+      <div class="answer"><p>A runtime conditional whose value comes from a configuration service rather than the build, evaluated per request. It lets you deploy code that is off, enable it for internal users, ramp by percentage, and turn it off instantly during an incident — all without a rebuild, a redeploy, or rolling back unrelated changes that shipped in the same release.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Blue-green versus canary — when would you choose each?</summary>
+      <div class="answer"><p>Blue-green when you need a clean version boundary and an instant, obvious rollback: regulated or big-bang cutovers, changes that cannot tolerate two versions running, teams that value a simple switch over gradual exposure. Canary when the service is high-traffic and user-facing and a bad build is expensive: it limits the blast radius to a small percentage and lets metrics decide. Blue-green exposes everyone at the switch instant but is trivially reversible; canary exposes few but takes longer and needs traffic splitting plus automated analysis. Blue-green costs double infrastructure; canary costs complexity. Neither solves the database.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> During a rolling update, two versions of your service are live. What must you guarantee?</summary>
+      <div class="answer"><p>Mutual compatibility. The API contract must be backward-compatible (additive fields, no renames, no removed endpoints); message and event schemas must be readable by both; shared caches must use versioned keys or tolerant serialisation; and every database change in that release must work for both versions — which in practice means additive-only migrations and the expand-contract pattern. If two versions cannot coexist, you need Recreate and a window, not a rolling update.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you roll back a database migration?</summary>
+      <div class="answer"><p>Usually you do not — that is the honest answer, and it is what the interviewer is listening for. Structural changes such as DROP COLUMN or a type narrowing destroy data and have no inverse, so a symmetric rollback is impossible. You avoid needing one: make migrations forward-only and additive, use expand-contract so every intermediate state works with both application versions, and keep the old shape around long enough that redeploying the previous application version still works. When something is genuinely wrong you roll <em>forward</em> with a corrective migration. Beyond that: Liquibase lets you declare rollback instructions per changeset and Flyway has undo migrations in its paid tier, but both only help for reversible changes; a point-in-time restore is the last resort and costs you every write since the snapshot.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should migrations not run at application startup in a multi-replica deployment?</summary>
+      <div class="answer"><p>Several replicas start at once and contend for the migration lock, so most of them block; startup or readiness probes can time out and the orchestrator kills Pods mid-rollout. It also couples schema change to Pod scheduling, so you cannot verify the migration succeeded before shipping dependent code, and a failure surfaces as a crash-looping Pod rather than a failed pipeline stage. Run it as a separate gated step — a Kubernetes Job, a Helm pre-upgrade hook, or a dedicated CD stage — so exactly one process applies it and its exit code gates the rollout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Flyway or Liquibase — how would you choose?</summary>
+      <div class="answer"><p>Flyway applies ordered, versioned SQL files and records them with checksums in a schema-history table: simple, SQL-native, minimal learning curve, and it fails fast if an applied file was edited. Liquibase describes changes as changesets in XML, YAML, JSON or SQL, is more database-agnostic, and supports declared rollback per changeset. Choose Flyway when the team is comfortable writing SQL and wants transparency; choose Liquibase when you need database portability or want rollback instructions expressed alongside each change. The important part is that you use one, version it with the application code, and never apply schema changes by hand.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is shadow or mirrored traffic, and what is the risk?</summary>
+      <div class="answer"><p>Live requests are duplicated to the new version while the real response still comes from the old one, so the new version is exercised with production-shaped load and data at zero user risk. The risk is side effects: a mirrored request that writes a row, charges a card or sends a notification does it for real, and duplicated writes can corrupt state or double-bill. Mirror read-only paths, or point the shadow at a copied datastore with outbound integrations stubbed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk me through renaming a column with zero downtime.</summary>
+      <div class="answer"><p>Expand-contract, across at least three releases. (1) Add the new nullable column — additive, safe alone. (2) Deploy a version that writes both columns and reads the old one. (3) Backfill history in throttled, restartable, idempotent batches, never one locking transaction. (4) Deploy a version that reads the new column and still writes both — the reversible checkpoint. (5) Deploy a version that writes only the new column. (6) After a soak period, and only once no deployed version, report, ETL job or downstream consumer touches it, drop the old column. Constraints follow the same shape: add as NOT VALID, then validate separately to avoid a full-table lock.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your team wants blue-green. What do you tell them about the database?</summary>
+      <div class="answer"><p>That blue-green gives an instant code rollback and no data rollback. Both environments almost always share one database — duplicating it means replicating writes and reconciling them, which nobody sensibly does — so any schema change green applied is still applied after you switch back to blue. The consequence is that blue-green <em>requires</em> the same backward-compatible, expand-contract migration discipline as a rolling update; it does not exempt you from it. Also plan connection and session draining for in-flight work pinned to the old environment, and budget for keeping the idle environment configured identically, because drift between blue and green is a common incident cause.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Roll back or roll forward? How do you decide, and when?</summary>
+      <div class="answer"><p>Decide before the release, not during the incident. Roll back when the change is stateless and rollback-safe — image tag, config, no destructive migration, no new contract already consumed — and the previous version is genuinely known-good. Roll forward when data or contracts moved, when the old version has not been exercised against the current schema, or when the fix is small and your pipeline is fast; rolling back to an untested-against-current-state version can be more dangerous than shipping the fix. Fastest of all, when available, is flipping the feature flag off: a partial rollback with no build at all. Write the rule, the threshold and the person who may call it into the runbook per release, and rehearse the rollback path in a lower environment so it is a procedure rather than a rumour.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is flag debt and how do you keep it under control?</summary>
+      <div class="answer"><p>Every flag adds a branch, so N flags mean an exponential notional number of code paths, most of them never tested together. Stale release toggles cause real incidents when a forgotten flag defaults the wrong way after a config migration, and they make the codebase unreadable. Control it by classifying flags on creation — release toggles are transitional and must die within weeks, experiment toggles die with the experiment, ops toggles and kill switches may be permanent by design, and permission toggles belong in the authorisation model instead. Give every flag an owner and an expiry date, create the removal ticket at the same time as the flag, report on flags past expiry, and treat deleting the toggle and its dead branch as part of finishing the feature.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you automate canary promotion, and what stops it?</summary>
+      <div class="answer"><p>Use a progressive delivery controller — Argo Rollouts or Flagger — that replaces the plain Deployment with a resource owning a scripted sequence of weight steps and pauses, with a metric analysis at each pause querying Prometheus, Datadog or a web endpoint. Define success conditions on error rate, latency percentiles and one business metric; a failed condition aborts and shifts traffic back to stable automatically. Compare the canary against a freshly-deployed baseline of the old version rather than the long-running fleet, so warm-cache and JIT differences are not blamed on your change. Use sticky assignment so one user does not flip versions mid-session, and keep an indefinite pause before the final step if you want a human on the last decision. The real value is that the stop threshold is agreed in advance instead of argued about during the incident.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why does dev/prod parity matter, and how do preview environments help?</summary>
+      <div class="answer"><p>Every strategy above assumes what you tested resembles what you shipped to. The twelve-factor argument is to shrink three gaps: time (deploy hours after writing, not weeks), personnel (the authors deploy it), and tools (the same database engine, broker and versions in every environment). Substituting backing services — an in-memory database in dev, a real one in production — produces bugs that are unreproducible by construction, because the difference is the bug. Ephemeral preview environments make parity practical: each pull request gets a temporary full deployment from that branch, reviewers exercise the real thing, integration tests run against real infrastructure, and the environment is destroyed on merge, so nobody nurses a long-lived staging that has drifted months away from production.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.dep.release — rolling, blue-green and canary releases, feature flags, decoupling deploy from release</li>
+      <li>dev.dep.data — database migrations in CD, expand-contract, rollback discipline, environment parity</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

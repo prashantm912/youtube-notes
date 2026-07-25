@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Gradle module: the Kotlin DSL build script and plugins block, the configuration-versus-execution phase model, the task graph with inputs and outputs, implementation versus api and the other dependency configurations, multi-project builds and convention plugins, then the daemon, build cache, configuration cache, version catalogs, the wrapper and an honest Maven comparison — with verified resources and interview questions.">
+  <title>Gradle — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Gradle</h1>
+  <p class="standfirst">Maven hands you a fixed lifecycle and asks you to fit inside it. Gradle hands you a programmable task graph and asks you to be disciplined with it. That trade — flexibility bought with predictability — explains almost everything about how Gradle behaves, and every mistake teams make with it.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Gradle</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Gradle is a build tool whose build file is a real program. Instead of declaring a POM that a fixed lifecycle interprets, you write Kotlin (or Groovy) that <em>configures</em> a graph of tasks, which Gradle then orders and executes. That gives you flexibility Maven cannot reach, and it gives you a whole class of failures Maven cannot have — build logic that runs at the wrong time, tasks whose inputs are not declared, caches that miss because the build script read an environment variable behind Gradle's back.</p>
+    <p>The first half of this module is the model: the build script and its <code>plugins</code> block, the two phases that trip everyone up, tasks as a directed acyclic graph with declared inputs and outputs, the dependency configurations that replaced Maven's scopes, and how multi-project builds are wired together. The second half is where Gradle actually earns its place — the daemon, incremental builds, the build cache, the configuration cache that Gradle 9 made the preferred execution mode, version catalogs and the wrapper — and closes with an honest comparison against Maven. Everything here assumes Gradle 9 or later and the Kotlin DSL.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The build script: build.gradle.kts, the plugins block, and Kotlin vs Groovy DSL</h3>
+    <p>A Gradle build is described by scripts, not by a schema. <code>settings.gradle.kts</code> defines the build (its name and its subprojects) and <code>build.gradle.kts</code> configures one project inside it. The Kotlin DSL (<code>.gradle.kts</code>) is the current default for new builds and the one to learn: it is statically typed, so your IDE gives you real completion and click-through into plugin APIs, and typos fail at script-compile time rather than at task-execution time. The older Groovy DSL (<code>build.gradle</code>) is dynamically typed and still very common in existing codebases and in most tutorials written before roughly 2021 — you must be able to read both, and Gradle happily runs a build with a mix of the two.</p>
+    <p>Almost every build starts with the <code>plugins {}</code> block, and it is deliberately restricted: it must be the first block in the script, it takes only literal plugin ids and versions, and it cannot contain arbitrary logic. That restriction is what lets Gradle resolve plugins before the script is compiled and, later, what lets the configuration cache reason about the build. Applying a plugin is what creates tasks and extensions — <code>java</code> gives you <code>compileJava</code>, <code>test</code>, <code>jar</code> and the source sets; the Spring Boot plugin adds <code>bootRun</code> and <code>bootJar</code>. Understand that a Gradle build has almost no behaviour of its own: nearly everything you use is contributed by a plugin.</p>
+    <pre class="code-block" data-label="Kotlin"><code>plugins {                                   // must come first, literal ids only
+    java
+    id("org.springframework.boot") version "3.5.0"
+    id("io.spring.dependency-management") version "1.1.7"
+}
+
+group = "com.acme"
+version = "1.4.0"
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }   // build with a pinned JDK
+}
+
+repositories { mavenCentral() }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/writing_build_scripts.html" rel="noopener">Writing Build Scripts — Gradle User Manual</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/kotlin_dsl.html" rel="noopener">The Gradle Kotlin DSL Primer — Gradle User Manual (typing, IDE support, Groovy interop)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/plugins.html" rel="noopener">Using Plugins — Gradle User Manual (the plugins block and its constraints)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle" rel="noopener">Introduction to Gradle — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1u1osfIvVpw" rel="noopener">Gradle Tutorial for Java and Spring Boot — Telusko</a></li>
+    </ul>
+
+    <h3>The two-phase model: configuration versus execution</h3>
+    <p>This is the single concept that separates people who use Gradle from people who fight it. A Gradle build runs in three stages: <em>initialization</em> (read <code>settings.gradle.kts</code>, work out which projects exist), <em>configuration</em> (evaluate every build script from top to bottom, building the in-memory task graph), and <em>execution</em> (run the tasks actually needed for the requested goal, in dependency order). Configuration evaluates <strong>every</strong> project's script on <strong>every</strong> invocation, whatever you asked for. Running <code>./gradlew help</code> still configures the whole build.</p>
+    <p>The consequence is the classic Gradle bug: code written at the top level of a build script is configuration-time code. A stray <code>println</code>, a file read, a shell-out to <code>git rev-parse</code>, or a database check placed directly in the script body runs on every single build — including builds that execute none of your tasks — and it runs even when the task it "belongs to" is up to date. Work belongs inside a task action (<code>doLast { }</code>) or, better, behind a lazy provider so it is only computed if something asks for it. Gradle's own best-practice guidance pushes the same way: use the lazy configuration APIs (<code>tasks.register</code> rather than <code>tasks.create</code>, <code>Property</code> and <code>Provider</code> rather than plain fields) so configuration stays cheap and the configuration cache can serialise it.</p>
+    <pre class="code-block" data-label="Kotlin"><code>println("this runs at configuration time, on EVERY build")       // almost always a mistake
+
+tasks.register("stamp") {
+    val out = layout.buildDirectory.file("stamp.txt")            // lazy: no work yet
+    outputs.file(out)
+    doLast {                                                     // runs only if the task runs
+        out.get().asFile.writeText("built ${'$'}{project.version}")
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/build_lifecycle.html" rel="noopener">Build Lifecycle — Gradle User Manual (initialization, configuration, execution)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/best_practices_general.html" rel="noopener">General Best Practices — Gradle User Manual (lazy APIs, avoiding work at configuration time)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/part1_gradle_init.html" rel="noopener">Part 1: Initializing the Project — Gradle Tutorial (the generated build, walked through)</a></li>
+      <li>[Article] <a href="https://tomgregory.com/gradle-tutorial-for-complete-beginners" rel="noopener">Gradle tutorial for complete beginners — Tom Gregory</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Nabjqv8KDgc" rel="noopener">Gradle Beginner Tutorial: What are Build Tools, What is Gradle — Automation Step by Step (Raghav Pal)</a></li>
+    </ul>
+
+    <h3>Tasks: the directed acyclic graph, dependsOn, inputs and outputs</h3>
+    <p>A task is the unit of work, and the set of tasks plus their dependencies forms a directed acyclic graph. You never tell Gradle the order to run things in; you declare relationships and Gradle derives the order. <code>dependsOn</code> is the coarse hammer ("run that before this"). Most real dependencies are implicit and better: if task B's input is task A's output, Gradle infers the edge itself, which is why wiring tasks by <em>files and providers</em> rather than by name is the recommended style. There is also ordering that is not dependency — <code>mustRunAfter</code> and <code>shouldRunAfter</code> constrain order without forcing execution — and cycles are a hard error, hence "acyclic".</p>
+    <p>The property that makes Gradle fast is that every task declares its <strong>inputs</strong> and <strong>outputs</strong>. Before running a task Gradle hashes the declared inputs (source files, classpath, properties, the task's own implementation) and compares them against the snapshot from last time; if nothing changed and the outputs are still there, the task is skipped and reported <code>UP-TO-DATE</code>. Some tasks go further and are <em>incremental</em> — given the set of changed input files they recompile only what is affected. Undeclared inputs are the root of nearly every "it works on my machine but CI rebuilt everything" complaint: if a task reads a file it never declared, Gradle cannot see the change, and the task is wrongly skipped or wrongly rerun. Use <code>--scan</code> or <code>-i</code> to see exactly why a task ran.</p>
+    <pre class="code-block" data-label="Kotlin"><code>val generateVersionFile by tasks.registering {
+    val version = project.version.toString()          // captured, not read at execution time
+    val outDir = layout.buildDirectory.dir("generated/version")
+    inputs.property("version", version)               // declared input  -> part of the hash
+    outputs.dir(outDir)                               // declared output -> enables up-to-date
+    doLast { outDir.get().file("version.txt").asFile.writeText(version) }
+}
+
+tasks.named&lt;org.gradle.api.tasks.bundling.Jar&gt;("jar") {
+    from(generateVersionFile)                         // implicit dependency, inferred from the output
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/more_about_tasks.html" rel="noopener">Understanding Tasks — Gradle User Manual (dependencies, ordering, inputs and outputs)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/tutorial_using_tasks.html" rel="noopener">Tasks — Gradle User Manual (registering, configuring and locating tasks)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/incremental_build.html" rel="noopener">Incremental Builds — Gradle User Manual (how up-to-date checks are computed)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/java_plugin.html" rel="noopener">The Java Plugin — Gradle User Manual (every task the plugin contributes, and the graph between them)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-source-sets" rel="noopener">Gradle Source Sets — Baeldung (how source sets generate their own tasks and configurations)</a></li>
+    </ul>
+
+    <h3>Dependency configurations: implementation vs api, and the rest</h3>
+    <p>Maven has five scopes attached to a dependency. Gradle has <em>configurations</em>, which are named buckets of dependencies with declared roles — some you declare into, some are resolved into a classpath, some are what your project exposes to consumers. The <code>java</code> and <code>java-library</code> plugins give you the set you use every day: <code>implementation</code> (needed to compile and to run, but <strong>not</strong> exposed to consumers), <code>api</code> (needed to compile and leaks onto the consumer's compile classpath — <code>java-library</code> plugin only), <code>compileOnly</code> (compile classpath only, absent at runtime — annotations, provided servlet APIs), <code>runtimeOnly</code> (runtime only, never on the compile classpath — JDBC drivers, logging backends), <code>testImplementation</code> and <code>testRuntimeOnly</code> for the test source set, and <code>annotationProcessor</code> for processors such as Lombok or MapStruct that must run during compilation but never ship.</p>
+    <p><code>implementation</code> versus <code>api</code> is the most-asked Gradle interview question and it is genuinely about build performance, not aesthetics. If library A declares Guava as <code>api</code>, every consumer of A gets Guava on its compile classpath, can import it accidentally, and — this is the expensive part — must be <strong>recompiled whenever Guava's ABI changes</strong>, because it might be using it. If A declares Guava as <code>implementation</code>, Guava is still there at runtime but not on any consumer's compile classpath, so a change inside A that does not alter A's own public API recompiles A and nothing else. In a large multi-project build this is the difference between a two-minute and a twenty-minute incremental build. The rule: use <code>implementation</code> by default; use <code>api</code> only when a type from that dependency genuinely appears in your public signatures.</p>
+    <pre class="code-block" data-label="Kotlin"><code>dependencies {
+    api("com.google.guava:guava:33.4.0")                    // Guava types appear in MY public API
+    implementation("org.apache.commons:commons-lang3:3.17.0") // internal only; consumers never see it
+    compileOnly("org.projectlombok:lombok:1.18.36")           // compile-time only, not packaged
+    annotationProcessor("org.projectlombok:lombok:1.18.36")   // the processor itself
+    runtimeOnly("org.postgresql:postgresql:42.7.4")           // driver: loaded, never imported
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/declaring_dependencies.html" rel="noopener">Declaring Dependencies — Gradle User Manual</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/dependency_configurations.html" rel="noopener">Dependency Configurations — Gradle User Manual (declarable, resolvable and consumable roles)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/java_library_plugin.html" rel="noopener">The Java Library Plugin — Gradle User Manual (the api/implementation separation and why it exists)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-implementation-vs-compile" rel="noopener">Difference Between implementation and compile in Gradle — Baeldung</a></li>
+      <li>[Article] <a href="https://tomgregory.com/gradle-implementation-vs-compile-dependencies" rel="noopener">Gradle implementation vs compile dependencies — Tom Gregory</a></li>
+    </ul>
+
+    <h3>Multi-project builds, settings.gradle.kts and convention plugins</h3>
+    <p>A Gradle build is one <em>build</em> containing one or more <em>projects</em>. <code>settings.gradle.kts</code> at the root is the entry point: it names the build and calls <code>include(":app", ":domain", ":infra")</code> to declare subprojects, each of which may have its own <code>build.gradle.kts</code>. Subprojects depend on each other with <code>implementation(project(":domain"))</code>, and Gradle wires the task graphs together — asking for <code>:app:test</code> builds whatever of <code>:domain</code> is needed, in parallel where the graph allows, with the same up-to-date and caching machinery applied per project.</p>
+    <p>The real question in a multi-project build is where shared configuration lives. The old habit — a root <code>subprojects { }</code> or <code>allprojects { }</code> block that reaches into every child — is now discouraged: it couples every project to the root script, defeats parallel configuration, and is hostile to both the configuration cache and isolated projects. The recommended replacement is a <strong>convention plugin</strong>: a small precompiled script plugin (for example <code>buildSrc/src/main/kotlin/acme.java-conventions.gradle.kts</code>, or a plugin in a separate <code>build-logic</code> project pulled in with <code>includeBuild</code>) that each subproject applies explicitly by id. Note that <code>buildSrc</code> is built before anything else and any change to it invalidates the whole build, which is why larger repositories prefer an included <code>build-logic</code> build.</p>
+    <pre class="code-block" data-label="Kotlin"><code>// settings.gradle.kts
+rootProject.name = "orders"
+includeBuild("build-logic")            // convention plugins live in their own build
+include(":app", ":domain", ":infra")
+
+// domain/build.gradle.kts
+plugins { id("acme.java-conventions") }   // shared config applied explicitly, not injected
+
+// app/build.gradle.kts
+dependencies { implementation(project(":domain")) }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/multi_project_builds.html" rel="noopener">Multi-Project Builds — Gradle User Manual (settings, include, project dependencies)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/sharing_build_logic_between_subprojects.html" rel="noopener">Sharing Build Logic between Subprojects — Gradle User Manual (convention plugins, buildSrc)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/organizing_gradle_projects.html" rel="noopener">Organizing Gradle Projects — Gradle User Manual (repository layout that scales)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/composite_builds.html" rel="noopener">Composite Builds — Gradle User Manual (includeBuild and the build-logic pattern)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=eHMKq5G7uDs" rel="noopener">Gradle Tutorial — Shared Build Logic: Using the Version Catalog — Gradle Technologies</a></li>
+    </ul>
+
+    <h3>The daemon, incremental builds and the wrapper</h3>
+    <p>Every Gradle invocation talks to a long-lived background JVM called the <strong>daemon</strong>. It exists because starting a JVM, loading Gradle and warming up the JIT costs seconds you would otherwise pay on every command; the daemon pays that once and then keeps hot caches, a warm compiler and in-memory file hashes between builds. It is on by default and you should leave it on — the honest measure of a Gradle build is the second run, not the first. Daemons are matched by JVM version and JVM arguments, so a build that keeps changing <code>org.gradle.jvmargs</code> will keep spawning fresh daemons and lose the benefit. Add <code>org.gradle.parallel=true</code> so independent projects execute concurrently, and consider <code>--configuration-cache</code> and configure-on-demand for very large builds.</p>
+    <p>The <strong>wrapper</strong> (<code>gradlew</code>, <code>gradlew.bat</code>, and <code>gradle/wrapper/gradle-wrapper.properties</code>) is checked into the repository and downloads the exact Gradle version the build was written for. Everyone — laptops, CI, the new joiner on day one — then runs the same Gradle, and upgrading is a one-line commit (<code>./gradlew wrapper --gradle-version 9.x</code>). Never invoke a locally installed <code>gradle</code> in CI; always use <code>./gradlew</code>. Because the wrapper downloads a binary, verify the distribution checksum (<code>distributionSha256Sum</code>) in supply-chain-sensitive repositories.</p>
+    <pre class="code-block" data-label="Properties"><code># gradle.properties — checked in, applies to every developer and CI
+org.gradle.parallel=true
+org.gradle.caching=true
+org.gradle.configuration-cache=true
+org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g
+
+# upgrade the wrapper, then commit gradlew + gradle/wrapper/*
+# ./gradlew wrapper --gradle-version 9.1.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/gradle_daemon.html" rel="noopener">The Gradle Daemon — Gradle User Manual</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/gradle_wrapper.html" rel="noopener">The Gradle Wrapper — Gradle User Manual (generation, upgrade, checksum verification)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/performance.html" rel="noopener">Improve the Performance of Gradle Builds — Gradle User Manual</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-wrapper" rel="noopener">The Gradle Wrapper — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=u6zVotJ4m-0" rel="noopener">6 Ways to Make Your Gradle Builds Super Fast — Philipp Lackner</a></li>
+    </ul>
+
+    <h3>The build cache: local, remote, and why it beats up-to-date checks</h3>
+    <p>An up-to-date check only helps if <em>this</em> directory already contains the result. The <strong>build cache</strong> generalises it: for every cacheable task Gradle computes a hash of the task's inputs, its implementation and its output properties, and stores the outputs under that key. Ask for the same task with the same inputs again — after a <code>clean</code>, on a different branch, on a colleague's laptop, on a fresh CI agent — and Gradle unpacks the stored outputs instead of doing the work, reporting the task <code>FROM-CACHE</code>. Enable it with <code>org.gradle.caching=true</code>.</p>
+    <p>There are two layers. The <strong>local</strong> cache is a directory in your Gradle home and mostly rescues you from your own <code>clean</code> builds and branch switching. The <strong>remote</strong> cache is a shared HTTP-backed node (self-hosted, or Develocity) that CI populates and everyone reads, which is where the large wins live: a developer pulls the outputs of tasks a CI machine already ran. The catch is correctness — caching amplifies any task whose inputs are not fully declared, and non-reproducible outputs (embedded timestamps, absolute paths, non-deterministic ordering) mean cache keys that never match. Cache misses are a debugging skill: a build scan comparing two builds tells you which input differed.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/build_cache.html" rel="noopener">Build Cache — Gradle User Manual (cacheability, local and remote configuration, debugging misses)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-build-cache" rel="noopener">Gradle Build Cache — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=G8N7xt5gHec" rel="noopener">Gradle Build Cache vs Incremental Builds: Which is Faster? — Gradle Technologies</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=nHb0kIcTrFE" rel="noopener">Understanding Gradle: Caching — onepiece.Software by Jendrik Johannes</a></li>
+    </ul>
+
+    <h3>The configuration cache: Gradle 9's preferred execution mode</h3>
+    <p>The build cache skips <em>execution</em>. The configuration cache skips <em>configuration</em>. Recall that Gradle evaluates every build script on every invocation; on a large repository that alone can cost several seconds before a single class is compiled. The configuration cache serialises the fully configured task graph — the tasks, their configured state, and the values they captured — to disk, keyed on the things configuration depended on: the build scripts themselves, system properties, environment variables, files read at configuration time, and the requested tasks. A subsequent build with the same key skips initialization and configuration entirely and goes straight to execution. It also enables more parallelism, because a cached graph can be executed without re-evaluating scripts. Gradle 9 enables it by default and the Gradle team now describe it as the preferred mode of execution.</p>
+    <p>The price is constraints on build logic, and these are what interviewers probe. Task actions may not reach back into the <code>Project</code> object at execution time (no <code>project.property(...)</code>, no <code>project.file(...)</code> inside <code>doLast</code>) — capture what you need at configuration time into a <code>Property</code> or <code>Provider</code>. Shared mutable state between tasks is out; undeclared reads of environment variables or system properties must go through <code>providers.environmentVariable(...)</code> and <code>providers.systemProperty(...)</code> so Gradle can track them as cache inputs. Everything stored in the graph must be serialisable. Legacy plugins that violate these rules are the usual blocker, so the migration path is incremental: run with <code>--configuration-cache</code>, read the HTML problems report it generates, and fix or replace offenders one at a time.</p>
+    <pre class="code-block" data-label="Kotlin"><code>// Configuration-cache friendly: read through providers, capture into the task
+val gitSha = providers.environmentVariable("GIT_COMMIT").orElse("local")
+
+tasks.register("banner") {
+    val sha = gitSha                      // captured value, tracked as a cache input
+    val target = layout.buildDirectory.file("banner.txt")
+    outputs.file(target)
+    doLast {
+        // NOT allowed here: project.property(...), project.file(...), task.project
+        target.get().asFile.writeText("build ${'$'}{sha.get()}")
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/configuration_cache.html" rel="noopener">Configuration Cache — Gradle User Manual (what is cached, every requirement, the migration guide)</a></li>
+      <li>[Official] <a href="https://gradle.org/whats-new/gradle-9/" rel="noopener">What's new in Gradle 9 — gradle.org</a></li>
+      <li>[Article] <a href="https://blog.gradle.org/road-to-configuration-cache" rel="noopener">State of the Configuration Cache — Gradle Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2025/08/java-news-roundup-jul28-2025/" rel="noopener">Java News Roundup: Gradle 9.0 GA — InfoQ (JDK 17 baseline, configuration cache as preferred mode)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SW0x_oRXbYw" rel="noopener">Gradle Configuration Cache: 2x faster, 4x smaller, and ready for Gradle 9.0 — Gradle Technologies</a></li>
+    </ul>
+
+    <h3>Version catalogs: libs.versions.toml as the single source of dependency truth</h3>
+    <p>Hard-coded version strings scattered across twenty <code>build.gradle.kts</code> files is the Gradle equivalent of Maven's problem before <code>dependencyManagement</code> — and the fix is the <strong>version catalog</strong>. Declare libraries, versions, plugins and bundles once in <code>gradle/libs.versions.toml</code>, and every project refers to them with type-safe accessors that the Kotlin DSL generates: <code>implementation(libs.spring.boot.starter.web)</code>. The IDE completes them, a typo fails at compile time, and upgrading a library is a one-line change in one file. <code>[bundles]</code> group libraries that always travel together; <code>[plugins]</code> centralises plugin versions so the <code>plugins</code> block reads <code>alias(libs.plugins.spring.boot)</code>.</p>
+    <p>Know how a catalog differs from a BOM, because interviewers ask. A version catalog is a <em>build-time</em> convenience: it tells your build which versions to declare, and it disappears from the published metadata. A platform or BOM (<code>implementation(platform("..."))</code>) is a <em>resolution-time</em> constraint that also applies to transitive dependencies and is published with your artifact. They compose well — the catalog names the Spring Boot BOM, and the BOM then aligns every transitive version. Catalogs also make automated upgrade bots trivial to review, since every bump is a diff in one small TOML file.</p>
+    <pre class="code-block" data-label="TOML"><code># gradle/libs.versions.toml
+[versions]
+springBoot = "3.5.0"
+junit = "5.11.4"
+
+[libraries]
+spring-boot-starter-web = { module = "org.springframework.boot:spring-boot-starter-web", version.ref = "springBoot" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+
+[bundles]
+testing = ["junit-jupiter"]
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "springBoot" }</code></pre>
+    <pre class="code-block" data-label="Kotlin"><code>plugins { alias(libs.plugins.spring.boot) }
+
+dependencies {
+    implementation(libs.spring.boot.starter.web)   // type-safe accessor, completed by the IDE
+    testImplementation(libs.bundles.testing)
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/version_catalogs.html" rel="noopener">Version Catalogs — Gradle User Manual (TOML format, accessors, bundles, plugins)</a></li>
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/platforms.html" rel="noopener">Platforms and BOMs — Gradle User Manual (how constraints differ from catalog entries)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-dependency-management" rel="noopener">Dependency Management in Gradle — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-different-dependency-version-declarations" rel="noopener">Different Dependency Version Declarations in Gradle — Baeldung (strictly, prefer, require, reject)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=8044F5gc1dE" rel="noopener">Understanding Gradle: Centralizing Dependency Versions — onepiece.Software by Jendrik Johannes</a></li>
+    </ul>
+
+    <h3>Maven versus Gradle: an honest comparison</h3>
+    <p>Neither tool is a mistake, and a candidate who says "Gradle is just better" is showing inexperience. Maven's fixed lifecycle and XML POM make every Maven project look the same: a new engineer can read any POM on day one, tooling can analyse it without executing it, and the build is boring in the way infrastructure should be. Gradle's programmable graph makes the easy things slightly harder and the hard things possible — custom packaging, code generation, polyglot builds, Android — and its caching story (incremental tasks, build cache, configuration cache) is genuinely ahead. Maven 4 narrows several of these gaps, and Maven's build/consumer POM split addresses some long-standing complaints, so treat the comparison as a moving target.</p>
+    <p>The pragmatic reading: Gradle repays you on large multi-project repositories, on teams that need custom build logic, and anywhere build time is a daily tax; Maven repays you on straightforward JVM services, in teams with high churn, and in organisations that value uniformity over speed. The decisive risk with Gradle is not the tool but the discipline — an undisciplined Gradle build (logic in the root script, undeclared task inputs, plugins that break the configuration cache) is slower <em>and</em> less predictable than the Maven build it replaced.</p>
+    <table>
+      <caption>Maven and Gradle compared</caption>
+      <thead>
+        <tr><th>Dimension</th><th>Maven</th><th>Gradle</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Build definition</td><td>Declarative XML POM interpreted by a fixed lifecycle</td><td>Kotlin or Groovy script that programmatically configures a task graph</td></tr>
+        <tr><td>Execution model</td><td>Ordered phases; plugins bind goals to phases</td><td>Directed acyclic graph of tasks with declared inputs and outputs</td></tr>
+        <tr><td>Speed on a cold build</td><td>Comparable; sometimes faster to start</td><td>Similar, plus daemon startup on the very first run</td></tr>
+        <tr><td>Speed on incremental and repeat builds</td><td>Module-level rebuilds; incremental support is limited</td><td>Usually much faster — task-level up-to-date checks, build cache, configuration cache</td></tr>
+        <tr><td>Flexibility</td><td>Custom behaviour needs a plugin or awkward profile tricks</td><td>Arbitrary logic in convention plugins and custom tasks</td></tr>
+        <tr><td>Learning curve</td><td>Shallow; the POM is readable without knowing the tool</td><td>Steep — two phases, lazy providers, configurations, cache constraints</td></tr>
+        <tr><td>Predictability</td><td>High: every project looks the same</td><td>Depends entirely on team discipline; scripts can hide anything</td></tr>
+        <tr><td>Dependency scoping</td><td>Five scopes; compile scope leaks transitively</td><td>Configurations with implementation/api separation that limits leakage and recompilation</td></tr>
+        <tr><td>Centralising versions</td><td><code>dependencyManagement</code> and BOMs</td><td>Version catalog (build time) plus platforms and BOMs (resolution time)</td></tr>
+        <tr><td>IDE support</td><td>Excellent and instant — the POM is data</td><td>Good; Kotlin DSL gives completion, but the IDE must run the build to sync</td></tr>
+        <tr><td>Best team fit</td><td>Standard JVM services, high team churn, uniformity valued</td><td>Large multi-project repos, Android, custom build logic, build time matters</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.gradle.org/current/userguide/migrating_from_maven.html" rel="noopener">Migrating Builds from Maven — Gradle User Manual (concept-by-concept mapping)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ant-maven-gradle" rel="noopener">Ant vs Maven vs Gradle — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/gradle-equivalents-maven-commands" rel="noopener">Gradle Equivalents for Maven Commands — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/maven-convert-to-gradle" rel="noopener">Convert a Maven Build to Gradle — Baeldung</a></li>
+      <li>[Article] <a href="https://blog.gradle.org/road-to-gradle-9" rel="noopener">Road to Gradle 9 — Gradle Blog (what the major release set out to change)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-maven.html">← Maven</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="07-docker-basics.html">Docker Fundamentals →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Gradle questions in Indian product and service-company rounds cluster hard around two things — <code>implementation</code> vs <code>api</code>, and "why would you pick Gradle over Maven" — with the phase model and the caches as the follow-ups that separate users from operators:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Gradle and how does its build file differ from a Maven POM?</summary>
+      <div class="answer"><p>Gradle is a JVM build automation tool. A Maven POM is declarative XML data interpreted by a fixed lifecycle; a Gradle build file is a Kotlin or Groovy script that executes and programmatically configures a graph of tasks. That means Gradle can express arbitrary build logic, but it also means you cannot fully understand a Gradle build without running it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the Gradle wrapper and why is it committed to the repository?</summary>
+      <div class="answer"><p><code>gradlew</code>, <code>gradlew.bat</code> and <code>gradle/wrapper/gradle-wrapper.properties</code>. The wrapper downloads and runs the exact Gradle version the build was written for, so every developer, every CI agent and every new joiner runs the same build with no local installation. Upgrading is one commit. In CI you should always invoke <code>./gradlew</code>, never a preinstalled <code>gradle</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does the plugins block do, and why is it restricted?</summary>
+      <div class="answer"><p>It applies plugins, which is what actually creates tasks and extensions — the <code>java</code> plugin contributes <code>compileJava</code>, <code>test</code> and <code>jar</code>; Spring Boot's plugin adds <code>bootJar</code>. It must appear first and accepts only literal plugin ids and versions so Gradle can resolve plugins before compiling the script, which also keeps the build analysable for the configuration cache.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Kotlin DSL or Groovy DSL — which should a new project use?</summary>
+      <div class="answer"><p>Kotlin DSL (<code>build.gradle.kts</code>). It is the current default for new builds: statically typed, so the IDE gives real completion and navigation into plugin APIs, and errors surface when the script compiles rather than mid-build. Groovy DSL is still everywhere in existing repos and older tutorials, so you must be able to read it; script compilation for Kotlin is slightly slower on a cold build, which the daemon and caches absorb.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain implementation vs api. Why does it matter for build time?</summary>
+      <div class="answer"><p>Both put the dependency on your own compile and runtime classpath. <code>api</code> additionally exposes it on the compile classpath of everyone who depends on you; <code>implementation</code> does not. Consequence: with <code>api</code>, an ABI change in that dependency (or in your module) forces recompilation of every downstream module, because they might be using it. With <code>implementation</code>, changes that do not alter your own public API recompile only your module. On a large multi-project build that is the difference between a couple of minutes and twenty. Default to <code>implementation</code>; use <code>api</code> only when the dependency's types appear in your public signatures. <code>api</code> requires the <code>java-library</code> plugin.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> compileOnly, runtimeOnly and annotationProcessor — when do you use each?</summary>
+      <div class="answer"><p><code>compileOnly</code> for things needed to compile but provided at runtime by the environment or not needed at all — Lombok's annotations, a container-provided servlet API. <code>runtimeOnly</code> for things loaded reflectively and never imported — JDBC drivers, a logging backend — which also keeps them off the compile classpath so nobody imports them by accident. <code>annotationProcessor</code> for processors that must run during compilation (Lombok, MapStruct, Spring's configuration-metadata processor) but must never be packaged.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does a println at the top of build.gradle.kts run even for an unrelated task?</summary>
+      <div class="answer"><p>Because it is configuration-time code. Gradle evaluates every project's build script on every invocation to construct the task graph, before deciding what to execute. So top-level statements run on every build, including <code>./gradlew help</code>, and regardless of whether the surrounding task is up to date. Real work belongs inside a task action (<code>doLast</code>) or behind a lazy <code>Provider</code>, and tasks should be registered with <code>tasks.register</code> rather than eagerly created.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does Gradle decide a task is UP-TO-DATE?</summary>
+      <div class="answer"><p>Each task declares inputs (files, properties, classpath, and the task implementation itself) and outputs. Before executing, Gradle hashes the declared inputs and compares them with the snapshot from the previous run, also checking the outputs still exist and are unchanged. Match means skip. The failure mode is undeclared inputs: if a task reads something it never declared, Gradle cannot see the change and wrongly skips the task. Use <code>-i</code> or a build scan to see why a task ran.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Build cache versus configuration cache — what does each actually cache?</summary>
+      <div class="answer"><p>Different phases. The build cache stores <em>task outputs</em> keyed by a hash of the task's inputs, so a task can be satisfied from cache after a clean, on another branch, or on another machine (a task shows as <code>FROM-CACHE</code>); it has local and remote layers. The configuration cache stores the <em>configured task graph</em> keyed on build scripts, system properties, environment variables and files read during configuration, so Gradle can skip initialization and configuration entirely and go straight to execution. They are complementary and usually both enabled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What problem do version catalogs solve, and how do they differ from a BOM?</summary>
+      <div class="answer"><p>A catalog (<code>gradle/libs.versions.toml</code>) centralises library, plugin and bundle coordinates so every project declares <code>libs.spring.boot.starter.web</code> instead of a hard-coded string, with IDE completion and one place to bump versions. It is a build-time convenience and does not appear in your published metadata. A BOM or platform is a resolution-time constraint that also governs transitive dependencies and <em>is</em> published. They are complementary: the catalog names the BOM, the BOM aligns the transitive graph.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Maven or Gradle for a new microservice at your company — argue both sides.</summary>
+      <div class="answer"><p>Maven: uniform and boring, readable by anyone on day one, analysable without executing it, minimal ways for a team to hurt itself, and Maven 4 has closed several old gaps — the right default for a straightforward service in an organisation with many teams and high churn. Gradle: substantially faster on incremental and repeat builds thanks to task-level up-to-date checks plus the build and configuration caches, and able to express custom build logic through convention plugins — the right default for large multi-project repositories, Android, and anywhere build time is a daily tax. The deciding factor is usually the team, not the tool: an undisciplined Gradle build is slower and far less predictable than the Maven build it replaced.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What constraints does the configuration cache put on build logic, and how do you migrate?</summary>
+      <div class="answer"><p>Task actions may not access the <code>Project</code> object at execution time — no <code>project.file(...)</code> or <code>project.property(...)</code> inside <code>doLast</code>; capture values at configuration time into <code>Property</code>/<code>Provider</code> fields. Environment variables and system properties must be read through <code>providers.environmentVariable(...)</code> / <code>providers.systemProperty(...)</code> so Gradle tracks them as cache inputs. No shared mutable state between tasks, and everything stored in the graph must be serialisable. Migrate incrementally: turn it on, read the HTML problems report Gradle emits, fix your own tasks, and upgrade or replace third-party plugins that violate the rules. Gradle 9 enables it by default and treats it as the preferred execution mode.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your root build script uses subprojects { }. Why is that now discouraged, and what replaces it?</summary>
+      <div class="answer"><p>Cross-project configuration couples every subproject to the root script: you cannot read a subproject's build in isolation, configuration cannot be parallelised safely, and it conflicts with the configuration cache and isolated projects. The replacement is a convention plugin — a precompiled script plugin in <code>buildSrc</code> or, better for large repos, in a separate <code>build-logic</code> build pulled in with <code>includeBuild</code> — which each subproject applies explicitly by id. Explicit application also makes it obvious what configuration a module actually has. Note that any change to <code>buildSrc</code> invalidates the whole build, which is the main argument for the included-build variant.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> CI never gets build cache hits even though caching is enabled. How do you debug it?</summary>
+      <div class="answer"><p>Cache keys are hashes of task inputs, so a miss means some input differs. Usual culprits: absolute paths or machine-specific values baked into inputs, a different JDK or Gradle version, timestamps or non-deterministic ordering inside produced archives (fix with reproducible archive settings), environment variables read at configuration time that differ per agent, and a task that is simply not cacheable. Debug by running a build scan on both builds and comparing the task input hashes to find the first differing property, and check whether the remote cache is configured for push from CI and pull from developers.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do dependsOn, mustRunAfter and finalizedBy differ, and which should you reach for?</summary>
+      <div class="answer"><p><code>dependsOn</code> is a real dependency: requesting the task forces the other to run first. <code>mustRunAfter</code> and <code>shouldRunAfter</code> only constrain ordering <em>if</em> both tasks are already in the graph — they never pull a task in; <code>shouldRunAfter</code> is a hint Gradle may drop to break a cycle. <code>finalizedBy</code> schedules a task to run after another finishes, including on failure, which is how report and cleanup tasks are wired. Prefer none of them where possible: wire tasks by files and providers so Gradle infers the dependency from an output feeding an input, which stays correct when tasks are added or renamed.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.gr.build — build.gradle.kts, tasks, dependency configurations, multi-project builds</li>
+      <li>dev.gr.perf — Configuration cache, build cache, version catalogs, Maven comparison</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

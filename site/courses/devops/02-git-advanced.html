@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Git Advanced module: merge vs rebase and the golden rule, interactive rebase and autosquash, real conflict resolution including the ours/theirs inversion, cherry-pick, stash and tags, then reflog recovery, bisect, hooks, worktrees and large-repo Git — with verified resources and interview questions.">
+  <title>Git Advanced — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Git Advanced</h1>
+  <p class="standfirst">Anyone can commit and push. What marks out a senior engineer is the half hour after something goes wrong — a branch that needs cleaning before review, a conflict nobody understands, a colleague who force-pushed over a day of work. This module is that half hour, learned in advance.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">DevOps and Deployment</a> → Git Advanced</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 01 covered the object model and the everyday commands. This module covers the operations that rewrite history, resolve disagreements between two histories, and recover history you thought you had destroyed. The first half is integration and cleanup: merge versus rebase, interactive rebase, conflict resolution done properly, plus cherry-pick, stash and tags.</p>
+    <p>The second half is rescue and scale: the reflog as the safety net that means almost nothing in Git is ever truly lost, <code>git bisect</code> as a binary search for the commit that broke your build, hooks and worktrees as workflow tools, and the flags that make Git usable on a repository with a million files and a decade of history. Every one of these is a common interview topic, and every one of them is something you will eventually need under pressure.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Merge vs rebase: two ways to integrate, two shapes of history</h3>
+    <p><code>git merge</code> joins two histories by creating a new commit with two parents. Nothing that already existed is altered — every original commit keeps its hash, its author date and its true context. The cost is shape: a repository where every feature branch merges back produces a graph with lots of forks and joins, and a <code>git log</code> that interleaves work from different branches. <code>git rebase</code> takes the commits unique to your branch, replays them one at a time on top of the new base, and gives you a straight line. The commits are not moved — they are <em>copied</em>, so each replayed commit is a new object with a new hash and the originals become unreferenced.</p>
+    <p>That copy step is the whole argument. Linear history is easier to read, easier to bisect and easier to revert, which is why most teams rebase feature branches onto <code>main</code> before merging. But because rebasing rewrites commits, the golden rule follows directly: <strong>never rebase commits that other people have already pulled.</strong> Their clone still points at the originals, yours points at the copies, and their next merge will duplicate every commit. Rebase your own unshared branch freely; on a shared branch use <code>git revert</code> and a merge instead. When you do rebase a branch you have already pushed for review, push with <code>--force-with-lease</code>, never bare <code>--force</code>, so you refuse to overwrite work someone else pushed while you were rebasing.</p>
+    <pre class="code-block" data-label="Shell"><code># integrate main into a feature branch, two ways
+git switch feature
+git merge main        # new merge commit; history preserved, graph forks
+git rebase main       # commits replayed on top of main; new hashes, straight line
+
+# after rebasing a branch you had already pushed:
+git push --force-with-lease   # refuses if the remote moved since your last fetch</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Branching-Rebasing" rel="noopener">Git Branching — Rebasing (Pro Git book, including "the perils of rebasing")</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Branching-Basic-Branching-and-Merging" rel="noopener">Git Branching — Basic Branching and Merging (Pro Git book)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-merge" rel="noopener">git merge — official reference (strategies, fast-forward, --no-ff)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/merging-vs-rebasing" rel="noopener">Merging vs. Rebasing — Atlassian Git tutorials (the diagrams everyone quotes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/git-merge-vs-rebase" rel="noopener">Git Merge vs. Rebase — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=0chZFIZLR_0" rel="noopener">Git MERGE vs REBASE: Everything You Need to Know — ByteByteGo</a></li>
+    </ul>
+
+    <h3>Interactive rebase: cleaning a branch before anyone reviews it</h3>
+    <p><code>git rebase -i</code> opens the list of commits you are about to replay and lets you rewrite the plan before Git executes it. The verbs are the vocabulary: <code>pick</code> keeps a commit, <code>reword</code> edits only its message, <code>edit</code> stops so you can amend the content, <code>squash</code> folds a commit into the previous one and lets you combine the messages, <code>fixup</code> folds it in and throws its message away, <code>drop</code> deletes it, and reordering the lines reorders the commits. There is also <code>exec</code> to run a command (a test suite, say) after a commit, so you can prove every commit in the branch builds.</p>
+    <p>The workflow that makes this painless is <code>--autosquash</code>. Instead of remembering at the end which review comment belonged to which commit, fix the code immediately and commit with <code>git commit --fixup=&lt;sha&gt;</code>; Git writes a message prefixed <code>fixup!</code>. When you later run <code>git rebase -i --autosquash</code>, those commits are automatically moved directly under their targets and marked <code>fixup</code>, so you only confirm the plan. Set <code>rebase.autosquash=true</code> and it is the default. Two more flags worth knowing: <code>git rebase --onto</code> transplants a range of commits onto a completely different base (the fix when you branched off the wrong branch), and <code>--update-refs</code> keeps a stack of dependent branches pointing at the right replayed commits instead of at the abandoned originals.</p>
+    <pre class="code-block" data-label="Shell"><code>git commit --fixup=a1b2c3d          # marks this as a fix for that commit
+git rebase -i --autosquash main     # fixups slide under their targets automatically
+
+# branched off the wrong base? move only your three commits onto main:
+git rebase --onto main wrong-base feature
+
+# mid-rebase controls
+git rebase --continue | --skip | --abort</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History" rel="noopener">Git Tools — Rewriting History (Pro Git book: interactive rebase, squashing, splitting commits)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-rebase" rel="noopener">git rebase — official reference (--interactive, --autosquash, --onto, --update-refs)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/rewriting-history" rel="noopener">Rewriting history — Atlassian Git tutorials (amend, rebase -i, reflog)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/git-squash-commits" rel="noopener">How to Squash Commits in Git — Baeldung</a></li>
+      <li>[Article] <a href="https://www.git-tower.com/learn/git/faq/git-squash" rel="noopener">How to Squash Commits in Git — Tower Git FAQ</a></li>
+      <li>[Article] <a href="https://learngitbranching.js.org/" rel="noopener">Learn Git Branching — interactive sandbox for rebase, cherry-pick and reset drills</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Uszj_k0DGsg" rel="noopener">Git for Professionals: Tools &amp; Concepts for Mastering Version Control — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Conflict resolution: markers, ours/theirs, mergetool and rerere</h3>
+    <p>A conflict means both sides changed overlapping lines and Git refuses to guess. It writes conflict markers into the file: your side between <code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code> and <code>=======</code>, the other side between <code>=======</code> and <code>&gt;&gt;&gt;&gt;&gt;&gt;&gt;</code>. Set <code>merge.conflictStyle=zdiff3</code> and Git adds a third block showing the common ancestor, which turns guesswork into a readable three-way comparison. Resolution is always the same loop: run <code>git status</code> (it lists the unmerged paths and tells you the exact next command), edit each file until no markers remain and the result actually makes sense, <code>git add</code> it, then <code>git merge --continue</code> or <code>git rebase --continue</code>. Resolving means producing correct code, not deleting one side to make the markers go away.</p>
+    <p>Now the classic trap. <code>git checkout --ours &lt;file&gt;</code> and <code>--theirs</code> take a whole side, and their meaning <em>inverts</em> between merge and rebase. In a merge, "ours" is the branch you are standing on and "theirs" is the branch being merged in — what you would expect. In a rebase, Git first checks out the upstream branch and then replays your commits on top of it, so <strong>"ours" is the upstream you are rebasing onto and "theirs" is your own work being replayed</strong>. Candidates get this backwards constantly; state it explicitly and you look like someone who has actually done it. Two tools reduce the pain: <code>git mergetool</code> opens a configured three-pane diff tool, and <code>rerere</code> ("reuse recorded resolution") records how you resolved each conflict hunk and replays it automatically the next time the same conflict appears — invaluable when a long-lived branch is rebased repeatedly.</p>
+    <pre class="code-block" data-label="Shell"><code>git config --global merge.conflictStyle zdiff3   # show the common ancestor too
+git config --global rerere.enabled true          # record and replay resolutions
+
+git status                       # which files are unmerged, and what to run next
+git checkout --ours   path/file  # merge: my branch  |  rebase: the upstream base
+git checkout --theirs path/file  # merge: their branch |  rebase: my replayed commit
+git add path/file
+git rebase --continue</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Advanced-Merging" rel="noopener">Git Tools — Advanced Merging (Pro Git book: conflict markers, ours/theirs, mergetool, rerere)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-rerere" rel="noopener">git rerere — official reference (how recorded resolutions are matched and replayed)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-mergetool" rel="noopener">git mergetool — official reference (configuring a three-pane diff tool)</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2023/11/01/confusing-git-terminology/" rel="noopener">Confusing git terminology — Julia Evans (jvns.ca), including why ours/theirs flips</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/using-branches/merge-conflicts" rel="noopener">Merge conflicts — Atlassian Git tutorials</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=apGV9Kg7ics" rel="noopener">Complete Git and GitHub Tutorial — Kunal Kushwaha</a></li>
+    </ul>
+
+    <h3>Cherry-pick, stash and tags</h3>
+    <p><code>git cherry-pick</code> copies one commit (or a range) onto your current branch by computing its diff against its own parent and applying that as a three-way merge. The everyday use is a hotfix: the fix lands on <code>main</code>, and you cherry-pick it onto the release branch instead of merging the whole of <code>main</code>. Because it copies, the same change now exists as two commits with two hashes, which is fine for a deliberate backport and a mess if you do it habitually — the later merge has to reconcile them. <code>-x</code> records the source hash in the message, which makes the relationship traceable.</p>
+    <p><code>git stash</code> parks uncommitted work so you can switch context. Learn three things beyond the basic command: <code>-u</code> (or <code>--include-untracked</code>) is required or brand-new files are silently left behind, which is the number one stash surprise; <code>git stash push -m "message" -- path/</code> stashes a message and a subset of paths; and <code>git stash branch &lt;name&gt;</code> creates a branch from the commit the stash was taken on and applies it there, which is the clean escape when the stash no longer applies to your current head. Treat the stash as a short-lived scratchpad — a stash entry is not on any branch and is easy to forget.</p>
+    <p>Tags name a specific commit permanently. A <em>lightweight</em> tag is just a file containing a hash — fine for a private bookmark. An <em>annotated</em> tag (<code>-a</code>, or <code>-s</code> to sign it) is a real object in the database carrying a tagger, a date, a message and optionally a GPG signature, and it is what you must use for anything a release depends on. Tags are not pushed by <code>git push</code>: you push them explicitly with <code>git push origin v1.4.0</code> or <code>--follow-tags</code>, and moving a published tag is as antisocial as rewriting published history.</p>
+    <pre class="code-block" data-label="Shell"><code>git cherry-pick -x a1b2c3d          # backport one commit, recording its origin
+
+git stash push -u -m "wip: checkout form"   # -u also stashes untracked files
+git stash list && git stash pop
+git stash branch fix/checkout       # apply the stash on a fresh branch instead
+
+git tag -a v1.4.0 -m "Release 1.4.0"   # annotated: real object, author + message
+git push origin v1.4.0                 # tags are NOT pushed automatically</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/git-cherry-pick" rel="noopener">git cherry-pick — official reference (-x, ranges, conflict handling)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Stashing-and-Cleaning" rel="noopener">Git Tools — Stashing and Cleaning (Pro Git book)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Basics-Tagging" rel="noopener">Git Basics — Tagging (Pro Git book: lightweight vs annotated, pushing tags)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/saving-changes/git-stash" rel="noopener">git stash — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2023/11/10/how-cherry-pick-and-revert-work/" rel="noopener">How git cherry-pick and revert use 3-way merge — Julia Evans (jvns.ca)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ecK3EnyGD8o" rel="noopener">13 Advanced (but useful) Git Techniques and Shortcuts — Fireship</a></li>
+    </ul>
+
+    <h3>The reflog: nothing is really lost (and reset vs revert)</h3>
+    <p>Every time <code>HEAD</code> or a branch tip moves — commit, checkout, merge, rebase, reset, pull — Git appends a line to the reflog recording where it moved from and where it moved to. So a "lost" commit after a bad <code>reset --hard</code>, a rebase that mangled a branch, or a branch you deleted is not gone: the commit object is still in the object database and the reflog still names its hash. <code>git reflog</code> lists the recent positions, addressable as <code>HEAD@{1}</code>, <code>HEAD@{2}</code> and so on; recovery is then <code>git reset --hard HEAD@{1}</code>, or safer, <code>git branch rescue &lt;sha&gt;</code> so you can inspect before committing to it. If the reflog entry is gone too, <code>git fsck --lost-found</code> lists dangling commits. Two caveats that make good follow-up answers: the reflog is <strong>local to your clone</strong> — it is not pushed and it cannot recover work that only ever existed on someone else's machine — and unreachable entries expire (30 days by default, 90 days for reachable ones) before garbage collection can prune them.</p>
+    <p>The reflog is also the reason the <code>reset</code>/<code>revert</code> distinction matters less than people fear locally, and more than they think publicly. <code>git reset</code> moves a branch pointer: <code>--soft</code> keeps the index and working tree, <code>--mixed</code> (the default) resets the index, <code>--hard</code> discards working tree changes too — which are the only changes not recoverable from the reflog, because they were never committed. Use reset freely on commits you have not pushed. For anything already public, use <code>git revert</code>, which creates a <em>new</em> commit whose diff undoes the target. Everyone's history stays valid and the undo is itself reviewable. "Reset for local history, revert for public history" is a one-line answer that lands well in interviews.</p>
+    <pre class="code-block" data-label="Shell"><code>git reflog                       # every recent position of HEAD, with hashes
+git branch rescue HEAD@{3}       # safest recovery: name it, then look at it
+git reset --hard HEAD@{1}        # undo the previous history-moving command
+git fsck --lost-found            # dangling commits when the reflog can't help
+
+git revert a1b2c3d               # public history: a new commit that undoes it</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/git-reflog" rel="noopener">git reflog — official reference (HEAD@{n} syntax, expiry settings)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Internals-Maintenance-and-Data-Recovery" rel="noopener">Git Internals — Maintenance and Data Recovery (Pro Git book: reflog, fsck, dangling objects)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Reset-Demystified" rel="noopener">Git Tools — Reset Demystified (Pro Git book: soft, mixed and hard against the three trees)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-revert" rel="noopener">git revert — official reference (including -m for reverting a merge)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/refs-and-the-reflog" rel="noopener">Refs and the reflog — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://ohshitgit.com/" rel="noopener">Oh Shit, Git!?! — Katie Sylor-Miller (the recovery cheat sheet worth bookmarking)</a></li>
+      <li>[Article] <a href="https://sethrobertson.github.io/GitFixUm/fixup.html" rel="noopener">On undoing, fixing, or removing commits in git — Seth Robertson (decision tree)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=K7-wrGpnqUM" rel="noopener">How to Rescue Your Commits with Git Reflog — System Crafters</a></li>
+    </ul>
+
+    <h3>git bisect: binary search for the commit that broke it</h3>
+    <p>Something works in the release from two months ago and fails on <code>main</code>. Between them sit four hundred commits. <code>git bisect</code> turns that into roughly nine checkouts instead of four hundred, because it is a binary search over history. You mark one commit bad and one known-good ancestor; Git checks out the midpoint, you test and answer <code>git bisect good</code> or <code>git bisect bad</code>, and it halves the range each time until one commit is left. <code>git bisect skip</code> handles a revision that will not build, and <code>git bisect reset</code> puts you back where you started. Rename the terms with <code>git bisect start --term-old=fast --term-new=slow</code> when you are hunting a performance regression rather than a bug.</p>
+    <p>The version that actually changes your life is <code>git bisect run</code>. Give it a script that exits 0 when the revision is good and 1 through 127 when it is bad — 125 means "cannot test, skip this one" — and Git drives the entire search unattended while you do something else. The script can be a single test, a build plus a test, or a curl-and-grep against a locally started server. This is also where a linear, rebased history and small commits pay for themselves: bisecting a history of enormous merge commits tells you a merge is at fault without telling you which line, and every commit must build for the search to mean anything.</p>
+    <pre class="code-block" data-label="Shell"><code>git bisect start
+git bisect bad                 # current HEAD is broken
+git bisect good v1.3.0         # this release was fine
+# ... test, then: git bisect good   OR   git bisect bad
+git bisect reset               # return to where you started
+
+# unattended: exit 0 = good, 1-127 = bad, 125 = untestable
+git bisect start HEAD v1.3.0
+git bisect run ./scripts/reproduce.sh</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/git-bisect" rel="noopener">git bisect — official reference (run, skip, custom terms, replaying a bisect log)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Debugging-with-Git" rel="noopener">Git Tools — Debugging with Git (Pro Git book: blame and bisect)</a></li>
+      <li>[Article] <a href="https://www.git-tower.com/learn/git/faq/git-bisect" rel="noopener">How to use git bisect — Tower Git FAQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z-AkSXDqodc" rel="noopener">How to Use Git Bisect to Track Down Bugs — GitKraken (Learn Git series)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3cwWssglZuQ" rel="noopener">Using git bisect to Help Find Which Commit Broke Something — Nick Janetakis</a></li>
+    </ul>
+
+    <h3>Hooks and worktrees</h3>
+    <p>Hooks are executable scripts Git runs at defined points in its own workflow. The client-side ones you will meet are <code>pre-commit</code> (lint, format, run fast tests — reject the commit by exiting non-zero), <code>commit-msg</code> (enforce a Conventional Commits or ticket-id format), <code>pre-push</code> (run the test suite before anything leaves the machine) and <code>prepare-commit-msg</code>. They live in <code>.git/hooks</code>, which is <em>not</em> version-controlled and is not copied by <code>git clone</code>, so sharing them across a team means either setting <code>core.hooksPath</code> to a directory that is committed, or using a manager such as Husky, Lefthook or pre-commit that wires that up for you. The critical judgement call: client-side hooks are a convenience, not a control — any developer can bypass them with <code>--no-verify</code>. Real enforcement belongs on the server: CI checks required by branch protection rules, or <code>pre-receive</code>/<code>update</code> hooks on a self-hosted server. Say that in an interview and you have answered the question behind the question.</p>
+    <p><code>git worktree</code> lets one repository have several working directories at once, each on a different branch, all sharing a single object database. Instead of stashing to review a colleague's branch, <code>git worktree add ../review-1234 feature/1234</code> gives you a second directory you can build and test in while your main directory keeps its branch, its node_modules and its half-finished work untouched. <code>git worktree list</code> shows them, <code>remove</code> and <code>prune</code> clean up. The rules to remember: a branch can only be checked out in one worktree at a time, and worktrees cost almost nothing in disk space because the history is not duplicated. They pair naturally with long-running builds, with comparing two branches side by side, and with running an agent or a long test suite on one branch while you keep working on another.</p>
+    <pre class="code-block" data-label="Shell"><code># share hooks with the team: commit them, then point Git at the directory
+git config core.hooksPath .githooks
+
+# a second working directory on another branch, same repository
+git worktree add ../review-1234 feature/1234
+git worktree list
+git worktree remove ../review-1234</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/githooks" rel="noopener">githooks — official reference (every hook, when it fires, what its exit code means)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Customizing-Git-Git-Hooks" rel="noopener">Customizing Git — Git Hooks (Pro Git book: client-side and server-side)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-worktree" rel="noopener">git worktree — official reference (add, list, move, remove, prune)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/git-hooks" rel="noopener">Git hooks — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://www.git-tower.com/learn/git/faq/git-worktree" rel="noopener">How to use git worktree — Tower Git FAQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2uEqYw-N8uE" rel="noopener">Git's Best And Most Unknown Feature (worktrees) — ThePrimeagen</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U-R_882UGPM" rel="noopener">Git Hooks in 15 Minutes using Husky — Dylan Israel</a></li>
+    </ul>
+
+    <h3>Git at scale: shallow and partial clone, sparse-checkout, maintenance</h3>
+    <p>Clone a decade-old monorepo and you download every version of every file that ever existed. Git has three independent levers for that, and knowing which to pull is the interview differentiator. A <em>shallow</em> clone (<code>--depth=1</code>) truncates history: fast, small, but you cannot bisect, blame or diff against anything older, and it is the wrong default for a developer machine. A <em>partial</em> clone (<code>--filter=blob:none</code>) keeps the entire commit and tree graph but downloads file contents lazily, only when a command actually needs them — so history commands still work and you get most of the speed-up with none of the shallow-clone limitations. <code>--filter=tree:0</code> goes further and is aimed at CI jobs that only ever check out one commit. Independently, <code>git sparse-checkout set --cone apps/web libs/shared</code> limits which directories appear in your working tree, which is what makes a monorepo with a hundred thousand files feel like a small project.</p>
+    <p>The other half of scale is upkeep. Loose objects, unpacked refs and a stale commit-graph make everyday commands crawl. <code>git gc</code> compresses loose objects into packfiles, packs refs and prunes unreachable objects past their grace period. <code>git maintenance start</code> is the modern replacement for cron-ing that yourself: it registers background jobs — <code>prefetch</code>, <code>commit-graph</code>, <code>incremental-repack</code>, <code>loose-objects</code>, <code>pack-refs</code> — that keep the repository fast without the long stop-the-world pause of a full <code>gc</code>. For very large checkouts also look at the file-system monitor (<code>core.fsmonitor</code>) so <code>git status</code> does not have to stat every file, and at Microsoft's Scalar, which bundles these settings as a single opinionated configuration.</p>
+    <pre class="code-block" data-label="Shell"><code># blobless clone: full history, file contents fetched on demand
+git clone --filter=blob:none https://example.com/big-repo.git
+
+# only materialise the directories you work in
+git sparse-checkout set --cone apps/web libs/shared
+
+# background upkeep instead of a stop-the-world gc
+git maintenance start
+git config core.fsmonitor true      # skip stat-ing every file on status</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/partial-clone" rel="noopener">Partial Clone Design Notes — official Git documentation (blob and tree filters)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-sparse-checkout" rel="noopener">git sparse-checkout — official reference (cone mode, the sparse index)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-maintenance" rel="noopener">git maintenance — official reference (the background task set and scheduling)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-gc" rel="noopener">git gc — official reference (packing, pruning and the grace period)</a></li>
+      <li>[Article] <a href="https://github.blog/open-source/git/get-up-to-speed-with-partial-clone-and-shallow-clone/" rel="noopener">Get up to speed with partial clone and shallow clone — GitHub Blog</a></li>
+      <li>[Article] <a href="https://github.blog/open-source/git/bring-your-monorepo-down-to-size-with-sparse-checkout/" rel="noopener">Bring your monorepo down to size with sparse-checkout — GitHub Blog</a></li>
+      <li>[Article] <a href="https://github.blog/open-source/git/scaling-monorepo-maintenance/" rel="noopener">Scaling monorepo maintenance — GitHub Blog (why git maintenance exists)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jOVWHIDvpe8" rel="noopener">Optimize checkout and clone time for monorepos using sparse-checkout and filter — Bryant Son</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-git-fundamentals.html">← Git Fundamentals</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="03-github-workflow.html">GitHub and Code Review →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Advanced Git is asked in almost every Indian product and service-company round, from a two-year TCS or Infosys internal transfer panel to a senior interview at Flipkart or Zoho — the first two here are near-guaranteed:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Merge vs rebase — what is the difference and when do you use each?</summary>
+      <div class="answer"><p>Merge creates a new commit with two parents and preserves every existing commit exactly as it was, producing a branching graph. Rebase replays your branch's commits on top of a new base, creating copies with new hashes and producing a linear history. Use rebase to keep your own feature branch up to date and tidy before review; use merge to integrate into a shared branch and to preserve the fact that a feature was developed separately. The rule that decides it: never rebase commits that others have already pulled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> You deleted a branch / did a hard reset and lost a commit. How do you get it back?</summary>
+      <div class="answer"><p>Run <code>git reflog</code>. It records every position HEAD has held, so the lost commit's hash is still listed even though nothing points at it. Recover with <code>git branch rescue &lt;sha&gt;</code> (safest — you can inspect it first) or <code>git reset --hard HEAD@{1}</code> to undo the previous move. If even the reflog entry is gone, <code>git fsck --lost-found</code> lists dangling commits. Two caveats: the reflog is local to your clone, so it cannot recover someone else's work, and uncommitted working-tree changes destroyed by <code>reset --hard</code> were never objects and are genuinely gone.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the golden rule of rebasing, and what happens if you break it?</summary>
+      <div class="answer"><p>Do not rebase commits that exist outside your own repository — anything already pushed to a shared branch that colleagues have pulled. Rebasing replaces those commits with copies that have different hashes. Your teammate's clone still references the originals, so their next pull merges two versions of the same work and the history fills with duplicate commits. Fix a shared branch with <code>git revert</code> instead, and when you must force-push your own reviewed branch, use <code>--force-with-lease</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between a lightweight and an annotated tag?</summary>
+      <div class="answer"><p>A lightweight tag is just a ref pointing at a commit — a bookmark with no metadata. An annotated tag is a full object in the database with a tagger name, date, message and optional GPG signature. Use annotated for releases (anything auditable), lightweight for temporary local markers. Either way tags are not pushed by a plain <code>git push</code> — push them explicitly or with <code>--follow-tags</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What does git stash do, and what is the most common mistake with it?</summary>
+      <div class="answer"><p>It saves your uncommitted tracked changes and reverts the working tree to HEAD so you can switch context, then reapplies them with <code>pop</code> or <code>apply</code>. The common mistake is forgetting <code>-u</code>: untracked files are not stashed by default, so brand-new files stay in your working directory and often get committed to the wrong branch. Also useful: <code>git stash branch &lt;name&gt;</code>, which creates a branch from the commit the stash was made on and applies it there when the stash no longer applies cleanly to HEAD.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Walk me through cleaning up a messy branch before raising a pull request.</summary>
+      <div class="answer"><p><code>git fetch</code>, then <code>git rebase -i origin/main</code>. In the todo list: <code>reword</code> vague messages, <code>squash</code> or <code>fixup</code> the "fix typo" and "address review" commits into the commits they belong to, <code>drop</code> debug commits, and reorder so each commit is a self-contained, buildable change. Better still, while working, commit fixes with <code>git commit --fixup=&lt;sha&gt;</code> and finish with <code>git rebase -i --autosquash</code>, which arranges everything for you. Then push with <code>--force-with-lease</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> During a rebase conflict, what do --ours and --theirs refer to?</summary>
+      <div class="answer"><p>They are inverted compared to a merge. In a merge, "ours" is the branch you are on and "theirs" is the branch being merged in. In a rebase, Git checks out the upstream branch first and then replays your commits on top of it, so "ours" is the upstream base you are rebasing onto and "theirs" is your own commit currently being applied. Getting this backwards silently discards the wrong side, which is why <code>git status</code> and a three-way view (<code>merge.conflictStyle=zdiff3</code>) beat blindly taking a side.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> git reset vs git revert — which do you use and when?</summary>
+      <div class="answer"><p>Reset moves the branch pointer backwards and rewrites local history: <code>--soft</code> keeps index and working tree, <code>--mixed</code> resets the index, <code>--hard</code> discards working-tree changes as well. Revert leaves history intact and adds a new commit whose diff is the inverse of the target. Use reset on commits you have not pushed; use revert on anything already public, because it does not invalidate anyone else's clone and the undo is itself reviewable in the log.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A bug appeared somewhere in the last 400 commits. How do you find the commit that introduced it?</summary>
+      <div class="answer"><p><code>git bisect</code>. Mark the current commit bad and a known-good older commit or tag good; Git checks out the midpoint and you answer good or bad until one commit remains — about nine steps for 400 commits instead of 400. Automate it with <code>git bisect run ./script.sh</code>, where the script exits 0 for good, 1 through 127 for bad and 125 for "cannot test, skip". Then <code>git bisect reset</code>. This is a strong argument for small, individually buildable commits and a linear history.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When would you cherry-pick instead of merging, and what is the downside?</summary>
+      <div class="answer"><p>When you need exactly one commit somewhere else — typically backporting a hotfix from <code>main</code> onto a release branch without dragging along everything else that has landed. The downside is duplication: cherry-pick copies the change, so the same logical fix now exists as two commits with different hashes, and a later merge between those branches has to reconcile them (usually harmlessly, sometimes as a conflict). Use <code>-x</code> so the new commit records the original hash, and prefer merges for routine integration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Where do Git hooks live, and why can't you rely on a pre-commit hook to enforce a policy?</summary>
+      <div class="answer"><p>In <code>.git/hooks</code>, which is not version-controlled and is not copied by <code>git clone</code> — so they are not shared unless you commit a directory and set <code>core.hooksPath</code>, or use a manager like Husky or Lefthook. And any developer can skip them with <code>git commit --no-verify</code>. Client hooks are for fast feedback (formatting, lint, message format); enforcement has to live where it cannot be bypassed — required CI checks under branch protection, or server-side <code>pre-receive</code>/<code>update</code> hooks.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is git rerere and when does it earn its keep?</summary>
+      <div class="answer"><p>"Reuse recorded resolution". With <code>rerere.enabled=true</code>, Git records how you resolved each conflict hunk and, when it sees the identical conflict again, replays your resolution automatically. It pays off when the same conflict recurs: a long-lived branch rebased onto a fast-moving <code>main</code> day after day, repeatedly testing a merge before committing to it, or a release branch that keeps taking the same backports. Without it you resolve the same hunk by hand every single time.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> You branched off the wrong branch and have three commits on top of it. How do you move only those three onto main?</summary>
+      <div class="answer"><p><code>git rebase --onto main wrong-base feature</code>. It replays the commits that are in <code>feature</code> but not in <code>wrong-base</code> on top of <code>main</code>, leaving the wrong base's commits behind — which plain <code>git rebase main</code> would not do. Verify the set first with <code>git log wrong-base..feature</code>. If the replay goes wrong, <code>git rebase --abort</code>, and if you have already finished, the reflog still has the pre-rebase tip.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Cloning our monorepo takes forty minutes. What are your options and what do they cost?</summary>
+      <div class="answer"><p>Three independent levers. Shallow clone (<code>--depth=1</code>) is fastest but truncates history, so blame, bisect and old diffs stop working — acceptable for a throwaway CI job, wrong for a developer machine. Partial clone (<code>--filter=blob:none</code>) keeps the full commit and tree graph and fetches file contents lazily, so history commands still work; <code>--filter=tree:0</code> is the more aggressive CI variant. Sparse-checkout (<code>set --cone</code>) is orthogonal — it limits which directories are materialised in the working tree. Combine partial clone with sparse-checkout for developers, and add <code>git maintenance start</code> plus <code>core.fsmonitor</code> so the clone stays fast afterwards.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why use git worktree instead of stashing and switching branches?</summary>
+      <div class="answer"><p>A worktree gives you a second working directory backed by the same object database, so you can have <code>main</code> and a review branch checked out simultaneously. Nothing is stashed, your build output, dependency directory and IDE indexes stay intact per directory, and a long test run on one branch does not block work on another. It is cheap because history is not duplicated. Constraints: the same branch cannot be checked out in two worktrees at once, and you should <code>git worktree remove</code> or <code>prune</code> rather than deleting the directory by hand.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How long does the reflog protect you, and when is data genuinely unrecoverable?</summary>
+      <div class="answer"><p>Reflog entries for reachable commits expire after 90 days by default and unreachable ones after 30 (<code>gc.reflogExpire</code> and <code>gc.reflogExpireUnreachable</code>); once expired, a <code>git gc</code> can prune the objects for good. Genuinely unrecoverable: uncommitted working-tree changes destroyed by <code>git reset --hard</code> or <code>git checkout --</code>, because they were never written as objects; and anything that only existed in a clone you no longer have, since the reflog is never pushed. That is the real argument for committing early and often — a commit, even an ugly one, is protected.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.git.rebase — Merge vs rebase, interactive rebase, conflict resolution, cherry-pick, stash, tags</li>
+      <li>dev.git.recovery — Reflog recovery, bisect, hooks, worktrees, large-repo Git (sparse-checkout, partial clone, maintenance)</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

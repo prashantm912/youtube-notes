@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Docker Fundamentals module: what a container really is (namespaces, cgroups, union filesystem), images versus containers, layers and digests, tags versus versions, registries, the container lifecycle, BuildKit, the Dockerfile instruction set, build context and .dockerignore — with verified resources and interview questions.">
+  <title>Docker Fundamentals — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Docker Fundamentals</h1>
+  <p class="standfirst">A container is not a small virtual machine. It is an ordinary process on the host kernel, fenced off by namespaces, capped by cgroups, and given a filesystem assembled from stacked read-only layers. Everything that surprises people about Docker follows from that one sentence.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment → Docker Fundamentals</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Two things, and they map one-to-one onto the two halves of using Docker well. First, the runtime model: what a container actually is at the kernel level, how an image differs from a container, what a layer is, how digests and tags identify content, where registries fit, and the command lifecycle you will run a hundred times a day. Second, the build model: BuildKit — the default builder since Docker Engine 23 — the Dockerfile instruction set, the build context that gets shipped to the builder, and the instruction ordering that decides whether your builds take four seconds or four minutes.</p>
+    <p>The production concerns — multi-stage builds, slim base images, multi-architecture builds, resource limits and image scanning — are the next module. This one gets the mental model right first, because almost every Docker mistake in production is a misunderstanding from this page, scaled up.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>A container is a process, not a lightweight VM</h3>
+    <p>The "lightweight VM" analogy is the single most expensive misconception in this field, and it is worth killing before anything else. A virtual machine boots its own kernel on virtualised hardware. A container does not boot anything: <code>docker run</code> starts an ordinary Linux process on <em>your</em> kernel, and then the kernel lies to it about the world. Namespaces provide the lies — a PID namespace so the process believes it is process 1 with no siblings, a mount namespace so it sees a different root filesystem, plus network, UTS, IPC, user and cgroup namespaces. Control groups (cgroups) provide the limits: how much CPU, memory, and I/O bandwidth that process tree may consume. The root filesystem it sees is a union (overlay) filesystem stitched together from stacked image layers.</p>
+    <p>Three practical consequences fall straight out of that model, and interviewers probe all three. Containers start in milliseconds because there is no kernel to boot and no hardware to emulate — you are just forking a process with unusual flags. Containers share the host kernel, so a Linux image cannot run natively on a Windows or macOS kernel (Docker Desktop quietly runs a Linux VM for you) and a kernel-level vulnerability such as a container escape is a host-level compromise. And a container is <em>not</em> the security boundary a VM is: the isolation is kernel-enforced policy, not hardware separation, which is why running as root inside a container, mounting the Docker socket, or using <code>--privileged</code> are all treated as serious findings in a review.</p>
+    <pre class="code-block" data-label="SHELL"><code># The container's "PID 1" is just a host process wearing a namespace
+docker run -d --name web nginx
+docker top web                 # host-side view: real PIDs on the host kernel
+docker exec web ps -e          # container-side view: PID 1 is nginx
+
+# cgroups are the cap, namespaces are the fence
+docker run --memory 256m --cpus 0.5 --pids-limit 100 alpine sleep 600</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/" rel="noopener">What is a container? — Docker documentation (concepts, with the VM comparison)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/security/" rel="noopener">Docker Engine security — Docker documentation (namespaces, cgroups, kernel capabilities, the attack surface)</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2016/10/10/what-even-is-a-container/" rel="noopener">What even is a container: namespaces and cgroups — Julia Evans (jvns.ca)</a></li>
+      <li>[Article] <a href="https://www.redhat.com/en/topics/containers/whats-a-linux-container" rel="noopener">What is a Linux container? — Red Hat</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5GanJdbHlAA" rel="noopener">Docker vs Virtual Machine — simply explained — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Images versus containers: read-only layers and one thin writable layer</h3>
+    <p>An image is an immutable, ordered stack of read-only filesystem layers plus a JSON metadata blob (default command, environment, exposed ports, working directory, user). Each layer is a diff — the set of files added, changed or deleted relative to the layer beneath it. A container is that stack <em>plus one thin writable layer</em> on top, unioned together by a storage driver (overlay2 on modern Linux). When the process inside writes to a file that lives in a lower layer, the driver copies it up into the writable layer first; that copy-on-write step is why writing a large file inside a container is slower than writing to a volume, and why heavy write workloads belong in volumes rather than the container filesystem.</p>
+    <p>Say the relationship out loud until it is automatic: image is to container as class is to instance, or as executable is to process. Ten containers from one image share exactly one copy of the read-only layers on disk and differ only in their writable layers — which is the whole reason containers are cheap. And because that writable layer is deleted with the container, anything not written to a volume or a bind mount is gone the moment you <code>docker rm</code>. Layers are also the unit of transfer: pulling a new image version only downloads the layers you do not already have, which is why base image discipline pays for itself across an estate.</p>
+    <pre class="code-block" data-label="SHELL"><code>docker image history myapp:1.4.0   # every layer, its size, the instruction that made it
+docker image inspect myapp:1.4.0   # RootFS.Layers (the diff ids) + Config metadata
+docker diff web                    # A/C/D report of the container's writable layer
+docker system df                   # how much of your disk is layers vs writable vs volumes</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-an-image/" rel="noopener">What is an image? — Docker documentation</a></li>
+      <li>[Official] <a href="https://docs.docker.com/get-started/docker-concepts/building-images/understanding-image-layers/" rel="noopener">Understanding image layers — Docker documentation</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/storage/drivers/" rel="noopener">Storage drivers — Docker documentation (overlay2, copy-on-write, the writable layer)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-images-vs-containers" rel="noopener">Docker Image vs Container — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=rIrNIzy6U_g" rel="noopener">100+ Docker Concepts you Need to Know — Fireship</a></li>
+    </ul>
+
+    <h3>Tags versus digests: why <code>:latest</code> is not a version</h3>
+    <p>An image is identified two ways, and only one of them is trustworthy. A <em>tag</em> is a mutable human label pointing at a manifest — <code>myapp:1.4.0</code>, <code>node:22-alpine</code>. A <em>digest</em> is the content-addressed SHA-256 hash of the manifest — <code>myapp@sha256:ab3f…</code> — and it is immutable by construction: change one byte of any layer and you get a different digest. Tags can be moved, overwritten and deleted; digests cannot. This is why reproducible builds and supply-chain policies pin base images by digest, and why <code>docker pull</code> prints the resolved digest even when you asked for a tag.</p>
+    <p>The <code>:latest</code> trap deserves its own paragraph because it is asked in interviews and it breaks real deployments. <code>latest</code> is not a keyword and carries no semantics whatsoever — it is simply the tag Docker assumes when you omit one. It is not "the newest image", it is "whatever someone last happened to tag <code>latest</code>", which might be six months old or might be a breaking major version pushed an hour ago. Deploying <code>myapp:latest</code> also makes rollback impossible (there is no previous tag to go back to) and makes two nodes pulling at different moments run different code. Tag deliberately instead: an immutable version tag such as <code>1.4.0</code> or the Git commit SHA, plus optional moving convenience tags such as <code>1.4</code> and <code>stable</code>.</p>
+    <pre class="code-block" data-label="SHELL"><code># One image, several names; tagging is just adding a reference
+docker build -t myapp:1.4.0 -t myapp:1.4 -t ghcr.io/acme/myapp:1.4.0 .
+
+# Pin by digest when you need byte-for-byte reproducibility
+docker pull node@sha256:cf1a2b9d0e4c7f8a6b5d3e2c1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/image/tag/" rel="noopener">docker image tag — Docker CLI reference (name components, valid tag syntax)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/docker-hub/repos/" rel="noopener">Docker Hub repositories — Docker documentation (tags, digests, immutable tag settings)</a></li>
+      <li>[Official] <a href="https://github.com/opencontainers/image-spec" rel="noopener">OCI Image Format Specification — Open Container Initiative (manifests, descriptors, content-addressable digests)</a></li>
+      <li>[Article] <a href="https://developers.redhat.com/blog/2018/02/22/container-terminology-practical-introduction" rel="noopener">A Practical Introduction to Container Terminology — Red Hat Developer</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-tag" rel="noopener">Docker Tag Explained — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>Registries: Docker Hub, GHCR, ECR — push, pull, authentication</h3>
+    <p>A registry is the distribution layer: a content-addressed store of image manifests and layer blobs, spoken to over a standard HTTP API. Docker Hub is the default (an unqualified <code>nginx</code> means <code>docker.io/library/nginx</code>), but every serious team also uses a registry attached to their platform — GitHub Container Registry (<code>ghcr.io</code>) alongside GitHub Actions, Amazon ECR for AWS workloads, Azure ACR, Google Artifact Registry, or a self-hosted Harbor or Nexus. The registry name is simply the first path component of the image reference, which is why retagging is all that is needed to move an image between registries.</p>
+    <p>Two operational facts to carry into a real job. Authentication is per-registry via <code>docker login</code>, which writes credentials to <code>~/.docker/config.json</code> — in CI you almost never want a long-lived password there; use a short-lived token (a GitHub Actions token for GHCR, <code>aws ecr get-login-password</code> for ECR, or OIDC federation) so no static secret exists to leak. And Docker Hub enforces anonymous pull rate limits per IP address: on a shared corporate NAT or a busy CI runner this shows up as sudden <code>toomanyrequests</code> failures in builds that worked yesterday, and the fix is to authenticate the pull or mirror the base images into your own registry.</p>
+    <pre class="code-block" data-label="SHELL"><code>docker login ghcr.io -u USERNAME --password-stdin &lt; token.txt
+docker tag myapp:1.4.0 ghcr.io/acme/myapp:1.4.0
+docker push ghcr.io/acme/myapp:1.4.0
+
+# ECR wants a short-lived token, never a stored password
+aws ecr get-login-password --region ap-south-1 \
+  | docker login --username AWS --password-stdin 123456789012.dkr.ecr.ap-south-1.amazonaws.com</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-registry/" rel="noopener">What is a registry? — Docker documentation</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/image/push/" rel="noopener">docker image push — Docker CLI reference</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry" rel="noopener">Working with the Container registry (ghcr.io) — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/AmazonECR/latest/userguide/what-is-ecr.html" rel="noopener">What is Amazon Elastic Container Registry? — AWS documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2v0-aIO_R08" rel="noopener">Build and push Spring Boot Docker images using Maven plugin — Java Techie</a></li>
+    </ul>
+
+    <h3>The container lifecycle: run, ps, logs, exec</h3>
+    <p><code>docker run</code> looks like one action but is really two: <code>docker create</code> (materialise a writable layer and a container config from the image) followed by <code>docker start</code> (execute the entrypoint). Knowing that split matters because a container that has exited still exists — it keeps its writable layer, its logs and its exit code until you remove it, which is exactly what lets you debug a crash after the fact. Add <code>--rm</code> for throwaway runs, <code>-d</code> to detach, <code>-p host:container</code> to publish a port, <code>-e</code> or <code>--env-file</code> for configuration, <code>-v</code> for volumes, and <code>--name</code> so you are not copying hex ids around all day.</p>
+    <p><code>docker ps</code> shows running containers and <code>docker ps -a</code> shows every container including the exited ones with their status and exit code — the first command to run when "the container does not start". <code>docker logs</code> reads whatever the main process wrote to stdout and stderr, which is why containerised apps log to the console rather than to files; <code>-f</code> follows and <code>--tail</code> limits. <code>docker exec -it &lt;name&gt; sh</code> opens a shell in an <em>already running</em> container for live inspection, and it is worth being precise about the difference between <code>exec</code> (join a running container) and <code>run</code> (create a brand new one) because candidates confuse them constantly. Round it out with <code>inspect</code> for the full JSON config, <code>stats</code> for live resource use, and <code>cp</code> to move a file in or out.</p>
+    <pre class="code-block" data-label="SHELL"><code>docker run -d --name api -p 8080:8080 --env-file .env myapp:1.4.0
+docker ps -a                    # includes exited containers + exit codes
+docker logs -f --tail 100 api   # stdout/stderr of PID 1
+docker exec -it api sh          # shell inside the RUNNING container
+docker inspect api              # full config, mounts, network, health</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/engine/containers/run/" rel="noopener">Running containers — Docker Engine documentation (detached mode, restart policies, options)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/run/" rel="noopener">docker container run — Docker CLI reference (every flag)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/logs/" rel="noopener">docker container logs — Docker CLI reference</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/exec/" rel="noopener">docker container exec — Docker CLI reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=17Bl31rlnRM" rel="noopener">Docker Tutorial for Beginners — What is Docker? Introduction to Containers — Kunal Kushwaha</a></li>
+    </ul>
+
+    <h3>Stopping cleanly and cleaning up: stop versus kill, rm and prune</h3>
+    <p><code>docker stop</code> is polite: it sends SIGTERM to PID 1, waits for a grace period (ten seconds by default, tunable with <code>-t</code>), and only then sends SIGKILL. <code>docker kill</code> skips the courtesy and sends SIGKILL immediately. That grace period is where graceful shutdown lives — draining in-flight HTTP requests, committing a transaction, deregistering from service discovery, flushing a buffer. If your process ignores SIGTERM, or never receives it because the Dockerfile used shell form (see the ENTRYPOINT topic below), every deployment becomes a hard kill and you get truncated writes and dropped requests. The same mechanism drives Kubernetes pod termination, so understanding it here pays off twice.</p>
+    <p>Cleanup is the other half. <code>docker rm</code> deletes a stopped container and its writable layer; <code>docker rmi</code> deletes an image if nothing references it. Because layers accumulate silently, disk exhaustion on build agents is one of the most common Docker incidents in the wild, and <code>docker system df</code> then <code>docker system prune</code> is the standard response. Know exactly what the prune flags do before you type them on a shared machine: bare <code>prune</code> removes stopped containers, unused networks, dangling images and build cache; <code>-a</code> also removes every image not used by a running container; <code>--volumes</code> deletes anonymous volumes, which is how people destroy a local database they meant to keep.</p>
+    <pre class="code-block" data-label="SHELL"><code>docker stop -t 30 api      # SIGTERM, wait up to 30s, then SIGKILL
+docker kill api            # SIGKILL now (or --signal to send another)
+docker rm api              # remove the stopped container + its writable layer
+
+docker system df           # ALWAYS look before you prune
+docker image prune         # dangling (untagged) images only
+docker builder prune       # BuildKit cache only
+docker system prune -a     # everything unused — read the prompt carefully</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/stop/" rel="noopener">docker container stop — Docker CLI reference (the grace period and stop signal)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/kill/" rel="noopener">docker container kill — Docker CLI reference</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/manage-resources/pruning/" rel="noopener">Prune unused Docker objects — Docker documentation (every prune command and flag)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-guide" rel="noopener">Docker Guide — Baeldung on Ops (the whole command surface in one place)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3c-iBn73dDE" rel="noopener">Docker Tutorial for Beginners (full course) — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>BuildKit: the default builder, and what it changed</h3>
+    <p>Since Docker Engine 23.0, <code>docker build</code> runs BuildKit rather than the legacy builder — and that is the answer to "why do the Docker tutorials from 2019 look different?" The old builder executed a Dockerfile strictly top to bottom, one linear chain of layers, with a cache keyed on the previous instruction. BuildKit instead parses the Dockerfile into a dependency graph and then does things the old builder could not: run independent stages <em>in parallel</em>, skip stages whose output nothing needs, cache more precisely (including cache mounts that persist a package-manager directory across builds), and produce far better build output.</p>
+    <p>Three BuildKit features are worth knowing by name even at fundamentals level. <code>RUN --mount=type=cache</code> keeps a Maven, npm or apt cache directory between builds without baking it into a layer. <code>RUN --mount=type=secret</code> exposes a credential to a single command without it ever landing in the image history — the correct replacement for the old <code>ARG</code>-a-token anti-pattern, since anyone can read build args back out of an image. And build checks lint your Dockerfile as it builds, warning about things like an undefined build argument or a stage name that shadows another. BuildKit is also what <code>docker buildx</code> drives for multi-platform and multi-node builds, covered in the next module.</p>
+    <pre class="code-block" data-label="DOCKERFILE"><code># syntax=docker/dockerfile:1
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml .
+# cache mount: ~/.m2 survives across builds, never becomes a layer
+RUN --mount=type=cache,target=/root/.m2 mvn -q dependency:go-offline
+COPY src ./src
+RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package
+
+# secret mount: the token is readable only by this one RUN, not by image history
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/buildkit/" rel="noopener">BuildKit — Docker Build documentation (architecture, what it replaced, configuration)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/release-notes/23.0/" rel="noopener">Docker Engine 23.0 release notes — the release that made BuildKit the default builder</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/building/secrets/" rel="noopener">Build secrets — Docker Build documentation</a></li>
+      <li>[Official] <a href="https://github.com/moby/buildkit" rel="noopener">moby/buildkit — GitHub (the builder itself, frontend syntax versions, release notes)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2023/01/docker-buildkit-supply-chain/" rel="noopener">Docker BuildKit Adds Support for Supply Chain Security Practices and Cache Backends — InfoQ</a></li>
+    </ul>
+
+    <h3>The Dockerfile instruction set, in practical order</h3>
+    <p>A Dockerfile is a recipe, and roughly a dozen instructions cover almost everything you will write. <code>FROM</code> picks the base image and starts a stage. <code>WORKDIR</code> sets (and creates) the working directory — always use it instead of <code>RUN cd</code>, because each <code>RUN</code> is a separate shell and a <code>cd</code> does not survive. <code>COPY</code> brings files from the build context into the image; <code>ADD</code> does the same but additionally auto-extracts local tar archives and can fetch remote URLs, and those two conveniences are precisely why <code>COPY</code> is almost always the right choice — <code>ADD</code>'s magic is implicit, its URL fetch skips your proxy and cache behaviour, and Docker's own best-practice guide says to prefer <code>COPY</code>. <code>RUN</code> executes a command and commits the result as a layer, so chain related shell commands with <code>&amp;&amp;</code> and clean up package-manager caches in the <em>same</em> <code>RUN</code>; deleting a file in a later layer hides it but does not shrink the image, because the earlier layer still carries the bytes.</p>
+    <p>The rest configure the image rather than build it. <code>ENV</code> sets an environment variable that persists into the running container; <code>ARG</code> declares a build-time variable that does not — and critically, an <code>ARG</code> value is visible in <code>docker history</code>, so it must never carry a secret. <code>EXPOSE</code> is documentation plus a hint to tooling; it publishes nothing on its own, which surprises people, since only <code>-p</code> or <code>-P</code> at run time actually maps a port. <code>VOLUME</code> declares a path whose data should live outside the image. <code>USER</code> switches to a non-root account — Docker runs as root by default, and "container runs as root" is a standard finding in a security review, so create a user and drop to it before the final command. <code>HEALTHCHECK</code> teaches the engine how to test liveness, and <code>LABEL</code> attaches metadata such as source repository and version for supply-chain traceability.</p>
+    <pre class="code-block" data-label="DOCKERFILE"><code># syntax=docker/dockerfile:1
+FROM eclipse-temurin:21-jre-alpine
+LABEL org.opencontainers.image.source="https://github.com/acme/myapp"
+
+ARG APP_VERSION=1.4.0          # build time only, visible in image history
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"   # persists into the container
+
+WORKDIR /app
+COPY --chown=app:app target/myapp.jar app.jar     # COPY, not ADD
+
+RUN addgroup -S app &amp;&amp; adduser -S -G app app
+USER app                        # never leave the final stage running as root
+
+EXPOSE 8080                     # documentation only; -p does the real mapping
+HEALTHCHECK CMD wget -qO- http://localhost:8080/actuator/health || exit 1
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/dockerfile/" rel="noopener">Dockerfile reference — Docker documentation (every instruction, exhaustively)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/concepts/dockerfile/" rel="noopener">Dockerfile overview — Docker Build documentation</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/building/variables/" rel="noopener">Build variables — Docker documentation (ARG vs ENV, scope, precedence)</a></li>
+      <li>[Article] <a href="https://snyk.io/blog/10-docker-image-security-best-practices/" rel="noopener">10 Docker Image Security Best Practices — Snyk (non-root USER, least privilege, secrets)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WmcdMiyqfZs" rel="noopener">Dockerfile Tutorial — Docker in Practice — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>ENTRYPOINT versus CMD, and the PID 1 signal problem</h3>
+    <p>This pair is asked in almost every Docker interview, so be precise. <code>ENTRYPOINT</code> declares the executable the container exists to run; <code>CMD</code> declares default arguments. Anything you type after the image name in <code>docker run</code> <em>replaces</em> <code>CMD</code> and is appended to <code>ENTRYPOINT</code>; replacing <code>ENTRYPOINT</code> requires the explicit <code>--entrypoint</code> flag. So <code>ENTRYPOINT ["java","-jar","/app/app.jar"]</code> with <code>CMD ["--spring.profiles.active=prod"]</code> gives you a container that is always your app but whose arguments are overridable. If you specify only <code>CMD</code>, the whole line is the default command and any run argument replaces it entirely — convenient for general-purpose images like <code>alpine</code> or <code>python</code>, wrong for a single-purpose application image.</p>
+    <p>The subtler half is form, not choice. Exec form (a JSON array, <code>ENTRYPOINT ["java","-jar","app.jar"]</code>) executes the binary directly, so your process becomes PID 1 and receives SIGTERM from <code>docker stop</code>. Shell form (a bare string, <code>ENTRYPOINT java -jar app.jar</code>) is silently rewritten to <code>/bin/sh -c "…"</code>, making the shell PID 1 — and a shell does not forward signals to its child, so your application never sees SIGTERM, sits there until the grace period expires, and is SIGKILLed. Every "my app never shuts down gracefully in Kubernetes" thread traces back to this. Prefer exec form; when you genuinely need shell features or a wrapper script, either <code>exec</code> the real binary as the last line of that script so it takes over PID 1, or run with <code>--init</code> (or add a tiny init such as Tini) to get a real init that reaps zombies and forwards signals.</p>
+    <pre class="code-block" data-label="DOCKERFILE"><code># GOOD — exec form: java is PID 1 and gets SIGTERM
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+CMD ["--spring.profiles.active=prod"]     # overridable default arguments
+
+# BAD — shell form becomes /bin/sh -c "java -jar /app/app.jar"
+# sh is PID 1, never forwards SIGTERM, so shutdown is always a hard kill
+# ENTRYPOINT java -jar /app/app.jar
+
+# If a wrapper script is unavoidable, hand over PID 1 with exec:
+#   #!/bin/sh
+#   setup_things
+#   exec java -jar /app/app.jar "$@"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/engine/containers/multi-service_container/" rel="noopener">Run multiple processes in a container — Docker documentation (init systems, wrapper scripts, PID 1)</a></li>
+      <li>[Official] <a href="https://github.com/krallin/tini" rel="noopener">krallin/tini — GitHub (the init behind docker run --init, and why zombie reaping matters)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/dockerfile-run-cmd-entrypoint" rel="noopener">Difference Between RUN, CMD and ENTRYPOINT in a Dockerfile — Baeldung on Ops</a></li>
+      <li>[Article] <a href="https://hynek.me/articles/docker-signals/" rel="noopener">Why Your Dockerized Application Isn't Receiving Signals — Hynek Schlawack</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e3YERpG2rMs" rel="noopener">Dockerizing your Spring Boot Application — Java Techie</a></li>
+    </ul>
+
+    <h3>The build context, and what <code>.dockerignore</code> is really for</h3>
+    <p>The final argument to <code>docker build</code> — the dot in <code>docker build -t myapp .</code> — is not "where the Dockerfile is". It is the <em>build context</em>: the directory whose entire contents get packaged and transferred to the builder before the first instruction runs. That transfer is why a build in a repository with a 900 MB <code>node_modules</code>, a <code>target/</code> full of jars, and a <code>.git</code> history spends ages on "transferring context" before doing any work, on every single build. It is also a correctness rule: <code>COPY</code> can only reach paths inside the context, which is why <code>COPY ../shared/lib .</code> fails and why monorepo Dockerfiles are usually built from the repository root with <code>-f</code> pointing at the Dockerfile.</p>
+    <p>A <code>.dockerignore</code> file at the context root fixes both problems at once, using the same pattern syntax as <code>.gitignore</code>. Excluding <code>.git</code>, build output, dependency directories, local environment files and IDE folders routinely takes a context from hundreds of megabytes to a few. It is a security control as well as a performance one: without it, a careless <code>COPY . .</code> bakes your <code>.env</code>, your <code>.aws</code> credentials or your private keys into a layer that anyone who pulls the image can extract — deleting them in a later instruction does not help, because the earlier layer still holds them. Treat <code>.dockerignore</code> as mandatory, not optional, and keep it at least as strict as <code>.gitignore</code>.</p>
+    <pre class="code-block" data-label="TEXT"><code># .dockerignore — same syntax as .gitignore, at the context root
+.git
+.gitignore
+node_modules
+target/
+build/
+dist/
+**/*.log
+.env
+.env.*
+.aws
+*.pem
+.idea
+.vscode
+Dockerfile*
+README.md</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/concepts/context/" rel="noopener">Build context — Docker Build documentation (filesystem, Git and remote contexts, .dockerignore)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/image/build/" rel="noopener">docker image build — Docker CLI reference (the context argument, -f, build args)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/build-checks/" rel="noopener">Build checks — Docker documentation (the lint rules BuildKit applies to your Dockerfile)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-reduce-build-context" rel="noopener">Reduce Build Context for Docker Build Command — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fqMOX6JJhGo" rel="noopener">Docker Tutorial for Beginners — A Full DevOps Course on How to Run Applications in Containers — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Instruction ordering: writing a Dockerfile that hits the cache</h3>
+    <p>The builder caches per instruction. For each one it computes a key — for <code>RUN</code> the command string, for <code>COPY</code> and <code>ADD</code> a checksum of the files being copied — and reuses the existing layer if the key matches. The rule that follows is absolute: <strong>a cache miss on one instruction invalidates every instruction after it.</strong> So the ordering principle is to put the things that rarely change near the top and the things that change on every commit near the bottom. In practice that means declaring the base image, installing OS packages, then copying <em>only</em> the dependency manifest, resolving dependencies, and only then copying your source code.</p>
+    <p>Get it backwards — <code>COPY . .</code> before <code>mvn dependency:go-offline</code> or <code>npm ci</code> — and every one-character source edit changes the copied files, busts the cache, and re-downloads the entire dependency tree. The correct split turns a four-minute rebuild into a ten-second one and is one of the highest-value things you can know about Docker. Two related habits: keep the layer count sane by chaining related <code>RUN</code> commands with <code>&amp;&amp;</code> and cleaning package caches inside the same instruction, and remember that a cache hit depends on inputs, so a <code>RUN apt-get update</code> alone in a layer can serve a stale package index for months — pair it with the install in one instruction.</p>
+    <pre class="code-block" data-label="DOCKERFILE"><code># Dependencies first — this layer is reused until pom.xml/package.json changes
+COPY pom.xml .
+RUN mvn -q dependency:go-offline
+
+# Source last — the only layer that rebuilds on an ordinary commit
+COPY src ./src
+RUN mvn -q -DskipTests package
+
+# One RUN, cleanup inside it: a later "rm" cannot shrink an earlier layer
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends curl \
+ &amp;&amp; rm -rf /var/lib/apt/lists/*</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/cache/" rel="noopener">Docker build cache — Docker Build documentation (how the cache key is computed)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/cache/invalidation/" rel="noopener">Cache invalidation — Docker Build documentation (exactly what busts a layer)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/building/best-practices/" rel="noopener">Building best practices — Docker documentation (ordering, layer discipline, COPY over ADD)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/containers-kubernetes/7-best-practices-for-building-containers" rel="noopener">7 best practices for building containers — Google Cloud Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-build-cache" rel="noopener">How the Docker Build Cache Works and When Not to Use It — Baeldung on Ops</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="06-gradle.html">← Gradle</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="08-docker-production.html">Docker for Production Images →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Docker is asked in essentially every Indian backend, full-stack and DevOps interview, from service-company screening rounds to product-company system design. The first two here are near-certainties:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a container and a virtual machine?</summary>
+      <div class="answer"><p>A VM virtualises hardware and boots its own guest kernel on a hypervisor; a container is a process running on the <em>host</em> kernel, isolated by namespaces and capped by cgroups, with a root filesystem built from union-mounted image layers. Consequences: containers start in milliseconds and use megabytes rather than gigabytes, but they share the host kernel — so a Linux image needs a Linux kernel, and the isolation is kernel-enforced policy rather than hardware separation, making a container a weaker security boundary than a VM.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> ENTRYPOINT vs CMD — what is the difference, and when do you use each?</summary>
+      <div class="answer"><p>ENTRYPOINT is the executable the container always runs; CMD supplies default arguments. Arguments passed to <code>docker run</code> after the image name replace CMD entirely and are appended to ENTRYPOINT; overriding ENTRYPOINT needs the <code>--entrypoint</code> flag. Use ENTRYPOINT (exec form) plus CMD for a single-purpose application image, so the app is fixed and its flags are overridable; use CMD alone for general-purpose images where the user should be able to run anything. If both are given in exec form, the final command is ENTRYPOINT followed by CMD.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between an image and a container?</summary>
+      <div class="answer"><p>An image is an immutable, ordered stack of read-only layers plus metadata — the template. A container is a running (or stopped) instance of that image with one thin writable layer on top. Class versus object, or executable versus process. Many containers share one on-disk copy of the read-only layers; only their writable layers differ, and that writable layer is destroyed when the container is removed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a Docker layer, and what creates one?</summary>
+      <div class="answer"><p>A layer is a filesystem diff — files added, changed or deleted relative to the layer below. Instructions that change the filesystem (FROM, COPY, ADD, RUN) create layers; metadata-only instructions (ENV, LABEL, EXPOSE, CMD, ENTRYPOINT, USER, WORKDIR) update the image config rather than adding filesystem content. Layers are content-addressed and shared, so a pull only downloads the layers you do not already have.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is deploying <code>myapp:latest</code> to production a bad idea?</summary>
+      <div class="answer"><p><code>latest</code> is not a version and has no special meaning — it is just the tag assumed when you omit one, and it is mutable. Two nodes pulling at different times can run different code, you cannot tell from the tag what is actually deployed, and rollback is impossible because there is no earlier tag to return to. Use an immutable version tag (SemVer or the Git commit SHA), and pin base images by digest when reproducibility matters.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> COPY vs ADD — which do you use and why?</summary>
+      <div class="answer"><p>COPY, almost always. Both copy from the build context, but ADD also auto-extracts local tar archives and can fetch remote URLs. That implicit behaviour is the problem: a file named like an archive silently expands, remote fetches bypass your caching and proxy expectations and produce unverified content in a layer, and the intent of the line is no longer obvious. Docker's own best-practice guide says to prefer COPY; the legitimate ADD cases are extracting a local tarball deliberately and, in newer syntax versions, fetching a Git repository.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the build context, and why does a big one slow every build?</summary>
+      <div class="answer"><p>The context is the directory passed as the final argument to <code>docker build</code>; its entire contents are packaged and sent to the builder before any instruction executes. A repository containing <code>.git</code>, <code>node_modules</code> and build output can push hundreds of megabytes across on every build. It also constrains correctness — COPY cannot reference anything outside the context. Fix it with a <code>.dockerignore</code> at the context root, which is also a security control, since <code>COPY . .</code> would otherwise bake <code>.env</code> files and credentials into a layer.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> ENV vs ARG — what is the difference and which may hold a secret?</summary>
+      <div class="answer"><p>ARG is build-time only and is gone at run time; ENV is baked into the image config and is present as an environment variable in every container. Neither may hold a secret: ARG values are recoverable from <code>docker history</code> and ENV values from <code>docker inspect</code>. Use BuildKit's <code>RUN --mount=type=secret</code> for build-time credentials and inject runtime configuration through <code>-e</code>, an env file, or a secret manager.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What happens, precisely, when you run <code>docker run nginx</code>?</summary>
+      <div class="answer"><p>The CLI asks the daemon for the image; if it is not local, the daemon resolves <code>nginx</code> to <code>docker.io/library/nginx:latest</code>, authenticates if needed, pulls the manifest and the missing layers. It then creates a container — a writable layer over the image layers, plus namespaces, cgroups and a network endpoint — and starts it by executing the image's ENTRYPOINT/CMD as PID 1 in those namespaces. <code>run</code> is literally <code>create</code> plus <code>start</code>, which is why an exited container still exists with its logs and exit code until you remove it.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Does EXPOSE publish a port?</summary>
+      <div class="answer"><p>No. EXPOSE is documentation and a hint to tooling — it records which port the image listens on. Only <code>-p hostPort:containerPort</code> (or <code>-P</code> to map every exposed port to random high ports) actually publishes anything, and Compose or Kubernetes do the equivalent. You can publish a port that was never EXPOSEd, and an EXPOSEd port is unreachable from the host unless published.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is BuildKit the default builder, and what did it change?</summary>
+      <div class="answer"><p>BuildKit became the default in Docker Engine 23.0. Instead of executing the Dockerfile as a linear top-to-bottom chain, it builds a dependency graph, which lets it run independent stages in parallel, skip stages nothing depends on, and cache more precisely. It adds cache mounts (a package-manager directory persisted across builds without becoming a layer), secret and SSH mounts so credentials never enter the image history, build checks that lint the Dockerfile, and it is the engine behind buildx for multi-platform builds.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Spring Boot container is never shut down gracefully in Kubernetes. Diagnose it.</summary>
+      <div class="answer"><p>Almost certainly shell-form ENTRYPOINT. A bare string is rewritten to <code>/bin/sh -c "…"</code>, so the shell is PID 1 and does not forward SIGTERM to the JVM; the app sits idle through the whole grace period and is then SIGKILLed, dropping in-flight requests. Fix with exec form (<code>ENTRYPOINT ["java","-jar","app.jar"]</code>), or if a wrapper script is genuinely needed, end it with <code>exec java …</code> so the JVM takes over PID 1. Then confirm the app actually handles SIGTERM (Spring Boot's graceful shutdown) and that the grace period is long enough. Running with <code>--init</code> or Tini also gives you signal forwarding and zombie reaping.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A one-line change to a source file triggers a full dependency re-download on every build. Why, and how do you fix it?</summary>
+      <div class="answer"><p>The Dockerfile copies the whole project (<code>COPY . .</code>) before resolving dependencies. A COPY's cache key is a checksum of the copied files, so any source edit invalidates it — and a cache miss invalidates every subsequent instruction, including the dependency resolution. Reorder so rarely-changing inputs come first: copy only <code>pom.xml</code> / <code>package.json</code>, run <code>mvn dependency:go-offline</code> or <code>npm ci</code>, then copy the source. Add a BuildKit cache mount for the local repository directory to survive even a manifest change.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A secret was committed into an image in an early layer and deleted in a later one. Is the image safe?</summary>
+      <div class="answer"><p>No. Layers are additive diffs; a deletion in a later layer only records a whiteout entry, and the earlier layer still contains the bytes. Anyone who pulls the image can extract them with <code>docker save</code> or by inspecting the layer tarballs, and <code>docker history</code> exposes build arguments too. The secret must be rotated, and the image rebuilt so the credential never enters a layer — via a BuildKit secret mount at build time, or runtime injection through environment variables or a secret manager. Prevent recurrence with a <code>.dockerignore</code> and image scanning in CI.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Tag or digest — how would you pin images across an estate, and what do you give up?</summary>
+      <div class="answer"><p>A tag is a mutable pointer; a digest is the SHA-256 of the manifest and is immutable, so <code>base@sha256:…</code> is the only reference that guarantees byte-identical content on every pull. Pin base images by digest in Dockerfiles for reproducible and auditable builds, and deploy your own images by an immutable version tag (or digest) so rollback is a one-line change. The cost is that digests do not float: you no longer pick up base-image security patches automatically, so pair digest pinning with an automated bump (Renovate or Dependabot) and image scanning, otherwise you have traded a reproducibility problem for a vulnerability problem.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your CI agents keep running out of disk. What is consuming it, and how do you clean up safely?</summary>
+      <div class="answer"><p>Accumulated image layers, stopped containers, dangling images from rebuilt tags, BuildKit cache and orphaned volumes. Start with <code>docker system df</code> to see the split rather than guessing. Then prune narrowly: <code>docker container prune</code> for stopped containers, <code>docker image prune</code> for dangling images, <code>docker builder prune</code> (with a filter such as <code>--keep-storage</code> or an age filter) for build cache. Reserve <code>docker system prune -a</code> for agents, and never pass <code>--volumes</code> on a machine holding data you care about, since it deletes anonymous volumes. The durable fix is a scheduled prune with age filters plus a smaller build context so less is created in the first place.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.dk.images — images, layers, registries, the container lifecycle, BuildKit as the default builder</li>
+      <li>dev.dk.dockerfile — Dockerfile instruction set, build context, .dockerignore, tagging</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

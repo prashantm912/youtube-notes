@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Git Fundamentals module: the object model (blobs, trees, commits, tags), content-addressed storage, refs and HEAD, branches as pointers, the three trees and the staging area, .gitignore patterns and traps, the everyday command loop, remotes, diff mastery and history inspection — with verified resources and interview questions.">
+  <title>Git Fundamentals — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Git Fundamentals</h1>
+  <p class="standfirst">Git looks arbitrary until you understand what it actually stores on disk. Learn the object model first and the commands stop being incantations — almost every confusing Git behaviour turns out to be an obvious consequence of four object types and three trees.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Git Fundamentals</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module opens the DevOps track, and it deliberately teaches Git from the inside out. Most people learn Git as a list of commands to memorise, which is why the same handful of situations — a detached HEAD, a file that refuses to be ignored, a reset that ate an afternoon's work — keep catching them out. The underlying data structure is small enough to hold in your head: a content-addressed store of four object types, plus a set of pointers into it.</p>
+    <p>We start with blobs, trees, commits and tags and the SHA hashing that names them; then refs, HEAD and why a branch is nothing more than a movable file containing one commit id. From there the three trees — working directory, index and HEAD — explain exactly what <code>add</code>, <code>commit</code>, <code>restore</code>, <code>checkout</code> and the three flavours of <code>reset</code> do. The second half is the daily surface: the everyday command loop, remotes, real diff fluency, and the history-inspection commands that turn a repository into a searchable record of why the code looks the way it does.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The four object types: blob, tree, commit, tag</h3>
+    <p>Everything Git stores lives in <code>.git/objects</code> as one of four immutable object types. A <strong>blob</strong> is the raw bytes of a file — no name, no path, no permissions, just content. A <strong>tree</strong> is a directory listing: a table of entries, each holding a mode, a type, an object id and a name, pointing at blobs (files) or other trees (subdirectories). A <strong>commit</strong> points at exactly one top-level tree and at zero or more parent commits, and adds the author, committer, timestamps and message. An <strong>annotated tag</strong> is a fourth object that points at a commit and carries its own message and tagger — which is why annotated tags survive in the object database while lightweight tags are merely a ref.</p>
+    <p>Why it matters: this is the entire model. Branches, merges, rebases, stashes and remote tracking are all bookkeeping on top of these four types. Once you can say "a commit is a pointer to a tree plus pointers to parents" you can reason about history as a directed acyclic graph, and interview questions about detached HEAD, dangling commits and orphaned objects answer themselves. Note also what is <em>not</em> in the model: file renames. Git stores no rename record at all — <code>git log --follow</code> and diff rename detection infer them after the fact by comparing content similarity.</p>
+    <pre class="code-block" data-label="bash"><code># Look at the objects directly — this is the whole database
+git cat-file -t HEAD              # commit
+git cat-file -p HEAD              # tree id, parent id, author, message
+git cat-file -p HEAD^{tree}       # the directory listing
+git cat-file -p HEAD:README.md    # the blob's raw bytes
+git rev-parse HEAD                # the commit's own object id</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Internals-Git-Objects" rel="noopener">Git Internals — Git Objects — Pro Git book (Chacon &amp; Straub)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/gitglossary" rel="noopener">gitglossary — Git reference manual (precise definitions of blob, tree, commit, ref, index)</a></li>
+      <li>[Article] <a href="https://maryrosecook.com/blog/post/git-from-the-inside-out" rel="noopener">Git from the Inside Out — Mary Rose Cook</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2023/09/14/in-a-git-repository--where-do-your-files-live-/" rel="noopener">In a git repository, where do your files live? — Julia Evans (jvns.ca)</a></li>
+      <li>[Article] <a href="https://think-like-a-git.net/" rel="noopener">Think Like (a) Git — a guide for the perplexed (the graph theory behind Git)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hwP7WQkmECE" rel="noopener">Git Explained in 100 Seconds — Fireship</a></li>
+    </ul>
+
+    <h3>Content addressing: why a commit is a snapshot, not a diff</h3>
+    <p>Git names every object by the SHA hash of its own contents (SHA-1 historically, with SHA-256 repositories now supported). The name <em>is</em> a checksum, so an object can never be silently altered — change one byte and you have a different object with a different id. Identical content is stored once no matter how many times it appears, and because a commit's id incorporates its tree and its parents, a commit id transitively fingerprints the entire history that leads to it. That is why rewriting any commit changes the id of every commit after it, and why comparing two repositories reduces to comparing a few hashes.</p>
+    <p>The consequence people get wrong in interviews: a Git commit is a full snapshot of the tree, not a delta against its parent. Older systems such as Subversion stored per-file change lists; Git stores the complete state and shares unchanged blobs by identity. Diffs are <em>computed on demand</em> when you ask for them. (Packfiles do apply delta compression on disk to save space, but that is a storage optimisation underneath the model, not the model itself.) This is what makes branching cheap, <code>git checkout</code> of an old revision instant, and history verifiable.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Getting-Started-What-is-Git%3F" rel="noopener">What is Git? — Pro Git book (snapshots not differences, integrity by checksum)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/get-started/using-git/about-git" rel="noopener">About Git — GitHub Docs</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/what-is-git" rel="noopener">What is Git — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://wyag.thb.lt/" rel="noopener">Write Yourself a Git — Thibault Polge (build the object store yourself, in Python)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aolI_Rz0ZqY" rel="noopener">So You Think You Know Git (FOSDEM 2024) — Scott Chacon, GitButler</a></li>
+    </ul>
+
+    <h3>Refs and HEAD: branches are movable pointers, nothing more</h3>
+    <p>A ref is a file under <code>.git/refs</code> whose entire content is an object id. <code>refs/heads/main</code> is your local branch, <code>refs/remotes/origin/main</code> is your last-known position of the remote's branch, <code>refs/tags/v1.0</code> is a tag. Creating a branch writes a 41-byte file, which is why it is instantaneous and why "branches are expensive" habits carried over from older tools make no sense here. <code>HEAD</code> is one level of indirection above: normally it contains <code>ref: refs/heads/main</code>, meaning "I am on main", so committing advances the branch pointer automatically.</p>
+    <p>Detached HEAD is simply HEAD holding a raw commit id instead of a ref name. Nothing is broken; you are just not on a branch, so new commits are reachable from nothing once you leave, and garbage collection will eventually reap them. The fix is always the same — <code>git switch -c some-branch</code> to give those commits a name. Understanding refs also demystifies merge: a fast-forward merge is Git noticing the target is an ancestor and simply moving the pointer forward, with no merge commit at all.</p>
+    <pre class="code-block" data-label="bash"><code>cat .git/HEAD                     # ref: refs/heads/main
+cat .git/refs/heads/main          # a single 40-character object id
+git symbolic-ref HEAD             # the same, the supported way
+git branch feature                # creates one small file; O(1), not O(repo)
+git switch -c rescue              # give a detached HEAD's commits a name</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Internals-Git-References" rel="noopener">Git Internals — Git References — Pro Git book (refs, HEAD, remote refs, tags)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Branching-Branches-in-a-Nutshell" rel="noopener">Branches in a Nutshell — Pro Git book</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2023/11/23/branches-intuition-reality/" rel="noopener">Git branches: intuition and reality — Julia Evans (jvns.ca)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/using-branches" rel="noopener">Git branch — Atlassian Git tutorials</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=e2IbNHi4uCI" rel="noopener">Git Branches Tutorial — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>The three trees: working directory, index and HEAD</h3>
+    <p>Git manages three views of your project simultaneously. <strong>HEAD</strong> is the snapshot of the last commit on the current branch. The <strong>index</strong> (also called the staging area or cache — one binary file at <code>.git/index</code>) is the proposed next commit. The <strong>working directory</strong> is the actual files on disk you edit. Nearly every core command is best described as "which of these three does it move data between": <code>git add</code> copies working directory to index, <code>git commit</code> turns the index into a new commit and moves HEAD's branch to it, <code>git restore</code> copies out of the index or a commit back into the working directory.</p>
+    <p><code>git reset</code> is the command that finally makes sense in this frame, because its three modes stop one step further each time. <code>--soft</code> moves the branch pointer only, leaving index and working directory untouched (this is how you squash the last three commits into one staged change). <code>--mixed</code>, the default, also resets the index, so your changes survive as unstaged edits. <code>--hard</code> resets all three and is the only one that destroys uncommitted work — everything else is recoverable through the reflog. Note the modern split: <code>git switch</code> changes branches and <code>git restore</code> restores files, taking over the two unrelated jobs that <code>git checkout</code> historically did in one overloaded command. They have been available since Git 2.23 and are far clearer for beginners, but <code>checkout</code> is not deprecated and is still what most teams actually type, so you need to read both.</p>
+    <pre class="code-block" data-label="bash"><code>git reset --soft  HEAD~1   # branch moves back; index + files untouched
+git reset          HEAD~1   # (--mixed) branch + index move back; files kept
+git reset --hard  HEAD~1   # all three move back; uncommitted work is gone
+
+git restore --staged file.txt   # unstage: index &lt;- HEAD, working copy kept
+git restore file.txt            # discard edits: working copy &lt;- index
+git switch main                 # change branch (the old: git checkout main)</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Reset-Demystified" rel="noopener">Reset Demystified — Pro Git book (the definitive three-trees explanation)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-reset" rel="noopener">git-reset — Git reference manual (soft, mixed, hard, merge, keep)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-restore" rel="noopener">git-restore — Git reference manual</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/undoing-changes/git-reset" rel="noopener">Undoing changes: git reset — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://ohshitgit.com/" rel="noopener">Oh Shit, Git!?! — Katie Sylor-Miller (the recovery cheat sheet, by symptom)</a></li>
+    </ul>
+
+    <h3>The staging area in practice: add, status and partial commits</h3>
+    <p>The index exists so that <em>what you commit</em> is a deliberate choice rather than whatever happens to be on disk. This is the feature that distinguishes Git from most tools that came before it, and skipping it with a reflexive <code>git commit -am</code> throws away the main benefit: you fixed a bug and also reformatted an unrelated file, and those belong in two commits so the bug fix can be reviewed, reverted or cherry-picked on its own. <code>git add -p</code> stages selected hunks within a file interactively, so even a single messy file can be split into clean commits.</p>
+    <p>Read <code>git status</code> carefully rather than skimming it: it reports three distinct groups — staged ("Changes to be committed"), unstaged tracked changes ("Changes not staged for commit") and untracked files — and it tells you the exact command to undo each one. <code>git status --short</code> gives the two-column form worth learning, where the left column is the index state and the right column the working tree, so <code>MM</code> means "staged, then edited again" and only the staged version will be committed. Also know that <code>git commit -a</code> stages modifications and deletions of already-tracked files but never adds untracked ones.</p>
+    <pre class="code-block" data-label="bash"><code>git add -p            # stage hunk by hunk; the habit that produces clean commits
+git status --short    # XY columns: X = index, Y = working tree
+git diff              # what you have NOT staged
+git diff --staged     # what you are about to commit
+git commit --amend    # fold staged changes into the previous commit</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Basics-Recording-Changes-to-the-Repository" rel="noopener">Recording Changes to the Repository — Pro Git book (tracked, staged, modified)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-add" rel="noopener">git-add — Git reference manual (including interactive and patch mode)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-status" rel="noopener">git-status — Git reference manual (the short-format column codes)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Basics-Undoing-Things" rel="noopener">Undoing Things — Pro Git book (amend, unstage, discard)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/saving-changes" rel="noopener">Saving changes: git add and the staging area — Atlassian Git tutorials</a></li>
+    </ul>
+
+    <h3>.gitignore: patterns, precedence, and the already-tracked trap</h3>
+    <p><code>.gitignore</code> holds glob patterns for paths Git should not offer as untracked. The rules that actually matter: a leading slash anchors the pattern to the directory containing the file, a trailing slash matches directories only, <code>*</code> does not cross a slash but <code>**</code> does, and a leading <code>!</code> re-includes something previously excluded. Later rules override earlier ones. There is one exception that trips everyone: you cannot re-include a file if one of its parent directories is excluded, because Git never descends into an excluded directory to find it — you must un-exclude the directory first, then exclude its contents.</p>
+    <p>The classic trap is that <strong>.gitignore only affects untracked files</strong>. Once a file has been committed, Git keeps tracking it forever and adding it to the ignore file changes nothing. The fix is <code>git rm --cached</code> to stop tracking while keeping the file on disk, then commit that removal. Two more things to know for real projects: ignore rules can also live outside the repository, in <code>.git/info/exclude</code> for repo-local personal rules and in a global <code>core.excludesFile</code> for editor and OS noise that has no business in a shared file; and secrets committed by accident are not removed from history by any of this, since the blob remains in every past commit and must be treated as leaked and rotated.</p>
+    <pre class="code-block" data-label="gitignore"><code>build/            # any directory named build, at any depth
+/dist             # only dist at the repository root
+*.log             # every .log file
+!important.log    # ...except this one
+docs/**/tmp/      # ** crosses directory boundaries
+
+# Already committed? The ignore rule does nothing until you untrack it:
+#   git rm --cached secrets.env
+#   git check-ignore -v path/to/file   shows WHICH rule matched</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/gitignore" rel="noopener">gitignore — Git reference manual (full pattern format and precedence rules)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/get-started/git-basics/ignoring-files" rel="noopener">Ignoring files — GitHub Docs (repository, personal and global ignore files)</a></li>
+      <li>[Official] <a href="https://github.com/github/gitignore" rel="noopener">github/gitignore — GitHub's collection of language and tooling templates</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/saving-changes/gitignore" rel="noopener">.gitignore — Atlassian Git tutorials (patterns, debugging, shared vs personal)</a></li>
+    </ul>
+
+    <h3>The everyday loop: status, add, commit, branch, switch, merge</h3>
+    <p>Ninety percent of real Git use is a short cycle: check <code>status</code>, stage deliberately with <code>add</code>, write a commit message that says <em>why</em> rather than restating the diff, create or switch a branch, and merge when the work is reviewed. Commit small and often — a commit that changes one thing is a commit you can revert, cherry-pick, bisect across or explain in a review. The message convention worth adopting early is a short imperative subject line under about fifty characters, a blank line, then a body explaining the reasoning and any ticket reference; tools, changelogs and <code>git log --oneline</code> all assume that shape.</p>
+    <p>Merging comes in two flavours you should be able to name. If the branch you are merging into has not moved, Git performs a <strong>fast-forward</strong>: no merge commit is created, the pointer simply advances. If both branches have new commits, Git performs a <strong>three-way merge</strong> using the common ancestor, producing a merge commit with two parents. Use <code>--no-ff</code> when you want the merge commit to record that a feature branch existed even where a fast-forward was possible. Conflicts are not errors: Git stages what it could resolve, leaves conflict markers in the rest, and waits for you — the deeper mechanics of conflict resolution, rebase and recovery are the subject of the next module.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/git-switch" rel="noopener">git-switch — Git reference manual (the modern branch-changing command)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/git-guide" rel="noopener">A Guide to Git — Baeldung on Ops (the command surface end to end)</a></li>
+      <li>[Article] <a href="https://learngitbranching.js.org/" rel="noopener">Learn Git Branching — interactive visual sandbox (watch the graph move as you type)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=apGV9Kg7ics" rel="noopener">Complete Git and GitHub Tutorial — Kunal Kushwaha</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=RGOj5yH7evk" rel="noopener">Git and GitHub for Beginners — Crash Course — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Remotes: clone, fetch, pull and push</h3>
+    <p>A remote is a named URL — <code>origin</code> by convention — plus a set of remote-tracking refs under <code>refs/remotes/origin/</code>. Those refs are your local cache of where the remote's branches were the last time you talked to it; they are not live, and this is the single most useful thing to understand about remotes. <code>git fetch</code> downloads new objects and updates those tracking refs without touching your working directory at all, so it is always safe to run. <code>git pull</code> is <code>fetch</code> followed immediately by a merge (or a rebase with <code>--rebase</code>) into your current branch, which is why pull can produce conflicts and fetch never can.</p>
+    <p>Prefer <code>fetch</code> plus an explicit look at what arrived when the stakes are high: <code>git log --oneline HEAD..origin/main</code> shows exactly what you are about to take. On the push side, <code>git push -u origin feature</code> sets the upstream so later pushes and pulls need no arguments; a push is rejected when the remote has commits you do not, and the correct response is to integrate them, never <code>--force</code> on a shared branch. If you must overwrite a branch you own, use <code>--force-with-lease</code>, which refuses when someone else has pushed since your last fetch.</p>
+    <pre class="code-block" data-label="bash"><code>git fetch origin                       # safe: updates origin/* refs only
+git log --oneline HEAD..origin/main    # what would pull bring in?
+git log --oneline origin/main..HEAD    # what have I not pushed?
+git pull --rebase                      # fetch + rebase; linear local history
+git push -u origin feature             # set upstream on the first push</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Basics-Working-with-Remotes" rel="noopener">Working with Remotes — Pro Git book (tracking branches, fetch vs pull, push)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/get-started/git-basics/managing-remote-repositories" rel="noopener">Managing remote repositories — GitHub Docs</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/syncing" rel="noopener">Syncing: remote, fetch, pull and push — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://jvns.ca/blog/2023/11/01/confusing-git-terminology/" rel="noopener">Confusing git terminology — Julia Evans (jvns.ca)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SWYqp7iY_Tc" rel="noopener">Git &amp; GitHub Crash Course For Beginners — Traversy Media</a></li>
+    </ul>
+
+    <h3>Diff mastery: which two of the three trees are you comparing?</h3>
+    <p>Most confusion about <code>git diff</code> disappears once you ask which pair of trees it is comparing. Plain <code>git diff</code> compares the working directory against the index — your unstaged changes. <code>git diff --staged</code> (identical to <code>--cached</code>) compares the index against HEAD — precisely what a commit right now would contain. <code>git diff HEAD</code> compares the working directory against HEAD — everything you have changed since the last commit, staged or not. Getting this wrong is why people commit half of what they meant to, and it is asked in interviews constantly.</p>
+    <p>Beyond the three defaults, a handful of options do real work. <code>--stat</code> gives a per-file summary instead of a wall of text, which is the right first look at any large change. <code>--word-diff</code> highlights changed words rather than whole lines, indispensable for prose, config and long lines. Two dots versus three matters: <code>git diff main..feature</code> compares the two endpoints, while <code>git diff main...feature</code> compares feature against the <em>merge base</em>, which is what a pull request actually shows you. And <code>git diff --name-only</code> or <code>--name-status</code> feeds scripts and pre-commit hooks; add <code>-- path/</code> at the end to restrict any diff to a subtree.</p>
+    <pre class="code-block" data-label="bash"><code>git diff                  # working tree vs index   (unstaged)
+git diff --staged         # index vs HEAD           (about to be committed)
+git diff HEAD             # working tree vs HEAD    (everything)
+
+git diff --stat           # per-file summary of insertions/deletions
+git diff --word-diff      # word-level, not line-level
+git diff main...feature   # vs the merge base — what a pull request shows
+git diff HEAD~3 HEAD -- src/   # a range, restricted to one subtree</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/docs/git-diff" rel="noopener">git-diff — Git reference manual (every form and option, with the tree comparisons spelled out)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/gitrevisions" rel="noopener">gitrevisions — Git reference manual (HEAD~3, HEAD^2, two-dot vs three-dot ranges)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/inspecting-a-repository" rel="noopener">Inspecting a repository: status, log and diff — Atlassian Git tutorials</a></li>
+      <li>[Article] <a href="https://blog.gitbutler.com/how-git-core-devs-configure-git/" rel="noopener">How core Git developers configure Git — GitButler blog (diff and log settings worth stealing)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=gwWKnnCMQ5c" rel="noopener">Git &amp; GitHub Tutorial For Beginners In Hindi — CodeWithHarry</a></li>
+    </ul>
+
+    <h3>History inspection: log, the pickaxe, blame and show</h3>
+    <p>A repository's real value is that it answers "why is this line here?" — but only if you can query it. <code>git log --oneline --graph --all --decorate</code> is the one invocation to memorise: it draws the branch topology as ASCII art with every ref labelled, and it turns an abstract argument about merge history into a picture. Narrow it with <code>--since</code>, <code>--author</code>, <code>-- path/to/file</code>, or <code>-p</code> to show each commit's patch inline. <code>--follow</code> keeps tracking a file across renames, which Git has to infer because renames are never recorded.</p>
+    <p>Three tools do the forensic work. The <strong>pickaxe</strong>, <code>git log -S"someString"</code>, finds commits where the number of occurrences of a string changed — the fastest way to find when a function, config key or feature flag was introduced or deleted; <code>-G</code> is the regex variant that matches any diff line. <code>git blame</code> annotates each line of a file with the commit, author and date that last touched it, and <code>-w</code> (ignore whitespace) plus <code>-C</code> (detect moved code) stop a reformatting commit from taking the blame for everything. Finish with <code>git show &lt;commit&gt;</code> to read the full message and patch, and <code>git shortlog -sn</code> for a per-author commit count. One caution to voice in interviews: blame identifies the last change, not the responsible person — use it to find context, not culprits.</p>
+    <pre class="code-block" data-label="bash"><code>git log --oneline --graph --all --decorate   # the topology, at a glance
+git log -p -- src/auth.ts                    # patches for one file
+git log --follow -- src/auth.ts              # keep going across renames
+git log -S"parseToken" --oneline             # pickaxe: when did this string appear?
+git blame -w -C src/auth.ts                  # per-line, ignoring reformatting
+git show a1b2c3d                             # full message + patch
+git shortlog -sn                             # commits per author</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Basics-Viewing-the-Commit-History" rel="noopener">Viewing the Commit History — Pro Git book (log formatting and filtering)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-log" rel="noopener">git-log — Git reference manual (every filter, format and history-simplification rule)</a></li>
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Tools-Searching" rel="noopener">Git Tools — Searching — Pro Git book (grep, the pickaxe and line-log search)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-blame" rel="noopener">git-blame — Git reference manual (whitespace and copy-detection options)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ecK3EnyGD8o" rel="noopener">13 Advanced (but useful) Git Techniques and Shortcuts — Fireship</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="02-git-advanced.html">Git Advanced →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Git is asked in nearly every Indian interview loop, from a service-company screening round to a product-company system-design panel — the beginner questions are pure recall, but the later ones separate candidates who understand the object model from those who memorised a command list:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the four object types Git stores, and what does each hold?</summary>
+      <div class="answer"><p>Blob (raw file content, no name), tree (a directory listing of mode, type, object id and name entries pointing at blobs or other trees), commit (one tree pointer, zero or more parent pointers, author, committer, timestamps and message) and annotated tag (a pointer to a commit plus a tagger and message). Everything else in Git is bookkeeping on top of these.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the staging area and why does Git have one?</summary>
+      <div class="answer"><p>The index is a binary file at <code>.git/index</code> holding the proposed next commit. It exists so that what you commit is a deliberate selection rather than the whole working directory — you can fix a bug and reformat a file, then commit them separately. <code>git add -p</code> even lets you stage part of a single file.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between git fetch and git pull?</summary>
+      <div class="answer"><p>Fetch downloads new objects and updates the remote-tracking refs (<code>origin/main</code>) without touching your branch or working directory — it is always safe. Pull is fetch plus an immediate merge (or rebase with <code>--rebase</code>) into your current branch, so it can produce conflicts and change your files.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> git diff vs git diff --staged vs git diff HEAD?</summary>
+      <div class="answer"><p>Plain <code>diff</code>: working directory against the index, i.e. what is not yet staged. <code>--staged</code> (or <code>--cached</code>): the index against HEAD, i.e. exactly what a commit would contain right now. <code>diff HEAD</code>: working directory against HEAD, i.e. everything changed since the last commit whether staged or not.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> I added a file to .gitignore but Git still tracks it. Why?</summary>
+      <div class="answer"><p>Ignore rules apply only to untracked files. Once a path is in the index Git keeps tracking it regardless of any pattern. Run <code>git rm --cached path</code> to stop tracking while keeping the file on disk, then commit that removal. Use <code>git check-ignore -v path</code> to see which rule (if any) is matching.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are git switch and git restore, and do they replace checkout?</summary>
+      <div class="answer"><p>They split the two unrelated jobs <code>git checkout</code> did: <code>switch</code> changes branches, <code>restore</code> restores file contents from the index or a commit. Introduced in Git 2.23, they are clearer and less error-prone. <code>checkout</code> is not deprecated and remains what most teams type, so you should be fluent in both.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain the three modes of git reset.</summary>
+      <div class="answer"><p>All three move the current branch pointer; they differ in how far the effect propagates through the three trees. <code>--soft</code> stops there — index and working directory keep your changes, which is how you squash the last N commits into one staged change. <code>--mixed</code> (the default) also resets the index, so changes remain as unstaged edits. <code>--hard</code> also resets the working directory and is the only one that discards uncommitted work.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is a Git commit a snapshot or a delta against its parent?</summary>
+      <div class="answer"><p>A snapshot. Each commit points at a complete tree of the project; unchanged files simply reuse the same blob object because the content hash is identical, so snapshots cost almost nothing. Diffs are computed on demand. Packfiles do delta-compress objects on disk, but that is a storage optimisation, not the data model — and this is exactly where Git differs from Subversion.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is detached HEAD, how do you get into it, and how do you get out?</summary>
+      <div class="answer"><p>HEAD normally contains a symbolic ref like <code>ref: refs/heads/main</code>. Checking out a commit id, a tag, or a remote-tracking ref puts a raw object id in HEAD instead, so you are not on any branch. Commits made there are reachable from nothing once you leave and will eventually be garbage collected. Escape with <code>git switch -c newbranch</code> to name them, or <code>git switch -</code> to abandon them; the reflog can still recover them for a while.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is creating a branch in Git effectively free?</summary>
+      <div class="answer"><p>A branch is a file under <code>.git/refs/heads/</code> containing a single 40-character object id. Creating one writes 41 bytes; no files are copied and no history is duplicated. Switching branches just rewrites HEAD and updates the working tree to match the target commit's tree, reusing blobs that are already present.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you find the commit that introduced a particular string or function?</summary>
+      <div class="answer"><p>The pickaxe: <code>git log -S"parseToken" --oneline</code> lists commits where the count of that string changed, so it finds both the introduction and the deletion. <code>git log -G"regex"</code> matches any diff line against a regular expression instead. Add <code>-p</code> to see the patches, or a pathspec to narrow the search. For line-level history use <code>git log -L</code>; for the current state of each line use <code>git blame</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> When does a merge fast-forward, and when do you avoid it?</summary>
+      <div class="answer"><p>Fast-forward happens when the target branch is an ancestor of the branch being merged — Git just moves the pointer forward and creates no merge commit. Pass <code>--no-ff</code> when you want an explicit merge commit recording that a feature branch existed, which many teams require so a feature can be reverted as a unit. If both branches have diverged, Git performs a three-way merge from the common ancestor and always creates a merge commit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Two files in a repository have identical content but different names. How many blobs?</summary>
+      <div class="answer"><p>One. Blobs are content-addressed by the hash of their bytes, and they store no filename — the names live in the tree entries that point at the blob. Two identical files therefore share a single blob, and one tree holds two entries with different names and the same object id. This is also why Git records no rename information at all and has to infer renames by similarity when you ask for <code>--follow</code> or rename detection in a diff.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is the difference between two dots and three dots in git diff and git log?</summary>
+      <div class="answer"><p>They mean different things in the two commands, which is a common trap. In <code>git log A..B</code> the two-dot form lists commits reachable from B but not A, and <code>A...B</code> is the symmetric difference — commits in either but not both. In <code>git diff A..B</code> the two-dot form compares the two endpoints directly, while <code>A...B</code> compares B against the merge base of A and B, which is what a pull request diff shows and usually what you want when a long-lived branch has drifted.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A teammate committed an AWS key, then removed it in the next commit and added the file to .gitignore. Is the repository safe?</summary>
+      <div class="answer"><p>No. The blob still exists in the earlier commit and in every clone, fork and CI cache that ever fetched it, and anyone can read it with <code>git show</code>. The credential must be treated as compromised and rotated immediately — that is the first action, not the last. Removing it from history additionally requires rewriting every affected commit (git-filter-repo or BFG) plus a force push and re-clone by everyone, and on a hosted platform you should also contact support because cached views can persist. The ignore rule prevents recurrence but fixes nothing already committed.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your push is rejected as non-fast-forward. Walk through your options, including when force is acceptable.</summary>
+      <div class="answer"><p>Rejection means the remote branch has commits you do not have, so accepting your push would drop them. Correct response: <code>git fetch</code>, inspect with <code>git log --oneline HEAD..origin/main</code>, then integrate by merge or rebase and push again. Plain <code>--force</code> on a shared branch destroys other people's commits and is unacceptable. On a personal feature branch that you alone own — typically after an amend or interactive rebase — use <code>--force-with-lease</code>, which refuses the push if the remote moved since your last fetch and so cannot silently clobber a colleague.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you split one large uncommitted change into three reviewable commits?</summary>
+      <div class="answer"><p>Use the index as the selection tool: <code>git add -p</code> and accept only the hunks belonging to the first logical change, verify with <code>git diff --staged</code>, commit, and repeat. If the change is already in one commit, <code>git reset --soft HEAD~1</code> puts it back in the index (or <code>--mixed</code> to unstage entirely) and you re-stage in pieces. Keep each commit independently buildable so bisect and revert stay useful, and mention that a commit doing one thing is the precondition for cherry-picking and clean review.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.git.model — object model (blobs, trees, commits, tags), content-addressed storage, refs and HEAD, branches as pointers, the three trees, the staging area, .gitignore</li>
+      <li>dev.git.daily — everyday commands, branching and merging, remotes and fetch/pull/push, diff mastery, log and history inspection</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="GitHub Actions module: the workflow/job/step/action/runner object model, triggers and expressions, matrix builds, caching and service containers, reusable workflows versus composite actions, secrets and environments, least-privilege permissions, SHA pinning, OIDC federation for keyless cloud deploys, publishing the Java and Angular stack to GHCR, and a Jenkins survey — with verified resources and interview questions.">
+  <title>GitHub Actions — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: GitHub Actions</h1>
+  <p class="standfirst">The previous module argued for fast feedback, quality gates and promotion. This one is where those arguments become YAML that actually runs — and where the difference between a pipeline that works and a pipeline that leaks your cloud account is about six lines of configuration.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment → GitHub Actions</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>GitHub Actions is the CI/CD engine built into GitHub: a workflow is a YAML file in <code>.github/workflows/</code>, GitHub watches for the events you declare, and runs your jobs on machines it provisions per run. Because it lives next to the code and the pull request, it has become the default pipeline for open source and for a large share of enterprise Java and Angular work.</p>
+    <p>The first half of this module is mechanics — the object model, triggers, expressions, matrices, caching, service containers and the two ways to share workflow code. The second half is the part interviewers actually probe: secrets and environments, least-privilege tokens, why you pin third-party actions to a commit SHA, and OIDC federation, which removes long-lived cloud credentials from your repository entirely. We finish by wiring the course's own Java service and Angular app into a real publishing pipeline, then survey Jenkins so you can read a Jenkinsfile and say honestly when a self-hosted controller is still the right answer.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>The object model: workflow, job, step, action, runner</h3>
+    <p>Five nouns carry the whole system. A <strong>workflow</strong> is one YAML file under <code>.github/workflows/</code>, triggered by events. It contains <strong>jobs</strong>. Each job is assigned a <strong>runner</strong> — a fresh virtual machine or container — and contains an ordered list of <strong>steps</strong>. A step either runs a shell command (<code>run</code>) or invokes an <strong>action</strong> (<code>uses</code>), which is a packaged, versioned unit of reusable behaviour published from a repository.</p>
+    <p>The single fact that explains most beginner confusion: <em>jobs run in parallel on separate runners by default; steps run sequentially and share one filesystem and one workspace.</em> Two steps in the same job can pass files by writing to disk. Two jobs cannot — different machines, different disks — so they need <code>needs</code> for ordering, job outputs for small values, and artifacts for files. Each job also starts from a clean machine, which is why <code>actions/checkout</code> is the first step of nearly every job you will ever write.</p>
+    <pre class="code-block" data-label="YAML"><code>name: build
+on: [push]
+jobs:
+  test:                      # job: gets its own runner
+    runs-on: ubuntu-latest   # the runner label
+    steps:
+      - uses: actions/checkout@v4   # an action
+      - run: mvn -B verify          # a shell command, same machine as the step above</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/workflows-and-actions/workflows" rel="noopener">Workflows — GitHub Actions concepts (the object model in GitHub's own words)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax" rel="noopener">Workflow syntax for GitHub Actions — GitHub Docs reference (every key, exhaustive)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/runners/github-hosted-runners" rel="noopener">GitHub-hosted runners — GitHub Docs (images, sizes, what is preinstalled)</a></li>
+      <li>[Article] <a href="https://www.freecodecamp.org/news/learn-to-use-github-actions-step-by-step-guide/" rel="noopener">Learn to Use GitHub Actions: a Step-by-Step Guide — freeCodeCamp</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=R8_veQiYBjI" rel="noopener">GitHub Actions Tutorial — Basic Concepts and CI/CD Pipeline with Docker — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Triggers: the <code>on</code> block, and the <code>pull_request_target</code> trap</h3>
+    <p>The <code>on</code> key declares what starts a run. The four you will use constantly: <code>push</code> (optionally filtered by <code>branches</code>, <code>tags</code> and <code>paths</code>, which is how a monorepo avoids rebuilding everything), <code>pull_request</code> (validate the merge result before it lands, with <code>types</code> selecting opened/synchronize/reopened), <code>workflow_dispatch</code> (a manual Run workflow button, with typed <code>inputs</code> — the honest way to build a deploy button), and <code>schedule</code> (cron, in UTC, and best effort — GitHub delays scheduled runs under load, so never depend on exact firing times).</p>
+    <p>Now the trap. A <code>pull_request</code> run from a forked repository gets a read-only token and no access to secrets, deliberately, because the code being tested is a stranger's. <code>pull_request_target</code> exists to lift that restriction: it runs the workflow definition from the <em>base</em> branch but with full write permissions and secrets available. If you then check out and execute the pull request's code — <code>ref: ${{ github.event.pull_request.head.sha }}</code> followed by a build — you have handed a repository write token to anyone who can open a pull request. GitHub's own Security Lab named this the "pwn request". Use <code>pull_request_target</code> only for workflows that never execute contributor code (labelling, commenting, triage), and treat every value in the <code>github</code> context — branch names, titles, body text — as untrusted input, never interpolated directly into a <code>run</code> script.</p>
+    <pre class="code-block" data-label="YAML"><code>on:
+  push:
+    branches: [main]
+    paths: ['service/**']        # monorepo: only build what changed
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+  schedule:
+    - cron: '17 2 * * *'         # UTC, best effort, not a guarantee</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows" rel="noopener">Events that trigger workflows — GitHub Docs reference (every event and its payload)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow" rel="noopener">Manually running a workflow — GitHub Docs (workflow_dispatch and its inputs)</a></li>
+      <li>[Article] <a href="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/" rel="noopener">Keeping your GitHub Actions and workflows secure: Preventing pwn requests — GitHub Security Lab</a></li>
+      <li>[Article] <a href="https://securitylab.github.com/resources/github-actions-untrusted-input/" rel="noopener">Keeping your GitHub Actions and workflows secure: Untrusted input — GitHub Security Lab</a></li>
+    </ul>
+
+    <h3>Jobs and steps: <code>needs</code>, <code>if</code>, <code>uses</code> vs <code>run</code>, and outputs</h3>
+    <p><code>runs-on</code> picks the runner label. <code>needs</code> turns the default parallel fan-out into a dependency graph — <code>needs: [build]</code> makes a job wait, and GitHub runs everything else concurrently. <code>if</code> gates a job or step on an expression; the crucial subtlety is that a job with any failed dependency is skipped unless you say otherwise, which is why the status functions exist: <code>success()</code> (the implicit default), <code>always()</code>, <code>failure()</code> and <code>cancelled()</code>. A "publish the test report even when tests failed" step is <code>if: always()</code>; a "notify Slack on red" job is <code>if: failure()</code>.</p>
+    <p>A step is either <code>uses</code> (invoke an action, parameterised by <code>with:</code>) or <code>run</code> (execute a shell script, with the shell chosen by <code>shell:</code> and the working directory by <code>working-directory:</code>) — never both in one step. Values move outward in two hops: a step writes <code>echo "name=value" &gt;&gt; $GITHUB_OUTPUT</code> and a later step in the same job reads <code>steps.&lt;id&gt;.outputs.name</code>; a job declares <code>outputs:</code> mapping to a step output and a dependent job reads <code>needs.&lt;job&gt;.outputs.name</code>. <code>env</code> can be set at workflow, job or step scope, innermost winning. Expressions are written <code>${{ ... }}</code> and read from contexts — <code>github</code>, <code>env</code>, <code>vars</code>, <code>secrets</code>, <code>needs</code>, <code>steps</code>, <code>matrix</code>, <code>runner</code> — and support functions like <code>contains()</code>, <code>startsWith()</code>, <code>fromJSON()</code> and <code>hashFiles()</code>.</p>
+    <pre class="code-block" data-label="YAML"><code>jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: echo "version=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)" &gt;&gt; "$GITHUB_OUTPUT"
+  publish:
+    needs: [build]
+    if: github.ref == 'refs/heads/main' &amp;&amp; success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "shipping ${{ needs.build.outputs.version }}"</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/expressions" rel="noopener">Expressions — GitHub Docs reference (operators, functions, status checks)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/contexts" rel="noopener">Contexts — GitHub Docs reference (github, needs, steps, matrix and availability rules)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/variables" rel="noopener">Store information in variables — GitHub Docs (env, vars, default variables)</a></li>
+      <li>[Article] <a href="https://github.blog/enterprise-software/ci-cd/build-ci-cd-pipeline-github-actions-four-steps/" rel="noopener">Build a CI/CD pipeline with GitHub Actions in four steps — The GitHub Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=62N8UiWUdQo" rel="noopener">Introduction to GitHub Actions CI/CD — Kunal Kushwaha</a></li>
+    </ul>
+
+    <h3>Matrix builds: one job definition, many combinations</h3>
+    <p><code>strategy.matrix</code> expands a single job into one run per combination of the values you list — the classic being <code>java: [17, 21]</code> crossed with <code>os: [ubuntu-latest, windows-latest]</code>, giving four parallel jobs from one definition. Inside the job, <code>${{ matrix.java }}</code> selects the value for that run. This is how libraries prove they work across supported versions without four copies of the same YAML, and how a slow test suite is sharded across runners.</p>
+    <p>Two keys refine the product. <code>include</code> either adds extra properties to combinations that already match, or appends a whole new combination — the way you say "on Java 21 only, also publish coverage". <code>exclude</code> removes combinations that make no sense. The one to think about hardest is <code>fail-fast</code>, which defaults to <code>true</code>: the moment one combination fails, GitHub cancels every sibling. That saves minutes on a large matrix but destroys exactly the information you wanted — whether the bug is on all four platforms or only Windows. Set <code>fail-fast: false</code> on compatibility matrices, keep it on for shards where the first failure is enough. <code>max-parallel</code> throttles concurrency when the matrix would otherwise saturate your runner quota.</p>
+    <pre class="code-block" data-label="YAML"><code>strategy:
+  fail-fast: false          # see every combination's result, not just the first failure
+  max-parallel: 4
+  matrix:
+    java: [17, 21]
+    os: [ubuntu-latest, windows-latest]
+    include:
+      - java: 21
+        os: ubuntu-latest
+        coverage: true      # extra property on one existing combination
+    exclude:
+      - java: 17
+        os: windows-latest</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations" rel="noopener">Running variations of jobs in a workflow — GitHub Docs (matrix, include, exclude, fail-fast)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/build-and-test-code/java-with-maven" rel="noopener">Building and testing Java with Maven — GitHub Docs tutorial</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/enterprise-github-actions/" rel="noopener">Lessons Learned from Enterprise Usage of GitHub Actions — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Tz7FsunBbfQ" rel="noopener">GitHub Actions Certification — Full Course to Pass the Exam — freeCodeCamp.org</a></li>
+    </ul>
+
+    <h3>Caching: why a bad key is worse than no cache</h3>
+    <p>Every job starts on a clean machine, so without a cache each run re-downloads the whole Maven or npm dependency tree. <code>actions/cache</code> fixes that: it restores a tarball at the start of the job and saves it at the end if the key was not already present. The design lives entirely in two fields. <code>key</code> is the exact identity of the cache entry and should be derived from the lockfile — <code>hashFiles</code> over your <code>pom.xml</code> or <code>package-lock.json</code> files — so that any dependency change produces a new key. <code>restore-keys</code> is an ordered list of prefixes tried when the exact key misses, giving you a near-miss cache from the previous dependency set that you then top up.</p>
+    <p>Get the key wrong and you have built something worse than no cache at all. A key that never changes (say, just <code>maven-cache</code>) is written once and restored forever: the entry is immutable after its first write, so your build keeps resolving against a stale dependency set, and a genuinely upgraded library is silently ignored until someone spends a day debugging it. A key that changes on every run — anything containing <code>github.sha</code> — never hits, so you pay the upload cost on every single build for zero benefit. Also know the scope rules: caches are keyed per branch, a branch can read caches from its base branch and from the default branch but not from sibling branches, and GitHub evicts entries unused for seven days as well as trimming the oldest once a repository exceeds its cache quota. For the common cases you often need none of this — <code>actions/setup-java</code> takes <code>cache: maven</code> and <code>actions/setup-node</code> takes <code>cache: npm</code>, and those built-ins already compute a correct lockfile-derived key.</p>
+    <pre class="code-block" data-label="YAML"><code>- uses: actions/setup-java@v4      # built-in caching: correct key for free
+  with:
+    java-version: '21'
+    distribution: temurin
+    cache: maven
+
+- uses: actions/cache@v4           # manual control, when you need it
+  with:
+    path: ~/.m2/repository
+    key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+    restore-keys: |
+      ${{ runner.os }}-m2-</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching" rel="noopener">Caching dependencies to speed up workflows — GitHub Docs (keys, restore-keys, scope, eviction)</a></li>
+      <li>[Official] <a href="https://github.com/actions/cache" rel="noopener">actions/cache — GitHub repository (README, caveats and per-ecosystem key recipes)</a></li>
+      <li>[Official] <a href="https://github.com/actions/setup-java" rel="noopener">actions/setup-java — GitHub repository (distributions and built-in Maven/Gradle caching)</a></li>
+      <li>[Official] <a href="https://github.com/actions/setup-node" rel="noopener">actions/setup-node — GitHub repository (Node versions and built-in npm/yarn/pnpm caching)</a></li>
+    </ul>
+
+    <h3>Service containers: real dependencies for integration tests</h3>
+    <p>Unit tests need nothing; integration tests need a database, a broker, a cache. The <code>services</code> key starts Docker containers alongside the job on the same network, healthchecked, for the job's lifetime — a Postgres for repository tests, a Kafka or Redis for messaging tests. Steps running directly on the runner reach them on <code>localhost</code> via the ports you map; steps running inside a container job reach them by service label as hostname. GitHub tears them down when the job ends, so there is no cleanup to forget.</p>
+    <p>Worth knowing the alternative, because interviewers ask: on the JVM, Testcontainers starts the same dependencies from inside the test code, which means the identical setup runs on a developer laptop and in CI with no YAML duplication, and the version lives in the test rather than in the pipeline. Service containers win when the dependency must exist before your process starts, or when the same containers serve several steps; Testcontainers wins when you want laptop/CI parity. Either way, healthcheck options matter — without <code>--health-cmd</code> and friends, your first test can race a database that has not finished starting.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  postgres:
+    image: postgres:16
+    env:
+      POSTGRES_PASSWORD: test
+    ports: ['5432:5432']
+    options: &gt;-
+      --health-cmd pg_isready
+      --health-interval 10s
+      --health-retries 5</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/use-containerized-services/use-docker-service-containers" rel="noopener">Using containerized services — GitHub Docs (service containers, networking, healthchecks)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-github-cli" rel="noopener">Using GitHub CLI in workflows — GitHub Docs (gh for API work inside a job)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/github-actions-docker" rel="noopener">How to Use Docker With GitHub Actions — Baeldung on Ops</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/github-actions-workflow-locally" rel="noopener">Running GitHub Actions Workflow Locally with act — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>Reusable workflows vs composite actions</h3>
+    <p>Copy-pasted YAML rots the same way copy-pasted code does. GitHub offers two ways to factor it out, and choosing between them is a genuine interview question. A <strong>reusable workflow</strong> is a whole workflow file declaring <code>on: workflow_call</code> with typed <code>inputs</code>, <code>secrets</code> and <code>outputs</code>; a caller invokes it as a job with <code>uses: org/repo/.github/workflows/build.yml@v1</code>. It can contain multiple jobs, choose its own runners, and use <code>environment</code> gates — because it <em>is</em> a workflow.</p>
+    <p>A <strong>composite action</strong> is a sequence of steps packaged behind an <code>action.yml</code> and dropped into an existing job with <code>uses:</code>. It has no jobs and no runner of its own; it runs on whatever machine the calling job already has. The rule of thumb: if you are sharing <em>a piece of a job</em> — the four steps that set up Java, restore the cache and log in to a registry — write a composite action. If you are sharing <em>an entire pipeline shape</em>, including which runners to use and how jobs depend on each other, write a reusable workflow. Practical limits to remember: nesting is capped (a caller chain up to four levels deep), a reusable workflow is called at job level so it cannot be one step among others, and secrets are either passed explicitly or forwarded wholesale with <code>secrets: inherit</code> — the convenient option that also widens the blast radius, so prefer naming them.</p>
+    <pre class="code-block" data-label="YAML"><code># .github/workflows/java-build.yml  (the reusable workflow)
+on:
+  workflow_call:
+    inputs:
+      java-version: { type: string, default: '21' }
+    secrets:
+      SONAR_TOKEN: { required: false }
+
+# caller — invoked at JOB level, never as a step
+jobs:
+  build:
+    uses: acme/ci-workflows/.github/workflows/java-build.yml@v1
+    with: { java-version: '17' }
+    secrets: { SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows" rel="noopener">Reusing workflows — GitHub Docs (workflow_call, inputs, secrets, nesting limits)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/create-actions/create-a-composite-action" rel="noopener">Creating a composite action — GitHub Docs tutorial</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax" rel="noopener">Metadata syntax for GitHub Actions — GitHub Docs (the action.yml contract)</a></li>
+      <li>[Article] <a href="https://github.blog/developer-skills/github/using-reusable-workflows-github-actions/" rel="noopener">How to start using reusable workflows with GitHub Actions — The GitHub Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2024/03/mcdonalds-ci-github-actions/" rel="noopener">McDonald's Streamlines CI with GitHub Actions and Reusable Workflows — InfoQ</a></li>
+    </ul>
+
+    <h3>Secrets and environments: scope, masking, and deployment gates</h3>
+    <p>Secrets are encrypted values injected as environment variables or step inputs, and they exist at three scopes: <strong>repository</strong> (available to that repo's workflows), <strong>organization</strong> (shared, with a repository access policy), and <strong>environment</strong> (available only to jobs that declare <code>environment: production</code>). Environment scope is the one that carries real security value, because it binds a credential to a protected deployment target rather than to the whole repository.</p>
+    <p>Understand precisely what masking does and does not buy you. GitHub redacts known secret values from log output, so an accidental <code>echo</code> prints asterisks. That is a guard against mistakes, not against malice: a workflow that runs with a secret in scope can base64 it, split it, or send it anywhere, and the redaction will not notice. The security boundary is therefore <em>which jobs can see the secret</em>, not the masking. This is exactly why environment secrets plus required reviewers are worth the setup: a GitHub Environment can require named approvers before the job starts, impose a wait timer, and restrict which branches may deploy to it — a genuine human gate that also produces an audit trail on the deployment record. Add <code>concurrency</code> with a per-environment group so two deploys never overlap, and prefer <code>vars</code> (unencrypted configuration) over secrets for anything that is merely environment-specific, so your secret list stays short enough to audit.</p>
+    <pre class="code-block" data-label="YAML"><code>jobs:
+  deploy:
+    environment: production        # required reviewers + wait timer + branch policy apply here
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false    # never cancel a deploy mid-flight
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./deploy.sh
+        env:
+          API_TOKEN: ${{ secrets.PROD_API_TOKEN }}   # environment-scoped secret</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets" rel="noopener">Using secrets in GitHub Actions — GitHub Docs (scopes, masking, limits)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments" rel="noopener">Managing environments for deployment — GitHub Docs (required reviewers, wait timers, branch policies)</a></li>
+      <li>[Article] <a href="https://github.blog/enterprise-software/devops/building-organization-wide-governance-and-re-use-for-ci-cd-and-automation-with-github-actions/" rel="noopener">Building organization-wide governance and re-use for CI/CD with GitHub Actions — The GitHub Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/github-actions-create-pr" rel="noopener">Create Pull Request With GitHub Actions — Baeldung on Ops (token scopes in practice)</a></li>
+    </ul>
+
+    <h3>Least privilege: <code>permissions</code>, <code>GITHUB_TOKEN</code> and pinning to a SHA</h3>
+    <p>Every run gets an automatically minted <code>GITHUB_TOKEN</code>, scoped to the repository and expired when the job ends. Its default permissions are set at the repository or organization level and have historically been generous. Declare <code>permissions</code> explicitly — an empty or read-only block at workflow level, then the narrowest additions per job that needs them (<code>contents: write</code> only on the release job, <code>packages: write</code> only on the publish job, <code>id-token: write</code> only where you request an OIDC token). A workflow-level declaration replaces the defaults entirely, so writing <code>permissions: { contents: read }</code> at the top is the single highest-value line in most pipelines.</p>
+    <p>The other half is supply chain. <code>uses: some/action@v3</code> resolves a mutable Git tag: whoever controls that repository can repoint <code>v3</code> at new code, and if their account is compromised, every workflow in the world using that tag executes the attacker's code on the next run with whatever token scope you granted. The 2025 <code>tj-actions/changed-files</code> compromise did exactly this and dumped runner memory — including secrets — into public build logs across thousands of repositories. Pin third-party actions to a full 40-character commit SHA (with the version in a trailing comment so humans can read it), let Dependabot raise the bumps, and consider an organization policy that only allows actions from GitHub, verified creators and an explicit allow-list. Pinning is not paranoia; it is the difference between reviewing a change and inheriting one.</p>
+    <pre class="code-block" data-label="YAML"><code>permissions:
+  contents: read              # workflow default: read-only, replaces repo defaults
+jobs:
+  release:
+    permissions:
+      contents: write         # widened only where genuinely needed
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991  # v6.13.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/reference/security/secure-use" rel="noopener">Secure use reference (security hardening for GitHub Actions) — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/authenticate-with-github_token" rel="noopener">Automatic token authentication — GitHub Docs (GITHUB_TOKEN scopes and permissions key)</a></li>
+      <li>[Article] <a href="https://github.blog/security/supply-chain-security/four-tips-to-keep-your-github-actions-workflows-secure/" rel="noopener">Four tips to keep your GitHub Actions workflows secure — The GitHub Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2025/04/compromised-github-action/" rel="noopener">Compromised GitHub Action Highlights Risks in CI/CD Supply Chains — InfoQ</a></li>
+      <li>[Article] <a href="https://github.blog/news-insights/product-news/whats-coming-to-our-github-actions-2026-security-roadmap/" rel="noopener">What's coming to our GitHub Actions security roadmap — The GitHub Blog</a></li>
+    </ul>
+
+    <h3>OIDC federation: deploying to the cloud with no stored keys</h3>
+    <p>The old pattern stores a long-lived cloud access key as a repository secret. It works, and it is a standing liability: the key never expires, it is copied into every fork policy discussion and every audit, rotating it means coordinating across repositories, and anyone who exfiltrates it owns your cloud account until someone notices. OIDC federation removes it. GitHub runs an OpenID Connect identity provider; when a job declares <code>permissions: id-token: write</code>, it can request a short-lived, signed JWT from GitHub describing exactly who is asking — repository, ref, workflow, environment, and the <code>sub</code> claim that encodes them.</p>
+    <p>The cloud provider is configured to trust that issuer and to exchange such a token for temporary credentials. On AWS you create an IAM OIDC identity provider for <code>token.actions.githubusercontent.com</code> and a role whose trust policy conditions on <code>aud = sts.amazonaws.com</code> and on a <code>sub</code> that matches only the repository and ref you intend; <code>aws-actions/configure-aws-credentials</code> then performs <code>AssumeRoleWithWebIdentity</code> and the job holds credentials that expire in minutes. Azure and Google Cloud have the same shape with different names (federated credentials, Workload Identity Federation). The mistake to avoid is a sloppy trust condition: a <code>sub</code> wildcard like <code>repo:acme/*</code>, or worse a <code>StringLike</code> that matches any repository, hands your production role to anyone who can create a repo in scope. Pin the subject to <code>repo:owner/name:ref:refs/heads/main</code> or to <code>repo:owner/name:environment:production</code>, and let the GitHub Environment's reviewers gate who can trigger it.</p>
+    <pre class="code-block" data-label="JSON"><code>{
+  "Effect": "Allow",
+  "Principal": { "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+      "token.actions.githubusercontent.com:sub": "repo:acme/orders-service:environment:production"
+    }
+  }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/concepts/security/openid-connect" rel="noopener">About security hardening with OpenID Connect — GitHub Docs (claims, the sub format, the token flow)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws" rel="noopener">Configuring OpenID Connect in Amazon Web Services — GitHub Docs</a></li>
+      <li>[Official] <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html" rel="noopener">Create an OpenID Connect (OIDC) identity provider in IAM — AWS IAM User Guide</a></li>
+      <li>[Article] <a href="https://github.blog/security/supply-chain-security/secure-deployments-openid-connect-github-actions-generally-available/" rel="noopener">Secure deployments with OpenID Connect and GitHub Actions — The GitHub Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Io5UFJlEJKc" rel="noopener">Securely deploy to AWS with GitHub Actions and OIDC — GitHub</a></li>
+    </ul>
+
+    <h3>Publishing the stack: Java service and Angular app to GHCR</h3>
+    <p>Time to assemble everything against this course's own stack. The shape that holds up in practice: a <code>verify</code> job that checks out, sets up Java with Maven caching, runs <code>mvn -B verify</code> against a Postgres service container and uploads the surefire report as an artifact; a parallel <code>web</code> job that sets up Node with npm caching and runs the Angular lint, unit tests in headless Chrome, and <code>ng build --configuration production</code>; then an <code>images</code> job with <code>needs: [verify, web]</code> that logs in to <code>ghcr.io</code> with the built-in <code>GITHUB_TOKEN</code> (this is the one place <code>packages: write</code> is granted), builds both container images with <code>docker/build-push-action</code> and Buildx layer caching, and pushes them tagged with the commit SHA plus a semantic version.</p>
+    <p>Two habits separate this from a demo pipeline. First, tag images with the immutable commit SHA, not only <code>latest</code> — the SHA is what makes a deployment reproducible and a rollback a one-line change, and <code>docker/metadata-action</code> generates the whole tag set from the triggering event. Second, keep deployment in its own job behind <code>environment: production</code>, authenticating by OIDC, so that promoting a build is a reviewed decision against an already-published artifact rather than a rebuild. GHCR images inherit the repository's visibility and permissions by default, so a private repo's images stay private, and Kubernetes pulls them with an image pull secret or a linked package permission.</p>
+    <pre class="code-block" data-label="YAML"><code>images:
+  needs: [verify, web]
+  permissions: { contents: read, packages: write }
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: docker/setup-buildx-action@v3
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - uses: docker/build-push-action@v6
+      with:
+        context: ./service
+        push: true
+        tags: ghcr.io/${{ github.repository }}/orders:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images" rel="noopener">Publishing Docker images — GitHub Docs tutorial (GHCR login, metadata, tagging)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry" rel="noopener">Working with the Container registry (ghcr.io) — GitHub Docs</a></li>
+      <li>[Official] <a href="https://github.com/docker/build-push-action" rel="noopener">docker/build-push-action — GitHub repository (Buildx, GitHub Actions cache backend, multi-arch)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/github-actions-deploy-ec2" rel="noopener">Deploy Directly to AWS EC2 Using GitHub Actions — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NppkHKvnrqc" rel="noopener">Spring Boot — Build CI/CD Pipeline Using GitHub Actions, Build and Push Docker Image — Java Techie</a></li>
+    </ul>
+
+    <h3>Jenkins survey: the Jenkinsfile, agents and shared libraries</h3>
+    <p>Jenkins still runs an enormous amount of enterprise CI in India, so you should be able to read it fluently even if you never choose it for a greenfield project. A modern Jenkins pipeline is a <code>Jenkinsfile</code> in the repository using the <strong>declarative</strong> syntax: a top-level <code>pipeline</code> block containing <code>agent</code> (where it runs — <code>any</code>, a labelled node, or <code>docker { image '...' }</code>), <code>environment</code>, <code>options</code>, <code>stages</code> holding named <code>stage</code> blocks of <code>steps</code>, and <code>post</code> blocks (<code>always</code>, <code>success</code>, <code>failure</code>) for notification and cleanup. The older <strong>scripted</strong> syntax is raw Groovy and is now the escape hatch, reachable from declarative via a <code>script</code> block. The mapping to Actions is almost one to one: workflow to pipeline, job to stage, step to step, runner to agent, action to shared-library step or plugin.</p>
+    <p>The Jenkins answer to reuse is the <strong>shared library</strong> — a separate Git repository with <code>vars/</code> and <code>src/</code>, loaded with <code>@Library('platform-ci')</code>, exposing custom steps so a hundred teams' Jenkinsfiles shrink to a few lines. It is more powerful than composite actions (it is real Groovy on the JVM) and correspondingly easier to turn into an unreviewable platform monolith. So when is a self-hosted controller still right? When builds must sit inside a private network with no egress to a hosted control plane; when regulation or a bank's policy requires the CI system and its audit trail on your own infrastructure; when you need exotic agents — mainframe, embedded hardware, licensed toolchains, GPU fleets you already own; when a decade of plugins and shared libraries encodes process you cannot rewrite this quarter; or when your source is not on GitHub at all. Otherwise the operational cost — patching the controller, curating plugin versions, keeping agents alive, owning the security of a system that holds every credential you have — usually argues for a managed runner and self-hosted runners only where the network demands it.</p>
+    <pre class="code-block" data-label="Groovy"><code>@Library('platform-ci') _
+pipeline {
+  agent { docker { image 'maven:3.9-eclipse-temurin-21' } }
+  options { timestamps(); buildDiscarder(logRotator(numToKeepStr: '30')) }
+  stages {
+    stage('Build') { steps { sh 'mvn -B verify' } }
+    stage('Publish') {
+      when { branch 'main' }
+      steps { publishImage repo: 'orders', tag: env.GIT_COMMIT }   // shared-library step
+    }
+  }
+  post { failure { notifyTeam channel: '#ci-alerts' } }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.jenkins.io/doc/book/pipeline/" rel="noopener">Pipeline — Jenkins User Handbook (declarative vs scripted, why Pipeline as code)</a></li>
+      <li>[Official] <a href="https://www.jenkins.io/doc/book/pipeline/syntax/" rel="noopener">Pipeline syntax — Jenkins documentation (agent, stages, when, post, every directive)</a></li>
+      <li>[Official] <a href="https://www.jenkins.io/doc/book/pipeline/jenkinsfile/" rel="noopener">Using a Jenkinsfile — Jenkins documentation</a></li>
+      <li>[Official] <a href="https://www.jenkins.io/doc/book/pipeline/shared-libraries/" rel="noopener">Extending with shared libraries — Jenkins documentation</a></li>
+      <li>[Official] <a href="https://www.jenkins.io/doc/book/managing/nodes/" rel="noopener">Managing nodes and agents — Jenkins documentation (controller/agent architecture)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=7KCS70sCoK0" rel="noopener">Complete Jenkins Pipeline Tutorial — Jenkinsfile explained — TechWorld with Nana</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="12-cicd-concepts.html">← CI/CD Concepts</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="14-deployment-strategies.html">Deployment Strategies →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>GitHub Actions now appears in almost every Indian backend and full-stack round that touches DevOps — service companies ask the mechanics, product companies push straight to secrets, token scope and OIDC:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain workflow, job, step, action and runner.</summary>
+      <div class="answer"><p>A workflow is a YAML file in <code>.github/workflows/</code> triggered by events. It contains jobs; each job is scheduled onto a runner, a fresh machine or container. A job contains ordered steps. A step either runs a shell command (<code>run</code>) or invokes an action (<code>uses</code>), an action being a packaged, versioned unit of reusable behaviour published from a repository.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Do jobs run in parallel or in sequence? How do you change it?</summary>
+      <div class="answer"><p>Jobs run in parallel on separate runners by default; steps within a job run sequentially on one machine. Add <code>needs: [other-job]</code> to force ordering. Because parallel jobs are different machines with different filesystems, they cannot share files implicitly — pass small values via job outputs and files via upload/download artifact actions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between <code>uses</code> and <code>run</code>?</summary>
+      <div class="answer"><p><code>run</code> executes a shell command on the runner; <code>uses</code> invokes a published action, parameterised by <code>with:</code>. One step does one or the other, never both. Use actions for standard, reusable behaviour (checkout, language setup, registry login) and <code>run</code> for your own build commands.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which triggers have you used, and what does <code>workflow_dispatch</code> give you?</summary>
+      <div class="answer"><p><code>push</code> and <code>pull_request</code> for CI (filtered by branches and paths so a monorepo builds only what changed), <code>schedule</code> for nightly jobs (cron in UTC, best effort — it can be delayed), <code>workflow_dispatch</code> for manual runs with typed inputs, which is how you build a deploy button, and <code>workflow_call</code> to make the workflow reusable by others.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does a step pass a value to a later step, and to a later job?</summary>
+      <div class="answer"><p>Within a job: give the step an <code>id</code>, write <code>name=value</code> to the <code>$GITHUB_OUTPUT</code> file, and read <code>steps.&lt;id&gt;.outputs.name</code>. Across jobs: declare <code>outputs:</code> at job level mapping to that step output, add <code>needs:</code> in the consumer, and read <code>needs.&lt;job&gt;.outputs.name</code>. Files go through upload-artifact and download-artifact instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does a matrix build do, and why would you set <code>fail-fast: false</code>?</summary>
+      <div class="answer"><p><code>strategy.matrix</code> expands one job definition into one run per combination of the listed values, so you test Java 17 and 21 on Linux and Windows from a single block, with <code>include</code> and <code>exclude</code> refining the product. <code>fail-fast</code> defaults to true and cancels all siblings on the first failure — which hides whether the bug is platform-specific. Turn it off for compatibility matrices; leave it on for test shards where one failure is enough.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Design a cache key for a Maven build. Why is a bad key worse than no cache?</summary>
+      <div class="answer"><p>Key on the lockfile: <code>${{ runner.os }}-m2-</code> followed by <code>${{ hashFiles(...) }}</code> over every <code>pom.xml</code>, with <code>restore-keys: ${{ runner.os }}-m2-</code> as the near-miss prefix. A constant key is written once and immutable thereafter, so the build silently keeps resolving a stale dependency set even after an upgrade — a real correctness bug, not just a slow build. A key containing the commit SHA never hits, so you pay the save cost every run for nothing. Easiest correct answer: use <code>cache: maven</code> on <code>actions/setup-java</code>, which computes the key for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Reusable workflow or composite action — how do you choose?</summary>
+      <div class="answer"><p>A composite action packages a sequence of steps behind an <code>action.yml</code> and runs inside a job you already have, on that job's runner. A reusable workflow is a whole workflow with <code>on: workflow_call</code>, invoked at job level, and it can define multiple jobs, pick its own runners and use environment gates. Share a piece of a job with a composite action; share an entire pipeline shape with a reusable workflow. Nesting is limited to a four-level call chain.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you run integration tests that need Postgres and Kafka?</summary>
+      <div class="answer"><p>Either the <code>services</code> key, which starts healthchecked Docker containers on the job's network for the job's lifetime and exposes them on localhost, or Testcontainers from inside the test code. Service containers suit dependencies that must exist before your process starts and are shared across steps; Testcontainers gives identical setup on a laptop and in CI with the versions pinned in the test rather than in YAML. Always configure healthchecks so the first test does not race a database that is still starting.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Secrets are masked in logs. Does that make them safe?</summary>
+      <div class="answer"><p>No. Masking redacts known secret values from log output, which protects against accidental printing. It cannot stop a workflow that has the secret in scope from encoding it, splitting it or sending it to an external host. The real boundary is which jobs can see the secret at all — so scope credentials to a GitHub Environment protected by required reviewers rather than making them repository-wide, and prefer OIDC so there is no long-lived secret to steal.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you add a human approval gate before a production deploy?</summary>
+      <div class="answer"><p>Create a GitHub Environment named production with required reviewers, optionally a wait timer, and a branch policy restricting which refs may deploy to it. Put the deploy job behind <code>environment: production</code>: it pauses until an approver acts, the credential is environment-scoped so only that job can read it, and the approval is recorded on the deployment for audit. Add a <code>concurrency</code> group so two deploys to the same environment never overlap.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why pin third-party actions to a commit SHA instead of a tag?</summary>
+      <div class="answer"><p>A tag is a mutable pointer. Whoever owns the action repository — or whoever compromises that account — can repoint <code>v3</code> at new code, and every workflow using the tag executes it on the next run with whatever token scope you granted. That is not hypothetical: the 2025 tj-actions/changed-files compromise dumped runner memory including secrets into public logs across thousands of repositories. Pin to the full 40-character SHA with the version in a trailing comment, let Dependabot propose bumps so you review each change, and restrict allowed actions at organization level.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain OIDC federation for cloud deploys. What does it replace and how does the trust work?</summary>
+      <div class="answer"><p>It replaces long-lived cloud access keys stored as repository secrets. GitHub runs an OIDC identity provider; a job with <code>permissions: id-token: write</code> requests a short-lived signed JWT whose claims identify the repository, ref, workflow and environment. The cloud provider trusts that issuer and exchanges the token for temporary credentials — on AWS, an IAM OIDC provider for <code>token.actions.githubusercontent.com</code> plus a role whose trust policy conditions on the <code>aud</code> and on a <code>sub</code> matching exactly <code>repo:owner/name:environment:production</code>, then <code>AssumeRoleWithWebIdentity</code>. Nothing long-lived is ever stored, and credentials expire in minutes.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What is a pwn request, and how do you avoid it?</summary>
+      <div class="answer"><p><code>pull_request</code> runs from forks get a read-only token and no secrets, by design. <code>pull_request_target</code> runs the base branch's workflow with write permissions and secrets available. If such a workflow checks out and builds the pull request head, any stranger who opens a PR executes code with a write token — that is the pwn request. Use <code>pull_request_target</code> only for workflows that never run contributor code (labelling, triage, comments), never check out the untrusted ref in it, and treat every <code>github</code> context value as untrusted input rather than interpolating it into a shell script.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your pipeline is green but takes 25 minutes. How do you attack it?</summary>
+      <div class="answer"><p>Measure first from the run timeline, then: split sequential stages into parallel jobs and keep <code>needs</code> only where a real dependency exists; cache dependencies on a lockfile-derived key and enable Buildx layer caching for images; shard the test suite across a matrix; run the slow suites (end-to-end, security scans) only on main or nightly while pull requests get the fast gate; use path filters so unrelated modules do not rebuild; add <code>concurrency</code> with <code>cancel-in-progress</code> so superseded pull request runs stop immediately; and size runners up where the job is genuinely CPU-bound.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Map GitHub Actions onto Jenkins, and say when you would still choose Jenkins.</summary>
+      <div class="answer"><p>Workflow maps to pipeline, job to stage, step to step, runner to agent, action to a shared-library step or plugin, and <code>on:</code> to build triggers. A declarative Jenkinsfile has <code>pipeline { agent … environment … stages { stage { steps } } post { } }</code>, with shared libraries in <code>vars/</code> and <code>src/</code> as the reuse mechanism. Choose a self-hosted controller when builds must run inside a closed network, when regulation requires the CI system and its audit trail on your own infrastructure, when you need exotic or licensed agents, when a decade of plugins encodes process you cannot rewrite, or when the source is not on GitHub. Otherwise the cost of patching the controller, curating plugins and securing a system that holds every credential usually argues for managed runners.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you make <code>GITHUB_TOKEN</code> least-privilege, and what breaks if you forget?</summary>
+      <div class="answer"><p>Declare <code>permissions: { contents: read }</code> at workflow level — that replaces the repository defaults outright — then widen per job: <code>packages: write</code> only on the publish job, <code>contents: write</code> only on the release job, <code>id-token: write</code> only where OIDC is requested, <code>pull-requests: write</code> only where a bot comments. Forget it and every job in the workflow, including any third-party action you invoke, runs with a token that can push commits, publish packages and edit issues — so one compromised dependency becomes repository write access. A useful side note: pushes made with <code>GITHUB_TOKEN</code> deliberately do not trigger further workflows, which prevents infinite loops but surprises people building release automation.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.gha.syntax — workflow syntax, jobs and steps, triggers, matrix builds, caching, reusable workflows</li>
+      <li>dev.gha.secure — secrets and environments, OIDC federation for keyless cloud deploys, publishing the stack, Jenkins survey</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

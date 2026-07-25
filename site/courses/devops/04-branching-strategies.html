@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Branching and versioning module: why branch lifetime is the variable that matters, GitFlow vs GitHub Flow vs trunk-based development compared honestly, feature flags and flag debt, semantic versioning, conventional commits and changelog automation — with verified resources and interview questions.">
+  <title>Branching and Versioning — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Branching and Versioning</h1>
+  <p class="standfirst">Teams argue about branching diagrams when the real question is much simpler: how long is code allowed to sit unintegrated? Answer that and the diagram picks itself — and versioning is just the other half of the same story, telling everyone downstream what changed.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Branching and Versioning</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Branching strategy is one of the few engineering decisions a team makes once and then lives inside every day. This module compares the three models you will actually meet — GitFlow, GitHub Flow and trunk-based development — but the comparison is not a beauty contest between diagrams. Every model is really a policy about branch <em>lifetime</em>, and the cost of a branch grows faster than linearly with how long it lives.</p>
+    <p>Once branches are short, the obvious objection arrives: how do you merge work that is not finished? That is what feature flags are for, and they bring their own costs, so the module treats flag types and flag debt honestly rather than as a free lunch. The second half covers the release side: semantic versioning, the conventional-commits grammar that lets tooling compute the next version for you, and the changelog automation that grammar unlocks — with a note on why that automation collapses the moment half the team ignores the convention.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Branch lifetime is the variable that matters</h3>
+    <p>A branch is a bet that the rest of the codebase will not move much while you are away. Every commit anyone else lands on the mainline is a commit your branch has not seen, and the divergence between the two grows with time. Conflicts are the visible symptom; the invisible and more expensive one is the <em>semantic</em> conflict, where both sides merge cleanly and the result is still broken because a method you called changed meaning, a validation rule moved, or a column was renamed under you. Git will never flag that. Only integration will.</p>
+    <p>The arithmetic is worth stating plainly because it is what interviewers are probing when they ask "why trunk-based?". If two branches each touch files at some rate, the chance of overlap rises roughly with the product of the two divergences, so a branch that lives twice as long is far more than twice as painful to merge — and the pain is paid at the end, all at once, by whoever merges last. Long branches also delay every signal you care about: the build does not run against the combination, the tests do not exercise the combination, and the reviewer eventually faces a 2,000-line diff that no human reviews properly. This is exactly what continuous integration originally meant — integrating everyone's work continuously, not merely running a build server.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://git-scm.com/book/en/v2/Git-Branching-Branching-Workflows" rel="noopener">Branching Workflows — Pro Git book (git-scm.com)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/branching-patterns.html" rel="noopener">Patterns for Managing Source Code Branches — Martin Fowler (the definitive survey; note the /articles/ path, not /bliki/)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/bliki/FeatureBranch.html" rel="noopener">FeatureBranch — Martin Fowler bliki (the cost argument in short form)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/continuousIntegration.html" rel="noopener">Continuous Integration — Martin Fowler (what "integration" originally meant)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=pXovk-5J0Lg" rel="noopener">Continuous Integration vs Feature Branch Workflow — Dave Farley, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>GitFlow, GitHub Flow and trunk-based development, compared honestly</h3>
+    <p>GitFlow, published by Vincent Driessen in 2010, is the one with the famous diagram: a permanent <code>develop</code> branch, feature branches off it, <code>release/*</code> branches for stabilisation, <code>hotfix/*</code> branches off <code>main</code>, and merges in both directions. It was designed for software with explicit, versioned releases that multiple versions of which live in the wild simultaneously — installed desktop apps, on-premise products, SDKs. For that context it is a reasonable design. It was then cargo-culted into web teams that deploy the single latest version several times a day, where the release branch stabilises nothing and <code>develop</code> is a second mainline you must keep in sync. Driessen himself added a note of reflection to the original post advising readers whose software is continuously delivered to consider a simpler, trunk-based flow instead — worth quoting in an interview, because it shows you read the source rather than the diagram.</p>
+    <p>GitHub Flow strips it to one long-lived branch: <code>main</code> is always deployable, you cut a short feature branch, open a pull request, review, merge, deploy from <code>main</code>. Trunk-based development goes one step further and makes the branch lifetime an explicit rule — everyone integrates to trunk at least once a day, so branches live hours, not weeks, and at very small scale developers commit straight to trunk. The two overlap heavily in practice; the difference is that trunk-based names the constraint (daily integration) rather than leaving it to taste, and the DORA research programme consistently associates that constraint with high software delivery performance. Scaled trunk-based development still uses release branches, but cut <em>from</em> trunk for a release and never merged back — fixes are made on trunk and cherry-picked out, so trunk stays the single source of truth.</p>
+    <table>
+      <caption>Choosing a branching model</caption>
+      <thead>
+        <tr><th>Dimension</th><th>GitFlow</th><th>GitHub Flow</th><th>Trunk-based development</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Long-lived branches</td><td><code>main</code> plus <code>develop</code></td><td><code>main</code> only</td><td>trunk only</td></tr>
+        <tr><td>Typical branch lifetime</td><td>Days to weeks</td><td>Hours to days</td><td>Hours; a day at most</td></tr>
+        <tr><td>Designed for</td><td>Versioned, shipped-to-customer releases</td><td>Continuous delivery of one live version</td><td>Continuous integration and delivery at any scale</td></tr>
+        <tr><td>Release handling</td><td><code>release/*</code> branch, stabilise, merge back</td><td>Deploy from <code>main</code>, tag the commit</td><td>Release branch cut from trunk, fixes cherry-picked out</td></tr>
+        <tr><td>Hotfix path</td><td><code>hotfix/*</code> off <code>main</code>, merged to both</td><td>Fix on <code>main</code>, deploy</td><td>Fix on trunk, cherry-pick to the release branch</td></tr>
+        <tr><td>Unfinished work handled by</td><td>Keeping it on the branch</td><td>Small pull requests</td><td>Feature flags and branch by abstraction</td></tr>
+        <tr><td>Merge pain</td><td>Highest — paid at release time</td><td>Low</td><td>Lowest — paid continuously in small amounts</td></tr>
+        <tr><td>Main failure mode</td><td>Ceremony and drift between the two mainlines</td><td>Branches quietly growing long-lived</td><td>Flag debt and a weak test suite on trunk</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://nvie.com/posts/a-successful-git-branching-model/" rel="noopener">A successful Git branching model — Vincent Driessen (the original GitFlow post, including the author's later note of reflection)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/get-started/using-github/github-flow" rel="noopener">GitHub flow — GitHub Docs</a></li>
+      <li>[Official] <a href="https://trunkbaseddevelopment.com/" rel="noopener">Trunk Based Development — trunkbaseddevelopment.com (Paul Hammant's reference site)</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow" rel="noopener">Gitflow Workflow — Atlassian Git tutorials (with Atlassian's own caveat about its fit)</a></li>
+      <li>[Article] <a href="https://about.gitlab.com/topics/version-control/what-is-gitlab-flow/" rel="noopener">What is GitLab Flow? — GitLab (the environment-branch middle ground)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JOr4QeIjyW4" rel="noopener">Git Flow Is A Bad Idea — Dave Farley, GOTO Conferences 2022</a></li>
+    </ul>
+
+    <h3>Trunk-based development in practice, and the evidence behind it</h3>
+    <p>Adopting trunk-based development is not a policy announcement, it is a set of prerequisites. Trunk must stay releasable, which means a fast, trustworthy automated test suite and a build that fails loudly; without those, "everyone commits to main daily" simply means everyone breaks main daily. Reviews have to happen in hours rather than days, otherwise the branch you promised would live for an afternoon lives for a week while it waits in a queue. Work has to be sliced small enough to finish in a day, which is a planning discipline, not a Git one. Teams that skip these prerequisites and adopt the branching rule alone conclude, reasonably, that trunk-based development does not work.</p>
+    <p>The evidence base is the part worth citing precisely. The DORA research programme (the multi-year study behind the four delivery metrics — deployment frequency, lead time for changes, change failure rate and failed-deployment recovery time) identifies trunk-based development as a capability that predicts higher delivery performance, with the operational definitions being three or fewer active branches, branches merged to trunk at least daily, and no code-freeze or integration phases. Note the honest framing: this is correlational research over survey data at scale, not a controlled experiment, and the branching rule travels with a bundle of other practices. What it does establish is that short-lived branches are consistently found in the high-performing group and long-lived ones in the low-performing group — which is why "we use GitFlow because it is more rigorous" is a weak answer in a senior interview.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://trunkbaseddevelopment.com/short-lived-feature-branches/" rel="noopener">Short-Lived Feature Branches — Trunk Based Development (the scaled variant, with the rules)</a></li>
+      <li>[Official] <a href="https://dora.dev/capabilities/trunk-based-development/" rel="noopener">Trunk-based development — DORA capability page (definitions, evidence, how to improve)</a></li>
+      <li>[Article] <a href="https://dora.dev/guides/dora-metrics/" rel="noopener">DORA's software delivery metrics: the four keys — dora.dev</a></li>
+      <li>[Article] <a href="https://www.atlassian.com/continuous-delivery/continuous-integration/trunk-based-development" rel="noopener">Trunk-based development — Atlassian Continuous Delivery guide</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/devops/repos/git/git-branching-guidance?view=azure-devops" rel="noopener">Adopt a Git branching strategy — Microsoft Azure DevOps documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=U_IFGpJDbeU" rel="noopener">Branching Strategies Explained — DevOps &amp; AI Toolkit (Viktor Farcic)</a></li>
+    </ul>
+
+    <h3>Feature flags: how you merge work that is not finished</h3>
+    <p>The objection to short branches is always the same: the feature takes three weeks, so how can it merge daily? The answer is to merge the code but not expose the behaviour. A feature flag is a runtime conditional that decides whether the new path executes; the incomplete work travels to production dark, integrated with everything else, running through the same build and the same tests, invisible to users until you flip it. This is the decoupling that matters — <em>deploy</em> becomes a low-risk engineering event that happens many times a day, while <em>release</em> becomes a business decision made separately, by changing configuration rather than shipping a build. Rollback stops meaning "redeploy the previous artifact" and starts meaning "turn the flag off", which takes seconds. Where a flag is awkward — a replacement for a component that many callers depend on — the structural equivalent is branch by abstraction: introduce an interface over the old implementation, build the new one behind it, migrate callers, then delete the old path.</p>
+    <p>Pete Hodgson's taxonomy is the one interviewers expect, and the useful insight is that the four types differ in lifetime and in who owns them. <em>Release toggles</em> hide in-progress work and should live days to weeks, then be deleted. <em>Ops toggles</em> let operators shed load or disable an expensive path during an incident, and may live for years by design. <em>Experiment toggles</em> route cohorts for A/B tests and die when the experiment concludes. <em>Permission toggles</em> gate features by plan or entitlement and are effectively part of the product forever. Now the honest cost: every flag is a branch in the code, so <em>n</em> live flags mean up to 2<sup>n</sup> reachable configurations, of which your test suite covers approximately two. Stale flags are the real debt — dead conditionals nobody dares remove, a config that no longer matches production, and eventually an incident caused by a flag someone forgot existed. Treat flag removal as part of finishing the feature: give release flags an expiry, track them in a register, and make a linter or a stale-flag report fail the build rather than trusting anyone to remember.</p>
+    <pre class="code-block" data-label="Java"><code>// Release toggle: unfinished pricing engine ships dark on trunk, off everywhere.
+// Owner: payments  |  Created: sprint 42  |  Remove by: sprint 45
+if (flags.isEnabled("checkout.new-pricing-engine", user)) {
+    return newPricingEngine.quote(cart);   // integrated daily, not yet released
+}
+return legacyPricingEngine.quote(cart);    // delete this branch AND the flag together</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://openfeature.dev/docs/reference/intro/" rel="noopener">OpenFeature — the CNCF vendor-neutral feature-flagging specification and SDKs</a></li>
+      <li>[Official] <a href="https://docs.getunleash.io/guides/feature-flag-best-practices" rel="noopener">Feature flag best practices — Unleash documentation</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/feature-toggles.html" rel="noopener">Feature Toggles (aka Feature Flags) — Pete Hodgson on martinfowler.com (the canonical taxonomy)</a></li>
+      <li>[Article] <a href="https://trunkbaseddevelopment.com/branch-by-abstraction/" rel="noopener">Branch by Abstraction — Trunk Based Development</a></li>
+      <li>[Article] <a href="https://docs.getunleash.io/concepts/technical-debt" rel="noopener">Technical debt from feature flags — Unleash documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=c8KgKTgyFUE" rel="noopener">Feature Flags Explained in 6 Minutes — CoderDave</a></li>
+    </ul>
+
+    <h3>Semantic versioning: what MAJOR, MINOR and PATCH actually promise</h3>
+    <p>Semantic versioning is a contract expressed as <code>MAJOR.MINOR.PATCH</code>, and the whole value is that the numbers are promises to consumers rather than marketing. Increment PATCH for a backwards-compatible bug fix, MINOR for backwards-compatible new functionality (also when you deprecate something, since deprecation alone breaks nothing), and MAJOR for any backwards-incompatible change to the public API. Bumping MAJOR or MINOR resets the lower components to zero. The definition of "breaking" is where candidates get sloppy: removing or renaming a public method, changing a parameter or return type, tightening validation on an input you used to accept, changing a default value, adding a required field to a request payload, and changing a documented error code are all breaking. Making an existing field optional, adding a new endpoint, or adding an optional field with a safe default generally are not. Critically, "breaking" is scoped to your <em>declared public API</em> — if you never documented it, it is not part of the contract, which is why writing down what is public is a prerequisite for versioning honestly.</p>
+    <p>Two details carry most of the follow-up questions. Pre-release and build metadata: <code>1.4.0-beta.2</code> is a pre-release, sorts <em>before</em> <code>1.4.0</code>, and signals that the contract may not hold; <code>1.4.0+build.5678</code> carries build metadata that is ignored entirely for precedence, so two versions differing only after the plus sign are the same version. And <code>0.y.z</code> means "anything may change at any time" — the spec explicitly says the public API should not be considered stable below <code>1.0.0</code>, which is exactly why many ecosystems treat a <code>0.x</code> minor bump as potentially breaking. Ecosystems then layer their own rules on top: npm range operators (<code>^1.2.3</code> allows minor and patch, <code>~1.2.3</code> only patch), Go's requirement that a major version above 1 appear in the import path, Python's own PEP 440 scheme which is not SemVer, and Maven's <code>-SNAPSHOT</code> convention for mutable pre-release builds. In Git, the version lives as an annotated tag on the release commit — annotated, not lightweight, because it carries a tagger, a date and a message and can be signed.</p>
+    <pre class="code-block" data-label="Text"><code>1.9.0        &lt; 1.10.0          numeric compare, not string compare
+1.0.0-alpha  &lt; 1.0.0-alpha.1 &lt; 1.0.0-beta &lt; 1.0.0-rc.1 &lt; 1.0.0
+1.0.0+build.5678 == 1.0.0      build metadata is ignored for precedence
+^1.2.3 -&gt; &gt;=1.2.3 &lt;2.0.0       ~1.2.3 -&gt; &gt;=1.2.3 &lt;1.3.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://semver.org/" rel="noopener">Semantic Versioning 2.0.0 — the specification (semver.org)</a></li>
+      <li>[Official] <a href="https://docs.npmjs.com/about-semantic-versioning/" rel="noopener">About semantic versioning — npm Docs (range operators in practice)</a></li>
+      <li>[Official] <a href="https://go.dev/doc/modules/version-numbers" rel="noopener">Module version numbering — Go documentation (major versions in the import path)</a></li>
+      <li>[Official] <a href="https://git-scm.com/docs/git-tag" rel="noopener">git-tag — Git reference documentation (annotated vs lightweight tags)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/cs/semantic-versioning" rel="noopener">Semantic Versioning — Baeldung on Computer Science</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=u-GU7EkZksA" rel="noopener">Semantic Versioning and Conventional Commits Explained Easily — Tharindu Kalhara</a></li>
+    </ul>
+
+    <h3>Conventional commits: a commit grammar machines can read</h3>
+    <p>A commit message is normally written for humans and read by nobody. Conventional Commits turns the subject line into a tiny parseable grammar — <code>type(scope)!: description</code> — so that tooling can derive the release from history instead of a human deciding it. <code>feat</code> introduces a feature and maps to a MINOR bump. <code>fix</code> patches a bug and maps to a PATCH bump. A <code>!</code> before the colon, or a <code>BREAKING CHANGE:</code> footer in the body, maps to a MAJOR bump — and can appear on <em>any</em> type, including a <code>refactor</code> or a <code>chore</code>, which is the detail most candidates miss. The remaining conventional types (<code>docs</code>, <code>style</code>, <code>refactor</code>, <code>perf</code>, <code>test</code>, <code>build</code>, <code>ci</code>, <code>chore</code>, <code>revert</code>) carry no version implication by default; the specification only mandates <code>feat</code> and <code>fix</code>, everything else is convention your team agrees on. The optional scope in parentheses names the affected area — invaluable in a monorepo, where <code>feat(auth):</code> and <code>feat(billing):</code> can drive independent releases of independent packages.</p>
+    <p>The honest caveat: this only pays off if the whole team follows it, and social pressure is not a mechanism. One <code>updated stuff</code> commit containing a breaking change and your automated MAJOR bump silently becomes a PATCH, which is worse than no automation because consumers now trust a number that is wrong. Enforce it mechanically — commitlint in a <code>commit-msg</code> hook plus the same check in CI on the pull request title — and decide your merge strategy deliberately, because it determines which messages the tooling actually sees. With squash merges the squash commit message is the only one parsed, so that is the message that must be conventional (GitHub can default it to the PR title, which is why linting PR titles matters). With merge commits or rebase merges, every individual commit is parsed instead. Pick one and make the CI check match it.</p>
+    <pre class="code-block" data-label="Text"><code>feat(cart): support partial refunds          -&gt; MINOR bump
+fix(auth): reject expired refresh tokens     -&gt; PATCH bump
+refactor(api)!: drop the v1 order endpoint   -&gt; MAJOR bump (the "!")
+chore(deps): bump jackson to 2.17.2          -&gt; no release by default
+
+feat(api): return money as minor units
+
+BREAKING CHANGE: amounts are now integers in paise, not decimal rupees.
+Callers parsing the decimal form must be updated.                -&gt; MAJOR bump</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.conventionalcommits.org/en/v1.0.0/" rel="noopener">Conventional Commits 1.0.0 — the specification</a></li>
+      <li>[Official] <a href="https://www.conventionalcommits.org/en/about/" rel="noopener">About Conventional Commits — the rationale and its relationship to SemVer</a></li>
+      <li>[Official] <a href="https://commitlint.js.org/" rel="noopener">commitlint — documentation (rules, shareable configs, hook setup)</a></li>
+      <li>[Article] <a href="https://github.com/conventional-changelog/commitlint" rel="noopener">conventional-changelog/commitlint — GitHub (CI and husky integration examples)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=JlfCRlFHmd8" rel="noopener">Conventional Commits — Git Tutorial for Absolute Beginners, Part 15 — DevInsideYou</a></li>
+    </ul>
+
+    <h3>Changelog automation: turning history into a release</h3>
+    <p>Once commits are machine-readable, the release itself can be computed. The two dominant tools take opposite approaches to the same problem. <strong>semantic-release</strong> is fully automatic: on every merge to the release branch it analyses the new commits, determines the next version, generates release notes, publishes the artifact, creates the Git tag and GitHub release, and never asks a human — the version is not stored in the repository at all, it is derived from history. <strong>release-please</strong> is deliberately staged: it accumulates commits and maintains an open "release pull request" that shows the proposed version bump and the generated changelog, and the release happens only when a human merges that PR. In a regulated environment, or anywhere a human sign-off is required before a version ships, the release-please model is usually the easier one to defend, and its monorepo support (per-package versions and changelogs from scoped commits) is strong.</p>
+    <p>Whatever generates it, a changelog written for humans beats a dump of commit subjects — which is the point of the Keep a Changelog convention: a reverse-chronological file with an <code>Unreleased</code> section and entries grouped under Added, Changed, Deprecated, Removed, Fixed and Security. Generated notes are a good default and a poor final product; the entries a user actually needs are the breaking ones with a migration hint, and those deserve hand-editing. GitHub's own automatically generated release notes are a lighter-weight middle path — they group merged pull requests by label with no commit convention required at all, which is often the right first step for a team not yet ready to enforce a grammar. In every case, the release notes and the Git tag should be produced by the pipeline from the merge commit, never typed by a person at the end of a long day.</p>
+    <pre class="code-block" data-label="YAML"><code># .github/workflows/release.yml — staged release with a human gate
+name: release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: java          # opens/updates a release PR; merging it tags + releases</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://keepachangelog.com/en/1.1.0/" rel="noopener">Keep a Changelog 1.1.0 — the convention and its rationale</a></li>
+      <li>[Official] <a href="https://semantic-release.gitbook.io/semantic-release" rel="noopener">semantic-release — official documentation (fully automated versioning and publishing)</a></li>
+      <li>[Official] <a href="https://github.com/googleapis/release-please" rel="noopener">googleapis/release-please — GitHub (the release-PR model and monorepo support)</a></li>
+      <li>[Official] <a href="https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases" rel="noopener">About releases — GitHub Docs (tags, release notes, assets)</a></li>
+      <li>[Article] <a href="https://github.com/conventional-changelog/conventional-changelog" rel="noopener">conventional-changelog — GitHub (the parser and presets the ecosystem is built on)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=zFvBT4m-FCU" rel="noopener">Use Release Please for Automated Releases — Ana's Dev Scribbles</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-github-workflow.html">← GitHub and Code Review</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="05-maven.html">Maven →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Branching and versioning come up in almost every Indian interview above two years of experience — service companies probe the GitFlow diagram and the release process, product companies probe why you would not use it and how you ship unfinished work safely:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What branching strategy did your team use, and why?</summary>
+      <div class="answer"><p>Answer with the constraint, not the diagram: how often you released, how many versions were live in production at once, and how big a change typically was. One live version deployed frequently points to GitHub Flow or trunk-based; multiple customer-installed versions needing parallel maintenance justifies release branches. The weak answer is "we used GitFlow" with no reason; the strong one names the tradeoff you accepted.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Explain the branches in GitFlow and what each is for.</summary>
+      <div class="answer"><p><code>main</code> holds released, tagged code. <code>develop</code> is the integration branch for the next release. <code>feature/*</code> branches off <code>develop</code> and merges back. <code>release/*</code> branches off <code>develop</code> to stabilise a version, then merges into both <code>main</code> and <code>develop</code>. <code>hotfix/*</code> branches off <code>main</code> for urgent production fixes and merges into both. The two-way merges are where the model's cost lives.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What do MAJOR, MINOR and PATCH mean in semantic versioning?</summary>
+      <div class="answer"><p>MAJOR for a backwards-incompatible change to the public API, MINOR for backwards-compatible new functionality (including deprecations), PATCH for a backwards-compatible bug fix. Bumping a component resets the ones to its right to zero. Version <code>0.y.z</code> is explicitly unstable — anything may change at any time.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a feature flag and what problem does it solve?</summary>
+      <div class="answer"><p>A runtime conditional that decides whether new code executes. It decouples deploy from release: the code ships to production dark and integrated, and the business decides separately when to turn it on. It lets unfinished work merge to trunk daily instead of living on a long branch, enables gradual rollout to a percentage of users, and turns rollback into a config change measured in seconds rather than a redeploy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between an annotated and a lightweight Git tag — which do you use for a release?</summary>
+      <div class="answer"><p>A lightweight tag is just a pointer to a commit. An annotated tag is a full object storing the tagger, date and message, and it can be GPG-signed. Use annotated tags for releases (<code>git tag -a v1.4.0 -m "..."</code>) so the release carries provenance; lightweight tags are fine for private bookmarks. Note that tags are not pushed by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do many teams move away from GitFlow, and what did its author say?</summary>
+      <div class="answer"><p>GitFlow was designed for software with multiple versions live in the field and explicit release windows. Web software deploys one version continuously, so <code>develop</code> becomes a redundant second mainline, the release branch stabilises nothing, and every merge is paid twice. Driessen added a note of reflection to the original post recommending a simpler trunk-based flow for continuously delivered software — the strategy is not wrong, it is being applied outside the context it was designed for.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why does branch lifetime matter more than the branching diagram?</summary>
+      <div class="answer"><p>Because divergence, not topology, causes pain. Every day a branch lives, the mainline moves and the merge cost grows faster than linearly — and textual conflicts are the easy case. Semantic conflicts merge cleanly and still break, because a contract changed underneath you, and only integration and tests catch those. Long branches also delay build and test feedback and produce diffs too large to review honestly. Any model that keeps branches short works; any model that lets them grow long hurts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Name the four types of feature flag and how their lifetimes differ.</summary>
+      <div class="answer"><p>Release toggles hide in-progress work and should be deleted within days or weeks. Ops toggles let operators disable expensive paths or shed load during an incident and may live for years by design. Experiment toggles route cohorts for A/B tests and die when the experiment ends. Permission toggles gate features by plan or entitlement and are effectively permanent product logic. The mistake is treating a release toggle as if it were permanent — that is how flag debt accumulates.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does a conventional commit map to a version bump?</summary>
+      <div class="answer"><p><code>feat</code> gives a MINOR bump, <code>fix</code> gives a PATCH bump, and a <code>!</code> after the type/scope or a <code>BREAKING CHANGE:</code> footer gives a MAJOR bump — the breaking marker can sit on any type, including <code>refactor</code> or <code>chore</code>. Other types (<code>docs</code>, <code>test</code>, <code>ci</code>, <code>chore</code>) trigger no release by default. Only <code>feat</code> and <code>fix</code> are mandated by the spec; the rest is team convention.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Give three concrete API changes that require a MAJOR bump and three that do not.</summary>
+      <div class="answer"><p>MAJOR: removing or renaming a public method, changing a return type or a documented error code, adding a required field to a request or tightening validation on an input you previously accepted. Not MAJOR: adding a new optional field with a safe default, adding a new endpoint, making a previously required field optional. The scope is the declared public API — undocumented behaviour is not part of the contract, which is why writing down what is public comes first.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you release a hotfix under trunk-based development with no long-lived release branch?</summary>
+      <div class="answer"><p>Fix on trunk first, always, so the defect cannot regress in the next release. Then cherry-pick the fix onto the release branch cut from trunk for the affected version, tag a new patch version and ship it. The rule is that release branches are cut from trunk and never merged back — traffic is one-way — so trunk remains the single source of truth. Merging a release branch back is how you reintroduce the two-mainline problem you left GitFlow to escape.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Feature flags let you merge daily, but what do they cost, and how do you manage that?</summary>
+      <div class="answer"><p>Each flag is a branch in the code, so <em>n</em> live flags mean up to 2<sup>n</sup> reachable configurations while your tests realistically cover two — plus stale conditionals nobody dares delete and incidents caused by flags people forgot existed. Manage it as debt: every release flag gets an owner and an expiry recorded at creation, removal is part of the definition of done, a stale-flag report or lint rule fails the build past the expiry, and integration tests run at minimum the flag-on and flag-off paths for anything on the critical path.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your team squash-merges pull requests. What does that mean for conventional commits and release automation?</summary>
+      <div class="answer"><p>Only the squash commit message reaches the release branch, so that message — not the individual commits on the branch — is what the tooling parses. Enforce the convention on the pull request title and configure the platform to use it as the squash message, then lint the PR title in CI. Under merge commits or rebase merges every individual commit is parsed instead, so the hook has to enforce it at commit time. The failure mode is mixing strategies: a breaking change buried in a branch commit that the squash message never mentions silently produces a PATCH release.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> semantic-release or release-please — how would you choose?</summary>
+      <div class="answer"><p>semantic-release computes and publishes the release automatically on every qualifying merge, with the version derived from history rather than stored in the repo — ideal for libraries published continuously with no human gate. release-please instead maintains an open release pull request showing the proposed version and generated changelog, so the release ships only when a human merges it, which is far easier to defend where sign-off or audit is required, and its per-package monorepo support is stronger. Choose on whether a human gate is a requirement or an obstacle.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Conventional commits are agreed but half the team ignores them. What actually goes wrong and how do you fix it?</summary>
+      <div class="answer"><p>The automation produces confidently wrong output: a breaking change committed as <code>update code</code> yields a PATCH release, consumers upgrade on a version number that promises compatibility, and their build breaks — worse than having no automation, because the number is now trusted and false. Fix it mechanically, not socially: commitlint in a <code>commit-msg</code> hook, the same check on PR titles in CI as a required status check, a shared config in the repo so the rules are not per-laptop, and a changelog review step in the release PR. Convention without enforcement is not a convention.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How does the DORA research support trunk-based development, and what are the limits of that claim?</summary>
+      <div class="answer"><p>DORA's multi-year survey research finds trunk-based development — operationally, three or fewer active branches, merged to trunk at least daily, with no code freezes or integration phases — predicts higher delivery performance on the four key metrics. The honest limits: it is correlational survey data, not a controlled experiment; the practice travels with a bundle of others (comprehensive test automation, fast reviews, continuous delivery) that are hard to separate; and it does not transplant to contexts with genuinely versioned, customer-installed software. The defensible claim is that short-lived branches are consistently found in high performers and long-lived ones in low performers.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.br.strategy</li>
+      <li>dev.br.semver</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

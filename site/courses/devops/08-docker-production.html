@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Docker for production images module: multi-stage builds for Spring Boot layered jars and jlink runtimes, Angular served from nginx, base image tradeoffs, BuildKit cache mounts and secrets, buildx multi-arch, networking, volumes, resource limits and the container-aware JVM, healthchecks and image scanning — with verified resources and interview questions.">
+  <title>Docker for Production Images — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Docker for Production Images</h1>
+  <p class="standfirst">An image that starts on your laptop and an image you would put in front of customers are two different artifacts. This module is about the distance between them: size, layer discipline, secrets, architecture, memory and the scanner report.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment track → Docker for Production Images</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>The previous module got a Dockerfile working. This one asks the harder question: would you run it? A naive Java image ships a full JDK, Maven, a local repository of downloaded jars and the source tree — roughly a gigabyte of attack surface to run a forty-megabyte application. A naive Angular image ships Node and <code>node_modules</code> to serve static files a web server could hand out on its own.</p>
+    <p>Multi-stage builds fix most of that in a dozen lines, and everything after it is refinement: layer your jar so a code change does not re-download the internet, choose a base image on evidence rather than habit, cache dependencies without leaking credentials into a layer, build for both amd64 and arm64, wire up networking and storage deliberately, and give the JVM a memory budget it can actually see. The end state is a small, reproducible, scanned image that an orchestrator can schedule and restart without surprises.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Multi-stage builds: the build stage, the runtime stage, and COPY --from</h3>
+    <p>A multi-stage Dockerfile has more than one <code>FROM</code>. Each <code>FROM</code> starts a fresh stage with its own filesystem, and <code>COPY --from=&lt;stage&gt;</code> reaches back into an earlier one to lift out just the finished artifact. The build stage can be as fat as it likes — JDK, Maven, Node, compilers, test fixtures — because none of it survives into the final image. Only the layers written after the last <code>FROM</code> are shipped, so the toolchain is deleted for free rather than deleted with a <code>RUN rm -rf</code> that merely hides bytes in an earlier layer.</p>
+    <p>This is the single biggest win available in container work, and it is two wins at once. Size: a Spring Boot image goes from roughly 800 MB to under 250 MB, and pull time across a hundred nodes drops with it. Security: every package you do not ship is a CVE you do not have to triage, and a compiler that is not present cannot be used by an attacker who lands a shell. You can also target an intermediate stage directly with <code>docker build --target build</code>, which is how a CI job runs tests in the fat stage and then builds the thin stage from the same file.</p>
+    <pre class="code-block" data-label="Dockerfile"><code># syntax=docker/dockerfile:1
+FROM maven:3.9-eclipse-temurin-21 AS build       # fat stage: JDK + Maven, thrown away
+WORKDIR /src
+COPY . .
+RUN mvn -B -DskipTests package
+
+FROM eclipse-temurin:21-jre-jammy                # thin stage: JRE only
+WORKDIR /app
+COPY --from=build /src/target/app.jar app.jar    # carry the artifact across
+USER 1001                                        # never run as root
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/building/multi-stage/" rel="noopener">Multi-stage builds — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/building/best-practices/" rel="noopener">Building best practices — Docker Docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/efficient-docker-images" rel="noopener">Tips for Creating Efficient Docker Images — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=saSJa9YVroA" rel="noopener">Dockerfile: From Start to Optimized (DockerCon 2023) — Docker</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=9MAU-O5jWJg" rel="noopener">Multi Stage Docker Builds — Java/SpringBoot Example — Tech Primers</a></li>
+    </ul>
+
+    <h3>Java images done properly: Spring Boot layered jars</h3>
+    <p>Copying a fat jar into the runtime stage works, but it wastes the layer cache in the way that hurts most. A Spring Boot jar is one file of maybe sixty megabytes, of which fifty-five are third-party dependencies that change a few times a quarter and five are your code that changes hourly. As a single <code>COPY</code> it is a single layer, so every commit produces a completely new sixty-megabyte layer to push and pull. Spring Boot's answer is the <em>layered jar</em>: the jar records a layer index that separates <code>dependencies</code>, <code>spring-boot-loader</code>, <code>snapshot-dependencies</code> and <code>application</code>, most-stable first.</p>
+    <p>You unpack it in the build stage with the jar's own tooling — <code>java -Djarmode=tools -jar app.jar extract --layers</code> on Spring Boot 3.3 and later, or the older <code>-Djarmode=layertools extract</code> — and then issue one <code>COPY --from</code> per layer in stability order. Now a code-only change invalidates only the small <code>application</code> layer; the dependency layer is reused from the registry and the push is measured in kilobytes. The zero-Dockerfile alternative is Cloud Native Buildpacks via <code>mvn spring-boot:build-image</code>, which produces an already-layered, already-hardened image with a memory calculator baked in — the right default when nobody on the team wants to own a Dockerfile.</p>
+    <pre class="code-block" data-label="Dockerfile"><code>FROM eclipse-temurin:21-jre-jammy AS builder
+WORKDIR /builder
+ARG JAR_FILE=target/*.jar
+COPY ${JAR_FILE} application.jar
+RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
+
+FROM eclipse-temurin:21-jre-jammy
+WORKDIR /application
+COPY --from=builder /builder/extracted/dependencies/ ./          # changes rarely
+COPY --from=builder /builder/extracted/spring-boot-loader/ ./
+COPY --from=builder /builder/extracted/snapshot-dependencies/ ./
+COPY --from=builder /builder/extracted/application/ ./           # changes every commit
+ENTRYPOINT ["java", "-jar", "application.jar"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/dockerfiles.html" rel="noopener">Dockerfiles — Spring Boot reference documentation (the layered-jar multi-stage example)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/efficient-images.html" rel="noopener">Efficient container images — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/cloud-native-buildpacks.html" rel="noopener">Cloud Native Buildpacks — Spring Boot reference documentation</a></li>
+      <li>[Article] <a href="https://spring.io/blog/2020/08/14/creating-efficient-docker-images-with-spring-boot-2-3/" rel="noopener">Creating Efficient Docker Images with Spring Boot — Spring Blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=BRrGXUffB8k" rel="noopener">Create Layered Jars and Layered Docker Images with Spring Boot — Techno Town Techie</a></li>
+    </ul>
+
+    <h3>Smaller Java runtimes: jdeps and jlink</h3>
+    <p>A JRE is a general-purpose runtime carrying every module the JDK defines — CORBA-era leftovers are gone, but you still ship XML, desktop, management and scripting modules a REST service never touches. Since Java 9 the platform is modular, so you can build a runtime containing only the modules your application resolves: <code>jdeps --print-module-deps</code> analyses the jar and names them, and <code>jlink</code> assembles a self-contained runtime image from that list. With <code>--strip-debug</code>, <code>--no-man-pages</code>, <code>--no-header-files</code> and compression, a typical Spring Boot runtime lands around 50–70 MB instead of 180 MB.</p>
+    <p>Know the caveats before you sell this in an interview. <code>jdeps</code> only sees static bytecode references, so anything loaded reflectively — JDBC drivers, JAXB, security providers, a framework's dynamic proxies — can be missed and must be added by hand with <code>--add-modules</code>; run the full test suite against the trimmed runtime, not just a smoke test. The jlink runtime must be built on the same OS and architecture as the final base image, which is exactly what a multi-stage build gives you. And weigh the payoff honestly: if the dependency layer is already cached on every node, shaving the JRE saves cold-start pull time and CVE surface rather than steady-state bandwidth.</p>
+    <pre class="code-block" data-label="Dockerfile"><code>FROM eclipse-temurin:21-jdk-jammy AS jre-build
+COPY target/app.jar /app.jar
+RUN jdeps --ignore-missing-deps --print-module-deps --multi-release 21 /app.jar &gt; /mods.txt
+RUN jlink --add-modules $(cat /mods.txt) --strip-debug --no-man-pages \
+          --no-header-files --compress=zip-6 --output /javaruntime
+
+FROM debian:bookworm-slim
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+COPY --from=jre-build /javaruntime $JAVA_HOME
+COPY --from=jre-build /app.jar /app.jar
+ENTRYPOINT ["java", "-jar", "/app.jar"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jlink.html" rel="noopener">jlink — Java Platform Tool Reference (Oracle)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jdeps.html" rel="noopener">jdeps — Java Platform Tool Reference (Oracle)</a></li>
+      <li>[Article] <a href="https://adoptium.net/news/2021/08/using-jlink-in-dockerfiles" rel="noopener">Using jlink in Dockerfiles — Eclipse Adoptium</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/jlink" rel="noopener">Guide to jlink — Baeldung</a></li>
+      <li>[Article] <a href="https://developers.redhat.com/articles/2025/04/17/jlink-integration-openshift-tech-preview-release" rel="noopener">jlink integration with OpenShift — Red Hat Developer</a></li>
+    </ul>
+
+    <h3>Angular images: build with Node, serve with nginx</h3>
+    <p>An Angular production build is a folder of static files. Node is needed to produce them and is useless afterwards, so the two-stage shape is obvious: stage one runs <code>npm ci</code> and <code>ng build</code> on a Node image, stage two copies the <code>dist</code> output into an nginx (or Caddy) image. The result is roughly 50 MB instead of 1.5 GB, it starts instantly, and it has no JavaScript runtime for an attacker to reach. Use <code>npm ci</code> rather than <code>npm install</code> so the lockfile is authoritative, and copy <code>package.json</code> and the lockfile <em>before</em> the rest of the source so the install layer caches across source-only changes.</p>
+    <p>The detail everyone forgets is the SPA fallback. The Angular router owns paths like <code>/orders/42</code> that exist only in the browser; a hard refresh sends that path to nginx, which looks for a file, finds none and returns 404. The fix is one <code>try_files</code> directive that falls back to <code>index.html</code>. Also mind the output path — modern Angular builds emit <code>dist/&lt;app&gt;/browser</code>, not <code>dist/&lt;app&gt;</code> — and remember that anything baked in at build time (an API base URL) is fixed per image, so environment-specific configuration belongs in a small runtime-fetched JSON file or in nginx's reverse-proxy rules rather than in a rebuilt image per environment.</p>
+    <pre class="code-block" data-label="Dockerfile"><code>FROM node:22-alpine AS build
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci                                   # cached unless the lockfile changes
+COPY . .
+RUN npm run build -- --configuration production
+
+FROM nginx:1.27-alpine
+COPY --from=build /src/dist/shop-web/browser /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# nginx.conf — the SPA fallback that makes deep-link refreshes work:
+#   location / { try_files $uri $uri/ /index.html; }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/guides/angular/" rel="noopener">Angular language-specific guide — Docker Docs</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/beginners_guide.html" rel="noopener">Beginner's Guide — nginx documentation (serving static content, config layout)</a></li>
+      <li>[Official] <a href="https://nginx.org/en/docs/http/ngx_http_core_module.html" rel="noopener">ngx_http_core_module — nginx documentation (location and try_files reference)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=J9uKG22lBwA" rel="noopener">Docker and Angular: Dockerizing your Angular Application — Java Techie</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-o5l6zFJ9_o" rel="noopener">Dockerize an Angular Application using Nginx — Get Arrays</a></li>
+    </ul>
+
+    <h3>Choosing a base image: distro, slim, Alpine, distroless, UBI</h3>
+    <p>The base image decides your CVE count, your image size and — for the JVM — sometimes whether the thing runs correctly at all. The honest framing is a tradeoff, not a ranking: smaller images have less to patch but less to debug with, and the most locked-down options give you no shell at all. Pick per workload, and pin by digest for reproducibility rather than trusting a floating <code>latest</code>.</p>
+    <p>The Alpine question deserves its own paragraph because it is an interview favourite. Alpine uses musl libc instead of glibc, and the JVM was built and tuned for glibc. Historically that meant no supported OpenJDK build at all; today Temurin and others publish musl-native builds, but you can still hit different thread-stack defaults, slower DNS resolution behaviour, and native libraries (Netty's transports, JNI-based drivers, anything compiled against glibc) that simply are not available for musl. For Java the safe defaults are a slim glibc distro, a distroless Java image, or UBI — reach for Alpine when you have measured the benefit and tested the workload. Separately, always ship a JRE (or a jlink runtime), never a JDK: the compiler, <code>jcmd</code>, <code>jstack</code> and the rest are build-time tools, and shipping them hands a foothold to anyone who gets code execution.</p>
+    <table>
+      <caption>Base image families, and what you trade for what</caption>
+      <thead><tr><th>Family</th><th>Rough size</th><th>Ships</th><th>Use when</th></tr></thead>
+      <tbody>
+        <tr><td>Full distro (<code>ubuntu</code>, <code>debian</code>)</td><td>~80–120 MB</td><td>Shell, package manager, full glibc userland</td><td>Build stages; workloads needing native tooling at runtime</td></tr>
+        <tr><td>Slim (<code>-slim</code>, <code>-jammy</code> JRE tags)</td><td>~30–80 MB</td><td>glibc, shell, minimal packages</td><td>The sane default for most Java and Node services</td></tr>
+        <tr><td>Alpine</td><td>~5–15 MB</td><td>musl libc, BusyBox shell, apk</td><td>Go/Rust/static binaries; JVM only after testing</td></tr>
+        <tr><td>Distroless (Google)</td><td>~20–50 MB</td><td>Runtime and CA certs only — no shell, no package manager</td><td>Hardened production runtime; debug with the <code>:debug</code> variant</td></tr>
+        <tr><td>UBI / UBI-minimal (Red Hat)</td><td>~40–100 MB</td><td>RHEL userland, freely redistributable, vendor-patched</td><td>OpenShift and enterprises that need a supported base with a CVE feed</td></tr>
+      </tbody>
+    </table>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/building/base-images/" rel="noopener">Base images — Docker Docs</a></li>
+      <li>[Official] <a href="https://hub.docker.com/_/eclipse-temurin" rel="noopener">eclipse-temurin — Docker Official Image (the jdk/jre, jammy/alpine/ubi tag matrix)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/dhi/" rel="noopener">Docker Hardened Images — Docker Docs</a></li>
+      <li>[Article] <a href="https://github.com/GoogleContainerTools/distroless" rel="noopener">GoogleContainerTools/distroless — GitHub (language runtimes with no shell or package manager)</a></li>
+      <li>[Article] <a href="https://developers.redhat.com/articles/2021/11/30/build-lightweight-and-secure-container-images-using-rhel-ubi" rel="noopener">Build lightweight and secure container images using RHEL UBI — Red Hat Developer</a></li>
+    </ul>
+
+    <h3>BuildKit cache mounts and build secrets</h3>
+    <p>The classic dependency trick — copy <code>pom.xml</code> first, run <code>mvn dependency:go-offline</code>, then copy the source — works, but it is a workaround for a missing feature. Any change to the POM throws the whole download away, the "offline" step never quite matches what the real build resolves, and it does nothing for a monorepo with a dozen modules. BuildKit's <code>RUN --mount=type=cache</code> solves it directly: the target directory is a persistent cache volume owned by the builder, shared across builds and not written into any layer. Mount <code>/root/.m2</code>, <code>/root/.gradle</code> or <code>/root/.npm</code> and dependency resolution goes from minutes to seconds without contorting the Dockerfile. The cache is a build-time convenience, not a source of truth — the build must still succeed on a cold builder, and in CI you point the cache at the registry with <code>--cache-from</code> / <code>--cache-to</code> because each runner starts empty.</p>
+    <p>Secrets get the same treatment. Passing a token via <code>ARG</code> or <code>ENV</code> writes it into image metadata that <code>docker history</code> will happily print, and deleting the file in a later <code>RUN</code> does not remove it from the earlier layer — the image is an append-only stack, so a leaked credential is leaked permanently and must be rotated. <code>RUN --mount=type=secret,id=...</code> exposes the value as a file only for the duration of that one command, in a tmpfs that is never committed. Use it for private registry credentials, an <code>.npmrc</code> token or an SSH key for a private Git dependency, and add <code>--mount=type=ssh</code> when you need agent forwarding.</p>
+    <pre class="code-block" data-label="Dockerfile"><code># syntax=docker/dockerfile:1
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY . .
+# persistent, never baked into a layer:
+RUN --mount=type=cache,target=/root/.m2 \
+    --mount=type=secret,id=mvnsettings,target=/root/.m2/settings.xml \
+    mvn -B -DskipTests package
+
+# docker build --secret id=mvnsettings,src=$HOME/.m2/settings.xml .</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/cache/optimize/" rel="noopener">Optimize cache usage in builds — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/cache/" rel="noopener">Docker build cache — Docker Docs (how layer invalidation actually works)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/building/secrets/" rel="noopener">Build secrets — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/dockerfile/#run---mounttypecache" rel="noopener">RUN --mount=type=cache — Dockerfile reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-cache-maven-dependencies" rel="noopener">Caching Maven Dependencies with Docker — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>buildx: multi-architecture images and Bake</h3>
+    <p>Developer laptops are increasingly arm64 while most cluster nodes are still amd64, and an image built on one will not start on the other — you get <code>exec format error</code>, the most common "works on my machine" failure of the container era. <code>docker buildx build --platform linux/amd64,linux/arm64</code> builds both and publishes a <em>manifest list</em>: a single tag whose index points at one image per architecture, so every host pulls the right one automatically. It needs a builder with the <code>docker-container</code> driver (the default driver cannot produce manifest lists), and the foreign architecture is either emulated through QEMU — correct but slow, and prone to failures in native toolchains — or, much better for CI, farmed out to a native remote builder node.</p>
+    <p>Two habits keep multi-arch builds fast. First, use the automatic platform arguments — <code>--platform=$BUILDPLATFORM</code> on the build stage so compilation runs natively, with <code>$TARGETARCH</code> passed in to cross-compile — so only the tiny runtime stage is architecture-specific. Second, once the command line grows past a couple of targets, move it into a Bake file: <code>docker buildx bake</code> reads an HCL/JSON definition of targets, platforms, tags and cache settings, builds them in parallel, and gives CI and developers one declarative file instead of a shell script nobody can read.</p>
+    <pre class="code-block" data-label="Shell"><code>docker buildx create --name multi --driver docker-container --use
+
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --cache-from type=registry,ref=registry.example.com/shop-api:cache \
+  --cache-to   type=registry,ref=registry.example.com/shop-api:cache,mode=max \
+  -t registry.example.com/shop-api:1.4.0 --push .
+
+docker buildx imagetools inspect registry.example.com/shop-api:1.4.0   # see the manifest list</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/build/building/multi-platform/" rel="noopener">Multi-platform builds — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/bake/" rel="noopener">Bake — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/builders/drivers/" rel="noopener">Build drivers — Docker Docs (why the default driver cannot do multi-arch)</a></li>
+      <li>[Article] <a href="https://www.docker.com/blog/multi-arch-build-and-images-the-simple-way/" rel="noopener">Multi-arch build and images, the simple way — Docker Blog</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-buildx" rel="noopener">Introduction to Docker Buildx — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=hWSHtHasJUI" rel="noopener">How to Build Multi-Architecture Docker Images with BuildX — DevOps Directive</a></li>
+    </ul>
+
+    <h3>Runtime wiring: networks, volumes, bind mounts and tmpfs</h3>
+    <p>Containers on the default <code>bridge</code> network can reach each other only by IP address, which is why the first thing any real setup does is create a <em>user-defined</em> bridge: on one of those, Docker's embedded DNS resolves container names, so <code>jdbc:postgresql://db:5432/shop</code> just works and survives a restart that changes the IP. <code>host</code> networking removes the network namespace entirely — full host performance, no port mapping, and no isolation, and it is Linux-only — while <code>none</code> gives a container no connectivity at all. Publishing with <code>-p 8080:8080</code> is a separate concern from container-to-container traffic: services that only talk to each other need a shared network, not published ports.</p>
+    <p>Storage has three shapes and the distinction is a reliable interview question. A <em>named volume</em> is managed by Docker under its own directory, is portable across hosts through volume drivers, and is the correct home for database files and any state that must outlive the container. A <em>bind mount</em> maps a specific host path into the container — perfect for mounting source code during development or dropping in a config file, but it couples the container to the host's filesystem layout and permissions, so it belongs in development and in deliberate config-injection cases. <em>tmpfs</em> lives in RAM and vanishes on stop: use it for scratch space and for secrets you never want written to disk. And keep the container's own writable layer for nothing important — the whole point of the model is that deleting the container should lose no data.</p>
+    <pre class="code-block" data-label="Shell"><code>docker network create shop-net                       # user-defined bridge: DNS by name
+docker volume create pgdata                          # managed, survives the container
+
+docker run -d --name db --network shop-net \
+  -v pgdata:/var/lib/postgresql/data postgres:16
+
+docker run -d --name api --network shop-net -p 8080:8080 \
+  -e SPRING_DATASOURCE_URL='jdbc:postgresql://db:5432/shop' \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --read-only registry.example.com/shop-api:1.4.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/engine/network/" rel="noopener">Networking overview — Docker Docs (bridge, host, none, overlay)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/network/drivers/bridge/" rel="noopener">Bridge network driver — Docker Docs (user-defined bridges and embedded DNS)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/storage/volumes/" rel="noopener">Volumes — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/storage/bind-mounts/" rel="noopener">Bind mounts — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/storage/tmpfs/" rel="noopener">tmpfs mounts — Docker Docs</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=IvQDAc4fADU" rel="noopener">Docker Volumes — Create and Attach Volumes vs Bind Mounts — Cached Insights</a></li>
+    </ul>
+
+    <h3>Resource limits and the container-aware JVM</h3>
+    <p>By default a container may use every core and every byte the host has. <code>--memory</code> and <code>--cpus</code> set cgroup limits, and their failure modes differ sharply: exceeding the memory limit gets the process killed by the kernel OOM killer with exit code 137 and no stack trace, while exceeding the CPU limit merely throttles you — latency degrades, nothing dies, and it is far harder to spot. Set both anyway; an unlimited container is a noisy neighbour that can take down everything else on the node, and orchestrators need declared requests to schedule sanely.</p>
+    <p>Then the Java-specific part that interviewers love. Old JVMs read <code>/proc/meminfo</code>, saw the host's 64 GB, sized the default heap at a quarter of it, and were killed the moment the workload grew past a 512 MB container limit — the classic "my container keeps dying at exit 137". Since JDK 10 (backported to late 8u) the JVM is container-aware: <code>UseContainerSupport</code> is on by default and it reads the cgroup limit instead. So the modern knob is <code>-XX:MaxRAMPercentage</code>, not <code>-Xmx</code> — a percentage travels correctly when the container is resized, a hard <code>-Xmx</code> does not. Leave real headroom, because heap is not the whole footprint: metaspace, thread stacks, code cache, GC structures and direct byte buffers are all outside it, so 75% of a 512 MB limit is a sensible starting point and native memory tracking is how you tune it. CPU matters too — <code>--cpus</code> feeds <code>availableProcessors()</code>, which sizes GC threads, the common ForkJoinPool and most connection pools, and giving a JVM less than one full CPU is a reliable way to produce mysterious latency.</p>
+    <pre class="code-block" data-label="Shell"><code>docker run -d --name api \
+  --memory=512m --memory-swap=512m --cpus=1.5 \
+  -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseSerialGC -XX:MaxMetaspaceSize=128m" \
+  registry.example.com/shop-api:1.4.0
+
+# prove the JVM sees the limit, not the host:
+docker run --rm --memory=512m eclipse-temurin:21-jre-jammy \
+  java -XX:+PrintFlagsFinal -version | grep -E 'MaxHeapSize|ActiveProcessorCount'</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/engine/containers/resource_constraints/" rel="noopener">Resource constraints — Docker Docs (memory, CPU and the OOM killer)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html" rel="noopener">java command reference — Oracle (UseContainerSupport, MaxRAMPercentage, ActiveProcessorCount)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-jvm-parameters-rampercentage" rel="noopener">JVM Parameters InitialRAMPercentage, MinRAMPercentage and MaxRAMPercentage — Baeldung</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-memory-limit" rel="noopener">Setting Memory and CPU Limits in Docker — Baeldung on Ops</a></li>
+      <li>[Article] <a href="https://www.infoq.com/presentations/openjdk-containers/" rel="noopener">Java in Containers — Part Deux — InfoQ (how the JVM learned to read cgroups)</a></li>
+    </ul>
+
+    <h3>HEALTHCHECK: telling the platform what "working" means</h3>
+    <p>A running process is not a working service. A JVM that has deadlocked, lost its database pool or wedged in a full-GC loop is still <code>Up</code> as far as the daemon is concerned, so without a health probe an orchestrator will keep routing traffic to it. <code>HEALTHCHECK</code> declares a command whose exit status defines health — 0 healthy, 1 unhealthy — and the container's status becomes <code>starting</code>, then <code>healthy</code> or <code>unhealthy</code>. The four options that matter are <code>--interval</code> (how often), <code>--timeout</code> (how long before the probe itself counts as a failure), <code>--retries</code> (consecutive failures before the verdict flips) and <code>--start-period</code>, the grace window during which failures do not count — indispensable for a Spring Boot app that needs half a minute to warm up.</p>
+    <p>Design the probe, do not copy it. It must be cheap, local and dependency-light: hitting <code>/actuator/health/readiness</code> is right, hitting an endpoint that fans out to three downstream services is a way to make one dependency's outage restart your whole fleet. Prefer a readiness-style check that reports whether this instance can serve traffic now, and keep liveness dumber than readiness. Two practical notes: the probe binary has to exist inside the image, which is exactly what a distroless base takes away, so people either add a small static <code>healthcheck</code> binary or rely on the orchestrator instead; and in Kubernetes the Dockerfile's HEALTHCHECK is ignored entirely — liveness, readiness and startup probes in the pod spec take over — so it is Compose and plain Docker where it earns its keep.</p>
+    <pre class="code-block" data-label="Dockerfile"><code>HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+  CMD wget -q --spider http://localhost:8080/actuator/health/readiness || exit 1
+
+# docker inspect --format='{{.State.Health.Status}}' api   -> starting | healthy | unhealthy</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/dockerfile/#healthcheck" rel="noopener">HEALTHCHECK — Dockerfile reference (Docker Docs)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/container/run/" rel="noopener">docker container run — Docker Docs (the --health-* runtime overrides)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html" rel="noopener">Actuator endpoints — Spring Boot reference documentation (liveness and readiness groups)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" rel="noopener">Configure Liveness, Readiness and Startup Probes — Kubernetes documentation</a></li>
+    </ul>
+
+    <h3>Image scanning, SBOMs and the security posture of an image</h3>
+    <p>Every image inherits the vulnerabilities of everything inside it, and the base image contributes most of them. Scanning turns that into a fact you can act on: <code>docker scout cves</code>, Trivy and Grype all enumerate the OS packages and application dependencies in an image, match them against vulnerability feeds, and — most usefully — tell you which layer introduced each finding, so "bump the base tag" versus "upgrade this library" is an evidence-based decision rather than a guess. Wire it into CI with a severity gate (<code>--severity HIGH,CRITICAL --exit-code 1</code>) so a regression fails the build, and re-scan published images on a schedule: an image that was clean at build time accumulates CVEs while sitting in the registry, because the disclosures are new, not the bytes.</p>
+    <p>An SBOM — a software bill of materials, usually SPDX or CycloneDX — is the inventory that makes this fast. Generate and attach one at build time with <code>docker buildx build --sbom=true --provenance=true</code>, and the next Log4Shell-scale disclosure becomes a query over your registry instead of a week of archaeology. Round the posture out with the things scanners cannot see: a non-root <code>USER</code>, <code>--read-only</code> with explicit tmpfs for scratch, dropped Linux capabilities, no secrets in <code>ENV</code>, a <code>.dockerignore</code> that keeps <code>.git</code> and <code>.env</code> out of the build context, and tags pinned by digest so what you scanned is what you deploy.</p>
+    <pre class="code-block" data-label="Shell"><code>docker scout cves registry.example.com/shop-api:1.4.0
+docker scout recommendations registry.example.com/shop-api:1.4.0   # better base image tags
+
+trivy image --severity HIGH,CRITICAL --exit-code 1 registry.example.com/shop-api:1.4.0
+grype registry.example.com/shop-api:1.4.0
+
+docker buildx build --sbom=true --provenance=true -t registry.example.com/shop-api:1.4.0 --push .</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/scout/" rel="noopener">Docker Scout — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/metadata/attestations/sbom/" rel="noopener">SBOM attestations — Docker Docs</a></li>
+      <li>[Article] <a href="https://trivy.dev/" rel="noopener">Trivy — Aqua Security (open-source container and IaC scanner)</a></li>
+      <li>[Article] <a href="https://github.com/anchore/grype" rel="noopener">anchore/grype — GitHub (vulnerability scanner for images and filesystems)</a></li>
+      <li>[Article] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html" rel="noopener">Docker Security Cheat Sheet — OWASP Cheat Sheet Series</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-IH5inFyEqU" rel="noopener">Container Image Scanning with Trivy — Trivy Overview — Aqua Security Open Source</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-docker-basics.html">← Docker Fundamentals</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="09-docker-compose.html">Docker Compose →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Production Docker is the DevOps topic Indian product and service companies probe hardest, because it is where a candidate either has shipped something or has only read about it. Image size and the JVM memory question come up almost every round:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a multi-stage build and why use one?</summary>
+      <div class="answer"><p>A Dockerfile with more than one FROM. Earlier stages hold the build toolchain (JDK, Maven, Node); the final stage starts from a small runtime base and pulls in only the built artifact with COPY --from. Everything in the discarded stages never reaches the shipped image, so you get a much smaller image and a much smaller attack surface without any cleanup commands.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How do you reduce the size of a Docker image?</summary>
+      <div class="answer"><p>In order of impact: use a multi-stage build so the toolchain never ships; choose a smaller base (a JRE tag, slim, distroless) instead of a full distro plus JDK; use a .dockerignore so the build context excludes .git, target and node_modules; combine related RUN steps and clean package-manager caches within the same layer; do not install debugging tools you will not use; and layer the artifact (Spring Boot layered jars) so pushes and pulls transfer only what changed. Then measure with docker history and docker scout to see which layer is actually large.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Volume vs bind mount — when do you use each?</summary>
+      <div class="answer"><p>A named volume is managed by Docker in its own storage area, is host-path independent, works with volume drivers and is the right place for persistent state such as database files. A bind mount maps an exact host directory into the container, which makes it ideal for live-reloading source code in development or injecting a config file, but it ties the container to the host's filesystem layout and permissions. Production data goes in volumes; bind mounts are mostly a development and configuration tool. tmpfs is the third option: in-memory, gone on stop, good for scratch and secrets.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why should the runtime image use a JRE rather than a JDK?</summary>
+      <div class="answer"><p>The JDK adds the compiler and the whole diagnostic toolchain, which is a hundred-plus megabytes you do not need to run a jar, plus extra CVE surface and a ready-made toolkit for anyone who gets code execution in your container. The JDK belongs in the build stage. If you need to go smaller still, build a custom runtime with jlink; if you need diagnostics in production, attach them deliberately rather than shipping them by default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are Spring Boot layered jars and what problem do they solve?</summary>
+      <div class="answer"><p>A fat jar copied as one COPY is one large layer, so a one-line code change produces a completely new sixty-megabyte layer to push and pull. A layered jar carries a layer index splitting it into dependencies, spring-boot-loader, snapshot-dependencies and application. You extract it in the build stage with java -Djarmode=tools -jar app.jar extract --layers (or the older layertools jarmode) and issue one COPY per layer, stable ones first. A code change then invalidates only the small application layer, and the dependency layer stays cached.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is Alpine risky as a base image for Java?</summary>
+      <div class="answer"><p>Alpine uses musl libc, not glibc, and the JVM plus most native libraries are built and tuned for glibc. Musl-native OpenJDK builds do exist now, but you can still meet different thread-stack and allocator behaviour, DNS resolution differences, and native dependencies (Netty native transports, JNI drivers, anything compiled against glibc) with no musl build at all. For Java, a slim glibc base, a distroless Java image or UBI is the safer default; use Alpine only when you have tested the specific workload and measured a real benefit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you build an image that runs on both Apple Silicon and an amd64 server?</summary>
+      <div class="answer"><p>Use buildx with a docker-container driver builder and pass --platform linux/amd64,linux/arm64 with --push. That publishes a manifest list under one tag, and each host pulls the matching image automatically. The other architecture is built either under QEMU emulation (correct but slow) or on a native remote builder node (much faster in CI). Use $BUILDPLATFORM on the build stage so compilation runs natively and only the runtime stage is architecture-specific.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you serve an Angular app from a container, and what breaks if you get it wrong?</summary>
+      <div class="answer"><p>Stage one uses a Node image to run npm ci and the production build; stage two copies the dist output (modern Angular emits dist/app/browser) into nginx and ships no Node at all. The classic bug is the missing SPA fallback: a hard refresh on a router-only path such as /orders/42 makes nginx look for a file that does not exist and return 404. One try_files $uri $uri/ /index.html directive fixes it. Also remember that build-time configuration is frozen per image, so per-environment settings should be fetched at runtime rather than rebuilt per environment.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Two containers need to talk to each other. How do you wire that up?</summary>
+      <div class="answer"><p>Put them on a user-defined bridge network and address each other by container or service name — Docker's embedded DNS resolves names on user-defined networks, unlike the legacy default bridge where only IP addresses work. Published ports (-p) are for reaching a container from the host or outside world and are not needed for container-to-container traffic; leaving a database unpublished but on the shared network is the more secure default.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Java container is killed with exit code 137 despite a 512m limit and no obvious leak. Diagnose it.</summary>
+      <div class="answer"><p>Exit 137 is the kernel OOM killer: the cgroup's memory limit was exceeded. Two usual causes. On an old JVM without container support, the heap was sized from the host's total RAM, so the default max heap alone exceeded the limit — fix by upgrading, or by setting the size explicitly. On a modern JVM the more likely cause is that heap is not the whole footprint: metaspace, thread stacks, code cache, GC structures and direct byte buffers all live outside it, so a MaxRAMPercentage set too close to 100 leaves no room for native memory. Set MaxRAMPercentage around 70–75, cap MaxMetaspaceSize and direct memory, and use native memory tracking to see where the rest is going.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is -XX:MaxRAMPercentage preferred over -Xmx in a container?</summary>
+      <div class="answer"><p>Because it is relative to the cgroup limit the JVM already reads via UseContainerSupport, so the same image behaves correctly whether it is scheduled with 512 MB or 4 GB — resize the container and the heap follows. A hard -Xmx is a constant baked into the image or the manifest, so it silently wastes memory on a large limit and gets the process OOM-killed on a small one. It also keeps one image valid across environments, which is the point of building once and promoting the same artifact.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A teammate passes an artifactory token with ARG and deletes the file in a later RUN. What is wrong?</summary>
+      <div class="answer"><p>Both halves are broken. Build arguments end up in image metadata that docker history will print, and layers are append-only — deleting a file in a later layer leaves the bytes readable in the earlier one, so anyone who can pull the image can extract the token. The credential must be treated as compromised and rotated. The correct mechanism is RUN --mount=type=secret, which exposes the value as a file in a tmpfs only for the duration of that command and never commits it to a layer, with --mount=type=ssh for private Git dependencies.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Cache mounts versus the copy-the-POM-first trick — why prefer cache mounts?</summary>
+      <div class="answer"><p>Copying the dependency descriptor first only preserves the cache while that file is untouched: any dependency change discards every download, the pre-fetch step rarely resolves exactly what the real build needs, and multi-module projects make it unwieldy. RUN --mount=type=cache gives the builder a persistent directory for the local repository that is shared across builds and never written into a layer, so resolution stays incremental and the image stays small. The caveat is that it is builder-local, so a cold CI runner starts empty — that is what registry-backed --cache-from and --cache-to are for — and the build must still succeed with an empty cache.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you keep a production image's vulnerability count under control over time?</summary>
+      <div class="answer"><p>Treat it as a continuous process, not a build-time check. Scan in CI with Docker Scout, Trivy or Grype and fail the build on new high or critical findings; attach an SBOM so you can answer "are we affected?" with a registry query instead of a manual audit; re-scan published images on a schedule because new disclosures land against unchanged bytes; and rebuild regularly so base-image patches actually reach production. Reduce what has to be patched by using a minimal base (distroless or a vendor-supported UBI) and pinning by digest, and pair it with the hardening scanners cannot check: non-root USER, read-only root filesystem, dropped capabilities and no secrets in the image.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your HEALTHCHECK calls an endpoint that verifies three downstream services. Critique that.</summary>
+      <div class="answer"><p>It converts a single dependency's outage into a fleet-wide restart storm: every instance reports unhealthy, the platform kills and reschedules all of them, and the restarts add load to the dependency that was already struggling. A health probe should report whether this instance can serve traffic, using cheap local checks. Keep liveness dumber than readiness, use Spring Boot's readiness group and a start-period long enough to cover warm-up, and remember Kubernetes ignores the Dockerfile HEALTHCHECK entirely in favour of pod-spec probes.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.dk.multistage</li>
+      <li>dev.dk.ops</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

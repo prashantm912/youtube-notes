@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Docker Compose module: the Compose specification and compose.yaml, services, networks and volumes, the everyday CLI, a realistic Postgres-Redis-Kafka stack, healthcheck-based startup ordering, profiles, override files, variable interpolation and Docker Hub pull rate limits — with verified resources and interview questions.">
+  <title>Docker Compose — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Docker Compose</h1>
+  <p class="standfirst">One command should be enough to bring up the whole system on a laptop. Compose is the file that makes that true — and, in most teams, the only architecture diagram that is actually executable.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → DevOps and Deployment → Docker Compose</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>A single container is easy. A real application is a web service, an API, a database, a cache, a broker and a migration job — six containers that must be built, networked, configured and started in a workable order. Compose is the declarative file that describes that whole set and the CLI that runs it, so a new joiner clones the repo, types one command, and has the system running by lunchtime instead of by Friday.</p>
+    <p>This module covers the Compose specification and the shape of <code>compose.yaml</code> — services, networks, volumes — then the everyday CLI, and then the part interviews actually probe: why <code>depends_on</code> on its own does not do what people think it does, how healthchecks fix startup ordering properly, and how profiles, override files and variable interpolation let one repository serve local development, CI and demo environments. It closes on the operational detail that breaks pipelines at the worst moment: Docker Hub pull rate limits.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Compose today: the specification, compose.yaml, and the V1 to V2 shift</h3>
+    <p>Compose stopped being "a Docker tool" and became a specification. The Compose Specification is an open, vendor-neutral schema for describing multi-container applications, implemented by Docker Compose and by other runtimes too — so what you learn here transfers. The canonical filename is now <code>compose.yaml</code>; <code>docker-compose.yml</code> still works and is looked up as a fallback, but new projects should use the modern name.</p>
+    <p>Two conventions catch out people who learned Compose a few years ago. First, the top-level <code>version:</code> key is obsolete — it belonged to the old versioned file formats (v2.x, v3.x) and the current specification ignores it, emitting a warning. Delete it; the schema is now determined by the keys you use, not by a version string. Second, the command is <code>docker compose</code> (a Go plugin bundled with the Docker CLI, known as Compose V2), not <code>docker-compose</code> (the standalone Python script, V1, which reached end of life and stopped receiving updates). If a tutorial hyphenates the command, it predates the current tooling — treat the rest of its advice with the same suspicion.</p>
+    <pre class="code-block" data-label="YAML"><code># compose.yaml — modern, minimal, correct
+# NO `version:` key. It is obsolete and only produces a warning.
+name: shop            # optional: pins the project name (else the folder name is used)
+
+services:
+  api:
+    image: ghcr.io/acme/shop-api:1.4.0</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/" rel="noopener">Docker Compose overview — Docker Docs</a></li>
+      <li>[Official] <a href="https://compose-spec.io/" rel="noopener">The Compose Specification — compose-spec.io (the vendor-neutral schema)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/intro/history/" rel="noopener">History and development of Compose — Docker Docs (why V2 replaced V1)</a></li>
+      <li>[Official] <a href="https://www.docker.com/blog/new-docker-compose-v2-and-v1-deprecation/" rel="noopener">Docker Compose: What's New, What's Changing, What's Next — Docker Blog (the V1 deprecation notice)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=1l_cmL57mds" rel="noopener">Collaboration and Team Feedback with Docker Compose — Kunal Kushwaha</a></li>
+    </ul>
+
+    <h3>The services block: image vs build, ports, environment, command, restart</h3>
+    <p>Everything begins with <code>services</code>. Each key under it is a service name — and that name is load-bearing: it becomes the DNS hostname other containers use, the default container name prefix, and the argument you pass to nearly every CLI subcommand. A service either pulls a prebuilt <code>image</code> or declares a <code>build</code> context that Compose hands to BuildKit; declaring both means "build it, then tag it with this name", which is the pattern you want so a locally built image gets a stable tag.</p>
+    <p>The remaining keys are the ones you will type daily. <code>ports</code> publishes a container port on the host in <code>HOST:CONTAINER</code> order — the direction people reverse constantly, and the reason a service is unreachable from the browser but perfectly reachable from a sibling container. <code>expose</code>, by contrast, publishes nothing to the host and is rarely needed, because containers on the same Compose network can already reach each other on any port. <code>environment</code> sets variables inline while <code>env_file</code> loads them from a file (inline values win); <code>command</code> overrides the image's default command; and <code>restart</code> decides what happens when the process exits — <code>unless-stopped</code> is the sane default for backing services on a developer machine.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  api:
+    build:
+      context: ./api          # build from source...
+      dockerfile: Dockerfile
+    image: shop/api:dev       # ...and tag the result with a stable name
+    ports:
+      - "8080:8080"           # HOST:CONTAINER — get the order wrong and nothing answers
+    env_file: [.env]
+    environment:
+      SPRING_PROFILES_ACTIVE: local   # inline values override env_file
+    command: ["java", "-jar", "/app/app.jar", "--server.port=8080"]
+    restart: unless-stopped</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/services/" rel="noopener">Services top-level element — Compose file reference (every key, alphabetically)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/build/" rel="noopener">Compose Build Specification — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/intro/compose-application-model/" rel="noopener">How Compose works: the application model — Docker Docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-compose" rel="noopener">Introduction to Docker Compose — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=SXwC9fSwct8" rel="noopener">Ultimate Docker Compose Tutorial — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>Networks: the default network and service-name DNS</h3>
+    <p>Compose creates a network for your project automatically and attaches every service to it, so you almost never need to write a <code>networks</code> block at all. Inside that network, Docker's embedded DNS resolves each service name to that service's container. The <code>api</code> service reaches the database at the hostname <code>db</code> on the database's own port — not on the host port you published, and never at <code>localhost</code>, because inside a container <code>localhost</code> means that container. That single misunderstanding accounts for a large share of "connection refused" issues in first Compose setups.</p>
+    <p>You declare explicit networks when you want segmentation — putting the database on an internal network the front end cannot reach, or marking a network <code>internal: true</code> so it has no route out to the internet — or when you need to join a pre-existing network with <code>external: true</code>, typically to talk to another Compose project. Publishing ports is then purely for <em>your</em> convenience as a developer: it lets your IDE, psql client or browser reach the container. Services talking to each other need no published ports whatsoever.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  api:
+    environment:
+      # host is the SERVICE NAME; port is the CONTAINER port, not the published one
+      DB_URL: jdbc:postgresql://db:5432/shop
+      REDIS_HOST: cache
+    networks: [backend]
+  db:
+    image: postgres:17
+    networks: [backend]       # no `ports:` — nothing on the host needs to reach it
+
+networks:
+  backend:
+    internal: true            # no egress to the internet from this network</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/networking/" rel="noopener">Networking in Compose — Docker Docs (the default network and DNS resolution)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/networks/" rel="noopener">Networks top-level element — Compose file reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-compose-links-depends-on" rel="noopener">Difference Between links and depends_on in Docker Compose — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=MVIcrmeV_6c" rel="noopener">Docker Compose Tutorial — Docker in Practice — TechWorld with Nana</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=6GoEfLsTI1E" rel="noopener">Docker Compose with Spring Boot and PostgreSQL — Geekific</a></li>
+    </ul>
+
+    <h3>Volumes: named volumes for data, bind mounts for source</h3>
+    <p>Containers are disposable; their writable layer disappears with them. Volumes are how state survives, and Compose gives you two kinds with genuinely different jobs. A <em>named volume</em> is storage Docker manages for you, declared under the top-level <code>volumes</code> key and mounted into a service — this is what you use for PostgreSQL data directories, broker logs and upload folders. It lives outside the container lifecycle, so <code>docker compose down</code> followed by <code>up</code> finds the data intact.</p>
+    <p>A <em>bind mount</em> maps a host path straight into the container, and its main development use is mounting your source tree so an edit on the laptop is visible inside the container immediately, enabling hot reload without a rebuild. The trade-offs are real: bind mounts are noticeably slower on macOS and Windows than on Linux, they inherit host file ownership (the classic permission-denied on a root-created file), and mounting a source directory over a path that contains build output — the <code>node_modules</code> problem — hides what the image built. The usual fix is an anonymous or named volume mounted over the nested path to shadow the bind mount. For the modern alternative, <code>develop.watch</code> syncs and rebuilds selectively instead of mounting everything.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  db:
+    image: postgres:17
+    volumes:
+      - pgdata:/var/lib/postgresql/data     # named volume: survives `down`
+  web:
+    build: ./web
+    volumes:
+      - ./web/src:/app/src                  # bind mount: live source for hot reload
+      - /app/node_modules                   # anonymous volume shadows the bind mount
+
+volumes:
+  pgdata:                                   # declared here, managed by Docker</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/volumes/" rel="noopener">Volumes top-level element — Compose file reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-volumes" rel="noopener">Guide to Docker Volumes — Baeldung on Ops</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-volume-mount-issues" rel="noopener">Troubleshooting Docker Volume Mounting Issues — Baeldung on Ops (named volumes vs bind mounts)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-share-volume-multiple-containers" rel="noopener">Share a Volume Between Multiple Containers in Docker Compose — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=TSySwrQcevM" rel="noopener">Docker Crash Course: Docker Compose — Net Ninja</a></li>
+    </ul>
+
+    <h3>The everyday CLI: up, down, logs, exec, ps, config</h3>
+    <p>Six subcommands cover almost everything. <code>docker compose up -d</code> starts the stack detached and is idempotent — re-run it after editing the file and Compose recreates only the services whose definition changed. Add <code>--build</code> when you have changed source that a service builds from, because Compose reuses an existing image otherwise and you will spend twenty minutes debugging code that is not running. <code>docker compose ps</code> shows what is up along with each container's health status, <code>logs -f api</code> tails one service, and <code>exec db psql -U app shop</code> opens a shell inside an already-running container (<code>run</code>, by contrast, starts a brand-new throwaway container — a distinction interviewers like).</p>
+    <p>Two more are worth reflexes. <code>docker compose config</code> prints the fully resolved file after merging every override and substituting every variable, which is the fastest way to answer "why is this service getting that value?" And the sharp edge: <code>docker compose down</code> removes containers and networks but <em>keeps</em> named volumes, while <code>down -v</code> also deletes them. That <code>-v</code> is how developers silently destroy the local database they had seeded — learn the difference before you learn it the hard way.</p>
+    <pre class="code-block" data-label="Shell"><code>docker compose up -d --build        # start detached, rebuilding changed services
+docker compose ps                   # state + health of every service
+docker compose logs -f --tail=100 api
+docker compose exec db psql -U app shop     # shell into a RUNNING container
+docker compose config               # the effective, fully merged and interpolated file
+docker compose down                 # containers + networks; named volumes SURVIVE
+docker compose down -v              # ...and now the data is gone. Deliberately.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/compose/" rel="noopener">docker compose — CLI reference (every subcommand)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/compose/down/" rel="noopener">docker compose down — CLI reference (what --volumes actually removes)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/cli/docker/compose/config/" rel="noopener">docker compose config — CLI reference (resolving the effective file)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-compose-yaml-file-check" rel="noopener">How to Validate a Docker Compose YAML File — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=DRYYb3JeYNk" rel="noopener">Docker Compose Tutorial with Commands and Example — Daily Code Buffer</a></li>
+    </ul>
+
+    <h3>The realistic stack: why depends_on is not enough, and how healthchecks fix it</h3>
+    <p>Here is the trap, and it is the single most-asked Compose interview question. Plain <code>depends_on: [db]</code> only guarantees that the <code>db</code> <em>container</em> has been started before the <code>api</code> container is started. It says nothing about whether PostgreSQL inside that container has finished initialising, replayed WAL, created the database and begun accepting connections — a process that routinely takes several seconds. So the API starts, tries to connect, gets "connection refused", and crashes. It appears to work on a fast laptop and fails in CI, which is the worst possible failure mode.</p>
+    <p>The fix is to give the dependency a <code>healthcheck</code> and depend on the <em>condition</em>, not the container: <code>depends_on: { db: { condition: service_healthy } }</code>. Now Compose runs the healthcheck command inside the container on an interval and holds the dependent service until it reports healthy. Choose a check that proves readiness rather than liveness — <code>pg_isready</code> for PostgreSQL, <code>redis-cli ping</code> for Redis, a broker API call for Kafka — and set <code>start_period</code> generously so slow first-boot initialisation does not count failures against you. The two other conditions matter too: <code>service_started</code> is the weak default, and <code>service_completed_successfully</code> is how you make a migration job run to completion before the API comes up. Keep an application-level retry as well, because in Kubernetes there is no <code>depends_on</code> at all and your service must tolerate a dependency that is briefly absent.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  db:
+    image: postgres:17
+    environment: { POSTGRES_USER: app, POSTGRES_DB: shop }
+    volumes: [ "pgdata:/var/lib/postgresql/data" ]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d shop"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s        # grace window for first-boot initialisation
+
+  cache:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  broker:
+    image: apache/kafka:latest
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      retries: 12
+      start_period: 40s
+
+  migrate:
+    build: ./api
+    command: ["./migrate.sh"]
+    depends_on:
+      db: { condition: service_healthy }
+
+  api:
+    build: ./api
+    depends_on:
+      db:      { condition: service_healthy }
+      cache:   { condition: service_healthy }
+      broker:  { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ["8080:8080"]
+
+  worker:
+    build: ./worker
+    depends_on:
+      broker: { condition: service_healthy }
+
+volumes:
+  pgdata:</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/startup-order/" rel="noopener">Control startup and shutdown order in Compose — Docker Docs (the depends_on conditions)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/gettingstarted/" rel="noopener">Compose quickstart — Docker Docs (a multi-service application end to end)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/linux/docker-compose-container-interdependence" rel="noopener">Docker Compose: Wait for Container X Before Starting Y — Baeldung on Linux</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-compose-mysql-connection-ready-wait" rel="noopener">Wait for Database Connection Readiness in Docker Compose — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=PSO_xKhSKEM" rel="noopener">Docker Healthcheck and Compose Healthcheck — Tech Buddy</a></li>
+    </ul>
+
+    <h3>Profiles: optional services in one file</h3>
+    <p>A full stack accumulates services nobody needs all the time — pgAdmin, a mail catcher, Prometheus and Grafana, a load generator, an LDAP stub. Splitting them into a second file works but fragments the definition. <code>profiles</code> is the better answer: tag a service with one or more profile names and Compose skips it unless that profile is activated, either by <code>--profile tools</code> on the command line or the <code>COMPOSE_PROFILES</code> environment variable. A service with no profile is always started, so the default <code>docker compose up</code> stays fast and lean.</p>
+    <p>Two behaviours are worth knowing. Naming a profiled service explicitly (<code>docker compose up pgadmin</code>) activates its profile implicitly, so you rarely need the flag interactively. And profiles compose with <code>depends_on</code>: if an enabled service depends on a profiled one, that dependency is pulled in automatically. Related and often confused with profiles is <code>required: false</code> on a dependency, which lets a service start even when the named dependency is not part of the current run — useful precisely when an optional profile is switched off.</p>
+    <pre class="code-block" data-label="YAML"><code>services:
+  api:                         # no profile: always started
+    build: ./api
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles: ["tools"]        # only with --profile tools
+  grafana:
+    image: grafana/grafana
+    profiles: ["tools", "observability"]
+
+# docker compose up -d                      -> api only
+# docker compose --profile tools up -d      -> api + pgadmin + grafana
+# COMPOSE_PROFILES=observability docker compose up -d</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/profiles/" rel="noopener">Using profiles with Compose — Docker Docs</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/" rel="noopener">Merge Compose files — Docker Docs (how override files combine, key by key)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/multiple-compose-files/extends/" rel="noopener">Extend Compose files with extends — Docker Docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-service-profiles" rel="noopener">Service Profiles in Docker — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=D8JwmDDg0ns" rel="noopener">Optional depends_on with Docker Compose — Nick Janetakis</a></li>
+    </ul>
+
+    <h3>Override files, fragments, and one file per environment</h3>
+    <p>Compose reads <code>compose.yaml</code> and, if present, <code>compose.override.yaml</code> automatically, merging the second over the first. That convention is the cleanest way to separate what is universal from what is local: the base file holds images, networks and dependencies, while the override adds bind-mounted source, debug ports, verbose logging and the developer tools. Commit both if the whole team shares them, or commit only the base and let each developer keep their own override. For CI, name the files explicitly — <code>-f compose.yaml -f compose.ci.yaml</code> — and remember the merge rules: mappings merge key by key, scalars are replaced, and sequences are replaced wholesale rather than concatenated, which surprises people expecting their extra <code>ports</code> entry to be added to the base list.</p>
+    <p>For reuse <em>inside</em> a file, YAML anchors and aliases (Compose calls them fragments) let you define a block once with <code>&amp;name</code> and splice it into several services with <code>&lt;&lt;: *name</code> — ideal for a shared logging configuration or a common set of environment variables. Use <code>x-</code> prefixed top-level keys to hold these definitions, since the specification reserves that prefix for extensions and ignores them. Where reuse must cross files or projects, <code>extends</code> pulls a service definition from another file, giving several repositories one canonical database service rather than five drifting copies. Whatever you use, verify the outcome with <code>docker compose config</code> rather than reasoning about it.</p>
+    <pre class="code-block" data-label="YAML"><code>x-logging: &amp;default-logging     # x- keys are reserved for extensions and ignored
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  api:
+    logging: *default-logging
+  worker:
+    logging: *default-logging
+
+# compose.override.yaml is merged automatically on top of compose.yaml.
+# For CI, be explicit and skip the implicit override:
+#   docker compose -f compose.yaml -f compose.ci.yaml up -d --wait</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/fragments/" rel="noopener">Fragments — Compose file reference (YAML anchors, aliases and extension fields)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/" rel="noopener">Interpolation — Docker Docs (the ${VAR:-default} and ${VAR:?error} forms)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/environment-variables/envvars-precedence/" rel="noopener">Environment variables precedence — Docker Docs (which source wins)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/environment-variables/set-environment-variables/" rel="noopener">Ways to set environment variables with Compose — Docker Docs</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-container-environment-variables" rel="noopener">Passing Environment Variables to Docker Containers — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>Variable interpolation and the .env file</h3>
+    <p>Compose substitutes <code>${VARIABLE}</code> references anywhere in the file before the configuration is applied, drawing values from the shell environment and from a <code>.env</code> file sitting next to the Compose file. This is how one file serves several environments without branching: image tags, ports, replica counts and credentials all become variables. Two forms carry most of the weight — <code>${TAG:-latest}</code> supplies a default when the variable is unset or empty, and <code>${DB_PASSWORD:?password required}</code> fails the command loudly with your message instead of silently starting a database with a blank password.</p>
+    <p>Be precise about the two different things that look alike. The <code>.env</code> file feeds <em>interpolation of the Compose file itself</em>; the <code>env_file</code> key feeds <em>variables into a container</em>. They are not the same file and not the same mechanism, and mixing them up is a common source of "the variable is set but the app cannot see it". Precedence runs, roughly, from most specific to least: an inline <code>environment</code> entry beats <code>env_file</code>, which beats the image's own <code>ENV</code>; and for interpolation, a shell variable beats the <code>.env</code> file. Keep real secrets out of both — commit a <code>.env.example</code> with placeholder values, git-ignore the real <code>.env</code>, and use Compose secrets for anything genuinely sensitive.</p>
+    <pre class="code-block" data-label="YAML"><code># .env (git-ignored)     ->  TAG=1.4.0
+#                            API_PORT=8080
+services:
+  api:
+    image: ghcr.io/acme/shop-api:${TAG:-latest}
+    ports: ["${API_PORT:-8080}:8080"]
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD before starting}
+
+# `docker compose config` shows the file AFTER substitution — always check there first.</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/production/" rel="noopener">Use Compose in production — Docker Docs (and where its limits are)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/legacy-versions/" rel="noopener">Legacy versions — Compose file reference (why the version key disappeared)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/use-secrets/" rel="noopener">Secrets in Compose — Docker Docs (the right home for credentials)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/compose/how-tos/file-watch/" rel="noopener">Use Compose Watch — Docker Docs (sync and rebuild instead of bind-mounting everything)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/docker-compose-no-config-file" rel="noopener">Troubleshooting "no configuration file provided" in Docker Compose — Baeldung on Ops</a></li>
+    </ul>
+
+    <h3>Compose beyond the laptop: Spring Boot support, Testcontainers, and the production line</h3>
+    <p>Two integrations remove most of the remaining friction for JVM teams. Spring Boot's Docker Compose support detects a <code>compose.yaml</code> in the project root, starts the stack when the application starts, reads connection details from the running containers and injects them as properties — so you delete the hand-written local datasource configuration entirely and stop the stack when the app stops. Testcontainers attacks the same problem from the test side, starting real dependencies per test run against throwaway containers; its Compose module can drive an existing Compose file directly, which is how integration tests stop depending on whatever happens to be running on the developer's machine.</p>
+    <p>Know where Compose stops, because interviewers ask. It is a single-host tool: no scheduling across nodes, no rolling updates with surge and unavailability budgets, no autoscaling, no self-healing beyond restart policies. The <code>deploy</code> key exists but most of it is honoured only by Swarm. The honest answer is that Compose is superb for local development, integration testing and modest single-server deployments, and that beyond that you move to Kubernetes — which is where this track goes next.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/dev-services.html" rel="noopener">Development-time services: Docker Compose support — Spring Boot reference documentation</a></li>
+      <li>[Official] <a href="https://java.testcontainers.org/modules/docker_compose/" rel="noopener">Docker Compose Module — Testcontainers for Java</a></li>
+      <li>[Official] <a href="https://docs.docker.com/reference/compose-file/deploy/" rel="noopener">deploy — Compose file reference (what is and is not honoured outside Swarm)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/docker-compose-support-spring-boot" rel="noopener">Docker Compose Support in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=-7b_jG9RY78" rel="noopener">Spring Boot 3.1 Docker Compose Module — Java Techie</a></li>
+    </ul>
+
+    <h3>Docker Hub pull rate limits in CI, and the registry mirror that fixes them</h3>
+    <p>The failure that takes a team by surprise: the pipeline that has run for months starts failing with <code>toomanyrequests: You have reached your pull rate limit</code>. Docker Hub meters image pulls per account, and anonymous pulls are metered by IP address — which on a shared CI runner, a corporate NAT or a cloud provider's egress range means you are sharing one small budget with strangers. Authenticated free accounts get a larger allowance than anonymous pulls, and paid subscriptions raise it further, so the first and cheapest mitigation is simply to <code>docker login</code> in CI with a service account and a read-only access token before anything pulls.</p>
+    <p>The structural fix is to stop pulling from Docker Hub on every build. Run a registry mirror — a pull-through cache that fetches an image from Hub once and serves every subsequent request locally — or use the equivalent managed feature in the registry you already pay for (Artifactory remote repositories, ECR pull-through cache, Azure Container Registry artifact cache, GCP Artifact Registry remote repos). Configure the Docker daemon or BuildKit with <code>registry-mirrors</code> and builds transparently hit the cache. Two habits make this stick: pin base images by digest so the cache is deterministic, and mirror the handful of images your Compose stack pulls — Postgres, Redis, Kafka — since a full local stack can pull half a dozen images per developer per day.</p>
+    <pre class="code-block" data-label="JSON"><code>// /etc/docker/daemon.json on a CI runner — pull through a local cache
+{
+  "registry-mirrors": ["https://registry-cache.internal.example.com"]
+}
+
+// In the pipeline, before anything pulls:
+//   echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.docker.com/docker-hub/usage/pulls/" rel="noopener">Docker Hub pull usage and limits — Docker Docs (how pulls are counted)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/docker-hub/image-library/mirror/" rel="noopener">Mirror the Docker Hub library — Docker Docs (running a pull-through cache)</a></li>
+      <li>[Official] <a href="https://docs.docker.com/build/buildkit/configure/" rel="noopener">Configure BuildKit — Docker Docs (pointing builders at a registry mirror)</a></li>
+      <li>[Article] <a href="https://www.docker.com/blog/revisiting-docker-hub-policies-prioritizing-developer-experience/" rel="noopener">Revisiting Docker Hub Policies — Docker Blog (the current limit thresholds)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2021/01/docker-jfrog-partnership/" rel="noopener">Docker Hub and JFrog Partnership Removes Image Pull Limits for Artifactory Users — InfoQ</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="08-docker-production.html">← Docker for Production Images</a>
+    <a href="index.html">All DevOps and Deployment modules</a>
+    <a href="10-kubernetes-basics.html">Kubernetes Fundamentals →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Compose comes up in almost every backend and DevOps round in India, from service-company screens ("what does this file do?") to product-company system rounds ("your stack is flaky on startup — fix it"):</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Docker Compose and what problem does it solve?</summary>
+      <div class="answer"><p>A tool for defining and running multi-container applications from one declarative file. Instead of a page of <code>docker run</code> commands with hand-wired networks, volumes and environment variables, you describe every service once in <code>compose.yaml</code> and bring the whole stack up with a single command. Its main value is reproducibility: every developer and the CI pipeline get an identical local environment.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the top-level sections of a Compose file?</summary>
+      <div class="answer"><p><code>services</code> (the containers, and the only mandatory one), <code>networks</code>, <code>volumes</code>, plus <code>configs</code> and <code>secrets</code>. An optional <code>name</code> pins the project name. Note what is <em>not</em> there any more: <code>version</code> is obsolete under the current Compose Specification and should be deleted.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between <code>docker-compose</code> and <code>docker compose</code>?</summary>
+      <div class="answer"><p>The hyphenated form is Compose V1, a standalone Python program that reached end of life. The space-separated form is Compose V2, a Go plugin shipped with the Docker CLI, which is what you should use — it is faster, supports the current specification including profiles and the new dependency conditions, and is the only version receiving development. Docker Desktop aliases the old command to the new one, which is why some scripts still appear to work.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> In <code>ports: "8081:8080"</code>, which number is which?</summary>
+      <div class="answer"><p>Host first, container second — <code>HOST:CONTAINER</code>. So the application listening on port 8080 inside the container is reachable at port 8081 on your machine. Publishing ports is only needed for access from the host; containers on the same Compose network reach each other directly on the container port.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> How does one service talk to another?</summary>
+      <div class="answer"><p>By service name. Compose creates a default network for the project, attaches all services to it, and Docker's embedded DNS resolves each service name to its container. So the API connects to <code>db</code> on port 5432, not to <code>localhost</code> — inside a container <code>localhost</code> is that container itself. No published ports and no legacy <code>links</code> are required.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Named volume vs bind mount — when do you use each?</summary>
+      <div class="answer"><p>Named volumes are managed by Docker, declared under the top-level <code>volumes</code> key, portable across platforms and fast — use them for database data directories and anything the application persists. Bind mounts map a host path in, so they are for development conveniences: mounting source for hot reload, injecting a config file, reading generated output. Bind mounts are slower on macOS and Windows and bring host file-ownership problems, so do not use them for database storage.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is the difference between <code>docker compose down</code> and <code>down -v</code>?</summary>
+      <div class="answer"><p><code>down</code> stops and removes containers and the project network but leaves named volumes alone, so your database data survives. <code>down -v</code> (or <code>--volumes</code>) additionally deletes the named volumes declared in the file — that is a permanent data loss and the usual cause of "my local database is empty again". Use <code>-v</code> deliberately when you want a clean slate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> <code>environment</code>, <code>env_file</code> and <code>.env</code> — what is the difference?</summary>
+      <div class="answer"><p><code>environment</code> sets variables on the container inline. <code>env_file</code> loads container variables from a named file. The <code>.env</code> file next to the Compose file is different in kind: it supplies values for <code>${VAR}</code> interpolation <em>within the Compose file itself</em>, before the configuration is applied. Precedence for the container runs inline <code>environment</code> over <code>env_file</code> over the image's <code>ENV</code>; for interpolation, the shell environment beats <code>.env</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you keep one Compose file usable for both local development and CI?</summary>
+      <div class="answer"><p>Keep the shared truth in <code>compose.yaml</code> and layer differences on top. <code>compose.override.yaml</code> is picked up automatically for local development (bind-mounted source, debug ports, dev tools); CI names its files explicitly with <code>-f compose.yaml -f compose.ci.yaml</code>, which skips the implicit override. Move anything that genuinely varies — image tags, ports, credentials — into interpolated variables with defaults, and mark optional services with profiles. Verify the result with <code>docker compose config</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What are profiles and when would you reach for them?</summary>
+      <div class="answer"><p>Profiles tag services as optional. A service with <code>profiles: ["tools"]</code> is skipped unless you pass <code>--profile tools</code> or set <code>COMPOSE_PROFILES</code>; services with no profile always start. They keep monitoring stacks, admin UIs, mail catchers and load generators in the same file as the application without slowing down the default <code>up</code>. Naming a profiled service directly also activates its profile.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your API container keeps crashing at startup because the database is not ready, even though you have <code>depends_on: [db]</code>. Explain and fix it.</summary>
+      <div class="answer"><p><code>depends_on</code> in its plain form only orders <em>container start</em>: Compose starts the <code>db</code> container before the <code>api</code> container and then immediately considers the dependency satisfied. It has no idea whether PostgreSQL inside that container has finished initialising and is accepting connections, which typically takes several seconds. The fix is to add a <code>healthcheck</code> to <code>db</code> (for example <code>pg_isready -U app</code>, with <code>interval</code>, <code>retries</code> and a generous <code>start_period</code>) and change the dependency to <code>depends_on: { db: { condition: service_healthy } }</code>. Compose then holds the API until the check passes. Keep an application-level connection retry as well, since production orchestrators have no equivalent of <code>depends_on</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Name the <code>depends_on</code> conditions and give a use for each.</summary>
+      <div class="answer"><p><code>service_started</code> — the default, container-start ordering only, adequate for a stateless sidecar. <code>service_healthy</code> — waits for the dependency's healthcheck to pass, which is what you want for databases, caches and brokers. <code>service_completed_successfully</code> — waits for a one-shot container to exit with status zero, the correct way to run a schema migration or seed job before the application starts. Add <code>required: false</code> when the dependency may legitimately be absent, for instance because its profile is disabled.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you write a good healthcheck, and what makes a bad one?</summary>
+      <div class="answer"><p>A good check proves the service can do its job: <code>pg_isready</code> against the actual database name, <code>redis-cli ping</code>, an HTTP request to a readiness endpoint that verifies dependencies. Tune <code>interval</code>, <code>timeout</code>, <code>retries</code> and especially <code>start_period</code>, during which failures do not count — that is what stops a slow first boot from being marked unhealthy. Bad checks: anything that only proves the process exists (a port being open, or <code>curl</code> against a path that returns success while the app is still loading), anything expensive enough to add load, and anything depending on a tool the image does not actually contain.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your CI pipeline suddenly fails with a Docker Hub pull rate limit error. Diagnose and fix.</summary>
+      <div class="answer"><p>Docker Hub meters pulls per account, and anonymous pulls are counted per IP address — so shared CI runners, corporate NAT or a cloud egress range put you in one pool with everyone else on that address. Short-term fix: authenticate in the pipeline with a service account and read-only access token before any pull, which moves you onto the account's larger allowance. Structural fix: stop pulling from Hub on every build — run a registry mirror or pull-through cache (Docker's own distribution mirror, Artifactory, ECR pull-through cache, ACR artifact cache) and point the daemon or BuildKit at it via <code>registry-mirrors</code>. Also pin base images by digest so the cache is deterministic, and cache the handful of images your Compose stack pulls repeatedly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Can you use Compose in production? Argue both sides.</summary>
+      <div class="answer"><p>For a single server with modest requirements — an internal tool, a demo environment, a small deployment where downtime during a restart is acceptable — Compose is defensible and vastly simpler than the alternatives. What it cannot do: schedule across multiple hosts, perform rolling updates with surge and unavailability control, autoscale, reschedule work off a failed node, or manage secrets and configuration at cluster scope. The <code>deploy</code> key hints at these but most of it is only honoured by Swarm. Once you need multi-node availability or zero-downtime releases, move to Kubernetes and keep Compose for local development and integration tests.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do multiple Compose files merge, and what surprises people?</summary>
+      <div class="answer"><p>Files given with repeated <code>-f</code> flags are merged left to right, with later files overriding earlier ones; <code>compose.override.yaml</code> is applied automatically when you do not name files explicitly. Mappings merge key by key and scalars are replaced — both intuitive. The surprise is sequences: lists such as <code>ports</code>, <code>command</code> arguments and <code>volumes</code> are replaced wholesale, not appended, so an override adding "one more port" silently drops the base list. Relative paths resolve against the first file's directory, another common trap. Always confirm with <code>docker compose config</code>, which prints the fully merged and interpolated result.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the DevOps and Deployment track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>dev.cmp.spec — The Compose specification, compose.yaml, services, networks, volumes</li>
+      <li>dev.cmp.stack — Full local stack, profiles, healthcheck-based startup ordering, override files, registry rate limits</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the DevOps and Deployment track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
