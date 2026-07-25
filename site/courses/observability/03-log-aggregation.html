@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Log aggregation module: why centralized logging is mandatory once you have replicas, the collect-ship-parse-store-query architecture, Filebeat, Fluentd, Fluent Bit, Alloy and Vector, ELK/EFK versus Grafana Loki, grok versus JSON-first ingestion, the log-based debugging workflow, KQL and LogQL side by side, and retention and index cost — with verified resources and interview questions.">
+  <title>Log Aggregation — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Log Aggregation</h1>
+  <p class="standfirst">SSH in and tail the file — a workflow that dies the moment you run two replicas, and dies harder in Kubernetes, where the filesystem you were going to tail disappears with the pod. This module is about the machinery that replaces it, and about the bill it quietly generates.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Observability track → Log Aggregation</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Module 02 got your application emitting good structured logs. This module is about what happens to them next: how they leave the process, where they land, how you search them, and what that costs. Centralization is not a nice-to-have — with three replicas behind a load balancer, the log line explaining a user's failed request is on exactly one of them, and nothing tells you which.</p>
+    <p>We cover the pipeline shape shared by every stack (emit, collect, ship, parse and enrich, store and index, query), the collectors that do the shipping, the Kubernetes DaemonSet pattern, and then the two dominant destinations compared honestly: ELK/EFK, which indexes everything and can find anything at a price, and Grafana Loki, which indexes only labels and is dramatically cheaper provided your search already has a rough address. The second half is the part that actually pays for the first: the debugging workflow, the query languages, and retention and cost control.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Why centralization stops being optional</h3>
+    <p>Single-server logging works because there is one file and one machine. Every assumption behind that breaks at scale. With N replicas a request touches one of them, so "grep the log" becomes "grep N logs and hope"; with autoscaling, N changes while you are looking. In containers the situation is worse: the container filesystem is ephemeral, so a crash-looping pod destroys the evidence of why it crashed, and Kubernetes' own node-level log files are rotated and garbage-collected without asking you. Add a request that crosses six services and the story you need is scattered across six different machines' log files, none of which is complete on its own.</p>
+    <p>The fix is the twelve-factor rule: an application should not manage log files at all. It writes an unbuffered event stream to <code>stdout</code>/<code>stderr</code>, and the execution environment — the container runtime, then a collector — is responsible for routing, storing and archiving it. That single discipline decouples the application from the logging backend entirely, which is why you can swap ELK for Loki later without touching application code.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/cluster-administration/logging/" rel="noopener">Logging Architecture — Kubernetes documentation (node-level logging, rotation, cluster-level patterns)</a></li>
+      <li>[Official] <a href="https://12factor.net/logs" rel="noopener">Logs: treat logs as event streams — The Twelve-Factor App</a></li>
+      <li>[Official] <a href="https://docs.docker.com/engine/logging/" rel="noopener">Logging — Docker documentation (logging drivers and where container output actually goes)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/kubernetes-logging-enhanced-observability/" rel="noopener">Elevating Kubernetes Logging for Enhanced Observability — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HGTBANm0VY4" rel="noopener">Logging with EFK Stack: Elasticsearch, Fluent Bit and Kibana — Abhishek.Veeramalla</a></li>
+    </ul>
+
+    <h3>The architecture every stack shares</h3>
+    <p>Vendors differ on components but not on shape. Six stages, always: <strong>emit</strong> (the application writes structured lines to stdout), <strong>collect</strong> (an agent reads the container's log files or a socket), <strong>ship</strong> (the agent buffers and forwards, with backpressure and retries so a backend outage does not lose data or stall the app), <strong>parse and enrich</strong> (turn text into fields, attach pod, namespace, host, environment), <strong>store and index</strong> (write to the backend in whatever indexing model it uses), <strong>query</strong> (a UI over the store). Debugging a broken logging pipeline means asking which of those six stages stopped.</p>
+    <p>Two stages deserve early attention because they are where teams get hurt. Shipping needs a durable buffer — a filesystem-backed queue rather than memory only — or a five-minute Elasticsearch outage becomes five minutes of permanently missing logs. And parsing is far cheaper if the application emitted JSON in the first place: every stage downstream gets easier when the fields already exist.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/get-started/architecture/" rel="noopener">Loki architecture — Grafana Loki documentation (distributor, ingester, querier, compactor)</a></li>
+      <li>[Official] <a href="https://docs.fluentd.org/quickstart/life-of-a-fluentd-event" rel="noopener">Life of a Fluentd event — Fluentd documentation (input, filter, buffer, output)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/logstash" rel="noopener">Logstash — Elastic reference documentation (the ingest and transform tier)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/ops/elk" rel="noopener">An Introduction to ELK Stack — Baeldung on Ops</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=5s9pR9UUtAU" rel="noopener">Microservices Logging with the ELK Stack: Elasticsearch, Logstash, Kibana — Java Techie</a></li>
+    </ul>
+
+    <h3>Collectors and shippers: Filebeat, Fluentd, Fluent Bit, Alloy, Vector</h3>
+    <p>The collector is the piece that runs everywhere, so its resource footprint matters more than its feature list. <strong>Filebeat</strong> is Elastic's Go-based shipper: light, reliable, tracks file offsets in a registry so a restart resumes where it stopped, and speaks natively to Elasticsearch or Logstash. <strong>Fluentd</strong> is the CNCF-graduated Ruby-based router with an enormous plugin ecosystem and a unified logging layer philosophy; it is flexible but heavier, in the tens of megabytes of memory. <strong>Fluent Bit</strong> is the same project's C rewrite aimed at edge and node duty — around a megabyte of memory, so it is now the default node agent even in stacks that still run Fluentd as a central aggregator.</p>
+    <p>On the Grafana side, <strong>Promtail</strong> was the Loki-native agent; it is now deprecated in favour of <strong>Grafana Alloy</strong>, a single OpenTelemetry-compatible collector for logs, metrics, traces and profiles — worth knowing because tutorials still say Promtail. <strong>Vector</strong> is the vendor-neutral option: a Rust collector with strong throughput, a real transformation language, and end-to-end acknowledgement, usually deployed in the agent-plus-aggregator topology. In interviews the useful framing is agent role versus aggregator role: the agent must be tiny and never fall over; the aggregator does the expensive parsing, fan-out and routing in one place you can scale independently.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/beats/filebeat" rel="noopener">Filebeat — Elastic reference documentation (inputs, registry, backpressure)</a></li>
+      <li>[Official] <a href="https://www.fluentd.org/architecture/" rel="noopener">Architecture — Fluentd (the unified logging layer argument)</a></li>
+      <li>[Official] <a href="https://docs.fluentbit.io/manual/about/fluentd-and-fluent-bit" rel="noopener">Fluentd &amp; Fluent Bit — Fluent Bit manual (the honest side-by-side from the same project)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/send-data/" rel="noopener">Send data to Loki — Grafana Loki documentation (Alloy, the Promtail deprecation, other clients)</a></li>
+      <li>[Official] <a href="https://vector.dev/docs/setup/deployment/roles/" rel="noopener">Deployment roles: agent and aggregator — Vector documentation</a></li>
+    </ul>
+
+    <h3>The Kubernetes pattern: a DaemonSet collector with metadata enrichment</h3>
+    <p>In Kubernetes the container runtime already writes every container's stdout to files under <code>/var/log/pods</code> on the node. So the standard pattern is a <strong>DaemonSet</strong>: exactly one collector pod per node, mounting that host path read-only, tailing every container's file. One agent covers every workload on the node regardless of language or framework, new pods are picked up automatically, and applications need no logging sidecar and no library change. The alternatives — a sidecar per pod, or shipping directly from the application over the network — cost far more resources or couple your code to the backend.</p>
+    <p>The stage that makes this pattern valuable is <strong>enrichment</strong>. A raw line from a node file is useless without provenance, so the collector calls the Kubernetes API and attaches namespace, pod name, container name, labels and annotations to every record. That is what lets you write <code>namespace = "payments" AND level = "ERROR"</code> instead of trying to recognise a pod by its log format. Two operational details worth remembering: the CRI log format wraps each line with a timestamp and a partial/full flag, so multi-line stack traces must be reassembled by the collector, and the node's log files are rotated by kubelet — if your collector falls behind rotation, you lose lines silently.</p>
+    <pre class="code-block" data-label="YAML"><code># Fluent Bit as a DaemonSet: tail node log files, then enrich from the Kubernetes API
+[INPUT]
+    Name              tail
+    Path              /var/log/containers/*.log
+    Parser            cri
+    DB                /var/log/flb_kube.db   # offsets survive a restart
+    Mem_Buf_Limit     5MB
+    Skip_Long_Lines   On
+
+[FILTER]
+    Name                kubernetes
+    Match               kube.*
+    Merge_Log           On                   # parse embedded JSON into real fields
+    Keep_Log            Off
+    Labels              On
+    Annotations         Off</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/" rel="noopener">DaemonSet — Kubernetes documentation (one collector per node)</a></li>
+      <li>[Official] <a href="https://docs.fluentbit.io/manual/data-pipeline/filters/kubernetes" rel="noopener">Kubernetes filter — Fluent Bit manual (pod, namespace and label enrichment)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/beats/filebeat/running-on-kubernetes" rel="noopener">Run Filebeat on Kubernetes — Elastic documentation (the DaemonSet manifest and autodiscover)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/alloy/latest/collect/logs-in-kubernetes/" rel="noopener">Collect Kubernetes logs — Grafana Alloy documentation</a></li>
+      <li>[Article] <a href="https://devopscube.com/setup-efk-stack-on-kubernetes/" rel="noopener">How to set up the EFK stack on Kubernetes — DevOpsCube</a></li>
+    </ul>
+
+    <h3>ELK/EFK versus Grafana Loki: the choice, honestly</h3>
+    <p>The two stacks differ on one decision, and everything else follows from it. <strong>Elasticsearch indexes the content</strong>: every log line is analysed into terms and written to an inverted index, so you can ask "find every line anywhere containing <code>OOMKilled</code> in the last day" and get an answer in seconds without knowing which service produced it. That capability is real and sometimes irreplaceable — aggregations, full-text relevance, arbitrary field queries. The price is also real: the index is often as large as or larger than the raw data, the cluster wants a lot of memory and fast disks, and shard and JVM management becomes somebody's part-time job.</p>
+    <p><strong>Loki indexes only the labels</strong> — a small set of low-cardinality key/value pairs such as namespace, app, pod, level — and stores the log content itself as compressed chunks in object storage. The index is tiny, the storage is S3-priced, and operating it is closer to running a stateless service. The trade is explicit: Loki cannot do a fast content search across everything. A LogQL query first selects a label stream, then brute-force filters that stream, so a query with a narrow label selector and a short window is fast and a query with a wide selector over a week is slow. Loki suits you if your investigations start from "which service, which time window" — which, if you have decent alerts and tracing, they usually do.</p>
+    <p>Two things not to be blindsided by. Elastic relicensed Elasticsearch and Kibana away from Apache 2.0 in 2021, which triggered AWS's <strong>OpenSearch</strong> fork — still Apache 2.0, now under the Linux Foundation, and a drop-in destination for most log pipelines. Elastic later added AGPL as an option, so Elasticsearch is open source again by OSI's definition, but the fork is permanent and OpenSearch is what many managed offerings run. If you would rather not operate any of it, hosted options exist at every point on the spectrum: Elastic Cloud, Amazon OpenSearch Service, Grafana Cloud Logs, and the log products of Datadog, New Relic and Splunk.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/get-started/overview/" rel="noopener">Loki overview — Grafana Loki documentation (why indexing labels only is cheaper)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/elasticsearch" rel="noopener">Elasticsearch — Elastic reference documentation (the inverted index and what it buys)</a></li>
+      <li>[Official] <a href="https://opensearch.org/about/" rel="noopener">About OpenSearch — opensearch.org (the fork, its governance and its scope)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/blog/elasticsearch-is-open-source-again" rel="noopener">Elasticsearch is Open Source, Again — Elastic blog (the licence history in Elastic's own words)</a></li>
+      <li>[Article] <a href="https://signoz.io/blog/loki-vs-elasticsearch/" rel="noopener">Loki vs Elasticsearch: key differences — SigNoz</a></li>
+    </ul>
+
+    <h3>Ingestion pipelines: grok, or just emit JSON</h3>
+    <p>Somewhere in the pipeline a line of text has to become fields, because <code>level</code>, <code>service</code>, <code>trace_id</code> and <code>duration_ms</code> are what you filter and aggregate on. The classic answer is <strong>grok</strong>: a named library of regular expressions that pull fields out of unstructured lines. It works, it is well documented, and it is the right tool for logs you do not control — nginx, Postgres, a legacy application nobody will rebuild. It is also the wrong default for your own services: grok patterns are slow (regex over every line at ingest, and a failed match is a silent data-quality bug), and they break the day a developer reorders the log format.</p>
+    <p>The real answer, following straight on from module 02, is to <strong>emit JSON at the source</strong> so no parsing is needed. Then the pipeline's remaining jobs are cheap and additive: rename fields onto a shared schema (Elastic Common Schema is a good default — <code>@timestamp</code>, <code>log.level</code>, <code>service.name</code>, <code>trace.id</code>, <code>error.stack_trace</code>), coerce types so numbers stay numbers, drop fields you must never store, and enrich with environment, region and version. Standardising the schema across services is the unglamorous work that makes a cross-service query possible at all; OpenTelemetry's log data model is the vendor-neutral version of the same idea, and it is what carries <code>trace_id</code> into your logs.</p>
+    <pre class="code-block" data-label="Ruby"><code># Logstash: grok only where you must, then normalise onto a shared schema
+filter {
+  if [service] == "nginx" {
+    grok { match =&gt; { "message" =&gt; "%{COMBINEDAPACHELOG}" } }   # unstructured, not ours
+  } else {
+    json { source =&gt; "message" }                                # our services: already JSON
+  }
+  mutate { rename =&gt; { "lvl" =&gt; "log.level" } convert =&gt; { "duration_ms" =&gt; "integer" } }
+  mutate { remove_field =&gt; [ "authorization", "card_number" ] }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/logstash/plugins/plugins-filters-grok" rel="noopener">Grok filter plugin — Logstash reference documentation</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/manage-data/ingest/transform-enrich/ingest-pipelines" rel="noopener">Ingest pipelines — Elasticsearch documentation (processors, on-failure handling)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/ecs/ecs-log" rel="noopener">Log fields — Elastic Common Schema reference (the shared field names worth adopting)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/beats/filebeat/filebeat-input-container" rel="noopener">Container input — Filebeat documentation (CRI format and multiline reassembly)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-application-logs-to-elastic-stack" rel="noopener">Send the logs of a Java app to the Elastic Stack — Baeldung</a></li>
+    </ul>
+
+    <h3>The debugging workflow: from an alert or a trace id to the line that matters</h3>
+    <p>Aggregation only pays off if you have a method. The productive one is funnel-shaped and always starts from a known anchor, never from a free-text search of everything. Anchor first: an alert firing on a service, an error-tracker fingerprint, a support ticket with a request id, or — best of all — a trace id. Then narrow in this order: <strong>time window</strong> (start with the fifteen minutes around the incident, not the last seven days), <strong>service and environment</strong> (label or field selectors, so the backend scans a fraction of the data), <strong>level</strong> (errors and warnings first), and only then <strong>content</strong>. Read the first error in the window, not the loudest one; the noisiest signal is usually a downstream consequence of a quieter earlier cause.</p>
+    <p>The multiplier here is <strong>correlation by trace id</strong>. If every service logs the trace and span id that module 02 put into the MDC, then one query — <code>trace_id = "4bf92f3577b34da6"</code> with no service filter — returns the complete story of a single request across every service it touched, in order. Wire the two directions together in your UI: Grafana's Loki data source uses derived fields to turn a trace id in a log line into a link to the trace, and Kibana links logs to APM traces the same way. Round it out with two habits: pin the exact time range and share the query URL in the incident channel rather than screenshots, and when you find the line you needed, ask whether the log that would have made it obvious in one step exists yet.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/explore-analyze/discover" rel="noopener">Discover — Kibana documentation (filtering, time range, saved searches)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/grafana/latest/datasources/loki/configure-loki-data-source/" rel="noopener">Configure the Loki data source — Grafana documentation (derived fields and trace links)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/logs/" rel="noopener">Logs — OpenTelemetry concepts (the log data model and trace correlation)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book (what logs are for, and what they are not)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=VEGYgPiAazk" rel="noopener">Grafana Loki querying basics, log based metrics and setting alerts on logs — Laszlo Fogas</a></li>
+    </ul>
+
+    <h3>Query languages side by side: Lucene and KQL versus LogQL</h3>
+    <p>In Kibana you have two. <strong>Lucene query syntax</strong> is the raw form — <code>level:ERROR AND service:payments AND message:timeout*</code>, with wildcards, fuzzy matching, ranges and boosting. <strong>KQL</strong> is the friendlier default: same field-and-value shape, better autocompletion, cleaner boolean and nested-field handling, and it hands the query to the Elasticsearch query DSL underneath. Because the content is indexed, a bare term search across everything is legitimate — expensive, but it will return.</p>
+    <p><strong>LogQL</strong> is deliberately a different shape, and understanding it is the fastest way to understand Loki. Every query is two parts: a mandatory <strong>label selector</strong> in braces that picks the streams, then a chain of <strong>filter and parser expressions</strong> applied to those streams' contents. <code>{namespace="payments", app="checkout"} |= "trace_id" | json | duration_ms &gt; 500</code> reads as select, then filter, then parse, then filter again. Wrap it in an aggregation such as <code>sum by (status) (rate({app="checkout"} |= "error" [5m]))</code> and you have a metric derived from logs, queryable and alertable exactly like Prometheus data. The performance rule follows directly from the design: put every cheap constraint in the label selector, keep the time range short, and never label on anything high-cardinality such as user id or trace id, because each distinct label combination creates a separate stream.</p>
+    <pre class="code-block" data-label="Query"><code># Kibana (KQL) — content is indexed, so a bare field match across services is fine
+log.level : "ERROR" and service.name : "checkout" and message : *timeout*
+
+# Loki (LogQL) — select streams by label FIRST, then filter the content
+{namespace="payments", app="checkout", level="error"} |= "timeout" | json | duration_ms &gt; 500
+
+# Same shape, turned into an alertable metric
+sum by (status) (rate({app="checkout"} | json | __error__="" [5m]))</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/explore-analyze/query-filter/languages/kql" rel="noopener">Kibana Query Language (KQL) — Elastic documentation</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/explore-analyze/query-filter/languages/lucene-query-syntax" rel="noopener">Lucene query syntax — Elastic documentation</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/query/log_queries/" rel="noopener">Log queries — LogQL reference (selectors, line filters, parsers, label filters)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/how-labels-in-loki-can-make-log-queries-faster-and-easier/" rel="noopener">How labels in Loki can make log queries faster and easier — Grafana blog</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=57dQwcmqkpQ" rel="noopener">How to query Grafana Loki with LogQL — Grafana</a></li>
+    </ul>
+
+    <h3>Retention, tiers and the index-size problem</h3>
+    <p>Start from the arithmetic, because it is the part candidates skip. Raw log volume is roughly events per second × bytes per event × seconds retained. In Elasticsearch you then add the index on top: with default dynamic mapping the indexed form is frequently comparable in size to the source, and replicas multiply the whole thing again — a replica count of one doubles it. Loki changes the equation rather than the arithmetic: the index is a small fraction of the data because it covers labels only, and the compressed chunks sit in object storage at roughly a tenth of the price of provisioned SSD.</p>
+    <p>Then apply <strong>tiering</strong> instead of one flat retention number. Elasticsearch's index lifecycle management moves an index through hot (fast disks, actively written and searched), warm (cheaper nodes, read-only), cold and frozen (searchable snapshots served straight from object storage, slow but queryable), and finally delete — with rollover triggered by age or size rather than a nightly cron. Loki does the same job with a compactor enforcing per-tenant and per-stream retention, plus an export path to your own bucket for long-term archive. Crucially, <strong>retention should be set per log class, not globally</strong>: audit and payment logs may be legally required for years, application debug logs are worthless after a week, access logs sit somewhere between. One global setting means you either pay archive prices for debug noise or delete the compliance evidence.</p>
+    <pre class="code-block" data-label="JSON"><code>{ "policy": { "phases": {
+  "hot":    { "actions": { "rollover": { "max_primary_shard_size": "50gb", "max_age": "1d" } } },
+  "warm":   { "min_age": "7d",  "actions": { "shrink": { "number_of_shards": 1 }, "forcemerge": { "max_num_segments": 1 } } },
+  "cold":   { "min_age": "30d", "actions": { "searchable_snapshot": { "snapshot_repository": "archive" } } },
+  "delete": { "min_age": "90d", "actions": { "delete": {} } }
+} } }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/manage-data/lifecycle/index-lifecycle-management" rel="noopener">Index lifecycle management — Elasticsearch documentation (rollover and phase actions)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/manage-data/lifecycle/data-tiers" rel="noopener">Data tiers — Elasticsearch documentation (hot, warm, cold, frozen)</a></li>
+      <li>[Official] <a href="https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore/searchable-snapshots" rel="noopener">Searchable snapshots — Elastic documentation (querying archived data from object storage)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/loki/latest/operations/storage/retention/" rel="noopener">Log retention — Grafana Loki documentation (compactor, per-tenant and per-stream rules)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/retain-logs-longer-without-breaking-the-bank-introducing-grafana-cloud-logs-export/" rel="noopener">Retain logs longer without breaking the bank: exporting logs to object storage — Grafana blog</a></li>
+    </ul>
+
+    <h3>Volume control: sampling and dropping at the collector</h3>
+    <p>Retention decides how long you keep data; the collector decides how much arrives in the first place, and that is the bigger lever. Log storage is routinely the largest single line in an observability bill — industry surveys repeatedly put logs at over half of total observability spend, and the bill tends to grow with deploy count and log statements rather than with revenue. Two structural facts make this fixable. Most log volume comes from a handful of chatty sources: health-check access logs, per-item loop logging, third-party library DEBUG output, and stack traces duplicated at every layer that catches and rethrows. And the vast majority of what you ingest is never read by anyone.</p>
+    <p>So put the filter as early as possible, at the node agent, where dropping a line costs nothing and shipping it costs everything downstream. Practical levers, roughly in order of payoff: drop health-check and readiness-probe lines outright; sample high-frequency success events (keep one in a hundred INFO lines from a hot path, keep all errors); throttle per-stream rates so one misbehaving pod cannot flood the cluster; truncate enormous fields such as full request bodies; and route by class — errors and audit events to the expensive indexed store, verbose debug to cheap object storage or nowhere. Do all of this in collector configuration rather than application code, so you can turn the tap back on during an incident without a deploy. And meter it: track ingested bytes per service as a first-class metric, otherwise the first person to notice the growth is Finance.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.fluentbit.io/manual/data-pipeline/filters/throttle" rel="noopener">Throttle filter — Fluent Bit manual (rate limiting at the node agent)</a></li>
+      <li>[Official] <a href="https://vector.dev/docs/reference/configuration/transforms/sample/" rel="noopener">Sample transform — Vector documentation (keep a proportion of matching events)</a></li>
+      <li>[Official] <a href="https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/processor/filterprocessor" rel="noopener">Filter processor — OpenTelemetry Collector Contrib (dropping telemetry by condition)</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/cost-crisis-observability-tooling" rel="noopener">The cost crisis in observability tooling — Honeycomb</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/how-much-should-i-spend-on-observability-pt1" rel="noopener">How much should I spend on observability? — Honeycomb</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="02-logging.html">← Logging Done Properly</a>
+    <a href="index.html">All Observability modules</a>
+    <a href="04-metrics.html">Metrics with Micrometer and Prometheus →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Log aggregation shows up in almost every DevOps-adjacent backend round in India, from service-company screens on "what is the ELK stack" to product-company design rounds where the real question is what your logging bill will look like at ten times the traffic:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What does ELK stand for, and what does each piece do?</summary>
+      <div class="answer"><p>Elasticsearch (distributed search and analytics engine — stores and indexes the logs), Logstash (ingestion pipeline — collects, parses, transforms, routes), Kibana (the UI — search, dashboards, visualisation). EFK swaps Logstash for Fluentd or Fluent Bit, which is the common choice in Kubernetes because the agent is far lighter. Beats, especially Filebeat, are the lightweight shippers that feed Logstash or Elasticsearch directly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why can't you just SSH into the server and tail the log file?</summary>
+      <div class="answer"><p>It stops working the moment there is more than one instance: a request hits one of N replicas and you do not know which, and N changes under autoscaling. In containers it is worse — the filesystem is ephemeral, so a crash-looping pod destroys its own evidence, and kubelet rotates and garbage-collects node log files anyway. And a request crossing six services leaves six partial stories on six machines. Centralization makes the logs outlive the process and searchable in one place.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Where should a containerised application write its logs?</summary>
+      <div class="answer"><p>To stdout and stderr, unbuffered, as a stream of structured events — the twelve-factor rule. The application should not open log files, rotate them or know the backend exists. The runtime captures the stream, a collector picks it up from the node, and the routing decision lives in the platform. That is what lets you replace ELK with Loki without touching application code.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Describe the stages of a log aggregation pipeline.</summary>
+      <div class="answer"><p>Emit (application writes structured lines to stdout), collect (an agent tails the node's container log files), ship (buffer and forward with retries and backpressure), parse and enrich (fields extracted, Kubernetes metadata attached), store and index (the backend writes it in its indexing model), query (Kibana or Grafana over the store). When logs go missing, the diagnosis is always "which of these six stages stopped".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Fluentd versus Fluent Bit — when do you use each?</summary>
+      <div class="answer"><p>Same project, different roles. Fluentd is Ruby-based with a very large plugin ecosystem and a footprint in the tens of megabytes — good as a central aggregator doing heavy routing and transformation. Fluent Bit is the C rewrite, around a megabyte of memory, designed for the node or edge — good as the per-node DaemonSet agent. The common production shape is Fluent Bit everywhere as the agent, optionally forwarding to a Fluentd or Logstash aggregator tier that does the expensive work once.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How is logging typically deployed in Kubernetes, and why that way?</summary>
+      <div class="answer"><p>A DaemonSet: one collector pod per node, mounting the host's container log directory read-only and tailing every container's file. It covers every workload on the node regardless of language, picks up new pods automatically, and needs no application change. The collector then calls the Kubernetes API to enrich each record with namespace, pod, container and labels. Sidecar-per-pod is the alternative when an application insists on writing to a file, but it multiplies resource cost by pod count.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Grok versus emitting JSON — which do you prefer and why?</summary>
+      <div class="answer"><p>JSON at the source, every time you control the code. Grok is regex over every line at ingest: CPU-expensive, brittle when a developer reorders the message, and a failed match fails silently, so you get a data-quality bug rather than an error. Grok is the right tool for logs you cannot change — nginx, database servers, legacy applications. For your own services, structured emission means the pipeline only has to rename fields onto a shared schema, coerce types, drop secrets and enrich.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> A user reports a failed checkout. Walk me through finding the cause in a centralized log system.</summary>
+      <div class="answer"><p>Anchor on something known — the request id or trace id from the error response, or the failing alert. Narrow the time window to the minutes around it. Filter by service and environment using labels or indexed fields so the backend scans a fraction of the data. Filter to errors and warnings, and read the earliest error in the window rather than the loudest, since the noisy one is usually a downstream consequence. Then query by trace id with no service filter to get the whole cross-service story in order, and pivot to the trace itself via the derived-field link. Finally, ask whether a missing log line would have made this a one-step diagnosis.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is LogQL, and how is its shape different from a Kibana query?</summary>
+      <div class="answer"><p>LogQL is Loki's query language and it is always two stages: a mandatory label selector in braces that picks the streams, then filter and parser expressions applied to those streams' content — for example <code>{namespace="payments", app="checkout"} |= "timeout" | json | duration_ms &gt; 500</code>. Kibana's KQL or Lucene query goes straight at the inverted index, so a bare content match across everything is a legitimate query. In Loki that same query has no label selector to narrow on, so it degenerates into a brute-force scan. LogQL also wraps into aggregations such as <code>rate(...)</code>, giving you Prometheus-style metrics and alerts derived from logs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> ELK versus Grafana Loki — how do you choose?</summary>
+      <div class="answer"><p>The whole difference is what gets indexed. Elasticsearch builds an inverted index over the log content, so any term is findable fast anywhere without knowing the source, and you get aggregations and full-text relevance — at the cost of an index frequently comparable in size to the raw data, high memory and fast-disk requirements, replica multiplication, and real operational work in shards and JVM tuning. Loki indexes only a small set of low-cardinality labels and keeps compressed content in object storage, so it is dramatically cheaper and close to stateless to run, but queries must start from a label selector and time window; wide searches over long windows are slow. Choose Loki when investigations start from a known service and time — which they do if your alerting and tracing are decent — and when cost or operational headcount is the binding constraint. Choose Elasticsearch or OpenSearch when arbitrary content search, aggregation and analytics over logs are genuinely part of the product or the compliance requirement. Many organisations run both: Loki for volume, an indexed store for the small high-value subset.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your log storage bill has become the largest line in the observability budget. What do you do?</summary>
+      <div class="answer"><p>Measure first: ingested bytes per service and per log class, so you find the handful of chatty sources — health-check access logs, per-item loop logging, library DEBUG output, stack traces duplicated at every rethrow — that usually dominate. Then cut at the collector, not in application code, so it is reversible during an incident without a deploy: drop probe traffic, sample high-frequency success events while keeping all errors, throttle per-stream rates, truncate huge fields. Next, set retention per log class rather than globally — audit and payment logs for years, application debug for days — and tier the rest through hot, warm, cold and searchable-snapshot phases so old data lives in object storage instead of on provisioned SSD. Structurally, consider moving bulk volume to a label-indexed store like Loki and keeping only the high-value subset in an indexed one, and check whether a metric or a trace would answer the question the log was there to answer. Finally, drop replica counts on non-critical indices and revisit dynamic mapping, which quietly indexes fields nobody queries.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why is high-cardinality labelling catastrophic in Loki, and what is the equivalent trap in Elasticsearch?</summary>
+      <div class="answer"><p>In Loki each distinct combination of label values is a separate stream with its own chunks and index entries. Adding <code>user_id</code> or <code>trace_id</code> as a label creates millions of streams, exploding the index Loki exists to keep small, fragmenting chunks into tiny inefficient objects, and pushing ingesters into memory pressure. Keep such values inside the log line where a filter or the <code>json</code> parser can reach them at query time. The Elasticsearch equivalent is mapping explosion: dynamic mapping turns every new JSON key into an indexed field, so unbounded key names blow up the cluster state and the field count limit. The fixes are the mirror image — fixed label sets in Loki, explicit mappings or a strict dynamic policy in Elasticsearch.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Elasticsearch was relicensed and OpenSearch forked. Why should an engineer care?</summary>
+      <div class="answer"><p>Elastic moved Elasticsearch and Kibana off Apache 2.0 to SSPL and the Elastic Licence in 2021 to stop cloud providers reselling them; AWS forked the last Apache-licensed release as OpenSearch, which is now under the Linux Foundation. Elastic later added AGPL as an option, so Elasticsearch qualifies as open source again, but the fork did not go away. Practically: the two have diverged in features, client libraries and version numbers, so "Elasticsearch client" and "OpenSearch client" are not interchangeable past a point; managed services differ in which one they actually run; and if your organisation has a licence policy, this is the question it will ask. The pipeline in front is mostly portable either way, which is another argument for keeping the application ignorant of the backend.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Logs stopped arriving for one service while others are fine. How do you debug the pipeline?</summary>
+      <div class="answer"><p>Walk the six stages. Is the application still writing to stdout — exec into the pod and check, and confirm it did not switch to a file or block on a full buffer. Is the node agent tailing that path — check its own logs and metrics for the file, and whether the offset registry is stuck after a rotation it missed. Is shipping backed up — look at the agent's buffer and retry metrics; a full filesystem buffer usually means the backend is rejecting writes. Is parsing dropping records — a grok failure or a mapping conflict makes the backend refuse documents while everything upstream looks healthy, which is why an on-failure path that stores the raw line matters. Is the backend rejecting or rate limiting — check ingest rejection counts and per-tenant limits. Only then suspect the query: a wrong time zone, a stale index pattern or a label that changed name looks exactly like missing data.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.agg.stack — Centralized logging, the ELK/EFK stack, Grafana Loki, shipping and parsing pipelines</li>
+      <li>obs.agg.workflow — Log-based debugging workflow, querying, retention and index cost tradeoffs</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

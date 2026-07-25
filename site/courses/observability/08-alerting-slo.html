@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Alerting, SLOs and on-call module: SLI vs SLO vs SLA, choosing user-facing SLIs, error budgets and budget policy, multi-window multi-burn-rate alerting, symptom-based alerts and alert fatigue, Alertmanager and Grafana routing, Sentry error grouping, runbooks, blameless review, JDK Flight Recorder and continuous profiling — with verified resources and interview questions.">
+  <title>Alerting, SLOs and On-Call — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Alerting, SLOs and On-Call</h1>
+  <p class="standfirst">Seven modules of logs, metrics, dashboards and traces exist to answer one question at three in the morning: is this hurting users, and does someone have to wake up? This closing module is where telemetry becomes a decision.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Observability track → Alerting, SLOs and On-Call</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Everything the previous seven modules built — structured logs, Micrometer meters scraped by Prometheus, Grafana dashboards, health probes, OpenTelemetry traces — is raw material. None of it decides anything. The decision layer is this one: a small set of numbers that describe the user's experience, a target for each of them, a budget for how much you may miss the target, and a rule that turns budget consumption into a page, a ticket, or silence.</p>
+    <p>So this module covers the vocabulary (SLI, SLO, SLA, and why confusing them is the fastest way to fail an interview), how to choose service level indicators that a user would recognise, error budgets and the policy that makes them bite, burn-rate alerting as the replacement for static thresholds, symptom-based alert design and the alert fatigue that kills teams that ignore it, then the operational half: error tracking and fingerprinting, runbooks, on-call rotations, blameless post-incident review, and continuous profiling with JDK Flight Recorder and Grafana Pyroscope — the signal that tells you which line of code is slow, not merely that the service is.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>SLI, SLO, SLA — get the vocabulary exactly right</h3>
+    <p>These three are asked together in almost every senior interview and candidates blur them constantly. An <strong>SLI</strong> is a <em>measurement</em>: a carefully defined ratio of good events to valid events — "the proportion of HTTP requests to the checkout API that returned a non-5xx response in under 300 milliseconds". An <strong>SLO</strong> is the <em>target</em> for that measurement over a window: "99.9% of such requests, measured over a rolling 30 days". An <strong>SLA</strong> is a <em>contract</em> with a customer that attaches financial or legal consequences — service credits, refunds, an exit clause — to missing an agreed level.</p>
+    <p>The practical consequence: most teams should have SLIs and SLOs and no SLA at all. An SLA is a commercial instrument, and when one exists it must be strictly looser than the internal SLO, because you want your own alerting to fire and your own engineers to react long before a customer can claim credits. The other reliability truth interviewers like to hear: the right target is almost never 100%. Chasing the last fraction of a nine costs disproportionately, and the user's own network, phone and Wi-Fi already impose a ceiling far below perfection — beyond a point, extra reliability is invisible to the person you built it for.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/service-level-objectives/" rel="noopener">Service Level Objectives — Google SRE Book, chapter 4 (the canonical SLI/SLO/SLA definitions)</a></li>
+      <li>[Official] <a href="https://sre.google/workbook/implementing-slos/" rel="noopener">Implementing SLOs — The Site Reliability Workbook, chapter 2 (specification vs implementation of an SLI)</a></li>
+      <li>[Official] <a href="https://sre.google/books/" rel="noopener">The SRE books — sre.google (all four titles readable free online)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=tEylFyxbDLE" rel="noopener">SLIs, SLOs, SLAs, oh my! (class SRE implements DevOps) — Google Cloud Tech</a></li>
+    </ul>
+
+    <h3>Choosing good SLIs: measure what the user feels</h3>
+    <p>The commonest failure is picking indicators because they are easy to collect. CPU utilisation, heap usage and thread-pool depth are diagnostic signals — useful once you know something is wrong, useless as a definition of "wrong". A good SLI is expressed from the user's side of the wire and falls into a small number of families: <em>availability</em> (did the request succeed), <em>latency</em> (did it succeed fast enough), <em>correctness</em> or quality (was the answer right, was the recommendation list populated), <em>freshness</em> (how stale is the data a batch or streaming pipeline serves), and for pipelines <em>throughput</em> and <em>coverage</em>. Pick two or three per service, not twenty; an SLO nobody can recite is an SLO nobody defends.</p>
+    <p>Two design details matter in interviews. First, latency SLIs are thresholds, not averages: "99% of requests under 300 ms" is an SLI, "average latency" is not, because averages hide the tail where the unhappy users live. Second, know the <em>request-based</em> versus <em>window-based</em> distinction. Request-based counts good events over valid events across the whole period, which is simple and matches how Prometheus counters work. Window-based slices the period into short intervals, marks each interval good or bad by its own criterion, and then computes the proportion of good intervals — better for services where a few minutes of total outage matters more than a diffuse error rate, and the natural fit when your users are batch jobs rather than humans. Also define "valid events" deliberately: excluding health-check traffic, bot scrapes and requests the client cancelled is legitimate; excluding whatever happened to fail is not.</p>
+    <pre class="code-block" data-label="PromQL"><code># Availability SLI: good events / valid events, over a rolling 30 days
+sum(rate(http_server_requests_seconds_count{uri="/checkout",status!~"5.."}[30d]))
+  /
+sum(rate(http_server_requests_seconds_count{uri="/checkout"}[30d]))
+
+# Latency SLI from a Micrometer histogram: fraction served under 300 ms
+sum(rate(http_server_requests_seconds_bucket{uri="/checkout",le="0.3"}[30d]))
+  /
+sum(rate(http_server_requests_seconds_count{uri="/checkout"}[30d]))</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book (the four golden signals)</a></li>
+      <li>[Official] <a href="https://sre.google/workbook/slo-engineering-case-studies/" rel="noopener">SLO Engineering Case Studies — The Site Reliability Workbook (Evernote and Home Depot, real SLI choices)</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/alerting-on-user-experience" rel="noopener">Alerting on the User Experience — Honeycomb blog</a></li>
+      <li>[Article] <a href="https://learn.microsoft.com/en-us/azure/well-architected/reliability/monitoring" rel="noopener">Architecture strategies for monitoring workload reliability — Azure Well-Architected Framework</a></li>
+    </ul>
+
+    <h3>Error budgets: turning reliability from an argument into a number</h3>
+    <p>The error budget is the genuinely useful idea in this whole module, and it is nothing more than arithmetic on the SLO. If the target is 99.9% over 30 days, then 0.1% of that period may fail: roughly 43 minutes. That is not a failure you must apologise for — it is an allowance you are entitled to spend, on risky deploys, on schema migrations, on the chaos experiment you have been postponing. Reliability stops being a values debate between a product manager who wants features and an engineer who wants safety, and becomes a shared balance both can read off a dashboard.</p>
+    <p>The number only bites if a written <em>error budget policy</em> says what happens at zero, agreed in advance by engineering and product, not negotiated during an incident. The standard policy: while budget remains, ship freely; when the budget is exhausted, feature launches stop and the team works reliability — bug fixes, load shedding, capacity, test coverage — until the rolling window recovers. Two refinements worth mentioning: budget consumed by a provider outage outside your control is usually still counted, because the user experienced it, and a budget that is never spent is its own smell, indicating an SLO set so loose it constrains nothing or so tight that nobody dares deploy.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/embracing-risk/" rel="noopener">Embracing Risk — Google SRE Book, chapter 3 (error budgets and the cost of extra nines)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/incident-management-that-actually-makes-sense-slos-error-budgets-and-blameless-reviews/" rel="noopener">Incident management that actually makes sense: SLOs, error budgets and blameless reviews — Grafana Labs blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/articles/slos-engineering-team-API/" rel="noopener">SLOs Are the API for Your Engineering Team — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=E3ReKuJ8ewA" rel="noopener">The Art of SLOs (Service Level Objectives) — Google Cloud Tech</a></li>
+    </ul>
+
+    <h3>Burn-rate alerting: multi-window, multi-burn-rate</h3>
+    <p>Once you have a budget, alerting has an obvious currency: how fast is it being spent? Burn rate is the ratio of the observed error rate to the rate that would exactly exhaust the budget over the SLO window. Burn rate 1 means you finish the 30 days having spent exactly the budget. Burn rate 14.4 means you would exhaust a 30-day budget in about two days — and, conveniently, would consume 2% of it in one hour, which is the classic fast-burn page.</p>
+    <p>This is the modern replacement for static thresholds, and the reason is worth stating precisely: an alert on "error rate above 1% for five minutes" pages you at four in the morning for a blip that costs a rounding error of budget, and stays silent through a slow 0.9% leak that will blow the whole month. A burn-rate alert is scale-invariant — it fires on things that will actually breach. The recommended shape is <em>multi-window, multi-burn-rate</em>: a fast-burn rule (high burn rate over a short window) that pages, plus a slow-burn rule (lower burn rate over hours) that raises a ticket. Each rule pairs a long window with a much shorter one (typically one-twelfth the length) whose job is purely to reset the alert quickly once the problem stops, so the page does not linger for an hour after recovery.</p>
+    <pre class="code-block" data-label="YAML"><code>groups:
+- name: checkout-slo
+  rules:
+  # Fast burn: 14.4x for 1h (with a 5m short window) => ~2% of a 30d budget gone. Page.
+  - alert: CheckoutErrorBudgetFastBurn
+    expr: |
+      job:slo_errors_per_request:ratio_rate1h{job="checkout"} &gt; (14.4 * 0.001)
+      and
+      job:slo_errors_per_request:ratio_rate5m{job="checkout"} &gt; (14.4 * 0.001)
+    labels: { severity: page }
+    annotations:
+      summary: "Checkout is burning its error budget 14x faster than sustainable"
+      runbook_url: "https://runbooks.internal.example/checkout-error-budget"
+  # Slow burn: 3x over 6h. Real, but it can wait for business hours. Ticket.
+  - alert: CheckoutErrorBudgetSlowBurn
+    expr: |
+      job:slo_errors_per_request:ratio_rate6h{job="checkout"} &gt; (3 * 0.001)
+      and
+      job:slo_errors_per_request:ratio_rate30m{job="checkout"} &gt; (3 * 0.001)
+    labels: { severity: ticket }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/workbook/alerting-on-slos/" rel="noopener">Alerting on SLOs — The Site Reliability Workbook, chapter 5 (the six alerting strategies and the multi-window multi-burn-rate recommendation)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/" rel="noopener">Alerting rules — Prometheus documentation (expressions, for, labels and annotations)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/grafana-cloud/alerting-and-irm/slo/introduction/" rel="noopener">Introduction to Grafana SLO — Grafana Cloud documentation (fast-burn and slow-burn alert rules)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/how-to-implement-multi-window-multi-burn-rate-alerts-with-grafana-cloud/" rel="noopener">How to implement multi-window, multi-burn-rate alerts — Grafana Labs blog</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/slos-budget-rate-alerts" rel="noopener">From Oops to Ops: SLOs Get Budget Rate Alerts — Honeycomb blog</a></li>
+    </ul>
+
+    <h3>Symptom-based alerting: what actually earns a page</h3>
+    <p>Alert on symptoms the user can feel, not on causes you happen to be able to measure. "Checkout success rate has fallen below its SLO" is a symptom; "node-7 CPU is at 92%" is a cause, and it is a cause that is frequently harmless — an autoscaler doing its job, a batch import running, a JVM compiling. Cause-based alerts multiply with your infrastructure and go stale every time the architecture changes; symptom alerts stay valid because users' expectations do not change when you move to Kubernetes. Causes belong on dashboards and in traces, where they answer "why" after a symptom alert has already told you "what".</p>
+    <p>The test each page must pass has three parts: it is <em>urgent</em> (waiting until morning makes it materially worse), <em>actionable</em> (a human can do something now that a machine cannot do for itself), and tied to <em>real user impact</em>. An alert that fails any of those is not a page. If it is real but not urgent, it is a ticket. If it is real but never actionable, it is a dashboard panel or a capacity review. If the standard response is "acknowledge and go back to sleep", delete it — that alert is training your team to ignore alerts. The corollary is that anything auto-remediated must not page: a pod that restarted and recovered is an event to record, not a person to wake.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/practical-alerting/" rel="noopener">Practical Alerting from Time-Series Data — Google SRE Book, chapter 10</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/practices/alerting/" rel="noopener">Alerting — Prometheus best practices (page on symptoms, cause-based alerts as the exception)</a></li>
+      <li>[Official] <a href="https://sre.google/workbook/monitoring/" rel="noopener">Monitoring — The Site Reliability Workbook, chapter 4 (alerts, tickets and logs as three response tiers)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CGldVD5wR-g" rel="noopener">Actionable Alerting for Site Reliability Engineers (class SRE implements DevOps) — Google Cloud Tech</a></li>
+    </ul>
+
+    <h3>Alert fatigue, severity tiers, routing, grouping and silences</h3>
+    <p>Alert fatigue is not an inconvenience, it is a safety failure. A rotation that receives forty notifications a night learns, entirely rationally, to skim and dismiss — and then dismisses the one that mattered. Treat noisy alerts as production bugs with an owner and a due date: track pages per shift as a metric, review every page that resolved itself in the weekly operational review, and make deleting an alert an ordinary, praised act. A useful rule of thumb from SRE practice is that a single on-call shift should be able to handle its incidents thoughtfully; if the volume prevents that, the volume is the problem, not the responder.</p>
+    <p>Mechanically, three tiers keep the noise apart. <em>Page</em> wakes a human through PagerDuty, Opsgenie or Grafana IRM. <em>Ticket</em> lands in the backlog for the next working day. <em>Logging</em> or a dashboard captures the rest. Alertmanager and Grafana Alerting then supply the noise controls that make this survivable: <em>grouping</em> collapses a hundred instance-level alerts firing for one cause into a single notification; <em>inhibition</em> suppresses dependent alerts when a broader one is already firing (do not page for twelve failing services when the database they share is already paging); <em>silences</em> mute known-noisy alerts during a maintenance window; and <em>repeat and group intervals</em> control how often a still-firing problem re-notifies. Route on labels — <code>severity</code>, <code>team</code>, <code>service</code> — so ownership is data in the alert rule rather than folklore in someone's head.</p>
+    <pre class="code-block" data-label="YAML"><code># Alertmanager: group, route by label, and never page for a symptom of a known cause
+route:
+  group_by: ['alertname', 'service']
+  group_wait: 30s          # let related alerts arrive before the first notification
+  group_interval: 5m       # batch updates to an existing group
+  repeat_interval: 4h      # re-notify a still-firing group this often
+  receiver: default-ticket
+  routes:
+    - matchers: [ 'severity = page' ]
+      receiver: pagerduty-oncall
+    - matchers: [ 'severity = ticket' ]
+      receiver: jira-backlog
+
+inhibit_rules:
+  - source_matchers: [ 'alertname = DatabaseDown' ]
+    target_matchers: [ 'severity = page' ]
+    equal: ['cluster']     # DB down? don't also page for every dependent service</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/alerting/latest/alertmanager/" rel="noopener">Alertmanager — Prometheus documentation (grouping, inhibition, silences, high availability)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/alerting/latest/configuration/" rel="noopener">Alertmanager configuration — Prometheus documentation (the routing tree, matchers and inhibit rules)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/grafana/latest/alerting/fundamentals/notifications/" rel="noopener">Notifications — Grafana Alerting documentation (notification policies, grouping and silences)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2026/03/airbnb-monitoring-alerts/" rel="noopener">Airbnb Rebuilt Alert Development after Discovering it Wasn't a Culture Problem — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=WZ8gqKIQ5Oc" rel="noopener">Get started with Grafana Alerting: Group alert notifications — Grafana</a></li>
+    </ul>
+
+    <h3>Error tracking: fingerprinting, grouping and release regressions</h3>
+    <p>Metrics tell you the error <em>rate</em>; error tracking tells you <em>which</em> error, how many distinct users hit it, and when it started. A tool such as Sentry receives every exception with its stack trace, then computes a <em>fingerprint</em> — normally derived from the stack frames in your own code plus the exception type — and folds every event with the same fingerprint into one <strong>issue</strong>. Ten thousand occurrences of one null-pointer bug become a single row with a count and a first-seen timestamp, instead of ten thousand log lines nobody will read. When the default grouping is wrong — a generic wrapper exception swallowing everything into one issue, or a message containing an order id splitting one bug into thousands — you correct it with explicit fingerprint rules or stack-trace rules rather than accepting the noise.</p>
+    <p>The second half of the value is release tracking. Tag every event with the build version and the commit, and the tool can tell you an issue is a <em>regression</em> — it was resolved, and it is back in build 4.12 — and can attribute newly appearing issues to the deploy that introduced them, which is the single fastest input to a rollback decision. Wire it to your alerting sparingly: a page for "a new issue affecting more than N users appeared within an hour of a release" is defensible; a notification per exception recreates the fatigue you just spent a section eliminating. On Spring Boot, the Sentry starter hooks Logback and the MVC/WebFlux stack automatically and can carry the trace id, so an issue links straight back to the distributed trace from module 07.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.sentry.io/product/issues/grouping-and-fingerprints/" rel="noopener">Grouping and fingerprints — Sentry documentation (how events become one issue)</a></li>
+      <li>[Official] <a href="https://docs.sentry.io/concepts/data-management/event-grouping/" rel="noopener">Event grouping — Sentry documentation (grouping algorithms, stack-trace and fingerprint rules)</a></li>
+      <li>[Official] <a href="https://docs.sentry.io/product/releases/" rel="noopener">Releases — Sentry documentation (release health, regressions and commit attribution)</a></li>
+      <li>[Official] <a href="https://docs.sentry.io/platforms/java/guides/spring-boot/" rel="noopener">Spring Boot — Sentry Java SDK documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=kGi6XTOnaEE" rel="noopener">Sentry — error tracking and crash reporting for microservices — Java Techie</a></li>
+    </ul>
+
+    <h3>Runbooks: the document every alert must link to</h3>
+    <p>A page at three in the morning finds a tired engineer who may have joined the team last month and has never seen this service fail. The runbook (playbook in Google's vocabulary) is what closes that gap, and a good one has a predictable shape: the <em>symptom</em> as the alert phrases it; the <em>user impact</em> in one line, so the responder can judge severity immediately; <em>diagnosis steps</em> as concrete commands, dashboard links and log or trace queries in the order to try them; <em>mitigation</em> — the actions that stop the bleeding, such as rolling back, failing over, disabling a feature flag, scaling a consumer group — clearly separated from any permanent fix; and <em>escalation</em>, naming who to wake and at what point.</p>
+    <p>Two rules make runbooks real rather than decorative. First, the alert links to it: put a <code>runbook_url</code> annotation on every alerting rule so the link arrives inside the page itself, and treat an alert without one as incomplete. Second, runbooks rot at exactly the speed production changes, so revise them from incidents — whoever used one during an incident updates it before closing the review, and steps that turned out to be mechanical become automation rather than prose. Keep them in version control next to the service, review them in pull requests, and prefer short and current over comprehensive and stale.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/workbook/on-call/" rel="noopener">On-Call — The Site Reliability Workbook, chapter 8 (playbooks, alert triage and on-call flexibility)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/alerting/latest/overview/" rel="noopener">Alerting overview — Prometheus documentation (rules, annotations and the Alertmanager split)</a></li>
+      <li>[Official] <a href="https://response.pagerduty.com/" rel="noopener">PagerDuty Incident Response Documentation (their internal on-call and response handbook, published openly)</a></li>
+      <li>[Article] <a href="https://docs.gitlab.com/user/project/clusters/runbooks/" rel="noopener">Runbooks — GitLab Docs (executable runbooks kept beside the code)</a></li>
+    </ul>
+
+    <h3>On-call practice, mitigation before fix, and blameless review</h3>
+    <p>A humane rotation is a design problem. Keep shifts short enough that sleep debt does not accumulate, keep the roster large enough that nobody is on call more than roughly a quarter of the time, define primary and secondary explicitly so escalation has a name rather than a group chat, and compensate on-call properly — free labour is how rotations quietly become one person's job. Every shift ends with a real <em>handover</em>: what is still burning, what was silenced and when the silence expires, what changed in production, what the next shift should watch. Write it down; a verbal handover is a handover that did not happen.</p>
+    <p>During an incident, the discipline that most distinguishes experienced responders is <em>mitigation before diagnosis</em>. The job at hand is to stop user impact — roll back the deploy, shift traffic, disable the feature, drain the bad node — not to understand the bug. Understanding is the job of the review afterwards, when you are rested and have the evidence. Declare roles early (incident commander, communications, operations), keep a timestamped log as you go, and communicate status to stakeholders on a fixed cadence so nobody has to interrupt the responders to ask. Afterwards, run a <em>blameless</em> post-incident review: the premise is that people act reasonably given the information and tools they had, so a review that ends at "someone was careless" has stopped one step short of the systemic cause. Publish it, and give every action item an owner, a priority and a place in the actual backlog — an unowned action item is a wish, and a review process that produces only wishes will be abandoned within two quarters.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/sre-book/being-on-call/" rel="noopener">Being On-Call — Google SRE Book, chapter 11 (operational load, balance and stress)</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/postmortem-culture/" rel="noopener">Postmortem Culture: Learning from Failure — Google SRE Book, chapter 15</a></li>
+      <li>[Official] <a href="https://sre.google/workbook/incident-response/" rel="noopener">Incident Response — The Site Reliability Workbook, chapter 9 (roles, command and communication)</a></li>
+      <li>[Article] <a href="https://response.pagerduty.com/after/post_mortem_process/" rel="noopener">Postmortem Process — PagerDuty Incident Response Documentation</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EQOi8d6e_S0" rel="noopener">Improving the on-call and incident response process — Random Thoughts Tech</a></li>
+    </ul>
+
+    <h3>JDK Flight Recorder: the always-on profiler you already have</h3>
+    <p>Metrics say the service is slow. Traces say which span is slow. Neither says which method allocated four gigabytes. JDK Flight Recorder closes that gap: an event recorder built into the JVM itself, designed for overhead low enough (roughly a percent on the default profile) to leave running in production permanently. It records method sampling, allocation, garbage collection pauses, lock contention, thread parks, exceptions thrown, class loading, socket and file I/O, JIT compilation — the things a JVM knows about itself and no external agent can see as cheaply. Start it at launch or attach to a running process with <code>jcmd</code>, dump a recording covering the last N minutes when something goes wrong, and open it in JDK Mission Control, which does automated analysis rather than leaving you to read raw events.</p>
+    <p>Two capabilities worth naming in an interview. Custom events: extend <code>jdk.jfr.Event</code> and your own domain milestones — a payment authorised, a batch chunk committed — appear on the same timeline as GC pauses and lock contention, which is how you correlate a business slowdown with a JVM cause. And event streaming (JEP 349, since Java 14): <code>RecordingStream</code> lets a process consume its own JFR events continuously and in-process, so you can export selected events to Micrometer or an OpenTelemetry pipeline instead of waiting for someone to dump a file after the incident is over.</p>
+    <pre class="code-block" data-label="Shell"><code># Start with JFR enabled, keeping a rolling in-memory buffer
+java -XX:StartFlightRecording=settings=profile,maxsize=200m,name=app -jar service.jar
+
+# Or attach to a running JVM and dump what just happened
+jcmd &lt;pid&gt; JFR.start settings=profile name=incident
+jcmd &lt;pid&gt; JFR.dump name=incident filename=/tmp/incident.jfr
+jcmd &lt;pid&gt; JFR.stop name=incident</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/jfapi/" rel="noopener">Flight Recorder API Programmer's Guide, Java SE 21 — Oracle documentation (events, custom events, settings)</a></li>
+      <li>[Official] <a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/diagnostic-tools.html" rel="noopener">Diagnostic Tools — Java SE 21 Troubleshooting Guide (jcmd, JFR commands, heap and thread dumps)</a></li>
+      <li>[Official] <a href="https://openjdk.org/jeps/349" rel="noopener">JEP 349: JFR Event Streaming — OpenJDK (consuming your own recording in-process)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-flight-recorder-monitoring" rel="noopener">Monitoring Java Applications with Flight Recorder — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=AgFOJEkBVjg" rel="noopener">Programmer's Guide to JDK Flight Recorder — Java (official Java channel)</a></li>
+    </ul>
+
+    <h3>Continuous profiling: async-profiler and Grafana Pyroscope</h3>
+    <p>JFR is excellent when you know which JVM to look at. Continuous profiling generalises it into a fourth telemetry signal: every instance, all the time, profiles shipped to a central store where you can query them like metrics — flame graphs for a service across a time range, and, crucially, <em>differential</em> flame graphs comparing this week against last week or version 4.12 against 4.11. That converts "the service got 30% slower after Tuesday's release" from a week of bisecting into a single visual diff that names the method.</p>
+    <p>The JVM sampler underneath is usually async-profiler, which avoids the safepoint bias that makes naive JVM sampling lie about where time goes, and can profile CPU, allocation, lock contention and wall clock. Grafana Pyroscope is the open-source store and UI, fed either by a Java agent, by an SDK, or by an eBPF profiler in the collector; because profiles carry the same service and version labels as your metrics, Grafana can pivot from a slow span in a trace to the flame graph of the process that served it. Budget for cost the same way you did for metric cardinality in module 04 — sample rates and retention are the dials — and remember that in production the profiler is a diagnostic tool, not an alert source: it answers "why", after the SLO alert has already told you "what".</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/async-profiler/async-profiler" rel="noopener">async-profiler — GitHub (low-overhead sampling profiler for the JVM, no safepoint bias)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/pyroscope/latest/" rel="noopener">Grafana Pyroscope documentation (continuous profiling architecture, ingestion and querying)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/pyroscope/latest/configure-client/language-sdks/java/" rel="noopener">Java — Grafana Pyroscope documentation (the Java agent and SDK setup)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/java-async-profiler" rel="noopener">A Guide to async-profiler — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=XL2yTCPy2e0" rel="noopener">Getting started with Pyroscope: Intro to continuous profiling — Grafana</a></li>
+    </ul>
+  </section>
+
+  <section id="verdict">
+    <h2>What you would actually do on Monday</h2>
+    <p>The whole track collapses into a short sequence, and it is worth being able to recite it. Pick one user-visible journey per service — checkout, search, login — and define two SLIs for it, availability and latency, from data you already emit through Micrometer. Set an SLO you can defend with evidence rather than a number that sounded impressive in a meeting, and write down the error budget in minutes so it feels like currency. Replace the existing threshold alerts on that journey with one fast-burn page and one slow-burn ticket, and delete every alert that has not led to an action in the last quarter. Give the surviving pages a <code>runbook_url</code> that resolves to a document with symptom, impact, diagnosis, mitigation and escalation.</p>
+    <p>Then the operational half: put error tracking in front of your exception firehose so bugs arrive grouped and attributed to a release; agree an error budget policy with product before you need it; run a blameless review after the next incident and give its action items owners; and turn JFR on in production with a rolling buffer so the next mystery latency spike leaves evidence behind. None of this requires new infrastructure — it requires deciding what "healthy" means and holding yourself to it. That decision, not the number of dashboards, is what observability was for.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="07-tracing.html">← Distributed Tracing</a>
+    <a href="index.html">All Observability modules</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>SLO and alerting questions dominate the production-readiness round in Indian product companies and the "how do you support what you build" round in service companies — the vocabulary questions are near-certain, and the follow-ups sort candidates who have carried a pager from candidates who have read about one:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between an SLI, an SLO and an SLA?</summary>
+      <div class="answer"><p>An SLI is a measurement of service behaviour — the proportion of valid requests served successfully and under 300 ms. An SLO is the target for that measurement over a window — 99.9% over a rolling 30 days. An SLA is a contract with a customer that attaches consequences, usually financial, to missing an agreed level. Most teams should have SLIs and SLOs and no SLA; where an SLA exists it must be looser than the internal SLO so you react long before a customer can claim credits.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is an error budget and how do you calculate one?</summary>
+      <div class="answer"><p>It is the amount of unreliability the SLO permits: one minus the target, applied to the window. A 99.9% target over 30 days allows 0.1% of about 43,200 minutes, so roughly 43 minutes of failure. It reframes reliability as a spendable quantity — deploys, migrations and experiments draw on it — instead of an argument about who cares more about users.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is a 100% availability target the wrong goal?</summary>
+      <div class="answer"><p>Cost rises steeply with each additional nine while the benefit disappears into the user's own network, device and Wi-Fi, which already fail more often than a well-run service. A 100% target also leaves no error budget, so every deploy becomes a violation and the team stops shipping. Choose the lowest target users cannot distinguish from perfect, and spend the difference on features.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What makes a good SLI? Give an example of a bad one.</summary>
+      <div class="answer"><p>A good SLI is measured from the user's perspective and expressed as good events over valid events — successful checkout requests under 300 ms, divided by all valid checkout requests. Bad ones are infrastructure proxies: CPU utilisation, heap usage, or "average response time". Averages hide the tail where the unhappy users are, and CPU can sit at 90% while every user is served perfectly.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Symptom-based versus cause-based alerting — which do you page on, and why?</summary>
+      <div class="answer"><p>Page on symptoms: user-visible failures such as an SLO burning down, a queue whose consumer lag means orders are not being processed, or checkout error rate rising. Causes — CPU, memory, disk, a single unhealthy pod — go to dashboards and tickets, because they are often benign, they multiply with the infrastructure, and they go stale whenever the architecture changes. Causes answer "why" after a symptom alert has told you "what".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How would you reduce alert fatigue on a team drowning in pages?</summary>
+      <div class="answer"><p>Measure it first — pages per shift, and the fraction that resolved with no human action. Then: delete alerts nobody has acted on; convert non-urgent ones to tickets; move from static thresholds to burn-rate alerts so noise stops paging; group and inhibit in Alertmanager so one root cause produces one notification instead of fifty; silence known maintenance windows; and require every remaining page to be urgent, actionable and tied to user impact, with a runbook link. Review noisy alerts weekly and treat them as production bugs with owners. The safety argument matters: a team trained to dismiss alerts will dismiss the real one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is burn rate, and why is a burn-rate alert better than "error rate above 1% for five minutes"?</summary>
+      <div class="answer"><p>Burn rate is how fast you are consuming the error budget relative to the sustainable pace; burn rate 1 exhausts the budget exactly at the end of the window, 14.4 exhausts a 30-day budget in about two days. A static threshold pages for short spikes that cost almost no budget and stays silent through a slow leak that will breach the SLO. A burn-rate alert scales with the actual consequence, so pages correspond to breaches rather than to blips.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain multi-window, multi-burn-rate alerting. Why two windows per rule?</summary>
+      <div class="answer"><p>You define several rules at different sensitivities: a high burn rate over a short window pages, a lower burn rate over hours raises a ticket. Each rule also pairs its long window with a much shorter one, typically one-twelfth the length, and requires both to be over threshold. The long window prevents firing on noise; the short window makes the alert clear quickly once the incident stops, so responders are not stuck with a page that lingers long after recovery.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Request-based versus window-based SLIs — when would you choose each?</summary>
+      <div class="answer"><p>Request-based counts good events over valid events across the whole period; it is simple, maps directly onto Prometheus counters, and suits high-volume request/response services. Window-based marks each short interval good or bad by its own criterion and then measures the proportion of good intervals; it suits services where a concentrated outage matters more than a diffuse error rate, low-traffic services where a handful of requests would otherwise dominate the ratio, and batch or streaming pipelines where "was this interval healthy" is the natural question.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How does an error-tracking tool turn ten thousand exceptions into one issue?</summary>
+      <div class="answer"><p>It fingerprints each event, normally from the exception type plus the stack frames belonging to your own code, and folds every event sharing a fingerprint into one issue with a count, a first-seen time and the affected users. When the default grouping is wrong — everything collapsed under a generic wrapper exception, or one bug split into thousands because the message embeds an order id — you override it with explicit fingerprint or stack-trace rules. Tagging events with the release then lets the tool flag regressions and attribute new issues to the deploy that introduced them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What belongs in a runbook, and how do you stop runbooks from going stale?</summary>
+      <div class="answer"><p>Symptom as the alert phrases it, user impact in one line, diagnosis steps as concrete commands and dashboard or trace links in the order to try them, mitigation actions that stop the bleeding kept separate from the permanent fix, and escalation with names and thresholds. Keep it in version control beside the service, link it from every alert with a runbook_url annotation, require the person who used it during an incident to update it before closing the review, and automate any step that turned out to be mechanical. Short and current beats comprehensive and stale.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your error budget is exhausted on day 18 of 30. What happens next?</summary>
+      <div class="answer"><p>Whatever the written error budget policy says — agreed with product in advance, not negotiated mid-incident. The standard policy freezes feature launches and redirects the team to reliability work (fixing the top budget consumers, load shedding, capacity, tests, rollback tooling) until the rolling window recovers. Exceptions need an explicit, recorded decision from the same people who agreed the policy. If your organisation would simply ignore the freeze, say so in the interview and explain what you would do instead: use the exhausted budget as evidence in prioritisation, and start with the single largest contributor identified from the burndown.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What makes a post-incident review blameless, and how do you tell a good one from theatre?</summary>
+      <div class="answer"><p>Blameless means the review assumes people acted reasonably given the information, tooling and pressure they had, so it keeps asking why the system made that action look correct instead of stopping at human error. A good review has a factual timeline with timestamps, separates mitigation from root cause, names contributing factors rather than a single cause, and produces action items with owners, priorities and tickets in the real backlog. Theatre looks like a document nobody reads, action items with no owner, and a conclusion that someone will be more careful next time.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you profile a production JVM without taking it down, and what does JFR give you that a trace does not?</summary>
+      <div class="answer"><p>JDK Flight Recorder runs inside the JVM at roughly a percent overhead on the default profile, so you leave it on with a rolling buffer and dump the last window when something goes wrong — start it with -XX:StartFlightRecording or attach later with jcmd, then analyse in JDK Mission Control. It gives what tracing cannot: method-level sampling, allocation sites, GC pause causes, lock contention, thread parks and JIT activity. A trace tells you which span was slow; JFR tells you which method allocated the objects that caused the pause inside it. Custom events extend jdk.jfr.Event so business milestones land on the same timeline, and JFR event streaming lets the process consume its own events live.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What does continuous profiling add on top of JFR, and how would you justify its cost?</summary>
+      <div class="answer"><p>It makes profiling a always-on, fleet-wide signal rather than a per-JVM investigation: async-profiler samples every instance without safepoint bias, Grafana Pyroscope stores the profiles with the same service and version labels as your metrics, and you query flame graphs over a time range. The decisive feature is the differential flame graph — comparing two releases or two time ranges names the method that regressed, turning a week of bisecting into one view. Justify it on incident time saved and on infrastructure: the same flame graphs routinely find the hot path whose fix cuts CPU cost across the fleet, which usually pays for the storage several times over. Control cost with sample rate and retention, exactly as you control metric cardinality.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.alert.slo — SLI, SLO and error budgets, symptom-based alerting, avoiding alert fatigue</li>
+      <li>obs.alert.oncall — Error tracking and grouping, on-call runbooks, incident review, JFR and continuous profiling in production</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

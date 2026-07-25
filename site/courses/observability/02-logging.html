@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Logging Done Properly module: structured JSON logs, level discipline, parameterized logging, MDC and correlation ids, what must never be logged, plus Logback configuration, appenders and encoders, async logging and rate limiting — with verified resources and interview questions.">
+  <title>Logging Done Properly — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Logging Done Properly</h1>
+  <p class="standfirst">Logs are the telemetry every team already has and almost nobody designs. This module turns log output from a stream of English sentences into a queryable data set, and then makes Logback emit it efficiently enough to survive production traffic.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Observability track → Logging Done Properly</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>Metrics and traces get designed; logs get written by whoever was debugging that method at the time. The result is the estate most engineers actually live with: gigabytes a day of string-concatenated prose that no query engine can filter, half of it at INFO, some of it containing an access token, and none of it carrying the request id that would let you reconstruct a single user's journey.</p>
+    <p>The first half of this module is discipline that is independent of any library: a log line is a data record, not a sentence; levels mean specific operational things; exceptions are logged once, at the boundary; per-request context lives in the MDC; and a defined set of values must never reach a log file at all. The second half is Logback specifically on Spring Boot 3.x/4.x — <code>logback-spring.xml</code>, appenders and encoders, JSON output, async appenders, and the rate limiting that stops one hot loop from flooding the whole pipeline.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Structured logging: a log line is a data record, not a sentence</h3>
+    <p>The default habit is to write a log line for a human reading a terminal. In production nobody reads a terminal — a shipper collects the line, an aggregator indexes it, and an engineer queries it three weeks later at two in the morning. A sentence such as <code>Order 91823 for user 4471 failed after 2 retries</code> is fine for the terminal and useless for the query engine: to find "all failed orders for tenant X in the last hour" you need a fragile regular expression over free text, and every developer phrases their sentence differently. Structured logging emits the same event as a record with stable field names, so the query becomes a field comparison instead of a text search.</p>
+    <p>Two rules make structured logs pay off. First, field names must be stable across services — pick a schema (Elastic Common Schema is the widely used one, or your own documented set) so <code>user.id</code> means the same thing everywhere, rather than <code>userId</code> here and <code>user_id</code> there. Second, put values in fields, not in the message: keep the message a short constant describing the event, and attach the varying data as key-value pairs. A constant message is itself a groupable field — you can count occurrences of one event type without normalising ten phrasings of it.</p>
+    <pre class="code-block" data-label="LOG"><code>// Unstructured — one sentence, ungroupable, unfilterable
+Order 91823 for user 4471 failed after 2 retries: connect timeout
+
+// Structured — the same event as a record a query engine can filter and aggregate
+{"@timestamp":"2026-07-25T11-22-30.145Z","log.level":"ERROR","message":"order.submit.failed",
+ "order.id":"91823","user.id":"4471","tenant":"acme","retry.count":2,
+ "error.type":"java.net.SocketTimeoutException","trace.id":"4bf92f3577b34da6"}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.elastic.co/docs/reference/ecs" rel="noopener">Elastic Common Schema (ECS) reference — Elastic (the canonical field-name vocabulary)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html" rel="noopener">Logging Vocabulary Cheat Sheet — OWASP (standard event names and fields)</a></li>
+      <li>[Article] <a href="https://www.innoq.com/en/blog/2019/05/structured-logging/" rel="noopener">Structured Logging — INNOQ (why the sentence habit fails at scale)</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/structured-events-basis-observability" rel="noopener">Structured events are the basis of observability — Honeycomb</a></li>
+      <li>[Article] <a href="https://newrelic.com/blog/log/structured-logging" rel="noopener">What is structured logging and why you should use it — New Relic</a></li>
+    </ul>
+
+    <h3>Level discipline, and logging an exception exactly once</h3>
+    <p>"Everything is INFO" is the normal failure mode, and it destroys the one cheap filter logs give you. Assign each level an operational meaning and hold the line: <strong>ERROR</strong> means a human must act — it is an alertable condition, so if nobody would be paged for it, it is not an ERROR. <strong>WARN</strong> means something is degraded or a fallback fired, worth reading in the morning but not worth waking anyone. <strong>INFO</strong> is the business narrative — the small set of events that describe what the system did (order accepted, payment captured, job completed), one or two per request, not per loop iteration. <strong>DEBUG</strong> is for development and for a temporary production bump when you are chasing something. <strong>TRACE</strong> is for desperation: payload dumps and per-iteration detail you would never leave enabled.</p>
+    <p>The companion rule is that an exception is logged <em>once</em>, at the boundary where you actually handle it — a controller advice, a message-listener error handler, a scheduled-job wrapper. The common anti-pattern is catch, log, rethrow at every layer, which turns one failure into four stack traces at four levels of the call stack; on-call then has to work out whether the service failed four times or once. Either handle it and log it, or add context and rethrow without logging. When you do log it, pass the throwable as the last argument so SLF4J prints the stack trace — <code>log.error("order.submit.failed", ex)</code>, not <code>log.error("failed: " + ex.getMessage())</code>, which throws away the cause chain that usually holds the actual reason.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://logback.qos.ch/manual/architecture.html" rel="noopener">Architecture — Logback manual (levels, effective level, level inheritance)</a></li>
+      <li>[Official] <a href="https://www.slf4j.org/apidocs/org/slf4j/Logger.html" rel="noopener">Logger — SLF4J API javadoc (every level and throwable overload)</a></li>
+      <li>[Article] <a href="https://sematext.com/blog/logging-levels/" rel="noopener">Logging levels: what they are and how to choose them — Sematext</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-logging" rel="noopener">Logging in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=vHoHUo6gRQE" rel="noopener">Spring Boot Logging with SLF4J and Logback — Java Techie</a></li>
+    </ul>
+
+    <h3>Parameterized logging and the SLF4J façade</h3>
+    <p>SLF4J is the façade you compile against; Logback is the implementation Spring Boot wires in behind it (Log4j2 can be swapped in without touching a line of application code — that separation is the whole point of the façade). Always inject the logger through SLF4J's <code>LoggerFactory</code>, never through a Logback class, or you have hard-wired the implementation into your business code.</p>
+    <p>Write every call in parameterized form: <code>log.info("order.submitted user={} order={}", userId, orderId)</code>. String concatenation builds the full message eagerly, before the logger has decided whether that level is even enabled, so a DEBUG line in a hot loop costs you string building on every iteration in production where DEBUG is off. The <code>{}</code> placeholder defers formatting until the framework knows the event will actually be written. That is also why the old guard clause <code>if (log.isDebugEnabled())</code> is unnecessary around a parameterized call — the only case where it still earns its keep is when computing an <em>argument</em> is expensive (serialising an object graph, a database round trip), because argument evaluation happens before the call regardless. Parameterized calls also give structure for free: the constant message is a stable grouping key, and JSON encoders can capture the arguments as fields instead of smearing them into text.</p>
+    <pre class="code-block" data-label="Java"><code>private static final Logger log = LoggerFactory.getLogger(OrderService.class);
+
+log.debug("cart.priced items=" + items.size() + " total=" + total);   // eager concat, always paid
+log.debug("cart.priced items={} total={}", items.size(), total);       // deferred, free when DEBUG off
+
+if (log.isTraceEnabled()) {                    // guard only when the ARGUMENT is expensive
+    log.trace("cart.dump payload={}", serialiseWholeGraph(cart));
+}
+log.error("order.submit.failed order={}", orderId, ex);   // trailing throwable prints the stack trace</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://www.slf4j.org/manual.html" rel="noopener">SLF4J user manual — parameterized messages, bindings, fluent API</a></li>
+      <li>[Official] <a href="https://www.slf4j.org/faq.html" rel="noopener">SLF4J FAQ — the performance case for placeholders over concatenation</a></li>
+      <li>[Official] <a href="https://logback.qos.ch/manual/introduction.html" rel="noopener">Introduction — Logback manual (parameterized logging and its cost model)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/slf4j-with-log4j2-logback" rel="noopener">SLF4J with Logback and Log4j2 — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=CvoiLGK3hNM" rel="noopener">Logging Like a Pro in Spring Boot: SLF4J, Logback, Log4j2 explained — codippa</a></li>
+    </ul>
+
+    <h3>MDC, correlation ids, and the thread-pool pitfall</h3>
+    <p>Mapped Diagnostic Context is a per-thread map that the logging framework merges into every line that thread writes. Populate it once at the edge of a request — trace id, span id, user id, tenant, request id — and every subsequent line, from the controller down to the repository, carries that context without a single method signature changing. That is what makes a log searchable by journey: <code>trace.id = "4bf92f35…"</code> returns every line from every layer of one request, in order, instead of forty unrelated lines interleaved with other users' traffic. On Spring Boot 3.x with Micrometer Tracing the trace and span ids are put into the MDC for you and appear in the default log pattern; you add your own domain keys (tenant, order id) on top.</p>
+    <p>The pitfall that gets asked in interviews: MDC is backed by a <code>ThreadLocal</code>, so it does <em>not</em> follow work onto another thread. Hand a task to an <code>@Async</code> method, a <code>CompletableFuture</code>, an executor or a parallel stream and the new thread's MDC is empty — the correlation id vanishes exactly where you needed it most. Fixes: capture <code>MDC.getCopyOfContextMap()</code> before submitting and restore it inside the task (a decorating <code>Executor</code> or Spring's <code>TaskDecorator</code> does this once for the whole application), and propagate the ids across service boundaries as HTTP headers or message headers so downstream services join the same trace. Equally important is cleanup: always clear the MDC in a <code>finally</code> block or a servlet filter, because pooled threads are reused and a leftover user id will silently contaminate the next request's logs.</p>
+    <pre class="code-block" data-label="Java"><code>// Edge: populate once, ALWAYS clear — pooled threads are reused
+try {
+    MDC.put("trace.id", traceId);
+    MDC.put("tenant", tenant);
+    chain.doFilter(request, response);
+} finally {
+    MDC.clear();
+}
+
+// Crossing a thread boundary: MDC is a ThreadLocal, so carry it yourself
+Map&lt;String, String&gt; ctx = MDC.getCopyOfContextMap();
+executor.submit(() -&gt; {
+    if (ctx != null) MDC.setContextMap(ctx);
+    try { doWork(); } finally { MDC.clear(); }
+});</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://logback.qos.ch/manual/mdc.html" rel="noopener">Mapped Diagnostic Context — Logback manual (semantics, inheritance, cleanup)</a></li>
+      <li>[Official] <a href="https://www.slf4j.org/apidocs/org/slf4j/MDC.html" rel="noopener">MDC — SLF4J API javadoc (getCopyOfContextMap, setContextMap, clear)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/tracing.html" rel="noopener">Tracing — Spring Boot Actuator reference (trace and span ids in the log pattern)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/mdc-in-log4j-2-logback" rel="noopener">Improved Java Logging with Mapped Diagnostic Context (MDC) — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Ip7BIptWMg4" rel="noopener">Mapped Diagnostic Context (MDC) in Spring Boot — Gyan Darpan</a></li>
+    </ul>
+
+    <h3>What must never be logged, and how to mask what slips through</h3>
+    <p>Treat the log pipeline as a system that copies data to third parties and keeps it for years. Logs are shipped to a hosted aggregator, indexed on machines you do not own, replicated into backups, and read by support engineers, contractors and anyone with dashboard access. So the list of values that must never enter it is short and absolute: passwords and password hashes, session tokens, JWTs, API keys and secrets, full card numbers (PAN), CVV, OTPs, Aadhaar and PAN-card style national identifiers, bank account numbers, and health data. Personal data under GDPR or India's DPDP Act is not banned outright, but it is subject to purpose limitation and storage limitation — an unbounded log retention full of email addresses and phone numbers is a compliance problem that nobody budgeted for.</p>
+    <p>The two habits that leak most are dumping whole request or response bodies at DEBUG (login payloads, payment payloads, tokens in headers) and calling <code>toString()</code> on an entity whose Lombok-generated <code>@ToString</code> happily includes every field. Defend in layers: exclude sensitive fields from <code>toString</code> at the source, log identifiers rather than objects, mask at the encoder with a Logback replacement or a custom converter so anything that does slip through is redacted before it hits disk, and never log a raw <code>Authorization</code> header. Also remember the injection angle — an unvalidated newline in user input can forge a whole extra log line, which is why OWASP treats log neutralisation as a security control rather than a formatting nicety.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" rel="noopener">Logging Cheat Sheet — OWASP (what to log, what to exclude, log injection)</a></li>
+      <li>[Official] <a href="https://cheatsheetseries.owasp.org/cheatsheets/User_Privacy_Protection_Cheat_Sheet.html" rel="noopener">User Privacy Protection Cheat Sheet — OWASP</a></li>
+      <li>[Official] <a href="https://gdpr-info.eu/art-5-gdpr/" rel="noopener">Article 5 GDPR — principles of purpose and storage limitation (the retention constraint)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/logback-mask-sensitive-data" rel="noopener">Masking Sensitive Data in Logback — Baeldung</a></li>
+    </ul>
+
+    <h3>logback-spring.xml: configuration, per-logger levels, additivity and profiles</h3>
+    <p>Spring Boot picks up either <code>logback.xml</code> or <code>logback-spring.xml</code> from the classpath, and the choice matters. Plain <code>logback.xml</code> is read by Logback directly, very early, before Spring's environment exists — so none of Boot's extensions work in it. Name the file <code>logback-spring.xml</code> and Boot loads it through its own initialiser, which unlocks <code>&lt;springProfile&gt;</code> (profile-conditional blocks) and <code>&lt;springProperty&gt;</code> (values pulled from the Spring <code>Environment</code>, so the application name or an environment tag can be injected into the log pattern). That is the difference that lets one file emit human-readable colourised lines on a developer laptop and single-line JSON in production.</p>
+    <p>Inside the file, levels are set per logger and inherit down the package hierarchy: <code>&lt;logger name="com.acme.order" level="DEBUG"/&gt;</code> applies to every class under that package, while the root logger catches everything else. Turning a chatty framework down — Hibernate SQL, an HTTP client's wire log — is a one-line change here, and for simple cases you do not need the XML at all: <code>logging.level.com.acme.order=DEBUG</code> in <code>application.yml</code> does the same thing. The property that trips people up is <code>additivity</code>: by default a logger's events are also passed to its ancestors' appenders, so attaching a file appender to <code>com.acme.audit</code> without setting <code>additivity="false"</code> writes every audit line twice — once to the audit file, once to the root's console.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;configuration&gt;
+  &lt;springProperty scope="context" name="appName" source="spring.application.name"/&gt;
+
+  &lt;springProfile name="local"&gt;                &lt;!-- humans read this one --&gt;
+    &lt;root level="INFO"&gt;&lt;appender-ref ref="CONSOLE"/&gt;&lt;/root&gt;
+  &lt;/springProfile&gt;
+
+  &lt;springProfile name="prod"&gt;                 &lt;!-- machines read this one --&gt;
+    &lt;root level="INFO"&gt;&lt;appender-ref ref="JSON"/&gt;&lt;/root&gt;
+  &lt;/springProfile&gt;
+
+  &lt;logger name="com.acme.order" level="DEBUG"/&gt;
+  &lt;logger name="org.hibernate.SQL" level="WARN"/&gt;
+  &lt;logger name="com.acme.audit" level="INFO" additivity="false"&gt;  &lt;!-- or it logs twice --&gt;
+    &lt;appender-ref ref="AUDIT_FILE"/&gt;
+  &lt;/logger&gt;
+&lt;/configuration&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://logback.qos.ch/manual/configuration.html" rel="noopener">Configuration — Logback manual (syntax, logger levels, additivity, auto-scan)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/features/logging.html" rel="noopener">Logging — Spring Boot reference (logback-spring.xml, springProfile, springProperty)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/logging.html" rel="noopener">Logging how-to guides — Spring Boot (custom configuration recipes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/logback" rel="noopener">A Guide to Logback — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=bphMYrTv8pA" rel="noopener">Mastering Logging in Spring Boot: from Logback to SLF4J — Engineering Digest</a></li>
+    </ul>
+
+    <h3>Appenders: console, rolling files, and the layout that formats them</h3>
+    <p>An appender is the destination. <code>ConsoleAppender</code> writes to stdout — which is the correct and usually the <em>only</em> destination in a container, because the platform (Docker, Kubernetes, a log shipper as a sidecar) is what collects stdout; writing to a file inside a pod means your logs die with the pod and your disk fills up in the meantime. <code>RollingFileAppender</code> still matters for VM deployments and for a separate audit trail, and it is always paired with a rolling policy: <code>TimeBasedRollingPolicy</code> rotates by date, <code>SizeAndTimeBasedRollingPolicy</code> adds a per-file size cap, and <code>maxHistory</code> plus <code>totalSizeCap</code> are the two settings that stop the disk-full incident nobody plans for.</p>
+    <p>Formatting is the appender's other half. A <code>PatternLayout</code> conversion pattern names the fields and their order — timestamp, level, thread, logger, MDC values via <code>%X{trace.id}</code>, message, and <code>%ex</code> for the stack trace. Two conversion words are worth knowing because they cost real money: <code>%L</code> (line number), <code>%M</code> (method) and <code>%C</code> (caller class) are computed by capturing a stack trace on <em>every</em> line, which is orders of magnitude slower than everything else in the pattern — fine locally, a genuine throughput problem under load.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender"&gt;
+  &lt;file&gt;/var/log/app/app.log&lt;/file&gt;
+  &lt;rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy"&gt;
+    &lt;fileNamePattern&gt;/var/log/app/app-%d{yyyy-MM-dd}.%i.log.gz&lt;/fileNamePattern&gt;
+    &lt;maxFileSize&gt;100MB&lt;/maxFileSize&gt;
+    &lt;maxHistory&gt;14&lt;/maxHistory&gt;
+    &lt;totalSizeCap&gt;5GB&lt;/totalSizeCap&gt;    &lt;!-- the disk-full guard --&gt;
+  &lt;/rollingPolicy&gt;
+  &lt;encoder&gt;
+    &lt;pattern&gt;%d %-5level [%thread] %logger{36} trace=%X{trace.id} - %msg%n&lt;/pattern&gt;
+  &lt;/encoder&gt;
+&lt;/appender&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://logback.qos.ch/manual/appenders.html" rel="noopener">Appenders — Logback manual (console, rolling file, rolling policies, AsyncAppender)</a></li>
+      <li>[Official] <a href="https://logback.qos.ch/manual/layouts.html" rel="noopener">Layouts — Logback manual (every PatternLayout conversion word and its cost)</a></li>
+      <li>[Official] <a href="https://logback.qos.ch/manual/encoders.html" rel="noopener">Encoders — Logback manual (why encoders replaced layouts on appenders)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=3KCUG256aCc" rel="noopener">Logging in Spring Boot using Logback: rolling file and max history — Simplifying Tech</a></li>
+    </ul>
+
+    <h3>JSON output: LogstashEncoder and Boot's built-in structured logging</h3>
+    <p>An encoder turns a log event into bytes. Swap the pattern encoder for a JSON one and the same application code starts emitting the records from the first topic — no call-site changes, just configuration. The long-standing community option is <code>logstash-logback-encoder</code>, which provides <code>LogstashEncoder</code> (and <code>LoggingEventCompositeJsonEncoder</code> for full control over which fields appear). It writes the standard event fields, promotes every MDC entry to a top-level JSON field automatically, and adds structured-argument helpers — <code>kv("order.id", id)</code> or <code>StructuredArguments.value(...)</code> — so an argument becomes a real typed field rather than text inside the message.</p>
+    <p>Since Spring Boot 3.4 you no longer need a third-party encoder for the common cases: Boot ships structured logging with three built-in formats — Elastic Common Schema, Logstash JSON, and GELF (Graylog) — enabled with a single property, plus a <code>StructuredLogFormatter</code> interface for a custom format. Choose deliberately: Boot's built-in support if you want zero extra dependencies and one of the standard schemas; <code>logstash-logback-encoder</code> if you need fine-grained field control, structured arguments or markers. Either way, keep the JSON encoder behind a <code>&lt;springProfile&gt;</code> so local development still gets readable lines — reading raw JSON in a terminal is a needless tax on your own team.</p>
+    <pre class="code-block" data-label="YAML"><code># Spring Boot 3.4+: structured logs with no extra dependency
+logging:
+  structured:
+    format:
+      console: ecs        # or: logstash, gelf, or your own StructuredLogFormatter
+    ecs:
+      service:
+        name: order-service
+        environment: prod</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://spring.io/blog/2024/08/23/structured-logging-in-spring-boot-3-4" rel="noopener">Structured Logging in Spring Boot 3.4 — Spring Blog (ECS, Logstash and GELF formats)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/logging/structured/package-summary.html" rel="noopener">org.springframework.boot.logging.structured — Spring Boot API (StructuredLogFormatter)</a></li>
+      <li>[Official] <a href="https://github.com/logfellow/logstash-logback-encoder" rel="noopener">logstash-logback-encoder — GitHub (LogstashEncoder, composite encoder, structured arguments)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-structured-logging" rel="noopener">Structured Logging in Spring Boot — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EM5E6qKDl70" rel="noopener">Spring Boot: JSON logging with Logback — Mike Møller Nielsen</a></li>
+    </ul>
+
+    <h3>AsyncAppender, sampling and rate limiting</h3>
+    <p>Logging is synchronous by default: the request thread formats the event and writes it, so a slow disk or a blocked stdout pipe becomes application latency. <code>AsyncAppender</code> wraps another appender with a bounded queue and a single worker thread that drains it, handing the request thread back almost immediately. The behaviour to understand — and to be asked about — is what happens when the queue fills. The default <code>queueSize</code> is small (256 events) and the default <code>discardingThreshold</code> is 20%: once the queue is 80% full Logback silently <em>drops</em> TRACE, DEBUG and INFO events, keeping only WARN and ERROR. That is a sane default for latency and a nasty surprise during an incident, when the INFO trail you wanted is exactly what was thrown away. Set <code>discardingThreshold</code> to 0 to never discard (the appender then blocks the caller instead — you have chosen completeness over latency), size the queue for your burst, and set <code>includeCallerData</code> to false unless you truly need it, because caller data must be captured on the calling thread and destroys the benefit.</p>
+    <p>Async moves the cost; it does not remove it. The other half is emitting less. Logback's filters do the work in-process: a <code>TurboFilter</code> is evaluated before the event object is even created (the cheapest possible place to drop something), <code>DuplicateMessageFilter</code> suppresses a message repeated beyond a threshold, and an <code>EvaluatorFilter</code> lets you express a sampling or throttling rule. Reach for these whenever a hot loop or a retry storm can produce thousands of identical lines a second — one bad code path flooding the pipeline costs you ingest budget, buries the useful signal, and can push an aggregator into dropping everyone's logs. Sample high-volume, low-value events (log one in a hundred with a count), keep every error, and treat log volume as a budget you monitor rather than a side effect you discover on the invoice.</p>
+    <pre class="code-block" data-label="XML"><code>&lt;appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender"&gt;
+  &lt;queueSize&gt;8192&lt;/queueSize&gt;             &lt;!-- default 256 is small for bursty traffic --&gt;
+  &lt;discardingThreshold&gt;0&lt;/discardingThreshold&gt;  &lt;!-- 0 = never drop INFO/DEBUG; block instead --&gt;
+  &lt;includeCallerData&gt;false&lt;/includeCallerData&gt;  &lt;!-- true undoes most of the benefit --&gt;
+  &lt;appender-ref ref="JSON"/&gt;
+&lt;/appender&gt;
+
+&lt;turboFilter class="ch.qos.logback.classic.turbo.DuplicateMessageFilter"&gt;
+  &lt;allowedRepetitions&gt;5&lt;/allowedRepetitions&gt;   &lt;!-- cheap throttle for the hot-loop case --&gt;
+&lt;/turboFilter&gt;</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://logback.qos.ch/manual/filters.html" rel="noopener">Filters — Logback manual (TurboFilter, DuplicateMessageFilter, EvaluatorFilter)</a></li>
+      <li>[Official] <a href="https://logging.apache.org/log4j/2.x/manual/async.html" rel="noopener">Asynchronous Logging — Log4j2 manual (the trade-offs, argued in depth)</a></li>
+      <li>[Article] <a href="https://twitter.github.io/finatra/user-guide/logging/asyncappender.html" rel="noopener">Custom Logback AsyncAppender — Finatra documentation (why the discard defaults bite)</a></li>
+      <li>[Article] <a href="https://dzone.com/articles/how-instantly-improve-your-0" rel="noopener">How to instantly improve your Java logging with 7 Logback tweaks — DZone</a></li>
+      <li>[Article] <a href="https://blog.amitwani.dev/asynchronous-logging-in-spring-boot-using-logback" rel="noopener">Asynchronous Logging in Spring Boot using Logback — Amit Wani</a></li>
+    </ul>
+
+    <h3>Log4j2 as the alternative, and the Log4Shell lesson</h3>
+    <p>Logback is Spring Boot's default, but Log4j2 is a first-class alternative and Boot ships a starter for it: exclude <code>spring-boot-starter-logging</code>, add <code>spring-boot-starter-log4j2</code>, and because your code talks to SLF4J nothing else changes. Log4j2's genuine advantages are its asynchronous loggers built on the LMAX Disruptor (a lock-free ring buffer rather than a blocking queue, materially better under high concurrency), garbage-free logging in steady state, and a richer plugin and configuration system. Logback's advantages are being the default, a simpler configuration surface, and <code>logback-spring.xml</code>'s Spring integration. For most services the choice is not performance-critical; pick one, and never let both implementations onto the classpath.</p>
+    <p>Log4Shell (CVE-2021-44228, December 2021) is the case study every senior interview eventually reaches. A JNDI lookup feature meant that logging an attacker-controlled string — a User-Agent header, a username, a chat message — could make the library fetch and execute remote code. The severity came from the position of the component: a logging library is on every code path, in every service, and often several dependency levels deep, so nobody knew where they had it. The lessons are the transferable ones: log a message, do not interpret it; keep a software bill of materials so "do we use Log4j, and where?" is a query rather than a two-week audit; patch dependencies on a schedule rather than on an incident; and remember that a transitive dependency you have never heard of is still your production risk.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://logging.apache.org/log4j/2.x/" rel="noopener">Apache Log4j 2 — official documentation</a></li>
+      <li>[Official] <a href="https://logging.apache.org/security.html" rel="noopener">Security — Apache Logging Services (the Log4Shell advisories and fixed versions)</a></li>
+      <li>[Official] <a href="https://nvd.nist.gov/vuln/detail/CVE-2021-44228" rel="noopener">CVE-2021-44228 — NVD entry (scope, scoring, affected versions)</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2021/12/log4j-zero-day-vulnerability/" rel="noopener">Vulnerability Affecting Multiple Log4j Versions Permits RCE Exploit — InfoQ</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-logback-log4j2" rel="noopener">Logging in Spring Boot with Logback and Log4j2 — Baeldung</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="01-observability-foundations.html">← Observability Foundations</a>
+    <a href="index.html">All Observability modules</a>
+    <a href="03-log-aggregation.html">Log Aggregation →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Logging is asked in almost every backend round in India — service companies test the mechanics (SLF4J, Logback config, levels), product companies push on MDC across threads, PII handling and what happens when the log pipeline is the bottleneck:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is SLF4J and how does it relate to Logback?</summary>
+      <div class="answer"><p>SLF4J is a façade — an API your code compiles against. Logback is an implementation that sits behind it and does the actual work; it is Spring Boot's default. Because the application only knows SLF4J, you can swap Logback for Log4j2 by changing dependencies, with no source changes. Always obtain loggers via <code>LoggerFactory.getLogger(...)</code>, never from a Logback class.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the log levels and say what each one should mean in production.</summary>
+      <div class="answer"><p>ERROR: a human must act — alertable. WARN: degraded, a fallback fired, read it in the morning. INFO: the business narrative, one or two lines per request describing what the system did. DEBUG: development, or a temporary production bump while investigating. TRACE: payload-level detail you would never leave on. The failure mode is putting everything at INFO, which destroys the only cheap filter you have.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why is <code>log.info("user {} did {}", id, action)</code> better than string concatenation?</summary>
+      <div class="answer"><p>Concatenation builds the whole string before the logger decides whether the level is enabled, so a disabled DEBUG line still costs string building on every call. The placeholder form defers formatting until the event is known to be written. It also keeps the message constant, which makes it a stable grouping key, and lets JSON encoders capture the arguments as separate fields instead of text.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Is <code>if (log.isDebugEnabled())</code> still needed around a parameterized call?</summary>
+      <div class="answer"><p>Usually no — the placeholders already defer the formatting cost. The guard still earns its place when computing an <em>argument</em> is expensive, because arguments are evaluated before the call regardless: serialising a large object graph, a database lookup, or anything with side effects should sit behind the guard.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Difference between <code>logback.xml</code> and <code>logback-spring.xml</code>?</summary>
+      <div class="answer"><p><code>logback.xml</code> is loaded by Logback directly, before the Spring environment exists, so Boot's extensions are unavailable. <code>logback-spring.xml</code> is loaded through Boot's initialiser and supports <code>&lt;springProfile&gt;</code> for profile-conditional blocks and <code>&lt;springProperty&gt;</code> for values from the Spring Environment. Prefer <code>logback-spring.xml</code> in any Boot application.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is structured logging and why bother?</summary>
+      <div class="answer"><p>Emitting each event as a record with stable, typed field names instead of an English sentence. It makes queries field comparisons rather than fragile regular expressions, makes aggregation possible (count and group by event type or tenant), and keeps meaning consistent across services when you adopt a schema such as ECS. Rule of thumb: constant message, varying data in fields.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is MDC, and how do you get a correlation id onto every line of a request?</summary>
+      <div class="answer"><p>MDC is a per-thread key-value map that the logging framework merges into every line that thread emits. Populate it in a servlet filter or interceptor at the edge with trace id, request id, user and tenant, reference the keys in the log pattern with <code>%X{...}</code> (or let a JSON encoder promote them to fields), and clear it in a <code>finally</code> block. Propagate the id to downstream services as a header so the whole journey shares one value. On Boot 3.x Micrometer Tracing puts trace and span ids in the MDC for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your correlation id disappears inside an <code>@Async</code> method. Why, and how do you fix it?</summary>
+      <div class="answer"><p>MDC is backed by a ThreadLocal, so it does not follow work onto another thread — executors, <code>CompletableFuture</code>, parallel streams and <code>@Async</code> all start with an empty MDC. Fix it by capturing <code>MDC.getCopyOfContextMap()</code> before submitting and calling <code>setContextMap</code> inside the task, done once centrally via a decorating Executor or Spring's <code>TaskDecorator</code>. Always clear afterwards, because the pooled thread will be reused for someone else's request.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What must never be logged, and how do you enforce it?</summary>
+      <div class="answer"><p>Never: passwords or hashes, session tokens and JWTs, API keys, full card numbers and CVV, OTPs, national identifiers such as Aadhaar or PAN, bank account numbers, health data. Personal data is allowed only under purpose and storage limitation (GDPR, DPDP) — unbounded retention of emails and phone numbers is a compliance problem. Enforce in layers: exclude sensitive fields from <code>toString</code>, log identifiers rather than whole objects, never dump raw request bodies or <code>Authorization</code> headers, and mask at the encoder so anything that slips through is redacted before it is written. Remember logs are shipped to third parties and kept for years.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> You are catching and logging the same exception in the DAO, the service and the controller. What is wrong?</summary>
+      <div class="answer"><p>One failure produces three or four stack traces, so on-call cannot tell whether the system failed once or four times, and error counts and alerts are inflated. Log an exception once, at the boundary where you actually handle it — a controller advice, a listener error handler, a job wrapper. Elsewhere either add context and rethrow without logging, or do not catch at all. Pass the throwable as the last SLF4J argument so the full cause chain is printed instead of just <code>getMessage()</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What does <code>additivity="false"</code> do on a logger?</summary>
+      <div class="answer"><p>By default an event is passed to the appenders of the logger <em>and</em> all its ancestors, so attaching a dedicated appender to a package while the root logger also has one writes every line twice. Setting <code>additivity="false"</code> stops the event at that logger, which is exactly what you want for an audit or access log that must go to its own file and nowhere else.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How do you make a Spring Boot service emit JSON logs, and what are the options?</summary>
+      <div class="answer"><p>Two routes. Boot 3.4+ has built-in structured logging: set <code>logging.structured.format.console</code> to <code>ecs</code>, <code>logstash</code> or <code>gelf</code>, with a <code>StructuredLogFormatter</code> for a custom shape — no extra dependency. Or use <code>logstash-logback-encoder</code> for finer control: <code>LogstashEncoder</code> or the composite encoder, automatic promotion of MDC entries to fields, and structured arguments such as <code>kv("order.id", id)</code>. Wrap either in a <code>&lt;springProfile&gt;</code> so local runs stay human-readable.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain <code>AsyncAppender</code>, and the default that surprises people during an incident.</summary>
+      <div class="answer"><p>It wraps another appender with a bounded queue drained by a worker thread, so the request thread is not blocked on I/O. The trap is the defaults: <code>queueSize</code> is 256 and <code>discardingThreshold</code> is 20%, so once the queue is 80% full Logback silently discards TRACE, DEBUG and INFO and keeps only WARN and ERROR — precisely during the traffic spike when you wanted the INFO trail. Set <code>discardingThreshold</code> to 0 to block instead of dropping, size the queue for realistic bursts, and leave <code>includeCallerData</code> false because caller data is captured on the calling thread and undoes the benefit.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A retry loop is producing thousands of identical lines a second and flooding the pipeline. What do you do?</summary>
+      <div class="answer"><p>Fix the call site first — log the failure once with a retry count rather than once per attempt. Then defend systemically: a <code>TurboFilter</code> is evaluated before the event object is even constructed, so it is the cheapest place to drop noise; <code>DuplicateMessageFilter</code> caps repetitions of one message; an <code>EvaluatorFilter</code> expresses a sampling rule (one in N, plus a count). Keep every error, sample the high-volume low-value events, and treat log volume as a monitored budget — flooding costs ingest money, buries the signal, and can make the aggregator shed everyone's logs.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why did Log4Shell matter so much, and what would you change in a codebase because of it?</summary>
+      <div class="answer"><p>CVE-2021-44228: Log4j2's JNDI lookup meant that merely logging an attacker-controlled string could load and execute remote code, and a logging library sits on every code path in every service, frequently as a transitive dependency nobody had inventoried. Changes worth making: keep a software bill of materials so "where do we use this?" is a query not an audit, patch dependencies on a schedule, scan continuously rather than at release time, log messages without interpreting them, and treat unvalidated user input in log lines as a security concern (log injection) rather than a formatting one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Logback or Log4j2 for a high-throughput service — how do you decide?</summary>
+      <div class="answer"><p>Both sit behind SLF4J, so the decision is operational, not architectural. Log4j2's asynchronous loggers use the LMAX Disruptor — a lock-free ring buffer rather than a blocking queue — and it offers garbage-free logging in steady state, which measurably helps at very high concurrency. Logback is the Boot default with a simpler configuration surface and <code>logback-spring.xml</code>'s profile and property integration. Benchmark with your own workload before switching; whichever you choose, ensure only one implementation is on the classpath and swap the starter dependency rather than touching application code.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.log.practice — Structured JSON logs, level discipline, MDC and correlation ids, what must never be logged</li>
+      <li>obs.log.logback — Logback configuration, appenders and encoders, async logging, sampling and rate limiting</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

@@ -364,7 +364,7 @@ independent of the web course phases — the two courses can interleave by user 
 - **Phase E4:** T2 Backend Testing (DONE 2026-07-19, 10 modules, 20/20, 172 links). **Phase E4 COMPLETE.**
 - **Phase E5:** A1 Angular Basics (DONE 2026-07-19, 10 modules, 20/20, 141 links) → A2 Angular Advanced (DONE 2026-07-19, 14 modules, 28/28, 211 links) → A3 Angular State Management (DONE 2026-07-25, 8 modules, 16/16, 104 links) → T1 Frontend Testing (DONE 2026-07-25, 8 modules, 16/16, 192 links). **Phase E5 COMPLETE.**
 - **Phase E6:** M1 Microservices (DONE 2026-07-25, 12 modules, 24/24, 400 links) → M2 Messaging (DONE 2026-07-25, 10 modules, 20/20, 373 links). **Phase E6 COMPLETE.**
-- **Phase E7:** O1 DevOps → C1 AWS → O2 Observability
+- **Phase E7:** O1 DevOps (DONE 2026-07-25, 14 modules, 28/28, 727 links) → C1 AWS (DONE 2026-07-25, 12 modules, 24/24, 681 links) → O2 Observability (DONE 2026-07-25, 8 modules, 16/16, 367 links). **Phase E7 COMPLETE.**
 - **Phase E8:** Y1 System Design → Y2 Secure Coding
 - **Phase E9:** P1 Projects (interleaved once prereq tracks done; expense tracker can start after E3)
 
@@ -380,7 +380,7 @@ Scale: ~255 module pages across 21 tracks (directory format, per §2). Ship per-
 - [ ] E4: T2 (0/10)
 - [x] E5: A1 (10/10), A2 (14/14), A3 (8/8), T1 (8/8)
 - [x] E6: M1 (12/12), M2 (10/10)
-- [ ] E7: O1 (0/14), C1 (0/12), O2 (0/8)
+- [x] E7: O1 (14/14), C1 (12/12), O2 (8/8)
 - [ ] E8: Y1 (0/14), Y2 (0/10)
 - [ ] E9: P1 (0/10)
 

@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Observability foundations module: what observability actually means, how it differs from monitoring, known vs unknown unknowns, the three pillars and their limits, wide structured events, auto vs manual instrumentation, cardinality and telemetry cost budgets — with verified resources and interview questions.">
+  <title>Observability Foundations — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Observability Foundations</h1>
+  <p class="standfirst">Every dashboard you have ever built answers a question somebody thought of in advance. Observability is the discipline of being able to answer the questions nobody thought of — at three in the morning, on a system you cannot redeploy.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → <a href="index.html">Observability track</a> → Observability Foundations</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>This module frames the whole track. It defines observability properly — not as "logs plus metrics plus traces", which is a description of data types, but as the property borrowed from control theory: can you infer the internal state of a system from the signals it emits at the outside? It then draws the real boundary against monitoring, maps that boundary onto known and unknown unknowns, and takes the three pillars apart honestly, including the increasingly loud argument that the pillars are a vendor frame rather than an engineering one.</p>
+    <p>The second half is the part that decides whether any of it survives contact with a finance review: instrumentation strategy. Auto-instrumentation versus hand-written spans, what is actually worth instrumenting, and the cost mechanics — cardinality, log volume, sampling — that quietly govern every observability programme. The remaining seven modules are the implementation detail underneath this one.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Observability, properly defined: the control-theory origin</h3>
+    <p>The word is borrowed, and the borrowing matters. In control theory a system is <em>observable</em> when its internal state can be reconstructed from knowledge of its external outputs — you do not get to open the box, you only get to read the instruments, and observability is the mathematical property that says the instruments are sufficient. Carry that across to software and the question stops being "do we have dashboards?" and becomes "given only the telemetry this system emits, can I determine any internal state it might have gotten itself into?"</p>
+    <p>That reframing has a sharp practical consequence. Observability is a property <em>of your system</em>, not a product you buy and not a team you hire; a vendor sells you tooling that makes the property easier to exploit, but a service that emits nothing but a request count and a stack trace is unobservable no matter which platform ingests it. The engineering work is therefore mostly upstream of the tool — deciding what the code emits, how much context travels with each emission, and whether that context is rich enough to reconstruct a story after the fact.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/observability-primer/" rel="noopener">Observability primer — OpenTelemetry documentation (the definition, telemetry, reliability and the vocabulary the rest of the track uses)</a></li>
+      <li>[Official] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book, chapter 6</a></li>
+      <li>[Article] <a href="https://charity.wtf/p/observability-is-a-many-splendored-thing" rel="noopener">Observability is a Many-Splendored Definition — Charity Majors (charity.wtf)</a></li>
+      <li>[Article] <a href="https://copyconstruct.medium.com/monitoring-and-observability-9b8bb7a0db0e" rel="noopener">Monitoring and Observability — Cindy Sridharan</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ACHr-qwHS8Y" rel="noopener">Observability: it's not just an ops thing — Charity Majors, NDC Conferences</a></li>
+    </ul>
+
+    <h3>Monitoring vs observability: known unknowns and unknown unknowns</h3>
+    <p>Monitoring answers questions you knew to ask in advance. You predicted a failure mode — the disk fills, the queue backs up, the error rate crosses five percent — and you encoded that prediction as a dashboard panel and an alert rule. It works beautifully, and it will keep working, for every failure mode you successfully anticipated. Those are your <strong>known unknowns</strong>: the question is already formulated, only its answer is missing, so you pre-compute that answer and put it on a wall.</p>
+    <p>Observability is what you need when the failure mode was not on the list. A distributed system has a combinatorially large space of possible states, and the ones that page you tend to be the ones nobody modelled: this build, for this tenant, on this shard, only for requests that arrived through the old mobile client. Those are <strong>unknown unknowns</strong> — you cannot pre-build a dashboard for a question you have not yet had. The operational test is blunt and worth memorising for interviews: <em>can you ask a brand-new question of your live production system and get an answer, without shipping new code?</em> If answering requires adding a log line and waiting for a deploy, you have monitoring. Both are legitimate; mature teams run monitoring for the known failure modes and rely on observability for everything else.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://sre.google/workbook/monitoring/" rel="noopener">Monitoring — The Site Reliability Workbook (symptom-based monitoring, what belongs in an alert)</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/observability-differs-traditional-monitoring" rel="noopener">How Observability Differs from Traditional Monitoring — Honeycomb</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/blog/observability-a-manifesto" rel="noopener">Observability: A Manifesto — Honeycomb (the argument that the term should stay narrow)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/distributed-systems-observability" rel="noopener">Observability in Distributed Systems — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ag2ykPO805M" rel="noopener">Is It Time To Version Observability? (Signs Point To Yes) — Charity Majors, GOTO Conferences</a></li>
+    </ul>
+
+    <h3>The three pillars: what logs, metrics and traces each answer — and cannot</h3>
+    <p>The conventional decomposition is logs, metrics and traces, and it is worth learning precisely because everyone will use the vocabulary. A <strong>log</strong> is a discrete, timestamped record of something that happened, carrying the most detail per event and costing the most per event to store, index and query. A <strong>metric</strong> is a number aggregated over a time interval — a counter, a gauge, a histogram — which is cheap to store and fast to query over months, but has thrown away every individual request by construction. A <strong>trace</strong> is the causal path of one request as it crosses services, a tree of spans stitched together by a propagated trace context, which is the only one of the three that tells you where the time went across process boundaries.</p>
+    <p>Each pillar's strength is the direct cause of its blind spot, and being able to state that trade-off cleanly is what an interviewer is listening for.</p>
+    <table>
+      <caption>What each signal answers, and where it goes blind</caption>
+      <thead>
+        <tr><th>Signal</th><th>Answers well</th><th>Cannot answer</th><th>Cost shape</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Logs</td><td>What exactly happened in this one execution, with full local context and the stack trace</td><td>Anything aggregate — "is this getting worse?" needs a scan or a pre-built index</td><td>Grows with request volume × verbosity; ingest and index dominate</td></tr>
+        <tr><td>Metrics</td><td>Trends, rates, percentiles, alert thresholds, months of history at constant cost</td><td>Which requests were the slow ones, and why — the individual is gone by design</td><td>Grows with the number of unique tag combinations, not with traffic</td></tr>
+        <tr><td>Traces</td><td>Where the latency went across services; the causal order of calls; the failing hop</td><td>Aggregate truth, unless sampling is understood — a sampled trace is an anecdote</td><td>Grows with request volume × span count; usually sampled hard</td></tr>
+      </tbody>
+    </table>
+    <p>Notice how often the real answer needs two of them: metrics tell you the p99 doubled at a point in time, traces tell you which downstream hop absorbed the time, logs tell you the exception that hop threw. The pillars are not competing options — they are three projections of the same underlying events.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/" rel="noopener">Signals — OpenTelemetry documentation (the overview of traces, metrics, logs and baggage)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/logs/" rel="noopener">Logs — OpenTelemetry signals reference</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/metrics/" rel="noopener">Metrics — OpenTelemetry signals reference (instrument types and aggregation)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/signals/traces/" rel="noopener">Traces — OpenTelemetry signals reference (spans, span context, attributes)</a></li>
+      <li>[Article] <a href="https://peter.bourgon.org/blog/2017/02/21/metrics-tracing-and-logging.html" rel="noopener">Metrics, tracing, and logging — Peter Bourgon (the Venn diagram everyone redraws)</a></li>
+    </ul>
+
+    <h3>The critique: "three pillars" is a frame, and the pillars are converging</h3>
+    <p>There is a serious and increasingly mainstream objection to the pillars framing, and knowing it marks you out in a senior interview. The objection is that three pillars describes three <em>storage products</em> a vendor would like to sell you, not three engineering capabilities. Splitting one request's story across three systems with three query languages, three retention policies and three bills means the debugging workflow becomes an exercise in manual correlation — and the thing you actually needed was never a pillar at all. What you needed was one arbitrarily wide, structured event per unit of work, carrying every dimension you might later want to filter or group by, in a store that lets you slice it after the fact.</p>
+    <p>That is the "wide events" position, sometimes labelled observability 2.0: emit one fat event per request with a hundred-plus fields — user id, tenant, build sha, feature flags, cache hit or miss, downstream latencies, queue depth on arrival — and derive metrics and traces from it rather than emitting three separate things. Meanwhile the pillars themselves are quietly converging in exactly that direction: <em>exemplars</em> attach a trace id to a specific bucket of a histogram so you can click from a latency spike straight into an example trace; trace and span ids are injected into log lines so a log search pivots to a trace; and OpenTelemetry models all three signals against a shared resource and shared semantic conventions. In practice you will inherit three pillars and should push the seams together with correlation ids at every layer.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://grafana.com/docs/grafana/latest/fundamentals/exemplars/" rel="noopener">Introduction to exemplars — Grafana documentation (linking a metric data point to a trace)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/specs/otel/metrics/data-model/" rel="noopener">Metrics Data Model — OpenTelemetry specification (the exemplar definition itself)</a></li>
+      <li>[Article] <a href="https://charity.wtf/p/live-your-best-life-with-structured-events" rel="noopener">Live Your Best Life With Structured Events — Charity Majors (charity.wtf)</a></li>
+      <li>[Article] <a href="https://isburmistrov.substack.com/p/all-you-need-is-wide-events-not-metrics" rel="noopener">All you need is Wide Events, not "Metrics, Logs and Traces" — Ivan Burmistrov</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=jf3CJ-KZlXs" rel="noopener">Let's stop calling them 3 Pillars of Observability — Gui Ferreira</a></li>
+    </ul>
+
+    <h3>Instrumentation strategy: auto-instrumentation vs manual spans</h3>
+    <p><strong>Auto-instrumentation</strong> (OpenTelemetry calls it zero-code instrumentation) attaches at runtime and instruments the libraries for you. On the JVM you add one flag — the OpenTelemetry Java agent — and without touching a line of application code you get spans for inbound HTTP, outbound HTTP clients, JDBC statements, Kafka producers and consumers, scheduled tasks, and JVM runtime metrics, with context propagation across all of them. The coverage is enormous for the effort, the naming follows semantic conventions so it is consistent across services, and it works on code you cannot change, including third-party libraries. Its weakness is that it only knows about frameworks: it will tell you a POST to <code>/api/orders</code> took eight hundred milliseconds and that four JDBC calls were involved, but it has no idea what an order is, which tenant placed it, or that this was a bulk import.</p>
+    <p><strong>Manual instrumentation</strong> is where that meaning gets added — a hand-written span around a business operation, attributes carrying the domain facts, and custom metrics for outcomes the business actually cares about. It costs developer time and it is the part that rots if nobody owns it. The recommendation that survives every real rollout: <em>start with the agent everywhere, then add manual instrumentation exactly where you have questions you could not answer.</em> Turning on auto-instrumentation is a one-sprint platform task that lifts the whole estate; manual spans are a per-team investment justified by specific debugging pain. Adding attributes to the span the agent already created is usually cheaper and better than creating a new one.</p>
+    <pre class="code-block" data-label="Bash"><code># zero-code: attach the agent, name the service, point it at a collector
+java -javaagent:/opt/otel/opentelemetry-javaagent.jar \
+     -Dotel.service.name=order-service \
+     -Dotel.exporter.otlp.endpoint=http://collector:4317 \
+     -jar order-service.jar</code></pre>
+    <pre class="code-block" data-label="Java"><code>// manual: enrich the span the agent already opened, rather than creating another
+Span span = Span.current();
+span.setAttribute("tenant.id", order.tenantId());
+span.setAttribute("order.line_count", order.lines().size());
+span.setAttribute("order.channel", order.channel());   // web | mobile | bulk-import
+span.setAttribute("payment.provider", chosenProvider); // the dimension you will slice by later</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/instrumentation/" rel="noopener">Instrumentation — OpenTelemetry concepts (the zero-code / code-based split)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/instrumentation/zero-code/" rel="noopener">Zero-code instrumentation — OpenTelemetry concepts</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/zero-code/java/agent/" rel="noopener">Java agent — OpenTelemetry zero-code instrumentation (attach, configure, suppress)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-opentelemetry-setup" rel="noopener">OpenTelemetry Setup in Spring Boot Application — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=H9bAMRmaaxk" rel="noopener">OpenTelemetry: Automatically Instrument Spring Boot App by OpenTelemetry Java Agent — Linh Vu</a></li>
+    </ul>
+
+    <h3>What is actually worth instrumenting</h3>
+    <p>The default answer for every service boundary is the RED signals — <strong>R</strong>ate (requests per second), <strong>E</strong>rrors (how many of them failed), <strong>D</strong>uration (the latency distribution, as a histogram, never a pre-computed average). Emit those at every entry point and every outbound dependency call and you can answer "is this service healthy and is it the one at fault?" for any service in the estate using one dashboard shape. Consistency is the whole value: the same three signals with the same names everywhere means an on-call engineer who has never seen your service can still read it. Module 04 goes into RED and its infrastructure counterpart in depth.</p>
+    <p>Above that sits the layer most teams skip and later regret: <strong>business events that map to user outcomes</strong>. Orders placed, payments authorised, KYC checks completed, carts abandoned at the payment step — emitted with the dimensions that let you slice them by tenant, channel, region and build. These are what let you detect an incident that no infrastructure signal registers: every service is returning HTTP 200 and the checkout success rate has fallen by thirty percent because a feature flag broke one payment provider for one client version. Domain-oriented observability of this kind is also the cheapest telemetry you own, because business events are orders of magnitude rarer than requests. When adding attributes, follow OpenTelemetry semantic conventions for anything that has a standard name and reserve your own namespace for the rest — it is what makes cross-service queries possible at all.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/instrumentation/code-based/" rel="noopener">Code-based instrumentation — OpenTelemetry concepts (custom spans, attributes, events)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/semantic-conventions/" rel="noopener">Semantic conventions — OpenTelemetry (the shared attribute vocabulary)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/the-red-method-how-to-instrument-your-services/" rel="noopener">The RED Method: how to instrument your services — Grafana blog (Tom Wilkie)</a></li>
+      <li>[Article] <a href="https://martinfowler.com/articles/domain-oriented-observability.html" rel="noopener">Domain-Oriented Observability — Pete Hodgson on martinfowler.com</a></li>
+      <li>[Video] <a href="https://www.infoq.com/presentations/opentelemetry-observability/" rel="noopener">Effective and Efficient Observability with OpenTelemetry — InfoQ presentation</a></li>
+    </ul>
+
+    <h3>Cardinality: the arithmetic that decides your metrics bill</h3>
+    <p>This is the single most asked cost question in observability interviews, and the answer is arithmetic rather than opinion. In a dimensional metrics system such as Prometheus, <em>every unique combination of metric name and label values is a separate time series</em>, stored and indexed independently. A counter <code>http_requests_total</code> with labels for method (about 5 values), route (say 40) and status (say 15) is roughly three thousand series — entirely fine. Add a label for user id with a million users and you have created up to three billion series. Memory, index size, ingestion cost and query latency all scale with series count, not with request volume, which is why a low-traffic service can bankrupt a metrics backend while a high-traffic one sits comfortably.</p>
+    <p>The rule to state in an interview: <strong>metric labels must be bounded and low-cardinality</strong>. User ids, order ids, session ids, request ids, raw URL paths with ids embedded in them, email addresses, full exception messages and unsanitised query strings are all unbounded and must never become labels — put them on a log line or a span attribute instead, where the storage model is per-event rather than per-series and high cardinality is the point. Templated routes (<code>/orders/{id}</code>, not <code>/orders/8f21c</code>) are the standard fix, and most frameworks will do it wrongly by default if you let them. Guard it operationally too: cap the label values a metrics client will accept, alert on series growth per service, and periodically audit which series are never queried.</p>
+    <pre class="code-block" data-label="Java"><code>// WRONG: unbounded label — one time series per user, forever
+Counter.builder("orders.placed").tag("user.id", userId).register(registry).increment();
+
+// RIGHT: bounded labels on the metric; the identity lives on the span/log instead
+Counter.builder("orders.placed")
+       .tag("channel", order.channel())        // ~4 values
+       .tag("region", order.region())          // ~6 values
+       .tag("outcome", outcome.name())         // ~5 values
+       .register(registry).increment();
+Span.current().setAttribute("user.id", userId); // high cardinality belongs here</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/practices/naming/" rel="noopener">Metric and label naming — Prometheus best practices (the explicit warning on unbounded labels)</a></li>
+      <li>[Article] <a href="https://www.robustperception.io/cardinality-is-key/" rel="noopener">Cardinality is key — Robust Perception (Brian Brazil)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/how-to-manage-high-cardinality-metrics-in-prometheus-and-kubernetes/" rel="noopener">How to manage high cardinality metrics in Prometheus and Kubernetes — Grafana blog</a></li>
+      <li>[Article] <a href="https://www.honeycomb.io/resources/getting-started/understanding-high-cardinality-role-observability" rel="noopener">Understanding High Cardinality and Its Role in Observability — Honeycomb</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=49BGvC1coG4" rel="noopener">PromCon EU 2019: Containing Your Cardinality — Prometheus Monitoring</a></li>
+    </ul>
+
+    <h3>Volume, sampling, retention — and setting an explicit telemetry budget</h3>
+    <p>Logs and traces scale with traffic, so their cost is bounded only by policy. Two levers control logs: <em>verbosity</em> (a DEBUG line per request in a service handling ten thousand requests per second is a firehose nobody will ever read) and <em>retention tiers</em> — hot, searchable storage for a few days, warm for a few weeks, cold object storage for the months you keep only for compliance. Most teams over-retain hot storage by an order of magnitude because nobody ever decided; deciding is the fix.</p>
+    <p>For traces, <strong>sampling is a necessity rather than a compromise</strong>, and saying so confidently is a good interview signal. Head-based sampling decides at the root span and propagates that decision, so it is cheap and consistent but blind — it discards errors and slow requests at the same rate as everything else. Tail-based sampling buffers complete traces in the collector and decides afterwards, letting you keep every error and every trace above a latency threshold while retaining a small percentage of the boring successes; it costs collector memory and buffering complexity. Whichever you choose, sampling must be consistent across services or you get broken traces, and any metrics derived from traces must be scaled by the sampling rate.</p>
+    <p>Pull all of this into an explicit <strong>telemetry budget</strong> — a number, agreed with the team that pays it, expressed as cost per service per month or per million requests, with an owner and a review cadence. Without one, telemetry spend grows monotonically and the only correction anyone ever applies is a panicked, indiscriminate cut during a cost review, which usually deletes the signals you needed. And the sharpest closing principle of the module: <em>observability data you never query is pure cost</em>. Audit your dashboards, your log indices and your metric series for what has actually been read in the last quarter, and delete without sentiment — a signal nobody has looked at in ninety days is a line item, not a safety net.</p>
+    <pre class="code-block" data-label="YAML"><code># Collector-side tail sampling: keep everything interesting, a slice of the rest
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: keep-all-errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: keep-slow-requests
+        type: latency
+        latency: { threshold_ms: 750 }
+      - name: sample-the-boring-successes
+        type: probabilistic
+        probabilistic: { sampling_percentage: 2 }</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://opentelemetry.io/docs/concepts/sampling/" rel="noopener">Sampling — OpenTelemetry concepts (head vs tail, consistency, when to use each)</a></li>
+      <li>[Official] <a href="https://opentelemetry.io/blog/2022/tail-sampling/" rel="noopener">Tail Sampling with OpenTelemetry: Keeping the Traces That Matter — OpenTelemetry blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2025/05/skyscanner-observability/" rel="noopener">Travel Giant Skyscanner Overhauls Observability, Cuts Telemetry Costs by 90% — InfoQ</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2026/02/opentelemetry-observability/" rel="noopener">OpenTelemetry Publishes "Demystifying OpenTelemetry" Guide — InfoQ (more telemetry is not more observability)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=EmZ6wycniGs" rel="noopener">ObservabilityCON 2022: Cardinality Management — Grafana</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="index.html">All Observability modules</a>
+    <a href="02-logging.html">Logging Done Properly →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Foundations questions open almost every observability round in Indian product and service companies — the monitoring-versus-observability definition is nearly guaranteed, and the cardinality question is the standard filter between candidates who have run a metrics backend and candidates who have only read about one:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is observability, and where does the term come from?</summary>
+      <div class="answer"><p>It comes from control theory, where a system is observable if its internal state can be inferred from its external outputs. Applied to software: can you determine any internal state your system got into, using only the telemetry it emits, without shipping new code to find out? It is a property of the system — of what the code emits and how much context it carries — not a product you buy.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the three pillars of observability?</summary>
+      <div class="answer"><p>Logs (discrete timestamped event records, highest detail and highest cost per event), metrics (numeric values aggregated over time — counters, gauges, histograms — cheap to store and query but with the individual request thrown away), and traces (the causal path of a single request across services, as a tree of spans joined by propagated trace context). Add that they are three projections of the same events and are increasingly correlated rather than separate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Monitoring vs observability — what is the actual difference?</summary>
+      <div class="answer"><p>Monitoring answers questions you asked in advance: you predicted a failure mode and encoded it as a dashboard and an alert. Observability lets you ask new questions of a live system without shipping code. Monitoring covers known unknowns, observability covers unknown unknowns. The practical test: when something breaks in a way nobody anticipated, can you slice your existing telemetry to find it, or do you have to add a log line and deploy?</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Give an example of a known unknown and an unknown unknown.</summary>
+      <div class="answer"><p>Known unknown: the database connection pool may exhaust — that failure mode is predictable, so you graph pool utilisation and alert at eighty percent. Unknown unknown: checkout fails only for users on Android app version 4.2 in one region whose cart contains a discounted item, because a feature flag interacted with a rounding change. Nobody would build that dashboard in advance; you need to be able to group by app version, region and flag state after the fact.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> When would you reach for a trace rather than a log?</summary>
+      <div class="answer"><p>When the question is "where did the time go?" or "which service in the chain failed?" A log tells you what happened inside one process; a trace shows the ordered, causal path across all of them with per-hop latency. In a request that crosses six services, a trace localises the problem in seconds; reading six services' logs to reconstruct the same picture takes an hour and needs a correlation id anyway.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Auto-instrumentation vs manual instrumentation — how do you choose?</summary>
+      <div class="answer"><p>Auto-instrumentation (the OpenTelemetry Java agent) needs no code change and covers frameworks broadly — HTTP in and out, JDBC, Kafka, JVM metrics — with consistent semantic-convention naming, and it works on code you cannot modify. It is generic: it does not know your domain. Manual instrumentation adds business-meaningful spans and attributes at the cost of developer time. The strategy is start with the agent everywhere, then add manual instrumentation where you had a question you could not answer. Enriching the agent's existing span with attributes is usually better than creating a new one.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What should every service emit as a baseline?</summary>
+      <div class="answer"><p>RED at every boundary: request rate, error count or rate, and duration as a histogram — on inbound endpoints and on every outbound dependency call. Then business events tied to user outcomes (orders placed, payments authorised, checks completed) with the dimensions you will want to slice by: tenant, channel, region, build. Baseline consistency matters more than cleverness — identical signal names across services mean anyone on-call can read any service.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should you not add a user id as a metric label?</summary>
+      <div class="answer"><p>Because every unique combination of metric name and label values is a separate time series. With a million users, one user-id label multiplies your series count by a million, and memory, index size, ingest cost and query latency all scale with series count rather than traffic — so it will take down or bankrupt the metrics backend. High-cardinality identity belongs on span attributes or structured log fields, where storage is per-event. Keep labels bounded and enumerable, and template your route labels so ids never leak into them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Is sampling a compromise that hurts debugging?</summary>
+      <div class="answer"><p>At any real traffic level it is a necessity, not a compromise — storing every span of every request is unaffordable and almost all of them are identical successes. The design question is which sampler. Head-based decides at the root and propagates, so it is cheap and consistent but discards errors at the same rate as successes. Tail-based buffers the whole trace in the collector and decides after the fact, so you keep every error and every slow request plus a small percentage of normal ones. Whatever you pick must be consistent across services, or traces arrive broken, and any metric derived from sampled traces must be scaled by the sampling rate.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you correlate a metric spike with the specific requests that caused it?</summary>
+      <div class="answer"><p>Exemplars. A histogram bucket carries an attached trace id for an example observation, so you click a latency spike in Grafana and jump straight into a trace that landed in that bucket. Complete the loop by injecting trace and span ids into every log line, so a log search pivots to the trace and a trace pivots to the logs. That correlation chain — metric to trace to log — is what makes three separate stores behave like one dataset.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Critique the "three pillars" framing.</summary>
+      <div class="answer"><p>It describes three storage products, not three engineering capabilities, and it institutionalises the split: one request's story lands in three systems with three query languages, three retention policies and three bills, so debugging becomes manual correlation. The alternative position is one arbitrarily wide, structured event per unit of work carrying every dimension you might later filter or group by, from which metrics and traces are derived. In practice you inherit three pillars, so the pragmatic move is to force them together — trace ids in logs, exemplars on histograms, shared resource attributes and semantic conventions.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your observability bill tripled in six months. Walk through what you do.</summary>
+      <div class="answer"><p>Measure before cutting: attribute spend across metrics, logs and traces, then per service. For metrics, find the top series-count contributors and hunt for unbounded labels — untemplated routes and leaked ids are the usual culprits. For logs, look at verbosity (a DEBUG line per request) and at hot retention that nobody ever decided on; move older data to warm and cold tiers. For traces, move to tail-based sampling and drop most successful, fast traces while keeping all errors. Then audit usage: dashboards, saved queries and series that have not been read in a quarter are pure cost. Finally set an explicit telemetry budget per service with an owner and a review cadence, so the correction is continuous instead of a panicked indiscriminate cut.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Everything is green and users are complaining. What does that tell you about your telemetry?</summary>
+      <div class="answer"><p>That you are monitoring causes rather than symptoms, and instrumenting infrastructure rather than user outcomes. Every service returning HTTP 200 within its latency budget is compatible with a broken checkout — an empty search result set, a silently failing payment provider, a client-side error after a successful API response. The fix is symptom-based signals derived from user outcomes (checkout success rate, search result rate, login success rate) sliced by build, client version, tenant and region, plus enough dimensional context to segment when only one slice is affected. Aggregate health is the classic place a real incident hides.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you roll out observability across forty existing microservices?</summary>
+      <div class="answer"><p>Platform-first and centrally owned. Deploy the OpenTelemetry Java agent through the base image or the deployment template so no team writes code to get baseline coverage; standardise service names, resource attributes and semantic conventions so cross-service queries work; route everything through a collector so sampling, redaction and backend choice are central policy rather than forty independent decisions. Ship structured logs with trace ids and a shared RED dashboard template in the same wave. Only then ask teams for manual instrumentation, justified by specific unanswerable questions. Set the telemetry budget and the retention tiers up front, because retrofitting cost control after adoption is far harder politically than agreeing it before.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Would you ever say a system is fully observable? How do you measure progress?</summary>
+      <div class="answer"><p>No — observability is not binary, because the space of possible states is effectively unbounded. Measure it by outcomes instead: what proportion of incidents were diagnosed from existing telemetry versus needing a new deploy to investigate; time to detect and time to identify the failing component; how many novel questions engineers successfully answered from production data last month. A useful team exercise is to take a past incident and ask whether today's telemetry would have answered it without a code change — that converts an abstract property into a concrete backlog item.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.fnd.pillars</li>
+      <li>obs.fnd.strategy</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

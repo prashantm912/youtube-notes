@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Health Checks module: liveness vs readiness vs startup semantics, Kubernetes probe mechanics and the outages bad probes cause, graceful shutdown, Spring Boot Actuator health endpoints, groups, ApplicationAvailability, custom HealthIndicators, management-port security and synthetic checks — with verified resources and interview questions.">
+  <title>Health Checks — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Health Checks</h1>
+  <p class="standfirst">Two lines of YAML and a one-line endpoint — health checks look like the most trivial thing in the deployment manifest, and they are one of the most reliable ways to turn a small degradation into a fleet-wide outage. Get the semantics right and everything else follows.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Observability track → Health Checks</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>A health check is a machine-readable answer to a question an orchestrator is about to act on. The whole module turns on that word <em>which</em> question: liveness asks "is this process wedged beyond recovery — should I restart it?", readiness asks "can this instance serve a request right now — should I keep it in the load balancer?", and startup asks "is it still booting — should I hold off the liveness clock?" Three questions, three completely different consequences, and pointing all three at the same endpoint is the classic self-inflicted outage.</p>
+    <p>We start with those semantics because the rest of the module depends on them: the Kubernetes probe knobs and their failure modes, the graceful-shutdown interaction where readiness must fail before the process stops, then Spring Boot Actuator concretely — the health endpoint, dependency indicators, health groups, <code>ApplicationAvailability</code>, custom <code>HealthIndicator</code> beans, and management-endpoint security. We close on the limit of all of it: an internal endpoint returning <code>UP</code> proves your components are alive, not that a user can log in. Versions here are Spring Boot 3.x/4.x and current Kubernetes.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Liveness, readiness and startup: three questions with three different consequences</h3>
+    <p>The distinction is not academic — the two probes trigger different actions. A failed <strong>liveness</strong> probe makes the kubelet <em>kill and restart the container</em>. A failed <strong>readiness</strong> probe does nothing to the container at all; it removes the pod's address from the Service endpoints, so the load balancer stops sending it traffic and resumes the moment the probe passes again. A failed <strong>startup</strong> probe also kills the container, but its job is to suppress the liveness and readiness probes entirely while a slow application boots, so a JVM that needs ninety seconds to warm its caches is not shot at second thirty by a liveness probe with an optimistic <code>initialDelaySeconds</code>.</p>
+    <p>Because the consequences differ, the checks must differ. Liveness should be the cheapest possible in-process signal — the event loop is turning, the HTTP server accepts a connection, no deadlock — and it must have <em>no external dependencies whatsoever</em>. Readiness may legitimately check the dependencies you genuinely cannot serve a request without: the primary datastore, a mandatory downstream, a warmed cache. The rule to memorise and to say out loud in an interview: <strong>restart-worthy failures go in liveness, traffic-worthy failures go in readiness, and anything a restart cannot fix does not belong in liveness</strong>. Wiring the same <code>/health</code> to both is how a readiness concern (a slow database) acquires the power to kill containers.</p>
+    <pre class="code-block" data-label="YAML"><code>livenessProbe:                 # cheap, in-process only — never touches a dependency
+  httpGet: { path: /actuator/health/liveness, port: 8081 }
+  periodSeconds: 10
+  failureThreshold: 3          # restart only after sustained failure
+
+readinessProbe:                # may check dependencies you cannot serve without
+  httpGet: { path: /actuator/health/readiness, port: 8081 }
+  periodSeconds: 5
+  failureThreshold: 1          # shed traffic fast; it is a cheap, reversible action
+
+startupProbe:                  # suppresses the other two until boot completes
+  httpGet: { path: /actuator/health/liveness, port: 8081 }
+  periodSeconds: 5
+  failureThreshold: 60         # up to ~5 minutes of boot before giving up</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/pods/probes/" rel="noopener">Probes — Kubernetes concepts (what each probe means and what the kubelet does with it)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" rel="noopener">Configure Liveness, Readiness and Startup Probes — Kubernetes task guide</a></li>
+      <li>[Article] <a href="https://www.redhat.com/en/blog/liveness-and-readiness-probes" rel="noopener">Liveness and Readiness Probes — Red Hat blog</a></li>
+      <li>[Article] <a href="https://learnkube.com/production-best-practices" rel="noopener">Kubernetes production readiness checklist — LearnKube (the probe section states the rule crisply)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aft4rlRpORI" rel="noopener">Readiness &amp; Liveness Probes: Robust and Resilient apps in Kubernetes — Tech Primers</a></li>
+    </ul>
+
+    <h3>Probe mechanics: the knobs, and HTTP vs exec vs TCP vs gRPC</h3>
+    <p>Every probe is defined by the same six fields and every one of them has bitten somebody. <code>initialDelaySeconds</code> delays the first check (largely obsoleted by a startup probe, which is the better tool). <code>periodSeconds</code> is the interval between checks. <code>timeoutSeconds</code> is how long the kubelet waits for a response before calling it a failure — it defaults to 1 second, which is shorter than a stop-the-world garbage-collection pause on a busy JVM, and that single default is behind a lot of "random restarts under load" tickets. <code>failureThreshold</code> is how many consecutive failures count as a verdict; <code>successThreshold</code> (which must be 1 for liveness and startup) is how many consecutive passes restore a readiness verdict. Your real detection time is <code>periodSeconds × failureThreshold</code> plus one <code>timeoutSeconds</code>, so tune the pair, not either alone.</p>
+    <p>Four probe mechanisms exist. <code>httpGet</code> is the default choice: any status from 200 to 399 is a pass, and it exercises the HTTP stack the way a real client does. <code>exec</code> runs a command inside the container and is by far the most expensive — it forks a process on every period, on every pod, forever, and a command that hangs leaves zombie processes behind. <code>tcpSocket</code> only proves a listener accepted a connection, which a completely deadlocked application will happily do, so it is a weak liveness signal. <code>grpc</code>, stable since Kubernetes 1.24, speaks the standard gRPC health checking protocol natively and removes the old <code>grpc-health-probe</code> sidecar binary. Note also that <code>terminationGracePeriodSeconds</code> can be set per-probe, so a liveness failure can be given a shorter grace period than a normal delete.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/" rel="noopener">Pod Lifecycle — Kubernetes (container states, probe outcomes, termination sequence)</a></li>
+      <li>[Official] <a href="https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/" rel="noopener">Pod v1 — Kubernetes API reference (every Probe field and its default)</a></li>
+      <li>[Article] <a href="https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-setting-up-health-checks-with-readiness-and-liveness-probes" rel="noopener">Kubernetes best practices: setting up health checks with readiness and liveness probes — Google Cloud Blog</a></li>
+      <li>[Article] <a href="https://www.infoq.com/news/2021/12/kubernetes-1-23/" rel="noopener">Kubernetes 1.23 Released with Improved Events, gRPC Probes and Dual-Stack Support — InfoQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=fqfieWP1jY4" rel="noopener">Kubernetes Health Checks: Liveness vs. Readiness vs. Startup Probe — Anton Putra</a></li>
+    </ul>
+
+    <h3>The disasters: probes that cause the outage they were meant to prevent</h3>
+    <p>Walk these three concretely, because interviewers ask for them by name. <strong>One: a liveness probe that checks a downstream database.</strong> The database has a thirty-second blip. Every pod's liveness probe fails simultaneously, the kubelet restarts every container in the fleet at once, all of them come up cold with empty connection pools and caches, they stampede the recovering database, and a partial degradation that would have healed itself becomes a total outage with a slow, self-inflicted recovery. Restarting a process never fixes someone else's database — so that check has no business being in liveness.</p>
+    <p><strong>Two: a readiness probe that can never fail</strong> — the hardcoded <code>return "OK"</code>, or a check of something unrelated to serving. Traffic keeps flowing to an instance whose connection pool is exhausted or whose migration failed, and every request routed there errors. This is the mirror-image sin: readiness that is too generous silently keeps broken instances in rotation, and because nothing restarts, nothing alerts. <strong>Three: a liveness <code>timeoutSeconds</code> shorter than a garbage-collection pause</strong>. Under peak load the JVM pauses for 1.5 seconds, the 1-second probe times out, three periods later the container is killed — so the pods die precisely when traffic is highest, which is the worst possible moment and looks nothing like a probe bug in the logs.</p>
+    <p>The defensive posture that falls out of this: liveness checks in-process health only and is deliberately hard to fail (generous timeout, <code>failureThreshold</code> of 3 or more); readiness is allowed to check genuine hard dependencies and is deliberately easy to fail, because shedding traffic is cheap and reversible; and an optional dependency — a recommendations service, an analytics sink — belongs in neither, because degrading gracefully is not the same as being unable to serve.</p>
+    <ul class="resources">
+      <li>[Article] <a href="https://blog.colinbreck.com/kubernetes-liveness-and-readiness-probes-how-to-avoid-shooting-yourself-in-the-foot/" rel="noopener">Kubernetes Liveness and Readiness Probes: How to Avoid Shooting Yourself in the Foot — Colin Breck</a></li>
+      <li>[Article] <a href="https://srcco.de/posts/kubernetes-liveness-probes-are-dangerous.html" rel="noopener">Liveness Probes are Dangerous — Henning Jacobs (the cascading-restart argument, from Zalando's operators)</a></li>
+      <li>[Article] <a href="https://developers.redhat.com/blog/2020/11/10/you-probably-need-liveness-and-readiness-probes" rel="noopener">You (probably) need liveness and readiness probes — Red Hat Developer</a></li>
+      <li>[Article] <a href="https://www.innoq.com/en/blog/2020/03/kubernetes-probes/" rel="noopener">Kubernetes Liveness and Readiness Probes Revisited — INNOQ</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=aTlQBofihJQ" rel="noopener">Kubernetes Probes: livenessProbe, readinessProbe, startupProbe — Rahul Wagh</a></li>
+    </ul>
+
+    <h3>Graceful shutdown: readiness must fail before the process stops</h3>
+    <p>Pod deletion is not a single event and the ordering matters. When a pod is deleted, Kubernetes does two things <em>concurrently</em>: it sends <code>SIGTERM</code> to the container and it removes the pod from the Service endpoints. Endpoint removal has to propagate to every kube-proxy and every ingress controller in the cluster, which takes a moment; the signal arrives instantly. So an application that exits promptly on <code>SIGTERM</code> will kill in-flight requests and will keep receiving new ones from load balancers that have not yet caught up — visible to users as a burst of 502s on every deploy.</p>
+    <p>The fix is to make readiness fail first and then linger. A <code>preStop</code> hook that simply sleeps for a few seconds (or an application that flips its readiness state to <code>DOWN</code> on <code>SIGTERM</code> and only then begins draining) gives endpoint removal time to propagate before the server stops accepting. Then drain: finish in-flight requests within a bounded window that must be shorter than <code>terminationGracePeriodSeconds</code>, or the kubelet's <code>SIGKILL</code> lands mid-request anyway. Spring Boot has first-class support — <code>server.shutdown=graceful</code> plus <code>spring.lifecycle.timeout-per-shutdown-phase</code> — and Boot's Kubernetes probe support moves <code>ReadinessState</code> to <code>REFUSING_TRAFFIC</code> as soon as shutdown begins, which is exactly the behaviour you want.</p>
+    <pre class="code-block" data-label="YAML"><code># Kubernetes side: let endpoint removal propagate before the server stops.
+lifecycle:
+  preStop:
+    exec: { command: ["sh", "-c", "sleep 8"] }
+terminationGracePeriodSeconds: 45   # must exceed preStop sleep + drain window
+
+# Spring Boot side (application.yml):
+server.shutdown: graceful
+spring.lifecycle.timeout-per-shutdown-phase: 30s</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/attach-handler-lifecycle-event/" rel="noopener">Attach Handlers to Container Lifecycle Events — Kubernetes (postStart and preStop hooks)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html" rel="noopener">Graceful Shutdown — Spring Boot reference documentation</a></li>
+      <li>[Article] <a href="https://learnkube.com/graceful-shutdown" rel="noopener">Graceful shutdown in Kubernetes — LearnKube (the race between SIGTERM and endpoint propagation, drawn out step by step)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=NQTqMO4lG_Y" rel="noopener">Graceful Shutdown in Spring Boot along with @PreDestroy — Tech Primers</a></li>
+    </ul>
+
+    <h3>Spring Boot Actuator: the health endpoint, indicators and show-details</h3>
+    <p>Add <code>spring-boot-starter-actuator</code> and you get <code>/actuator/health</code>, which aggregates every <code>HealthIndicator</code> bean on the classpath into a single status. Boot auto-configures indicators for what it can see: <code>DataSourceHealthIndicator</code> (runs a validation query), <code>DiskSpaceHealthIndicator</code> (free space above a threshold), plus Redis, MongoDB, Elasticsearch, Kafka, RabbitMQ, Cassandra, mail and more. Statuses aggregate by severity through <code>StatusAggregator</code> — one <code>DOWN</code> contributor makes the whole endpoint <code>DOWN</code> — and <code>HttpCodeStatusMapper</code> decides the HTTP status, which by default is 200 for <code>UP</code> and 503 for <code>DOWN</code>. That 503 is what makes an HTTP probe work without any extra glue.</p>
+    <p>The setting to be deliberate about is <code>management.endpoint.health.show-details</code>. It defaults to <code>never</code>, and that default exists for a reason: the detailed body names your dependencies, their versions, database product strings, cluster node counts and disk paths. Exposing it publicly hands an attacker a free reconnaissance report on your infrastructure. Set it to <code>when-authorized</code> for humans behind authentication, or <code>always</code> only on a management port that is not routable from outside the cluster. The probe itself only needs the aggregate status code — it never reads the body — so there is no operational reason to expose details to Kubernetes.</p>
+    <pre class="code-block" data-label="YAML"><code>management:
+  endpoints.web.exposure.include: health,info,prometheus
+  endpoint.health:
+    show-details: when-authorized     # never leak dependency detail publicly
+    show-components: when-authorized
+    probes.enabled: true              # adds /health/liveness and /health/readiness
+  health:
+    diskspace.threshold: 500MB
+    db.enabled: true                  # datasource indicator: readiness, not liveness</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html" rel="noopener">Endpoints — Spring Boot Actuator reference (the Health endpoint, auto-configured indicators, show-details, status aggregation)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/rest/actuator/health.html" rel="noopener">Health — Spring Boot Actuator Web API documentation (exact response shapes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-actuators" rel="noopener">Spring Boot Actuator — Baeldung (endpoints, exposure and configuration end to end)</a></li>
+      <li>[Article] <a href="https://reflectoring.io/spring-boot-health-check/" rel="noopener">Health Checks with Spring Boot — Reflectoring</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=t1_RbTb3BUo" rel="noopener">Actuator with Spring Boot: new features, enhancements and @Endpoint — Java Techie</a></li>
+    </ul>
+
+    <h3>Health groups, ApplicationAvailability and Kubernetes probe auto-configuration</h3>
+    <p>A single aggregate status cannot answer two different questions, so Boot lets you slice the indicators into <em>health groups</em>. <code>management.endpoint.health.group.liveness.include</code> and <code>...group.readiness.include</code> define which contributors feed each group, and they surface at <code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code> — the two URLs your probes should point at. Set <code>management.endpoint.health.probes.enabled=true</code> to create them explicitly; Boot enables them automatically when it detects a Kubernetes environment or a Cloud Foundry deployment. Each group takes its own <code>show-details</code> and its own status aggregation, so the liveness group can stay minimal while readiness carries real dependency detail.</p>
+    <p>Underneath, Boot models this as first-class application state rather than as endpoint plumbing. <code>ApplicationAvailability</code> is an injectable bean exposing <code>LivenessState</code> (<code>CORRECT</code> or <code>BROKEN</code>) and <code>ReadinessState</code> (<code>ACCEPTING_TRAFFIC</code> or <code>REFUSING_TRAFFIC</code>). The framework publishes an <code>AvailabilityChangeEvent</code> on every transition, and any bean can both listen for those events and publish its own — which is how you say "my Kafka consumer group has been rebalancing for two minutes, stop sending me HTTP traffic" without touching a controller. Boot moves readiness to <code>ACCEPTING_TRAFFIC</code> after <code>ApplicationReadyEvent</code> and to <code>REFUSING_TRAFFIC</code> when graceful shutdown starts, and the default liveness group deliberately contains only the <code>livenessState</code> indicator — no datasource, no Redis, no downstream. Boot's own default is the rule this module opened with.</p>
+    <pre class="code-block" data-label="YAML"><code>management.endpoint.health:
+  probes.enabled: true
+  group:
+    liveness:
+      include: livenessState          # in-process only — nothing external, ever
+    readiness:
+      include: readinessState,db,redis
+      show-details: always            # safe: management port is cluster-internal
+      additional-path: "server:/readyz"   # also serve it on the main port if needed</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/deployment/cloud.html" rel="noopener">Deploying to the Cloud — Spring Boot how-to (the Kubernetes container probes section)</a></li>
+      <li>[Official] <a href="https://spring.io/blog/2020/03/25/liveness-and-readiness-probes-with-spring-boot/" rel="noopener">Liveness and Readiness Probes with Spring Boot — Spring Blog (the design rationale for groups and availability state)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/availability/ApplicationAvailability.html" rel="noopener">ApplicationAvailability — Spring Boot API documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/availability/AvailabilityChangeEvent.html" rel="noopener">AvailabilityChangeEvent — Spring Boot API documentation (publishing and listening for state changes)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-liveness-readiness-probes" rel="noopener">Liveness and Readiness Probes in Spring Boot — Baeldung</a></li>
+    </ul>
+
+    <h3>Writing a custom HealthIndicator that is fast and does not cascade</h3>
+    <p>Implement <code>HealthIndicator</code> (or extend <code>AbstractHealthIndicator</code>) and register it as a bean; the bean name minus the <code>healthIndicator</code> suffix becomes the key in the response, so <code>paymentGatewayHealthIndicator</code> appears as <code>paymentGateway</code>. Return <code>Health.up()</code>, <code>Health.down()</code>, <code>Health.outOfService()</code> or a custom <code>Status</code>, optionally with <code>withDetail(...)</code> entries. For a hierarchy of related checks, <code>CompositeHealthContributor</code> groups several indicators under one key.</p>
+    <p>Two rules govern the implementation and both come from the same insight: this method runs on every probe period, on every pod, forever. <strong>It must be fast and hard-bounded.</strong> No unbounded remote call, no query without a timeout — a health check that blocks for thirty seconds turns the probe timeout into a container restart, which means your health check caused the outage. Cache expensive results for a few seconds and use a timeout strictly shorter than the probe's. <strong>It must not cascade.</strong> If your indicator pings a downstream, and that downstream's indicator pings its downstream, one leaf failure marks an entire dependency tree <code>DOWN</code> — and if any of that is wired into liveness, it restarts the tree too. Check what <em>you</em> own; report a failing optional dependency as degraded detail rather than <code>DOWN</code>, or exclude it from the readiness group entirely.</p>
+    <pre class="code-block" data-label="Java"><code>@Component                                     // key in the response: "paymentGateway"
+class PaymentGatewayHealthIndicator implements HealthIndicator {
+
+    private final PaymentGatewayClient client;  // configured with a hard 500ms timeout
+
+    @Override
+    public Health health() {
+        try {
+            var probe = client.ping();          // bounded, local, no fan-out
+            return Health.up().withDetail("region", probe.region()).build();
+        } catch (Exception e) {
+            // DOWN here removes this pod from traffic — never wire it into liveness
+            return Health.down().withDetail("reason", e.getClass().getSimpleName()).build();
+        }
+    }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/health/contributor/HealthIndicator.html" rel="noopener">HealthIndicator — Spring Boot API documentation</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/how-to/actuator.html" rel="noopener">Actuator how-to guides — Spring Boot (customising endpoints, health details and sanitisation)</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-health-indicators" rel="noopener">Health Indicators in Spring Boot — Baeldung (custom indicators, composites, custom statuses)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=ZgL9mFtC_iw" rel="noopener">Spring Boot Actuator: Health Endpoint, Health Indicators and Writing a Custom HealthIndicator — Linh Vu</a></li>
+    </ul>
+
+    <h3>Securing the endpoints: separate the management port, expose only what you need</h3>
+    <p>Actuator's health endpoint is exposed over HTTP by default, and everything else is not — <code>management.endpoints.web.exposure.include</code> is an allow-list precisely so that <code>env</code>, <code>heapdump</code>, <code>threaddump</code>, <code>loggers</code> and <code>shutdown</code> stay off unless you deliberately turn them on. A leaked <code>/actuator/env</code> dumps your entire resolved configuration, including property names an attacker can use to fingerprint the stack; <code>/actuator/heapdump</code> hands over live memory. Never answer "expose all" in an interview.</p>
+    <p>The strongest control is topological: set <code>management.server.port</code> to a port distinct from the application port and bind it to the internal interface. Kubernetes probes and your Prometheus scraper reach it inside the cluster; the ingress only ever publishes the application port, so the management surface is simply not reachable from the internet regardless of what is exposed on it. Layer authentication on top with Spring Security using <code>EndpointRequest.toAnyEndpoint()</code> to match the actuator paths, and keep the probe endpoints themselves unauthenticated — the kubelet cannot present credentials — which is safe precisely because they return only a status code and, in the liveness group, no detail at all.</p>
+    <pre class="code-block" data-label="YAML"><code>management:
+  server:
+    port: 8081                        # separate port; ingress publishes only 8080
+    address: 127.0.0.1                # or a cluster-internal interface
+  endpoints.web:
+    base-path: /actuator
+    exposure.include: health,prometheus   # allow-list; never "*"
+    exposure.exclude: env,heapdump,threaddump,shutdown</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/monitoring.html" rel="noopener">Monitoring and Management over HTTP — Spring Boot Actuator reference (management port, base path, securing endpoints)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/enabling.html" rel="noopener">Enabling Production-ready Features — Spring Boot Actuator reference</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-actuator-enable-endpoints" rel="noopener">How to Enable All Endpoints in Spring Boot Actuator — Baeldung (and why you should not)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=z16fBE-k1oQ" rel="noopener">Spring Boot Actuator Endpoints: health, env, heapdump, threaddump, metrics, logging — Cameron McKenzie</a></li>
+    </ul>
+
+    <h3>Synthetic checks and blackbox monitoring: UP is not the same as working</h3>
+    <p>Here is the honest limit of everything above. <code>/actuator/health</code> returning <code>UP</code> means every component that bothered to register an indicator believes itself fine. It does not mean a user can log in. A misconfigured OAuth redirect, an expired signing certificate, a broken CDN path, a feature flag stuck off, a downstream returning 200 with an empty body — none of those move a single health indicator, and all of them are total outages from the customer's point of view. Whitebox health checks are self-assessment; you also need somebody outside the system trying the thing customers actually do.</p>
+    <p>That is synthetic monitoring, or blackbox probing: a scheduled transaction executed from outside your cluster — often from several regions — that exercises a real user journey end to end (log in, search, add to cart, checkout with a test account) and alerts when the journey breaks or slows, regardless of what the internal dashboards say. The Prometheus Blackbox exporter covers the simple end (HTTP, TCP, DNS, ICMP, certificate expiry); Grafana Synthetic Monitoring and k6 scripts cover scripted multi-step journeys. Run them against production on a schedule, keep the test accounts and their data isolated, and make sure the synthetic traffic is tagged so it never pollutes your business metrics. The deeper point, which module 08 picks up: health checks tell you about <em>components</em>, SLOs tell you about <em>users</em> — and it is entirely possible for every component to be <code>UP</code> while your error budget burns.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://github.com/prometheus/blackbox_exporter" rel="noopener">Blackbox exporter — Prometheus (HTTP, TCP, DNS, ICMP and TLS-expiry probing from outside)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/grafana-cloud/testing/synthetic-monitoring/" rel="noopener">Synthetic Monitoring — Grafana documentation (multi-region checks and scripted browser journeys)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/k6/latest/" rel="noopener">Grafana k6 documentation (scripting the user journey you want to synthesise)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book (symptoms vs causes, blackbox vs whitebox)</a></li>
+      <li>[Article] <a href="https://sre.google/workbook/alerting-on-slos/" rel="noopener">Alerting on SLOs — Google SRE Workbook (why user-facing signals beat component health, previewing module 08)</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="05-dashboards.html">← Dashboards with Grafana</a>
+    <a href="index.html">All Observability modules</a>
+    <a href="07-tracing.html">Distributed Tracing →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Health checks are asked in almost every Indian backend and DevOps round that touches Kubernetes — the liveness-versus-readiness question is near-universal, and the "why not check the database in liveness" follow-up is the one that separates candidates who have configured probes from candidates who have copied them:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is the difference between a liveness probe and a readiness probe?</summary>
+      <div class="answer"><p>They trigger different actions. A failed liveness probe makes the kubelet kill and restart the container — it answers "is this process wedged beyond recovery?" A failed readiness probe does not touch the container; it removes the pod from the Service endpoints so the load balancer stops sending traffic, and puts it back when the probe passes again. Liveness is destructive and irreversible, readiness is cheap and reversible.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What is a startup probe and what problem does it solve?</summary>
+      <div class="answer"><p>It handles slow-starting applications. While a startup probe is failing, Kubernetes disables the liveness and readiness probes entirely, so a JVM that needs two minutes to boot is not restarted by an impatient liveness probe. Once it succeeds it never runs again and the other probes take over. It is the correct replacement for piling seconds onto initialDelaySeconds, because you can give a generous failureThreshold for boot while keeping a tight liveness period afterwards.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Which endpoints does Spring Boot Actuator expose for Kubernetes probes?</summary>
+      <div class="answer"><p><code>/actuator/health/liveness</code> and <code>/actuator/health/readiness</code>, backed by health groups. They appear when <code>management.endpoint.health.probes.enabled=true</code>, and Boot enables them automatically when it detects it is running on Kubernetes. Point livenessProbe at the first and readinessProbe at the second — not both at plain <code>/actuator/health</code>.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Name the probe configuration fields and what each controls.</summary>
+      <div class="answer"><p>initialDelaySeconds (wait before the first check), periodSeconds (interval between checks), timeoutSeconds (how long to wait for a response — default 1), failureThreshold (consecutive failures before acting), successThreshold (consecutive passes to recover; must be 1 for liveness and startup), and terminationGracePeriodSeconds (drain window, settable per probe). Detection time is roughly periodSeconds × failureThreshold plus one timeout.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why should a liveness probe never check the database?</summary>
+      <div class="answer"><p>Because restarting your process cannot fix someone else's database, and the action is fleet-wide. One database blip fails the liveness probe on every pod at the same instant, so the kubelet restarts the entire fleet simultaneously. They all come back cold with empty pools and caches and stampede the recovering database, turning a partial, self-healing degradation into a full outage with a slow recovery. Database health belongs in readiness, where the consequence is only "stop sending me traffic".</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your pods restart randomly under peak load but the logs show nothing. What do you check?</summary>
+      <div class="answer"><p>Suspect the liveness probe first: check <code>kubectl describe pod</code> for a "Liveness probe failed" event and a Reason of OOMKilled versus Error. The classic cause is a timeoutSeconds of 1 (the default) being shorter than a stop-the-world garbage-collection pause under load, so the probe times out exactly when traffic is highest. Fix by raising timeoutSeconds and failureThreshold, making the liveness endpoint cheaper, and separating the management port so probe traffic does not queue behind application requests. Also rule out memory limits and CPU throttling.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> httpGet vs exec vs tcpSocket vs grpc probes — when do you use each?</summary>
+      <div class="answer"><p>httpGet is the default and best choice: 200–399 is a pass and it exercises the real HTTP stack. exec runs a command inside the container and is the most expensive — a fork on every period on every pod, and hanging commands leave zombies. tcpSocket only proves a listener accepted a connection, which a deadlocked app still does, so it is a weak liveness signal, useful for non-HTTP services. grpc, stable since Kubernetes 1.24, speaks the standard gRPC health protocol natively and removes the old grpc-health-probe sidecar.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why is <code>show-details</code> set to <code>never</code> by default, and when would you change it?</summary>
+      <div class="answer"><p>The detailed body enumerates your dependencies — database product and version, Redis cluster size, disk paths, mail hosts — which is free reconnaissance for an attacker. Probes never read the body, only the status code, so there is no operational need to expose it. Change it to when-authorized behind Spring Security for humans, or always only on a management port that is not routable from outside the cluster.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you write a custom HealthIndicator, and what are the constraints?</summary>
+      <div class="answer"><p>Implement <code>HealthIndicator</code> (or extend AbstractHealthIndicator) as a bean; the bean name minus the healthIndicator suffix becomes the response key. Return Health.up()/down()/outOfService() with optional details. Constraints: it runs on every probe period on every pod, so it must be fast and hard-bounded — a timeout strictly shorter than the probe's, results cached for a few seconds if the check is expensive — and it must not fan out to downstream health checks, or one leaf failure marks a whole dependency tree DOWN.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through what happens when a pod is deleted, and why users see 502s on deploy.</summary>
+      <div class="answer"><p>Kubernetes concurrently sends SIGTERM to the container and removes the pod from the Service endpoints. The signal is instant; endpoint removal has to propagate to every kube-proxy and ingress controller, which lags. An app that exits promptly on SIGTERM therefore kills in-flight requests and keeps receiving new ones from load balancers that have not caught up — that is the 502 burst. Fix: a preStop hook that sleeps a few seconds (or flipping readiness to DOWN first) so endpoint removal propagates, then a bounded drain, with terminationGracePeriodSeconds larger than preStop plus drain. In Spring Boot that is server.shutdown=graceful with spring.lifecycle.timeout-per-shutdown-phase, and Boot moves ReadinessState to REFUSING_TRAFFIC when shutdown starts.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Explain ApplicationAvailability, LivenessState and AvailabilityChangeEvent.</summary>
+      <div class="answer"><p>Boot models availability as application state rather than endpoint plumbing. ApplicationAvailability is an injectable bean exposing LivenessState (CORRECT or BROKEN) and ReadinessState (ACCEPTING_TRAFFIC or REFUSING_TRAFFIC). Every transition publishes an AvailabilityChangeEvent, and any bean can publish one too — so a Kafka consumer stuck rebalancing can push REFUSING_TRAFFIC and drop out of the load balancer without touching a controller. Boot sets ACCEPTING_TRAFFIC after ApplicationReadyEvent and REFUSING_TRAFFIC when graceful shutdown begins. The default liveness group contains only livenessState — no external dependency — which is the framework encoding the rule for you.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> A dependency your service can degrade without is failing. Which probe should reflect it?</summary>
+      <div class="answer"><p>Neither. Liveness is out because a restart cannot fix a downstream. Readiness is out because you can still serve — marking the pod not-ready removes capacity for no benefit, and if every replica depends on the same optional service you take yourself fully offline over a degraded feature. Report it as a detail on a non-probe health group or as a metric and alert, and let the circuit breaker degrade the feature. Only a dependency you genuinely cannot serve a request without belongs in the readiness group.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> All your health checks report UP but customers cannot log in. How is that possible, and what would have caught it?</summary>
+      <div class="answer"><p>Health checks are self-assessment of components. An expired signing certificate, a broken OAuth redirect URI, a feature flag stuck off, a CDN path returning the wrong asset, or a downstream answering 200 with an empty body move no health indicator at all. What catches it is blackbox monitoring: a synthetic transaction run from outside the cluster that performs the real journey — log in, search, checkout with a test account — on a schedule, from multiple regions. The Prometheus Blackbox exporter covers simple HTTP/TCP/DNS/certificate checks; Grafana Synthetic Monitoring or k6 scripts cover multi-step journeys. Tag the synthetic traffic so it does not pollute business metrics.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> How would you design health checks and probes for a service with a two-minute warm-up and a hard Postgres dependency?</summary>
+      <div class="answer"><p>Startup probe on the liveness path with periodSeconds 5 and failureThreshold around 40–60, so boot gets up to five minutes while liveness stays tight afterwards. Liveness on <code>/actuator/health/liveness</code> with the group limited to livenessState, timeoutSeconds around 3–5 to survive garbage-collection pauses, failureThreshold 3. Readiness on <code>/actuator/health/readiness</code> with the group including readinessState and the datasource indicator, short period and failureThreshold 1 so traffic sheds immediately. Graceful shutdown with a preStop sleep covering endpoint propagation and terminationGracePeriodSeconds above preStop plus drain. Management port separated from the application port, show-details restricted, and a synthetic check exercising a real transaction from outside to catch what the internal endpoints cannot see.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.hc.semantics — Liveness vs readiness vs startup semantics and the Kubernetes probe interplay</li>
+      <li>obs.hc.actuator — Spring Boot Actuator health endpoints and groups, dependency health indicators, synthetic checks</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>

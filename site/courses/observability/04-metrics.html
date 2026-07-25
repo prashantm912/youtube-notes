@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Metrics module: Micrometer's registry and meter types (counter, gauge, timer, long task timer, distribution summary), percentiles versus histogram buckets, tag cardinality, the Prometheus pull model and exposition format, PromQL basics, and the RED and USE methods — with verified resources and interview questions.">
+  <title>Metrics with Micrometer and Prometheus — Learn It Right</title>
+  <link rel="stylesheet" href="../../assets/site.css">
+</head>
+<body class="theme-devops lesson-page">
+<header class="page-header">
+  <h1>Module: Metrics with Micrometer and Prometheus</h1>
+  <p class="standfirst">Logs tell you what happened to one request; metrics tell you what is happening to all of them. They are cheap, pre-aggregated and the only pillar you can safely alert on — provided you pick the right meter and keep your tags under control.</p>
+</header>
+<main>
+  <nav class="breadcrumb" aria-label="Breadcrumb"><a href="../../index.html">Knowledge Library</a> → Courses → Observability track → Metrics with Micrometer and Prometheus</nav>
+
+  <section id="intro">
+    <h2>What this module covers</h2>
+    <p>A metric is a number sampled over time. That constraint is the whole value proposition: a counter incremented ten million times still costs one time series, so metrics stay affordable at volumes where logging every event would bankrupt you. That is why alerts, dashboards and capacity planning all sit on metrics rather than logs or traces.</p>
+    <p>This module covers instrumentation with Micrometer — the vendor-neutral facade Spring Boot wires up for you — then the backend that scrapes it. Two mistakes dominate real projects and interviews alike: choosing the wrong meter type (a counter for something that can decrease, a gauge on an object nobody holds a reference to), and letting a tag carry unbounded values until the cardinality explosion takes the metrics backend down. Both get a section of their own. Versions assumed: Spring Boot 3.x/4.x with current Micrometer and current Prometheus.</p>
+  </section>
+
+  <section id="topics">
+    <h2>Topics</h2>
+
+    <h3>Micrometer: the vendor-neutral facade and its registry model</h3>
+    <p>Micrometer is to metrics what SLF4J is to logging — you instrument once against a neutral API and choose the backend with a dependency. Swap <code>micrometer-registry-prometheus</code> for the Datadog, New Relic, CloudWatch, OTLP or Graphite registry and your instrumentation code does not change. Everything hangs off a <code>MeterRegistry</code>: meters are created through it, cached by name plus tag set, and the registry is what naming conventions and filters are applied to on the way out. A <code>CompositeMeterRegistry</code> can publish the same meters to several backends at once, and <code>SimpleMeterRegistry</code> holds them in memory for tests.</p>
+    <p>On Spring Boot you rarely construct one. Actuator auto-configures a registry for every implementation on the classpath, injects it as a bean, and pre-instruments the things you would otherwise write yourself: JVM memory and garbage collection, thread and class loading counts, HTTP server and client request timers, <code>DataSource</code> and HikariCP pool state, cache statistics, Tomcat internals, Kafka and RabbitMQ clients. Add <code>spring-boot-starter-actuator</code> plus the Prometheus registry and expose the endpoint, and a useful dashboard exists before you have written a single custom meter. Your job is then the handful of meters that describe your <em>business</em> — orders placed, payments declined, queue depth — not the platform.</p>
+    <pre class="code-block" data-label="Java"><code>@Service
+class OrderService {
+    private final Counter placed;
+
+    OrderService(MeterRegistry registry) {          // injected by Actuator
+        this.placed = Counter.builder("orders.placed")
+            .description("Orders accepted by the checkout API")
+            .tag("channel", "web")                  // bounded value set only
+            .register(registry);
+    }
+
+    void place(Order o) { /* ... */ placed.increment(); }
+}</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts.html" rel="noopener">Concepts — Micrometer reference documentation (the facade, meters, the registry contract)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/registry.html" rel="noopener">Registry — Micrometer reference documentation (composite and global registries)</a></li>
+      <li>[Official] <a href="https://docs.spring.io/spring-boot/reference/actuator/metrics.html" rel="noopener">Metrics — Spring Boot Actuator reference documentation (auto-configuration and supported registries)</a></li>
+      <li>[Article] <a href="https://spring.io/blog/2018/03/16/micrometer-spring-boot-2-s-new-application-metrics-collector" rel="noopener">Micrometer: Spring Boot's new application metrics collector — Spring Blog (the design rationale)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=HIUoeLYWo7o" rel="noopener">Introducing Micrometer Application Metrics — Jon Schneider (SpringDeveloper)</a></li>
+    </ul>
+
+    <h3>Choosing the right meter: counter, gauge, timer, long task timer, distribution summary</h3>
+    <p>A <strong>Counter</strong> is a single monotonically increasing value — use it for things that only ever happen more: requests served, messages consumed, errors thrown. Never use a counter for a quantity that can go down; queries assume it only rises, and a decrement makes <code>rate()</code> read the drop as a counter reset. A <strong>Gauge</strong> is the opposite: an instantaneous reading that moves in both directions — queue depth, active sessions, cache size, free disk. You do not set a gauge, you register a function that samples an object, and Micrometer polls it at publish time.</p>
+    <p>That sampling detail is the classic trap: <strong>a gauge holds a weak reference to the object it samples.</strong> Register a gauge on a local variable or a collection nobody else retains, the object is collected, and the gauge silently starts reporting NaN — no exception, no log line, just a dead line on the dashboard. Always keep a strong reference in a field. A <strong>Timer</strong> records duration and count together (so it gives you both latency and throughput from one meter) and should be used for anything short-lived; <code>@Timed</code> or <code>timer.record(...)</code> both work. A <strong>LongTaskTimer</strong> is for the opposite case — it reports on operations <em>while they are still running</em>, which is the only way to see that a nightly batch job has been stuck for forty minutes rather than waiting until it finishes to find out. A <strong>DistributionSummary</strong> is a timer for things that are not durations: payload sizes in bytes, items per batch, order values.</p>
+    <pre class="code-block" data-label="Java"><code>// WRONG: nothing else holds the list, so the gauge reports NaN after GC
+Gauge.builder("queue.depth", new ArrayList&lt;String&gt;(), List::size).register(registry);
+
+// RIGHT: strong reference kept in a field
+private final Queue&lt;Job&gt; pending = new ConcurrentLinkedQueue&lt;&gt;();
+Gauge.builder("queue.depth", pending, Queue::size).register(registry);
+
+Timer.builder("payment.gateway").register(registry).record(() -&gt; gateway.charge(req));
+DistributionSummary.builder("order.value.rupees").register(registry).record(order.total());</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/counters.html" rel="noopener">Counters — Micrometer reference documentation</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/gauges.html" rel="noopener">Gauges — Micrometer reference documentation (weak references and the NaN trap)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/long-task-timers.html" rel="noopener">Long task timers — Micrometer reference documentation</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/distribution-summaries.html" rel="noopener">Distribution summaries — Micrometer reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/micrometer" rel="noopener">Quick Guide to Micrometer — Baeldung (every meter type with runnable code)</a></li>
+    </ul>
+
+    <h3>Percentiles: client-side quantiles versus histogram buckets</h3>
+    <p>Averages hide the users who are suffering, so latency is reported as percentiles. Micrometer offers two very different ways to get them and confusing the two is a genuine production bug. <code>publishPercentiles(0.95, 0.99)</code> computes the quantiles <em>inside the JVM</em> and ships the answers as pre-computed gauges — accurate for that one instance, cheap, and completely un-aggregatable. <code>publishPercentileHistogram()</code> instead ships a set of cumulative bucket counters, and the backend computes the quantile across whatever instances you ask for; <code>serviceLevelObjectives</code> lets you add bucket boundaries at the latencies you actually care about.</p>
+    <p>The rule that follows is the most-failed metrics question in interviews: <strong>you cannot average percentiles.</strong> The mean of ten pods' p99 values is not the fleet p99 and has no statistical meaning at all — a pod serving three requests contributes as much to the average as one serving thirty thousand, and a quantile is a position in a distribution, not a quantity you can add up. If you need a cross-instance percentile you must aggregate the underlying distribution, which means histogram buckets and <code>histogram_quantile()</code> at query time. Keep the two techniques straight: client-side percentiles for a single-instance debugging view, histograms for anything that feeds an SLO or an alert.</p>
+    <pre class="code-block" data-label="YAML"><code>management.metrics.distribution:
+  percentiles-histogram:
+    http.server.requests: true      # bucket series the backend can aggregate
+  slo:
+    http.server.requests: 100ms,300ms,500ms,1s
+  percentiles:
+    payment.gateway: 0.95,0.99      # per-instance only — never average these</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/timers.html" rel="noopener">Timers — Micrometer reference documentation (recording, pause detection, sample API)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/histogram-quantiles.html" rel="noopener">Histograms and percentiles — Micrometer reference documentation (the aggregatability tradeoff)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/practices/histograms/" rel="noopener">Histograms and summaries — Prometheus best practices (why quantiles cannot be averaged)</a></li>
+      <li>[Article] <a href="https://www.robustperception.io/how-does-a-prometheus-histogram-work/" rel="noopener">How does a Prometheus histogram work? — Robust Perception (Brian Brazil)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=Gck4H85vCTw" rel="noopener">Enable Histogram and Client-side Percentile for Timer — Linh Vu (Spring Boot Actuator/Micrometer series)</a></li>
+    </ul>
+
+    <h3>Tags, naming conventions and the cardinality bomb</h3>
+    <p>Tags (Prometheus calls them labels) are the dimensions you slice a metric by — <code>uri</code>, <code>status</code>, <code>method</code>, <code>outcome</code>. Micrometer names meters in dot-delimited lower case (<code>http.server.requests</code>) and each registry translates that into its backend's convention, so the Prometheus registry emits <code>http_server_requests_seconds_count</code> without you thinking about it. Add tags that apply to every meter — application name, region, instance, environment — as <em>common tags</em> on the registry via a <code>MeterRegistryCustomizer</code> rather than repeating them at each call site.</p>
+    <p>Now the part that causes outages. <strong>Every unique combination of tag values is a separate time series</strong>, stored, indexed and kept in memory by the backend. A meter with 5 endpoints × 6 status codes × 3 regions is 90 series — fine. Add a tag carrying a user id, an order id, a request id, an email address, a session token, a full stack trace message, or a raw URL path such as <code>/orders/8f3c-1a</code> and you have created one series per distinct value, forever. Millions of near-empty series follow, the scrape slows, the backend's memory blows up, and queries across the metric stop returning. This is the cardinality bomb, and it is why the fix is <em>URI templating</em>: tag with the route pattern <code>/orders/{id}</code>, never the resolved path — which is exactly what Spring's built-in <code>http.server.requests</code> instrumentation does. Micrometer also gives you defensive tooling: <code>MeterFilter.maximumAllowableTags(...)</code> caps a tag's distinct values and buckets the rest into a <code>ttl</code> overflow value, <code>MeterFilter.deny(...)</code> drops meters entirely, and <code>replaceTagValues</code> rewrites offending values before they are ever published. High-cardinality context belongs in a trace or a log line, not a tag.</p>
+    <pre class="code-block" data-label="Java"><code>@Bean
+MeterRegistryCustomizer&lt;MeterRegistry&gt; conventions() {
+    return registry -&gt; registry.config()
+        .commonTags("application", "checkout", "region", "ap-south-1")
+        // hard ceiling: after 100 distinct URIs, extra values collapse to "other"
+        .meterFilter(MeterFilter.maximumAllowableTags(
+                "http.server.requests", "uri", 100, MeterFilter.deny()));
+}
+// tag with the template, never the resolved path:
+//   good  uri="/orders/{id}"      one series
+//   bad   uri="/orders/9a41c2"    one series per order, forever</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/naming.html" rel="noopener">Naming meters — Micrometer reference documentation (conventions, common tags, tag rules)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/concepts/meter-filters.html" rel="noopener">Meter filters — Micrometer reference documentation (deny, transform, maximumAllowableTags)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/practices/naming/" rel="noopener">Metric and label naming — Prometheus best practices</a></li>
+      <li>[Article] <a href="https://www.robustperception.io/cardinality-is-key/" rel="noopener">Cardinality is key — Robust Perception (the rule of thumb for label budgets)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/how-to-manage-high-cardinality-metrics-in-prometheus-and-kubernetes/" rel="noopener">How to manage high cardinality metrics in Prometheus and Kubernetes — Grafana Labs</a></li>
+    </ul>
+
+    <h3>Prometheus: the pull model, scrape configuration and the exposition format</h3>
+    <p>Prometheus inverts the assumption most people arrive with. Your application does not push metrics anywhere; it exposes a plain-text endpoint and the Prometheus server <em>scrapes</em> it on an interval — typically every 15 to 60 seconds. On Spring Boot that endpoint is <code>/actuator/prometheus</code>, and the whole integration is a starter dependency plus one exposure property. Pull has real consequences worth stating in an interview: the scrape itself is a health signal (the synthetic <code>up</code> series tells you the target is alive without any application code), targets can be discovered dynamically, a broken monitoring server cannot back-pressure your application, and you can point a browser at the endpoint to see exactly what will be collected. The cost is that short-lived batch jobs die before anyone scrapes them, which is what the Pushgateway exists for — and it is the only case where pushing is the right answer.</p>
+    <p>Targets come from <code>scrape_configs</code>. Static lists work for a fixed set of hosts, but in Kubernetes you use service discovery — <code>kubernetes_sd_configs</code>, or the Prometheus Operator's ServiceMonitor resources — so pods that scale up are scraped automatically and pods that vanish stop being alerted on. Relabelling rules then rewrite discovered labels into the ones you actually query by. The response body itself is the exposition format: one line per series, an optional <code>#&nbsp;HELP</code> and <code>#&nbsp;TYPE</code> comment per metric family, labels in braces, value last. It is deliberately boring text so anything can produce it, and OpenMetrics is its standardised successor.</p>
+    <pre class="code-block" data-label="YAML"><code>management:
+  endpoints.web.exposure.include: health,info,metrics,prometheus
+  metrics.tags.application: ${spring.application.name}
+
+# prometheus.yml on the server side
+scrape_configs:
+  - job_name: checkout
+    metrics_path: /actuator/prometheus
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["checkout-1:8080", "checkout-2:8080"]</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/introduction/overview/" rel="noopener">Overview — Prometheus documentation (architecture, the pull model, when not to use it)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/configuration/configuration/" rel="noopener">Configuration — Prometheus documentation (scrape_configs, service discovery, relabelling)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/instrumenting/exposition_formats/" rel="noopener">Exposition formats — Prometheus documentation (the text format and OpenMetrics)</a></li>
+      <li>[Official] <a href="https://docs.micrometer.io/micrometer/reference/implementations/prometheus.html" rel="noopener">Prometheus registry — Micrometer reference documentation</a></li>
+      <li>[Article] <a href="https://www.baeldung.com/spring-boot-prometheus" rel="noopener">Monitoring Spring Boot Apps With Prometheus — Baeldung</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=h4Sl21AKiDg" rel="noopener">How Prometheus Monitoring works — Prometheus Architecture explained — TechWorld with Nana</a></li>
+    </ul>
+
+    <h3>The four metric types on the wire, and what a histogram really is</h3>
+    <p>Prometheus itself stores only float samples against a timestamp; the "type" is a convention plus a naming pattern. A <strong>counter</strong> only goes up and resets to zero on process restart — you never graph its raw value, you graph its rate. A <strong>gauge</strong> goes both ways and is meaningful as-is. A <strong>histogram</strong> is where people get confused: it is not one series but a family. Micrometer's <code>http_server_requests_seconds</code> histogram expands into many <code>..._bucket{le="0.1"}</code> series (cumulative counts of observations at or below each boundary), plus <code>..._sum</code> and <code>..._count</code>. Quantiles are computed from those buckets at query time, which is precisely what makes them aggregatable across instances. A <strong>summary</strong> ships pre-computed quantiles from the client instead — cheaper to query, impossible to aggregate. That is the same tradeoff you met on the Micrometer side, seen from the backend.</p>
+    <p>Classic histograms have a real drawback: you must guess the bucket boundaries in advance, and boundaries that miss your latency range give you useless resolution while a generous set multiplies your series count. <strong>Native histograms</strong> (still evolving, but shipped as an experimental feature and worth naming) fix this by storing a single, self-scaling exponential-bucket structure per series — far higher resolution at a fraction of the cardinality cost, with no boundary tuning. Know that they exist and why they were introduced, even if your cluster is still on classic buckets.</p>
+    <pre class="code-block" data-label="Prometheus text format"><code># TYPE http_server_requests_seconds histogram
+http_server_requests_seconds_bucket{uri="/orders/{id}",le="0.1"} 24041
+http_server_requests_seconds_bucket{uri="/orders/{id}",le="0.3"} 24730
+http_server_requests_seconds_bucket{uri="/orders/{id}",le="+Inf"} 24802
+http_server_requests_seconds_sum{uri="/orders/{id}"} 1183.4
+http_server_requests_seconds_count{uri="/orders/{id}"} 24802</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/concepts/metric_types/" rel="noopener">Metric types — Prometheus documentation (counter, gauge, histogram, summary)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/concepts/data_model/" rel="noopener">Data model — Prometheus documentation (series, labels, samples)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/tutorials/understanding_metric_types/" rel="noopener">Understanding metric types — Prometheus tutorial (worked examples of each type)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/specs/native_histograms/" rel="noopener">Native histograms — Prometheus specification</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yYbXak-1hew" rel="noopener">Understanding Prometheus Histograms — Prometheus Monitoring with Julius (PromLabs)</a></li>
+    </ul>
+
+    <h3>PromQL: vectors, rate(), histogram_quantile() and recording rules</h3>
+    <p>PromQL has two things you evaluate against. An <em>instant vector</em> is one sample per matching series at a moment in time — <code>http_server_requests_seconds_count{status="500"}</code>. A <em>range vector</em> is every sample in a window, written with a bracketed duration — <code>...[5m]</code> — and it is not directly graphable; it is raw material for a function that collapses it back down. Selectors match on the metric name plus label matchers: <code>=</code>, <code>!=</code>, <code>=~</code> and <code>!~</code> for regular expressions.</p>
+    <p>The single most important habit: <strong>almost every counter query is wrapped in <code>rate()</code></strong>. A counter's absolute value is meaningless — it depends on how long the process has been running — but <code>rate(x[5m])</code> gives per-second change averaged over the window and, crucially, handles counter resets when a pod restarts. Use <code>rate()</code> for graphs and alerts, <code>irate()</code> only for fast-moving debug views, and <code>increase()</code> when you want a total over the window. Percentiles come from <code>histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m])))</code> — note the order: rate the buckets first, then sum, keeping <code>le</code> in the grouping, then take the quantile. Aggregation operators (<code>sum</code>, <code>avg</code>, <code>max</code>, <code>count</code>) take <code>by (...)</code> to keep labels or <code>without (...)</code> to drop them. When a query becomes expensive or is reused across dashboards, promote it to a <em>recording rule</em>: Prometheus evaluates it on a schedule and stores the result as a new series, so dashboards and alerts read a cheap pre-computed value instead of re-crunching millions of samples.</p>
+    <pre class="code-block" data-label="PromQL"><code># request rate per endpoint
+sum by (uri) (rate(http_server_requests_seconds_count{application="checkout"}[5m]))
+
+# error ratio (the "E" of RED)
+sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m]))
+  / sum(rate(http_server_requests_seconds_count[5m]))
+
+# p95 latency aggregated across every instance
+histogram_quantile(0.95,
+  sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m])))</code></pre>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/querying/basics/" rel="noopener">Querying basics — Prometheus documentation (instant vs range vectors, matchers)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/querying/functions/" rel="noopener">Query functions — Prometheus documentation (rate, irate, increase, histogram_quantile)</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/querying/examples/" rel="noopener">Query examples — Prometheus documentation</a></li>
+      <li>[Official] <a href="https://prometheus.io/docs/prometheus/latest/configuration/recording_rules/" rel="noopener">Recording rules — Prometheus configuration reference</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=yntN95sQOFc" rel="noopener">PromQL Explained: Mastering Data Types, Selectors, and Modifiers — KodeKloud</a></li>
+    </ul>
+
+    <h3>RED and USE: knowing what to measure, and where the data lives long-term</h3>
+    <p>Two checklists stop you from instrumenting at random. <strong>RED</strong> — Rate, Errors, Duration — is Tom Wilkie's method for anything request-driven: for every service, measure requests per second, the number of those that failed, and the distribution of how long they took. Apply it uniformly to every service and you get a consistent operational view that lets an on-call engineer reason about code they did not write. <strong>USE</strong> — Utilization, Saturation, Errors — is Brendan Gregg's method for every <em>resource</em>: CPU, memory, disk, network, connection pools, thread pools. For each one ask how busy it is, how much work is queued waiting for it, and how many operations failed. The two are complements, not alternatives: RED tells you your users are unhappy, USE usually tells you which resource is why. Google's four golden signals (latency, traffic, errors, saturation) are the same idea with saturation folded in, and they are the phrasing most SRE interviews use.</p>
+    <p>One awareness-level point to close on: a single Prometheus server is designed for reliability rather than durability — local storage, no clustering, retention measured in weeks. For long retention, global query across clusters, or downsampling, you front it with a long-term storage layer. Grafana Mimir, Thanos and VictoriaMetrics are the three names to know; all speak PromQL and consume the remote-write protocol, so your instrumentation and your queries are unaffected by the choice. Knowing that this tier exists — and that you do not solve retention by turning up a single Prometheus's disk — is enough at this stage.</p>
+    <ul class="resources">
+      <li>[Official] <a href="https://prometheus.io/docs/practices/instrumentation/" rel="noopener">Instrumentation — Prometheus best practices (what to measure in each kind of subsystem)</a></li>
+      <li>[Official] <a href="https://grafana.com/docs/mimir/latest/" rel="noopener">Grafana Mimir documentation (long-term, horizontally scalable Prometheus storage)</a></li>
+      <li>[Article] <a href="https://grafana.com/blog/the-red-method-how-to-instrument-your-services/" rel="noopener">The RED Method: how to instrument your services — Tom Wilkie, Grafana Labs</a></li>
+      <li>[Article] <a href="https://www.brendangregg.com/usemethod.html" rel="noopener">The USE Method — Brendan Gregg (the original write-up and checklists)</a></li>
+      <li>[Article] <a href="https://sre.google/sre-book/monitoring-distributed-systems/" rel="noopener">Monitoring Distributed Systems — Google SRE Book (the four golden signals)</a></li>
+      <li>[Video] <a href="https://www.youtube.com/watch?v=2wr9njNdywk" rel="noopener">Spring Boot — Monitoring Microservice with Prometheus and Grafana — Java Techie</a></li>
+    </ul>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a href="03-log-aggregation.html">← Log Aggregation</a>
+    <a href="index.html">All Observability modules</a>
+    <a href="05-dashboards.html">Dashboards with Grafana →</a>
+  </nav>
+
+  <section id="interview">
+    <h2>Interview questions</h2>
+    <p>Metrics questions turn up in almost every backend and SRE round in India — the meter-type question is the screen, and cardinality and percentile aggregation are where product-company interviews separate candidates who have run this in production:</p>
+    <details class="qa"><summary><span class="level">Beginner</span> What is Micrometer and why does Spring Boot use it?</summary>
+      <div class="answer"><p>A vendor-neutral metrics facade — the SLF4J of metrics. You instrument once against <code>MeterRegistry</code> and choose the backend (Prometheus, Datadog, CloudWatch, OTLP, New Relic) by adding a dependency, with no code change. Spring Boot Actuator auto-configures the registry and pre-instruments the JVM, HTTP server and client, connection pools, caches and messaging clients, so you only write the meters that describe your business.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Counter vs gauge — when do you use each?</summary>
+      <div class="answer"><p>Counter for a value that only increases: requests handled, errors, messages consumed. Gauge for an instantaneous value that moves both ways: queue depth, active connections, cache size, free memory. The test is simple — if the number can ever go down, it is not a counter. Using a counter for a decreasing value breaks <code>rate()</code>, which reads any decrease as a process restart.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> Why does Prometheus pull instead of push, and what breaks under pull?</summary>
+      <div class="answer"><p>Targets expose an endpoint and the server scrapes them. Benefits: the scrape itself is a liveness signal (the synthetic <code>up</code> series), targets are discovered dynamically, applications cannot be back-pressured by a struggling monitoring system, and you can inspect the endpoint by hand. What breaks: short-lived batch jobs that exit before any scrape — those push to the Pushgateway, which is the documented exception rather than a general pattern.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Beginner</span> What are the four Prometheus metric types?</summary>
+      <div class="answer"><p>Counter (monotonic, reset on restart), gauge (goes up and down), histogram (observations bucketed into cumulative <code>_bucket</code> series plus <code>_sum</code> and <code>_count</code>), and summary (client-computed quantiles plus <code>_sum</code> and <code>_count</code>). The types are conventions over the same float-sample storage; the difference lives in the naming pattern and how you query them.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Your gauge shows NaN in production. What happened?</summary>
+      <div class="answer"><p>A gauge holds a <em>weak</em> reference to the object it samples so instrumentation never leaks memory. If nothing else retains that object it is garbage collected and the gauge reports NaN — silently, with no exception. The fix is to keep a strong reference in a field (or use <code>Gauge.builder(..., this, o -&gt; ...)</code> on a long-lived bean). Registering a gauge on a local variable is the usual cause.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why can't you average p99 across instances?</summary>
+      <div class="answer"><p>A percentile is a position within a distribution, not an additive quantity, so the arithmetic mean of ten pods' p99 values is a number with no statistical meaning — and it weights a pod serving three requests the same as one serving thirty thousand. To get a fleet-wide percentile you must aggregate the underlying distribution: publish histogram buckets, then <code>histogram_quantile(0.95, sum by (le) (rate(..._bucket[5m])))</code>. Client-side <code>publishPercentiles</code> values are per-instance only.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> What is metric cardinality and how do you blow it up?</summary>
+      <div class="answer"><p>Cardinality is the number of distinct time series a metric produces — one per unique combination of label values. It multiplies: 5 endpoints × 6 statuses × 3 regions is 90 series. You blow it up by putting an unbounded value in a tag: user id, order id, request id, email address, session token, an exception message, or a raw URL path containing an id. Each distinct value becomes a permanent series, memory and index size explode, scrapes slow down and queries over the metric stop returning.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> How do you keep the URI tag on HTTP metrics safe?</summary>
+      <div class="answer"><p>Tag with the route template, not the resolved path — <code>uri="/orders/{id}"</code>, never <code>uri="/orders/9a41c2"</code>. Spring's built-in <code>http.server.requests</code> instrumentation does this automatically from the handler mapping; the danger is hand-rolled instrumentation or a filter that reads <code>request.getRequestURI()</code>. Back it with <code>MeterFilter.maximumAllowableTags</code> so any leak is capped rather than unbounded, and put the per-request identifiers in a trace or a structured log instead.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Why do you almost always wrap a counter in rate()?</summary>
+      <div class="answer"><p>A counter's raw value depends on how long the process has been up, so graphing it tells you nothing and comparing it across pods is meaningless. <code>rate(x[5m])</code> gives per-second change over the window and explicitly handles counter resets, so a pod restart shows as a gap rather than a huge negative spike. Use <code>rate</code> for graphs and alerts, <code>increase</code> for a total over a window, and <code>irate</code> only for short, fast-moving debug views.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Explain RED and USE, and when you would apply each.</summary>
+      <div class="answer"><p>RED — Rate, Errors, Duration — applies to request-driven services: how many requests, how many failed, how long they took. USE — Utilization, Saturation, Errors — applies to resources: CPU, memory, disk, network, connection and thread pools. Use RED for every service uniformly so on-call can reason about unfamiliar code; use USE when RED says something is wrong and you need to find which resource is the constraint. Google's four golden signals are the same idea with saturation added.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Intermediate</span> Timer vs LongTaskTimer vs DistributionSummary?</summary>
+      <div class="answer"><p>Timer records the duration and count of short operations, and only reports once each one finishes. LongTaskTimer reports on tasks that are <em>still running</em>, which is the only way to see that a nightly batch has been stuck for forty minutes rather than finding out afterwards. DistributionSummary is a timer for non-time values — payload bytes, items per batch, order amounts — and supports the same histogram and percentile configuration.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Walk through the p95 latency query and explain the operator order.</summary>
+      <div class="answer"><p><code>histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket[5m])))</code>. Innermost first: <code>rate</code> converts each cumulative bucket counter into a per-second rate and absorbs restarts; <code>sum by (le, uri)</code> merges instances while <em>keeping</em> the <code>le</code> label, because <code>histogram_quantile</code> needs the full bucket set to interpolate; only then does the quantile function run. Drop <code>le</code> from the grouping and the query returns nothing; sum before rating and counter resets corrupt the result.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> publishPercentiles vs publishPercentileHistogram — which and why?</summary>
+      <div class="answer"><p><code>publishPercentiles</code> computes quantiles inside the JVM and ships the answers, so they are accurate for that instance, cheap to store, and impossible to aggregate or re-quantile. <code>publishPercentileHistogram</code> ships cumulative bucket counters and lets the backend compute the quantile over any set of instances, at the cost of extra series. Anything feeding an SLO, an alert or a multi-instance dashboard must use histograms; client-side percentiles are for single-instance inspection. Add <code>serviceLevelObjectives</code> to place buckets at the latencies you actually promise.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Your Prometheus is out of memory and queries time out. Diagnose it.</summary>
+      <div class="answer"><p>Almost always active-series growth. Check <code>prometheus_tsdb_head_series</code> over time and use <code>topk(10, count by (__name__)({__name__=~".+"}))</code> to find the offending metric families, then look at which label is unbounded. Typical culprits: an id or a raw path leaking into a tag, per-pod labels churning on every deploy, or a histogram with too many buckets multiplied by too many dimensions. Fixes in order: drop or rewrite the label with a meter filter or a relabel rule, template the URI, reduce bucket counts (or move to native histograms), and move long retention to Mimir, Thanos or VictoriaMetrics rather than growing one server.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> Why prefer histograms over summaries in a multi-instance deployment?</summary>
+      <div class="answer"><p>Summaries carry pre-computed quantiles from each client, so there is no correct way to combine them across replicas — you can only look at one instance at a time. Histograms ship the distribution as buckets, so the backend can sum bucket rates across every instance and compute a true fleet-wide quantile at query time. Summaries are cheaper to query and more accurate for a single process; histograms are the only option once you have more than one pod, which in practice you always do.</p></div>
+    </details>
+    <details class="qa"><summary><span class="level">Pro</span> What are recording rules, and when would you introduce one?</summary>
+      <div class="answer"><p>A recording rule evaluates an expression on a schedule and writes the result back as a new series. Introduce one when the same expensive query is repeated across dashboards and alerts, when a dashboard panel is slow because it re-aggregates millions of samples on every refresh, or when you want alert and dashboard definitions to agree by construction. Convention is to name them <code>level:metric:operation</code>, for example <code>job:http_requests:rate5m</code>. They trade a little storage and evaluation cost for large, repeated query savings.</p></div>
+    </details>
+  </section>
+
+  <section id="covered">
+    <h2>Features covered</h2>
+    <p>Traceability against the Observability track checklist:</p>
+    <details><summary>Show checklist ids</summary>
+    <ul class="covered-list">
+      <li>obs.met.micrometer — Counters, gauges, timers and distribution summaries, tags and cardinality dangers</li>
+      <li>obs.met.prometheus — Prometheus scraping model, metric types, PromQL basics, the RED and USE methods</li>
+    </ul>
+    </details>
+  </section>
+
+</main>
+<footer>
+  <p>Part of the Observability track — Enterprise course. Links verified: <time datetime="2026-07-25">25 July 2026</time>.</p>
+</footer>
+<script src="../../assets/site.js" defer></script>
+</body>
+</html>
